@@ -27,6 +27,7 @@ public class AuxiaSink extends Sink {
     private static class Parameters implements Serializable {
 
         private AuxiaUtil.Type type;
+        private AuxiaUtil.Mode mode;
         private String field;
         private String projectId;
         private String eventName;
@@ -73,7 +74,7 @@ public class AuxiaSink extends Sink {
                             errorMessages.add("required field 'event_name' does not exist in input schema: " + inputSchema.getFields());
                         }
                     }
-                    final AuxiaUtil.EventConverter converter = AuxiaUtil.createElementConverter(projectId, eventName, inputSchema, excludeFields);
+                    final AuxiaUtil.EventConverter converter = AuxiaUtil.createElementConverter(projectId, eventName, inputSchema, excludeFields, mode);
                     errorMessages.addAll(converter.validate(inputSchema));
                 }
             }
@@ -93,6 +94,9 @@ public class AuxiaSink extends Sink {
         private void setDefaults() {
             if(type == null) {
                 this.type = AuxiaUtil.Type.element;
+            }
+            if(mode == null) {
+                this.mode = AuxiaUtil.Mode.event;
             }
             if(pubsub != null) {
                 this.pubsub.setDefaults();
@@ -167,7 +171,6 @@ public class AuxiaSink extends Sink {
         final PCollectionTuple messagesWithFailures = input
                 .apply("Format", ParDo
                         .of(new PubSubFormatDoFn(
-                                getJobName(), getName(),
                                 parameters, inputSchema, inputs.getAllInputs(),
                                 AuxiaUtil.getFileDescriptorSet().toByteArray(),
                                 getLoggings(),
@@ -185,13 +188,11 @@ public class AuxiaSink extends Sink {
 
     private static class PubSubFormatDoFn extends DoFn<MElement, PubsubMessage> {
 
-        private final String jobName;
-        private final String name;
-
         private final List<String> inputNames;
         private final Schema inputSchema;
 
         private final AuxiaUtil.Type type;
+        private final AuxiaUtil.Mode mode;
         private final String field;
         private final String auxiaProjectId;
         private final String auxiaEventName;
@@ -213,8 +214,6 @@ public class AuxiaSink extends Sink {
 
 
         PubSubFormatDoFn(
-                final String jobName,
-                final String name,
                 final Parameters parameters,
                 final Schema inputSchema,
                 final List<String> inputNames,
@@ -223,10 +222,9 @@ public class AuxiaSink extends Sink {
                 final TupleTag<BadRecord> failureTag,
                 final boolean failFast) {
 
-            this.jobName = jobName;
-            this.name = name;
-
             this.type = parameters.type;
+            this.mode = parameters.mode;
+
             this.field = parameters.field;
             this.auxiaProjectId = parameters.projectId;
             this.auxiaEventName = parameters.eventName;
@@ -255,8 +253,8 @@ public class AuxiaSink extends Sink {
         @Setup
         public void setup() {
             this.converter = switch (type) {
-                case json -> AuxiaUtil.createJsonConverter(auxiaProjectId, auxiaEventName, field, excludeFields);
-                case element -> AuxiaUtil.createElementConverter(auxiaProjectId, auxiaEventName, inputSchema, excludeFields);
+                case json -> AuxiaUtil.createJsonConverter(auxiaProjectId, auxiaEventName, field, excludeFields, mode);
+                case element -> AuxiaUtil.createElementConverter(auxiaProjectId, auxiaEventName, inputSchema, excludeFields, mode);
             };
             this.converter.setup(bytes);
 

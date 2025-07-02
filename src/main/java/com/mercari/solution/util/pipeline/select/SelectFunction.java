@@ -29,6 +29,7 @@ public interface SelectFunction extends Serializable {
         cast,
         rename,
         constant,
+        replace,
         expression,
         text,
         concat,
@@ -138,6 +139,7 @@ public interface SelectFunction extends Serializable {
             case rename -> Rename.of(name, jsonObject, inputFields, ignore);
             case cast -> Cast.of(name, jsonObject, inputFields, ignore);
             case constant -> Constant.of(name, jsonObject, ignore);
+            case replace -> Replace.of(name, jsonObject, inputFields, ignore);
             case expression -> Expression.of(name, jsonObject, ignore);
             case text -> Text.of(name, jsonObject, inputFields, ignore);
             case concat -> Concat.of(name, jsonObject, inputFields, ignore);

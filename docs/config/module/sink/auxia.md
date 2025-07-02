@@ -19,6 +19,7 @@ Event data can be synchronized simply, without the need to implement conversions
 |---------------|----------|---------------------|--------------------------------------------------------------------------------------------------------|
 | projectId     | required | String              | Specify the projectId of the Auxia you wish to link                                                    |
 | type          | optional | Enum                | Choose `element` or `json`. If you want to parse JSON type data, choose `json`. Default is `element`.  |
+| mode          | optional | Enum                | Choose `event` or `user`. If you want to integrate user properties, choose `user`. Default is `event`. |
 | field         | optional | String              | When parsing JSON, specify the field name with JSON value.                                             |
 | eventName     | optional | String              | If the data flows to this sink all have the same event_name, it can be specified here as a fixed value |
 | pubsub        | optional | Map<String,Object\> | Specify the resource name of the topic of the pubsub you wish to link to Auxia                         |
@@ -30,7 +31,7 @@ Event data can be synchronized simply, without the need to implement conversions
 The input record must contain the fields `required` in the following reserved fields list().
 Fields other than the names listed below will be linked as event properties
 
-reference: https://docs.auxia.io/data-ingestion/overview/user-event-data
+reference: https://docs.auxia.io/data-ingestion/overview/event-data#proto-structure
 
 | field name                | optional           | type      | description                                                                                                                                                                                                                  |
 |---------------------------|--------------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
