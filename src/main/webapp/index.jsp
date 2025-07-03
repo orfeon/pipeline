@@ -20,7 +20,7 @@
     <div id="buttons" style="padding-right: 20px">
       <button id="dryRunButton" type="button" name="dryrun" class="btn btn-secondary" style="width: 150px">Dry Run<span id="dryRunButtonTimer" style="display:none; margin-left: 10px;"></span></button>
       <button id="runButton" type="button" name="run" class="btn btn-primary" style="width: 150px">Run<span id="runButtonTimer" style="display:none; margin-left: 10px;"></span></button>
-      <button id="launchButton" type="button" name="launch" class="btn btn-warning" style="width: 150px; display:none;">Launch<span id="launchButtonTimer" style="display:none; margin-left: 10px;"></span></button>
+      <button id="launchButton" type="button" name="launch" class="btn btn-warning" style="width: 150px;">Launch<span id="launchButtonTimer" style="display:none; margin-left: 10px;"></span></button>
     </div>
   </header>
   <main style="width:100%; padding: 0px 20px 10px; flex: 1; display: flex; flex-direction: row; gap: 20px;">
