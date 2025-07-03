@@ -551,7 +551,7 @@ public class BigtableSchemaUtil {
 
     public static Schema convertSchema(final String projectId, final String instanceId, final String sql) {
         try(final BigtableDataClient client = BigtableDataClient.create(projectId, instanceId);
-            final ResultSet resultSet = client.executeQuery(Statement.newBuilder(sql).build())) {
+            final ResultSet resultSet = client.executeQuery(client.prepareStatement(sql, new HashMap<>()).bind().build())) {
             return BigtableSchemaUtil.convertSchema(resultSet.getMetadata());
         } catch (final IOException | SQLException e) {
             throw new RuntimeException("", e);

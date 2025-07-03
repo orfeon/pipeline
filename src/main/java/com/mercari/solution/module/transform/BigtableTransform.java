@@ -3,8 +3,8 @@ package com.mercari.solution.module.transform;
 import com.google.cloud.bigtable.data.v2.BigtableDataClient;
 import com.google.cloud.bigtable.data.v2.BigtableDataSettings;
 import com.google.cloud.bigtable.data.v2.models.*;
+import com.google.cloud.bigtable.data.v2.models.sql.PreparedStatement;
 import com.google.cloud.bigtable.data.v2.models.sql.ResultSet;
-import com.google.cloud.bigtable.data.v2.models.sql.Statement;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -392,7 +392,8 @@ public class BigtableTransform extends Transform {
         }
 
         private List<MElement> readBySql(final MElement input) {
-            try(final ResultSet resultSet = client.executeQuery(Statement.newBuilder(sql).build())) {
+            final PreparedStatement preparedStatement = client.prepareStatement(sql, new HashMap<>());
+            try(final ResultSet resultSet = client.executeQuery(preparedStatement.bind().build())) {
                 final List<MElement> results = new ArrayList<>();
                 while(resultSet.next()) {
                     final MElement result = BigtableSchemaUtil.convert(resultSet, input.getTimestamp());

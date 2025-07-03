@@ -12,15 +12,15 @@
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.65.0</beam.version>
+    <beam.version>2.66.0</beam.version>
 
     <snakeyaml.version>2.4</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
     <exp4j.version>0.4.8</exp4j.version>
     <commons-math3.version>3.6.1</commons-math3.version>
-    <lucene.version>10.2.1</lucene.version>
+    <lucene.version>10.2.2</lucene.version>
     <pdfbox.version>3.0.5</pdfbox.version>
-    <jsoup.version>1.20.1</jsoup.version>
+    <jsoup.version>1.21.1</jsoup.version>
 
     <hbase.version>2.6.2</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
@@ -207,21 +207,6 @@
       <properties>
         <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=DirectRunner</jib.entrypoint>
       </properties>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>com.google.cloud.tools</groupId>
-            <artifactId>jib-maven-plugin</artifactId>
-            <configuration>
-              <container>
-                <environment>
-                  <GOOGLE_APPLICATION_CREDENTIALS>/mnt/gcloud/application_default_credentials.json</GOOGLE_APPLICATION_CREDENTIALS>
-                </environment>
-              </container>
-            </configuration>
-          </plugin>
-        </plugins>
-      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
@@ -253,15 +238,9 @@
       <build>
         <plugins>
           <plugin>
-            <groupId>com.google.cloud.tools</groupId>
-            <artifactId>jib-maven-plugin</artifactId>
-            <configuration>
-              <container>
-                <environment>
-                  <GOOGLE_APPLICATION_CREDENTIALS>/mnt/gcloud/application_default_credentials.json</GOOGLE_APPLICATION_CREDENTIALS>
-                </environment>
-              </container>
-            </configuration>
+            <groupId>org.eclipse.jetty</groupId>
+            <artifactId>jetty-maven-plugin</artifactId>
+            <version>${jetty.version}</version>
           </plugin>
         </plugins>
       </build>
@@ -379,6 +358,24 @@
         <dependency>
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-spark-3</artifactId>
+          <scope>runtime</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+
+    <!-- Makes the DataflowRunner available when running a dataflow pipeline job. -->
+    <profile>
+      <id>dataflow-gpu</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <jib.image>nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04</jib.image>
+      </properties>
+      <dependencies>
+        <dependency>
+          <groupId>org.apache.beam</groupId>
+          <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
