@@ -182,7 +182,10 @@ public class BigQuerySink extends Sink {
             }
 
             if(outputResult == null) {
-                outputResult = !OptionUtil.isStreaming(input);
+                outputResult = switch (method) {
+                    case DEFAULT, FILE_LOADS, STREAMING_INSERTS -> !OptionUtil.isStreaming(input);
+                    default -> false;
+                };
             }
 
         }
@@ -247,7 +250,7 @@ public class BigQuerySink extends Sink {
                 write = applyParameters(write, parameters, insertTableSchema, isStreaming, destinationFunction, errorHandler);
                 yield elements
                         .apply("ConvertToRow", ParDo.of(new ToRowDoFn(inputSchema)))
-                        .setCoder(RowCoder.of(inputSchema.getRow().getSchema()))
+                        .setCoder(RowCoder.of(inputSchema.getRowSchema()))
                         .apply("WriteRow", write);
             }
             case avro -> {
@@ -438,7 +441,6 @@ public class BigQuerySink extends Sink {
                 case TableRow tableRow -> tableRow;
                 default -> throw new IllegalArgumentException();
             };
-            TemplateUtil.setFunctions(values);
             return TemplateUtil.executeStrictTemplate(destination, values);
         };
     }
