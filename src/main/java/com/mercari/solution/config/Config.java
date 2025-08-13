@@ -160,7 +160,7 @@ public class Config implements Serializable {
 
     public static class Systems implements Serializable {
 
-        private Map<String, String> args;
+        private LinkedHashMap<String, String> args;
         private String context;
         private List<Import> imports;
         private Failure failure;
@@ -190,7 +190,7 @@ public class Config implements Serializable {
                 final String context,
                 final Map<String, String> args) {
             if(this.args == null) {
-                this.args = new HashMap<>();
+                this.args = new LinkedHashMap<>();
             }
             this.args.putAll(args);
 
@@ -545,11 +545,15 @@ public class Config implements Serializable {
             return configJson;
         }
 
-        final Map<String,String> values = new HashMap<>();
+        final Map<String,String> values = new LinkedHashMap<>();
         for(final Map.Entry<String,String> entry : args.entrySet()) {
             final String value;
             if(TemplateUtil.isTemplateText(entry.getValue())) {
-                value = TemplateUtil.executeStrictTemplate(entry.getValue(), values);
+                String entryValue = entry.getValue();
+                for(final Map.Entry<String, String> ventry : values.entrySet()) {
+                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), ventry.getValue());
+                }
+                value = TemplateUtil.executeStrictTemplate(entryValue, values);
             } else {
                 value = entry.getValue();
             }
