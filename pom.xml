@@ -6,13 +6,13 @@
 
   <groupId>com.mercari.solution</groupId>
   <artifactId>pipeline</artifactId>
-  <version>1.0.0-beta1</version>
+  <version>1.0.0-beta2</version>
   <name>Mercari Pipeline</name>
 
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.66.0</beam.version>
+    <beam.version>2.67.0</beam.version>
 
     <snakeyaml.version>2.4</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
@@ -26,21 +26,21 @@
     <mysql-connector.version>8.4.0</mysql-connector.version>
     <postgresql-connector.version>42.7.7</postgresql-connector.version>
     <sqlserver-connector.version>8.4.1.jre11</sqlserver-connector.version>
-    <alloydb-connector.version>1.2.4</alloydb-connector.version>
-    <jdbc-socket-factory.version>1.25.1</jdbc-socket-factory.version>
+    <alloydb-connector.version>1.2.5</alloydb-connector.version>
+    <jdbc-socket-factory.version>1.25.2</jdbc-socket-factory.version>
     <hikaricp.version>6.3.0</hikaricp.version>
     <h2.version>2.3.232</h2.version>
     <drive.version>v3-rev20250511-2.0.0</drive.version>
 
     <onnxruntime.version>1.22.0</onnxruntime.version>
     <onnxruntime-extensions.version>0.13.0</onnxruntime-extensions.version>
-    <onnx.version>1.17.0-1.5.11</onnx.version>
+    <onnx.version>1.18.0-1.5.12</onnx.version>
 
     <slf4j.version>2.0.16</slf4j.version>
     <junit.version>4.13.1</junit.version>
     <mockito.version>3.0.0</mockito.version>
 
-    <maven-jib-plugin.version>3.4.4</maven-jib-plugin.version>
+    <maven-jib-plugin.version>3.4.6</maven-jib-plugin.version>
     <maven-compiler-plugin.version>3.8.1</maven-compiler-plugin.version>
     <maven-jar-plugin.version>3.0.2</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.1.0</maven-shade-plugin.version>
@@ -48,7 +48,7 @@
 
     <jetty.version>11.0.25</jetty.version>
     <jakarta-servlet.version>6.1.0</jakarta-servlet.version>
-    <mcp.version>0.10.0</mcp.version>
+    <mcp.version>0.11.2</mcp.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -138,6 +138,9 @@
               </filters>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.mercari.solution.api.mcp.PipelineMcpStreamableServer</mainClass>
+                </transformer>
               </transformers>
             </configuration>
           </execution>
@@ -238,38 +241,37 @@
       <build>
         <plugins>
           <plugin>
-            <groupId>org.eclipse.jetty</groupId>
-            <artifactId>jetty-maven-plugin</artifactId>
-            <version>${jetty.version}</version>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-war-plugin</artifactId>
+            <configuration>
+              <webResources>
+                <resource>
+                  <directory>docs/config</directory>
+                  <targetPath>docs/config</targetPath>
+                </resource>
+                <resource>
+                  <directory>examples</directory>
+                  <targetPath>examples</targetPath>
+                </resource>
+                <resource>
+                  <directory>src/main/resources/libs</directory>
+                  <targetPath>WEB-INF/lib</targetPath>
+                </resource>
+              </webResources>
+            </configuration>
           </plugin>
-        </plugins>
-      </build>
-    </profile>
-
-    <profile>
-      <id>server-dev</id>
-      <activation>
-        <activeByDefault>false</activeByDefault>
-      </activation>
-      <properties>
-        <packaging>war</packaging>
-        <jib.image>jetty:${jetty.version}-jdk21</jib.image>
-        <jib.entrypoint>java,-jar,/usr/local/jetty/start.jar</jib.entrypoint>
-        <jib.appRoot>/var/lib/jetty/webapps/ROOT</jib.appRoot>
-      </properties>
-      <dependencies>
-        <dependency>
-          <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-direct-java</artifactId>
-          <scope>runtime</scope>
-        </dependency>
-      </dependencies>
-      <build>
-        <plugins>
           <plugin>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-maven-plugin</artifactId>
             <version>${jetty.version}</version>
+            <configuration>
+              <webApp>
+                <resourceBases>
+                  <resourceBase>src/main/webapp</resourceBase>
+                  <resourceBase>${project.basedir}</resourceBase>
+                </resourceBases>
+              </webApp>
+            </configuration>
           </plugin>
         </plugins>
       </build>
@@ -477,6 +479,8 @@
 
     <!-- Machine Learning -->
     <!-- https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime -->
+
+    <!-- https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime_gpu -->
     <dependency>
       <groupId>com.microsoft.onnxruntime</groupId>
       <artifactId>onnxruntime</artifactId>
@@ -698,12 +702,14 @@
       <scope>provided</scope>
     </dependency>
 
+    <!-- Pipeline Server for MCP -->
     <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp -->
     <dependency>
       <groupId>io.modelcontextprotocol.sdk</groupId>
       <artifactId>mcp</artifactId>
       <version>${mcp.version}</version>
     </dependency>
+
 
   </dependencies>
 </project>

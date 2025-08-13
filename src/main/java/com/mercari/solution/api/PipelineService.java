@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.io.Serializable;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -52,6 +53,42 @@ public class PipelineService {
             .map(Integer::valueOf)
             .orElse(10);
 
+    public static class RunResult implements Serializable {
+
+        public final String configText;
+        public final String responseText;
+        public final String errorMessage;
+        public final Boolean isError;
+
+        RunResult(
+                final String configText,
+                final String responseText,
+                final String errorMessage,
+                final Boolean isError) {
+
+            this.configText = configText;
+            this.responseText = responseText;
+            this.errorMessage = errorMessage;
+            this.isError = isError;
+        }
+
+        public static RunResult succeed(
+                final String configText,
+                final String responseText) {
+
+            return new RunResult(configText, responseText, null, false);
+        }
+
+        public static RunResult failure(
+                final String configText,
+                final String responseText,
+                final String errorMessage) {
+
+            return new RunResult(configText, responseText, errorMessage, true);
+        }
+
+    }
+
     public static void serve(
             final HttpServletRequest request,
             final HttpServletResponse response) throws IOException {
@@ -77,7 +114,9 @@ public class PipelineService {
             switch (type.toLowerCase()) {
                 case "run", "dryrun" -> {
                     final boolean dryRun = type.startsWith("dry");
-                    run(configText, dryRun, response, userEmail);
+                    final RunResult result = run(configText, dryRun);
+                    log(userEmail, dryRun ? "DryRun" : "Run", !result.isError, result.configText, result.errorMessage);
+                    response.getWriter().println(result.responseText);
                 }
                 case "launch" -> {
                     launch(configText, response, userEmail);
@@ -102,11 +141,7 @@ public class PipelineService {
 
     }
 
-    private static void run(
-            final String configText,
-            final Boolean dryRun,
-            final HttpServletResponse response,
-            final String userEmail) throws IOException {
+    public static RunResult run(final String configText, final Boolean dryRun) {
 
         String configContent = null;
         final long startMillis = Instant.now().toEpochMilli();
@@ -163,9 +198,7 @@ public class PipelineService {
                 responseJson.addProperty("metrics", metricsJson);
             }
 
-            log(userEmail, dryRun ? "DryRun" : "Run", true, configContent, null);
-
-            response.getWriter().println(responseJson);
+            return RunResult.succeed(configContent, responseJson.toString());
         } catch (final IllegalModuleException e) {
             final long endMillis = Instant.now().toEpochMilli();
             final JsonObject responseJson = new JsonObject();
@@ -183,9 +216,7 @@ public class PipelineService {
                 responseJson.add("error", error);
             }
 
-            log(userEmail, dryRun ? "DryRun" : "Run", false, configContent, String.join(",", e.errorMessages));
-
-            response.getWriter().println(responseJson);
+            return RunResult.failure(configContent, responseJson.toString(), String.join(",", e.errorMessages));
         } catch (final Throwable e) {
             final long endMillis = Instant.now().toEpochMilli();
             final JsonObject responseJson = new JsonObject();
@@ -199,9 +230,7 @@ public class PipelineService {
                 responseJson.add("error", error);
             }
 
-            log(userEmail, dryRun ? "DryRun" : "Run", false, configContent, FailureUtil.convertThrowableMessage(e));
-
-            response.getWriter().println(responseJson);
+            return RunResult.failure(configContent, responseJson.toString(), FailureUtil.convertThrowableMessage(e));
         }
     }
 

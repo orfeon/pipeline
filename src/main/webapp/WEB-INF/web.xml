@@ -7,6 +7,12 @@
         <async-supported>true</async-supported>
     </servlet>
 
+    <servlet>
+        <servlet-name>MPipelineMcpServer</servlet-name>
+        <servlet-class>com.mercari.solution.api.mcp.PipelineMcpStreamableServer</servlet-class>
+        <async-supported>true</async-supported>
+    </servlet>
+
     <servlet-mapping>
         <servlet-name>MPipelineServer</servlet-name>
         <url-pattern>/api/pipeline/*</url-pattern>
@@ -20,5 +26,10 @@
     <servlet-mapping>
         <servlet-name>MPipelineServer</servlet-name>
         <url-pattern>/probe/*</url-pattern>
+    </servlet-mapping>
+
+    <servlet-mapping>
+        <servlet-name>MPipelineMcpServer</servlet-name>
+        <url-pattern>/mcp</url-pattern>
     </servlet-mapping>
 </web-app>

@@ -5,7 +5,6 @@
   <meta charset="UTF-8">
   <title>Mercari Pipeline Playground</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM" crossorigin="anonymous">
-  <link rel="stylesheet" href="/layout.css?id=1">
 </head>
 <body style="height: 100%; margin: 0; display: flex; flex-direction: column;">
   <header id="header" class="navbar navbar-fixed-top navbar-inverse" role="navigation" style="height: 80px; flex-shrink: 0;">
