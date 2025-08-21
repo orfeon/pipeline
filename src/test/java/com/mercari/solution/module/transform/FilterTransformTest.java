@@ -49,8 +49,8 @@ public class FilterTransformTest {
                       "parameters": {
                         "select": [
                           { "name": "events", "func": "struct", "mode": "repeated", "fields": [
-                            { "name": "id", "func": "jsonpath", "field": "data", "path": "$.fieldA" },
-                            { "name": "description", "func": "jsonpath", "field": "data", "path": "$.fieldB" }
+                            { "name": "id", "func": "json_path", "field": "data", "path": "$.fieldA" },
+                            { "name": "description", "func": "json_path", "field": "data", "path": "$.fieldB" }
                           ], "each": "data" }
                         ],
                         "flattenField": "events"

@@ -16,8 +16,8 @@ public interface AggregateFunction extends StatefulFunction {
         count,
         max,
         min,
-        argmax,
-        argmin,
+        arg_max,
+        arg_min,
         last,
         first,
         sum,
@@ -94,8 +94,8 @@ public interface AggregateFunction extends StatefulFunction {
             case min -> Max.of(name, inputFields, field, expression, condition, range, ignore, true);
             case last -> Last.of(name, inputFields, condition, range, ignore, params, false);
             case first -> Last.of(name, inputFields, condition, range, ignore, params, true);
-            case argmax -> ArgMax.of(name, inputFields, condition, range, ignore, params);
-            case argmin -> ArgMax.of(name, inputFields, condition, range, ignore, params, true);
+            case arg_max -> ArgMax.of(name, inputFields, condition, range, ignore, params);
+            case arg_min -> ArgMax.of(name, inputFields, condition, range, ignore, params, true);
             case avg -> Avg.of(name, inputFields, field, expression, condition, range, ignore, params);
             case std -> Std.of(name, inputFields, field, expression, condition, range, ignore, params);
             case simple_regression -> SimpleRegression.of(name, inputFields, field, expression, condition, range, ignore, params);
