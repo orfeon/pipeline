@@ -26,7 +26,13 @@ public class AvroToElementConverter {
     private static Schema.FieldType convertFieldType(final org.apache.avro.Schema avroFieldSchema, final boolean nullable) {
         final Schema.FieldType fieldType = switch (avroFieldSchema.getType()) {
             case BOOLEAN -> Schema.FieldType.BOOLEAN;
-            case STRING -> Schema.FieldType.STRING;
+            case STRING -> {
+                if(AvroSchemaUtil.isSqlTypeJson(avroFieldSchema)) {
+                    yield Schema.FieldType.JSON;
+                } else {
+                    yield Schema.FieldType.STRING;
+                }
+            }
             case BYTES, FIXED -> {
                 if(AvroSchemaUtil.isLogicalTypeDecimal(avroFieldSchema)) {
                     yield Schema.FieldType.DECIMAL;

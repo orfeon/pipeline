@@ -310,6 +310,8 @@ public class BigtableSchemaUtil {
 
         private Schema.FieldType fieldType;
 
+        private String dynamicTypeField;
+
         private transient Template templateQualifier;
         private transient long fixedTimestampMicros;
 
@@ -451,11 +453,12 @@ public class BigtableSchemaUtil {
             if(primitiveValue == null) {
                 return null;
             }
+            final Schema.Type dynamicType = getDynamicType(primitiveValues);
 
             final String cq = TemplateUtil.executeStrictTemplate(templateQualifier, standardValues);
             return switch (mutationOp) {
                 case SET_CELL -> {
-                    final ByteString fieldValue = toByteString(format, primitiveValue);
+                    final ByteString fieldValue = toByteString(format, primitiveValue, dynamicType);
                     final long timestampMicros = switch (timestampType) {
                         case server -> -1L;
                         case event -> timestamp.getMillis() * 1000L;
@@ -506,6 +509,17 @@ public class BigtableSchemaUtil {
                         .build();
                 default -> throw new IllegalArgumentException("Illegal mutationOp: " + mutationOp + " for columnQualifier");
             };
+        }
+
+        private Schema.Type getDynamicType(Map<String,Object> primitiveValues) {
+            if(dynamicTypeField == null) {
+                return null;
+            }
+            final Object dynamicTypeFieldValue = primitiveValues.get(dynamicTypeField);
+            if(dynamicTypeFieldValue == null) {
+                return null;
+            }
+            return Schema.Type.of(dynamicTypeFieldValue.toString());
         }
 
         private List<Object> toPrimitiveValues(final Column column) {
@@ -850,10 +864,10 @@ public class BigtableSchemaUtil {
         }
     }
 
-    private static ByteString toByteString(final Format format, final Object primitiveValue) {
+    private static ByteString toByteString(final Format format, final Object primitiveValue, final Schema.Type dynamicType) {
         return switch (format) {
             case text -> toByteStringText(primitiveValue);
-            case bytes -> toByteStringBytes(primitiveValue);
+            case bytes -> toByteStringBytes(primitiveValue, dynamicType);
             case hadoop -> toByteStringHadoop(primitiveValue);
             case avro -> {
                 try {
@@ -936,10 +950,11 @@ public class BigtableSchemaUtil {
         return ByteString.copyFrom(text, StandardCharsets.UTF_8);
     }
 
-    public static ByteString toByteStringBytes(final Object primitiveValue) {
+    public static ByteString toByteStringBytes(Object primitiveValue, final Schema.Type dynamicType) {
         if(primitiveValue == null) {
-            return ByteString.copyFrom(new byte[0]);
+            return null;
         }
+        primitiveValue = convertDynamicFieldValue(dynamicType, primitiveValue);
         final byte[] bytes = switch (primitiveValue) {
             case Boolean b -> Bytes.toBytes(b);
             case String s -> Bytes.toBytes(s);
@@ -963,6 +978,78 @@ public class BigtableSchemaUtil {
         final Writable writable = toWritable(primitiveValue);
         final byte[] bytes = WritableUtils.toByteArray(writable);
         return ByteString.copyFrom(bytes);
+    }
+
+    public static Object convertDynamicFieldValue(final Schema.Type dynamicType, final Object primitiveValue) {
+        if(dynamicType == null) {
+            return primitiveValue;
+        }
+        if(primitiveValue == null) {
+            return null;
+        }
+        return switch (dynamicType) {
+            case string, json -> primitiveValue.toString();
+            case bool -> switch (primitiveValue) {
+                case String s -> Boolean.parseBoolean(s);
+                case Utf8 u -> Boolean.parseBoolean(u.toString());
+                case Number n -> n.doubleValue() > 0;
+                default -> null;
+            };
+            case int16 -> switch (primitiveValue) {
+                case String s -> Short.parseShort(s);
+                case Utf8 u -> Short.parseShort(u.toString());
+                case Boolean b -> b ? 1 : 0;
+                case Number n -> n.shortValue();
+                default -> null;
+            };
+            case int32 -> switch (primitiveValue) {
+                case String s -> Integer.parseInt(s);
+                case Utf8 u -> Integer.parseInt(u.toString());
+                case Boolean b -> b ? 1 : 0;
+                case Number n -> n.intValue();
+                default -> null;
+            };
+            case int64 -> switch (primitiveValue) {
+                case String s -> Long.parseLong(s);
+                case Utf8 u -> Long.parseLong(u.toString());
+                case Boolean b -> b ? 1L : 0L;
+                case Number n -> n.longValue();
+                default -> null;
+            };
+            case float32 -> switch (primitiveValue) {
+                case String s -> Float.parseFloat(s);
+                case Utf8 u -> Float.parseFloat(u.toString());
+                case Boolean b -> b ? 1F : 0F;
+                case Number n -> n.floatValue();
+                default -> null;
+            };
+            case float64 -> switch (primitiveValue) {
+                case String s -> Double.parseDouble(s);
+                case Utf8 u -> Double.parseDouble(u.toString());
+                case Boolean b -> b ? 1D : 0D;
+                case Number n -> n.doubleValue();
+                default -> null;
+            };
+            case date -> switch (primitiveValue) {
+                case String s -> DateTimeUtil.toEpochDay(s);
+                case Utf8 u -> DateTimeUtil.toEpochDay(u.toString());
+                case Number n -> n.intValue();
+                default -> null;
+            };
+            case time -> switch (primitiveValue) {
+                case String s -> DateTimeUtil.toMicroOfDay(s);
+                case Utf8 u -> DateTimeUtil.toMicroOfDay(u.toString());
+                case Number n -> n.longValue();
+                default -> null;
+            };
+            case timestamp -> switch (primitiveValue) {
+                case String s -> DateTimeUtil.toEpochMicroSecond(s);
+                case Utf8 u -> DateTimeUtil.toEpochMicroSecond(u.toString());
+                case Number n -> n.longValue();
+                default -> null;
+            };
+            default -> throw new RuntimeException("Bigtable dynamic field type does not support type: " + dynamicType);
+        };
     }
 
     public static Object toPrimitiveValue(final Format format, final Schema.FieldType fieldtype, final ByteString byteString) {

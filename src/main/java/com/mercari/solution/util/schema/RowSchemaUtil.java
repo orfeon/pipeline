@@ -965,13 +965,15 @@ public class RowSchemaUtil {
                     yield switch (value) {
                         case Number n -> LocalDate.ofEpochDay(n.longValue());
                         case String s -> DateTimeUtil.toLocalDate(s);
-                        default -> throw new IllegalArgumentException();
+                        case LocalDate ld -> ld;
+                        default -> throw new IllegalArgumentException("Not supported date type for value: " + value);
                     };
                 } else if(isLogicalTypeTime(fieldType)) {
                     yield switch (value) {
                         case Number n -> LocalTime.ofNanoOfDay(n.longValue() * 1000L);
                         case String s -> DateTimeUtil.toLocalTime(s);
-                        default -> throw new IllegalArgumentException();
+                        case LocalTime lt -> lt;
+                        default -> throw new IllegalArgumentException("Not supported time type for value: " + value);
                     };
                 } else if (isLogicalTypeEnum(fieldType)) {
                     final EnumerationType enumerationType = fieldType.getLogicalType(EnumerationType.class);

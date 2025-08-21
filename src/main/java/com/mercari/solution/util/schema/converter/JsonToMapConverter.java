@@ -1,5 +1,6 @@
 package com.mercari.solution.util.schema.converter;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.module.Schema;
@@ -10,6 +11,14 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 public class JsonToMapConverter {
+
+    public static Map<String, Object> convert(final String jsonText) {
+        if(jsonText == null) {
+            return new HashMap<>();
+        }
+        final JsonElement jsonElement = new Gson().fromJson(jsonText, JsonElement.class);
+        return convert(jsonElement);
+    }
 
     public static Map<String, Object> convert(final JsonElement json) {
         final Map<String, Object> map = new HashMap<>();
