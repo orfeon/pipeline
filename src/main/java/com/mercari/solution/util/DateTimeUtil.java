@@ -100,7 +100,16 @@ public class DateTimeUtil {
         return toLocalDate(text, false);
     }
 
-    public static LocalDate toLocalDate(final String text, final boolean safe) {
+    public static LocalDate toLocalDate(String text, final boolean safe) {
+        if(text == null) {
+            return null;
+        }
+        if(text.startsWith("\"") && text.endsWith("\"")) {
+            text = text.replaceAll("\"", "");
+        }
+        if(text.startsWith("'") && text.endsWith("'")) {
+            text = text.replaceAll("'", "");
+        }
         if(PATTERN_DATE3.matcher(text).find()) {
             return LocalDate.parse(text, FORMAT_DATE3);
         } else if(PATTERN_DATE2.matcher(text).find()) {
