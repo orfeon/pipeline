@@ -184,7 +184,7 @@ public class SelectTransformTest {
                           range:
                             count: 3
                         - name: field_long_argmin_count3
-                          func: argmin
+                          func: arg_min
                           field: field_string
                           comparingField: field_long
                           range:
