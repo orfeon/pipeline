@@ -96,7 +96,7 @@ public class Logging implements Serializable {
             case info -> logger.info(logMessage);
             case warn -> logger.warn(logMessage);
             case error -> logger.error(logMessage);
-            case null -> logger.debug(logMessage);
+            case null -> logger.info(logMessage);
         }
     }
 

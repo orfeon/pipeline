@@ -314,6 +314,10 @@ public class MElement implements Serializable {
                 .orElse(null);
     }
 
+    public Map<String, Object> asStandardMap(final Schema schema) {
+        return asStandardMap(schema.getFields(), null);
+    }
+
     public Map<String, Object> asStandardMap(final Schema schema, final Collection<String> fieldNames) {
         return asStandardMap(schema.getFields(), fieldNames);
     }
@@ -829,6 +833,30 @@ public class MElement implements Serializable {
                 .withString("field", "")
                 .withEventTime(timestamp)
                 .build();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        } else if (!(o instanceof MElement other)) {
+            return false;
+        } else {
+            if(this.type != other.type
+                    || this.epochMillis != other.epochMillis) {
+                return false;
+            }
+            if(this.value != null && other.value != null) {
+                return value.equals(other.value);
+            } else {
+                return this.value == null && other.value == null;
+            }
+        }
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(value);
     }
 
     @Override
