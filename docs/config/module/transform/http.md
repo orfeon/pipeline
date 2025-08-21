@@ -17,18 +17,20 @@ Http transform module can be used to filter rows by specified criteria or to ret
 |----------------|----------|--------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | request        | required | Request                                    | Specify the configuration settings needed to create an HTTP request                                                         |
 | response       | required | Response                                   | Specify the configuration options needed to parse the HTTP response                                                         |
+| auth           | optional | Auth                                       | Specify the authentication definition                                                                                       |
+| filter         | optional | [FilterCondition](../common/filter.md)     | Specify the conditions for filtering rows                                                                                   |
 | select         | optional | Array<[SelectField](../common/select.md)\> | Specify the field definitions if you want to refine, rename, or apply some processing to the http response or input fields. |
 | timeoutSeconds | optional | Integer                                    | Specify the seconds in which a request is considered to have timed out and failed. The default is 60.                       |
 
 ## Http transform module Request parameters
 
-| parameter | optional | type                             | description                                                                                                                                                                                                                                |
-|-----------|----------|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| endpoint  | required | String                           | Specify the url for http access. You can embed the fields of the input record with Template Engine FreeMarker.                                                                                                                             |
-| method    | required | Enum                             | Specify one of `get`, `post`, `put`, or `delete` as the http request method                                                                                                                                                                |
-| body      | optional | String                           | Specify the body of the http request. You can embed the fields of the input record with Template Engine FreeMarker                                                                                                                         |
-| params    | optional | Map<String,String\>              | Specify the request parameters as map. You can embed the fields of the inputs with Template Engine FreeMarker. `                                                                                                                           |
-| headers   | optional | Map<String,String\>              | Specify the headers of the http request. You can embed the fields of the inputs with Template Engine FreeMarker. `${_access_token}`, and `${_id_token}` variables in the headers value can be used to embed the dataflow worker's SA token |
+| parameter | optional | type                | description                                                                                                                                                                                                                                |
+|-----------|----------|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| endpoint  | required | String              | Specify the url for http access. You can embed the fields of the input record with Template Engine FreeMarker.                                                                                                                             |
+| method    | required | Enum                | Specify one of `get`, `post`, `put`, or `delete` as the http request method                                                                                                                                                                |
+| body      | optional | JsonElement         | Specify the body of the http request. You can embed the fields of the input record with Template Engine FreeMarker                                                                                                                         |
+| params    | optional | Map<String,String\> | Specify the request parameters as map. You can embed the fields of the inputs with Template Engine FreeMarker. `                                                                                                                           |
+| headers   | optional | Map<String,String\> | Specify the headers of the http request. You can embed the fields of the inputs with Template Engine FreeMarker. `${_access_token}`, and `${_id_token}` variables in the headers value can be used to embed the dataflow worker's SA token |
 
 ## Http transform module Response parameters
 
@@ -40,6 +42,15 @@ Http transform module can be used to filter rows by specified criteria or to ret
 
 The schema of the output of this module is that if no `select` parameter is specified, the output will be following schema.
 You can also specify fields to be extracted from this `body` field or from the fields of the input record by using `select` parameter.
+
+## Http transform module Auth parameters
+
+| parameter   | optional  | type           | description                                                     |
+|-------------|-----------|----------------|-----------------------------------------------------------------|
+| refresh     | required  | Refresh        | Specify refresh condition                                       |
+| format      | optional  | Enum           | Specify `text`, `bytes`, or `json` as the http response format. |
+| requests    | optional  | List<Request\> | Requests condition to get token                                 |
+
 
 ### Succeed record schema
 
