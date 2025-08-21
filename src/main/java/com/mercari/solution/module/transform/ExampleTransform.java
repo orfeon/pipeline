@@ -1,14 +1,19 @@
 package com.mercari.solution.module.transform;
 
-import com.mercari.solution.module.MCollectionTuple;
-import com.mercari.solution.module.MElement;
-import com.mercari.solution.module.MErrorHandler;
-import com.mercari.solution.module.Transform;
+import com.mercari.solution.module.*;
 import com.mercari.solution.module.Transform.Module;
 import com.mercari.solution.util.pipeline.Union;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 @Module(name="example")
 public class ExampleTransform extends Transform {
@@ -18,22 +23,94 @@ public class ExampleTransform extends Transform {
             final MCollectionTuple inputs,
             final MErrorHandler errorHandler) {
 
-        final PCollection<MElement> output = inputs
+        // When there are multiple sources, they can be integrated into a single schema source.
+        final PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()
                         .withWaits(getWaits())
-                        .withStrategy(getStrategy()))
-                .apply("Print", ParDo.of(new PrintDoFn()));
+                        .withStrategy(getStrategy()));
+        final Schema inputSchema = Union.createUnionSchema(inputs); // Utility method for creating integrated schema
+
+        // Define the schema for the output record (Specify in the last output definition.)
+        final Schema outputSchema = Schema.builder()
+                .withField("stringField", Schema.FieldType.STRING)
+                .withField("hashCodeField", Schema.FieldType.INT32)
+                .withField("timestampField", Schema.FieldType.TIMESTAMP)
+                .build();
+
+        final TupleTag<MElement> outputTag = new TupleTag<>() {};
+        final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
+
+        final PCollectionTuple outputs = input
+                .apply("SomethingProcess", ParDo
+                        .of(new ExampleDoFn(getLoggings(), getFailFast(), failureTag))
+                        .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+
+        // Definition for storing BadRecord in a common dead-letter when an error occurs
+        if(errorHandler != null) {
+            errorHandler.addError(outputs.get(failureTag));
+        }
+
+        // Define output records with output schema.
         return MCollectionTuple
-                .of(output, inputs.getSingleSchema());
+                .of(outputs.get(outputTag), outputSchema);
     }
 
-    private static class PrintDoFn extends DoFn<MElement, MElement> {
+    private static class ExampleDoFn extends DoFn<MElement, MElement> {
+
+        private final Map<String, Logging> logs;
+        private final boolean failFast;
+        private final TupleTag<BadRecord> failuresTag;
+
+        ExampleDoFn(
+                final List<Logging> logs,
+                final boolean failFast,
+                final TupleTag<BadRecord> failuresTag) {
+
+            this.logs = Logging.map(logs);
+            this.failFast = failFast;
+            this.failuresTag = failuresTag;
+        }
 
         @ProcessElement
         public void processElement(ProcessContext c) {
             final MElement input = c.element();
-            System.out.println("debug: " + input);
-            c.output(input);
+            if(input == null) {
+                return;
+            }
+
+            try {
+                // When input is specified in logs, it will be output to the log.
+                Logging.log(LOG, logs, "input", input);
+
+                final int hashCode = Objects.hashCode(input);
+                if(hashCode % 2 == 0) {
+                    final MElement output = MElement.builder()
+                            .withString("stringField", input.toString())
+                            .withInt32("hashCodeField", hashCode)
+                            .withTimestamp("timestampField", c.timestamp())
+                            .withEventTime(c.timestamp()) // MElement requires specification of event time.
+                            .build();
+
+                    // It is also possible to create it via Map as follows.
+                    /*
+                    final Map<String, Object> values = new HashMap<>();
+                    values.put("stringField", input.toString());
+                    values.put("hashCodeField", hashCode);
+                    values.put("timestampField", c.timestamp().getMillis() * 1000L); // timestamp value
+                    final MElement output = MElement.of(values, c.timestamp.getMillis());
+                     */
+                    c.output(output);
+
+                    Logging.log(LOG, logs, "output", output);
+                } else {
+                    Logging.log(LOG, logs, "not_output", input);
+                }
+            } catch (final Throwable e) {
+                // If an error occurs during processing, create a BadRecord data and output it with a failure tag.
+                // Here, it is generated by the utility common method.
+                final BadRecord badRecord = processError("Failed to process example module", input, e, failFast);
+                c.output(failuresTag, badRecord);
+            }
         }
 
     }
