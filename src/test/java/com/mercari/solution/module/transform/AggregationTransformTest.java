@@ -92,8 +92,8 @@ public class AggregationTransformTest {
                               { "name": "minFloat", "op": "min", "field": "floatField" },
                               { "name": "lastString", "op": "last", "field": "stringField" },
                               { "name": "firsts", "op": "first", "fields": ["stringField","intField","floatField","timestampField"] },
-                              { "name": "argmaxString", "op": "argmax", "field": "stringField", "comparingField": "floatField" },
-                              { "name": "argminString", "op": "argmin", "fields": ["stringField","intField","boolField","floatField"], "comparingField": "floatField" },
+                              { "name": "argmaxString", "op": "arg_max", "field": "stringField", "comparingField": "floatField" },
+                              { "name": "argminString", "op": "arg_min", "fields": ["stringField","intField","boolField","floatField"], "comparingField": "floatField" },
                               { "name": "arrayAggSingle", "op": "array_agg", "field": "intField" },
                               { "name": "arrayAggMulti", "op": "array_agg", "fields": ["stringField", "intField", "floatField"] }
                             ]
