@@ -358,13 +358,14 @@ public class Config implements Serializable {
     public static Config parse(final String configText, final String context, final Format format, final Map<String, String> templateArgs) {
         try {
             JsonObject jsonObject = convertConfigJson(configText, format);
-            LOG.info("Pipeline config: \n{}", new GsonBuilder().setPrettyPrinting().create().toJson(jsonObject));
 
             try {
                 jsonObject = processArgs(jsonObject, templateArgs);
             } catch (Throwable e) {
                 throw new IllegalModuleException("", "pipeline", e);
             }
+
+            LOG.info("Pipeline config: \n{}", new GsonBuilder().setPrettyPrinting().create().toJson(jsonObject));
 
             final Config config = new Gson().fromJson(jsonObject, Config.class);
             if(config == null) {
@@ -515,7 +516,7 @@ public class Config implements Serializable {
         return new LinkedHashMap<>(argsParameters.getOrDefault("args", new LinkedHashMap<>()));
     }
 
-    private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> args) {
+    private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
         final JsonObject argsJsonObject;
         if(configJson.has("args") && configJson.get("args").isJsonObject()) {
             argsJsonObject = configJson.getAsJsonObject("args");
@@ -528,6 +529,7 @@ public class Config implements Serializable {
             argsJsonObject = new JsonObject();
         }
 
+        final Map<String, String> args = new LinkedHashMap<>();
         for(final Map.Entry<String, JsonElement> entry : argsJsonObject.entrySet()) {
             if(entry.getValue().isJsonPrimitive()) {
                 final JsonPrimitive primitive = entry.getValue().getAsJsonPrimitive();
@@ -539,6 +541,10 @@ public class Config implements Serializable {
             } else {
                 args.put(entry.getKey(), entry.getValue().toString());
             }
+        }
+
+        if(paramsArgs != null && !paramsArgs.isEmpty()) {
+            args.putAll(paramsArgs);
         }
 
         if(args.isEmpty()) {
