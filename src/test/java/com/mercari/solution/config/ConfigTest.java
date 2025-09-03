@@ -64,6 +64,39 @@ public class ConfigTest {
     }
 
     @Test
+    public void testArgs() {
+        final String configYaml1 = """
+                system:
+                  args:
+                    table: mydataset.mytable
+                    timestamp: "2025-01-01T00:00:00Z"
+                    condition: updated_at > '${args.timestamp}'
+                sources:
+                  - name: BigQueryInput
+                    module: bigquery
+                    parameters:
+                      query: "SELECT * FROM `${args.table}` WHERE ${args.condition}"
+                      queryLocation: asia-northeast1
+                """;
+        try {
+            {
+                String[] args = new String[]{"args.condition=TRUE"};
+                final Config config = Config.parse(configYaml1, null, Config.Format.yaml, args);
+                final SourceConfig sourceConfig = config.getSources().getFirst();
+                Assert.assertEquals("SELECT * FROM `mydataset.mytable` WHERE TRUE", sourceConfig.getParameters().get("query").getAsString());
+            }
+            {
+                String[] args = new String[0];
+                final Config config = Config.parse(configYaml1, null, Config.Format.yaml, args);
+                final SourceConfig sourceConfig = config.getSources().getFirst();
+                Assert.assertEquals("SELECT * FROM `mydataset.mytable` WHERE updated_at > '2025-01-01T00:00:00Z'", sourceConfig.getParameters().get("query").getAsString());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
     public void testTags() {
         final String configTag1 = """
                 {
