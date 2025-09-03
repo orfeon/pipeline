@@ -17,6 +17,7 @@ import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.FailureUtil;
 import com.mercari.solution.util.TemplateUtil;
 import freemarker.template.Template;
+import org.apache.avro.SchemaBuilder;
 import org.apache.avro.util.Utf8;
 import org.apache.beam.sdk.values.KV;
 import org.apache.commons.io.IOUtils;
@@ -199,6 +200,9 @@ public class BigtableSchemaUtil {
                 valueArgs.add(qualifier.field);
                 if(qualifier.timestampField != null) {
                     valueArgs.add(qualifier.timestampField);
+                }
+                if(qualifier.dynamicTypeField != null) {
+                    valueArgs.add(qualifier.dynamicTypeField);
                 }
             }
             return valueArgs;
@@ -553,6 +557,16 @@ public class BigtableSchemaUtil {
                 .withField("value", Schema.FieldType.BYTES)
                 .withField("timestamp", Schema.FieldType.TIMESTAMP)
                 .build();
+    }
+
+    public static org.apache.avro.Schema createCellAvroSchema() {
+        return SchemaBuilder.builder().record("root").fields()
+                .name("rowKey").type(AvroSchemaUtil.REQUIRED_STRING).noDefault()
+                .name("family").type(AvroSchemaUtil.REQUIRED_STRING).noDefault()
+                .name("qualifier").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+                .name("value").type(AvroSchemaUtil.REQUIRED_BYTES).noDefault()
+                .name("timestamp").type(AvroSchemaUtil.REQUIRED_LOGICAL_TIMESTAMP_MICRO_TYPE).noDefault()
+                .endRecord();
     }
 
     public static Schema convertSchema(final ResultSetMetadata meta)  throws SQLException {

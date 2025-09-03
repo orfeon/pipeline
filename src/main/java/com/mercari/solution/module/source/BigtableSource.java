@@ -8,7 +8,10 @@ import com.google.protobuf.ByteString;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.gcp.BigtableUtil;
+import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.BigtableSchemaUtil;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.beam.sdk.io.gcp.bigtable.BigtableIO;
 import org.apache.beam.sdk.io.range.ByteKeyRange;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -240,14 +243,14 @@ public class BigtableSource extends Source {
                 outputs = rows
                         .apply("ConvertToRow", ParDo
                                 .of(new RowToRowElementDoFn(
-                                        parameters, getTimestampAttribute(), getFailFast(), failuresTag))
+                                        parameters, getTimestampAttribute(), getLoggings(), getFailFast(), failuresTag))
                                 .withOutputTags(outputTag, TupleTagList.of(failuresTag)));
             }
             case cell -> {
-                outputSchema = BigtableSchemaUtil.createCellSchema();
+                outputSchema = Schema.of(BigtableSchemaUtil.createCellAvroSchema());
                 outputs = rows
                         .apply("ConvertToCells", ParDo
-                                .of(new RowToCellElementDoFn(getFailFast(), failuresTag))
+                                .of(new RowToCellElementDoFn(getLoggings(), getFailFast(), failuresTag))
                         .withOutputTags(outputTag, TupleTagList.of(failuresTag)));
             }
             default -> throw new IllegalModuleException("Not supported bigtable source output type: " + parameters.outputType);
@@ -348,12 +351,14 @@ public class BigtableSource extends Source {
         private final String firstTimestampField;
         private final String lastTimestampField;
 
+        private final Map<String,Logging> logs;
         private final Boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
         RowToRowElementDoFn(
                 final Parameters parameters,
                 final String timestampAttribute,
+                final List<Logging> loggings,
                 final Boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
 
@@ -366,6 +371,7 @@ public class BigtableSource extends Source {
             this.firstTimestampField = parameters.firstTimestampField;
             this.lastTimestampField = parameters.lastTimestampField;
 
+            this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
         }
@@ -400,9 +406,11 @@ public class BigtableSource extends Source {
                     final Instant timestamp = Instant.ofEpochMilli((Long) primitiveValues.get(timestampAttribute) / 1000L);
                     final MElement output = MElement.of(primitiveValues, timestamp);
                     c.outputWithTimestamp(output, timestamp);
+                    Logging.log(LOG, logs, "output", output);
                 } else {
                     final MElement output = MElement.of(primitiveValues, c.timestamp());
                     c.output(output);
+                    Logging.log(LOG, logs, "output", output);
                 }
             } catch (final Throwable e) {
                 final Map<String, Object> values = new HashMap<>();
@@ -415,15 +423,25 @@ public class BigtableSource extends Source {
 
     private static class RowToCellElementDoFn extends DoFn<Row, MElement> {
 
+        private final Map<String, Logging> logs;
         private final Boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
+        private transient org.apache.avro.Schema outputSchema;
+
         RowToCellElementDoFn(
+                final List<Logging> loggings,
                 final Boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
 
+            this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
+        }
+
+        @Setup
+        public void setup() {
+            this.outputSchema = BigtableSchemaUtil.createCellAvroSchema();
         }
 
         @ProcessElement
@@ -440,14 +458,18 @@ public class BigtableSource extends Source {
                     for (final Column column : family.getColumnsList()) {
                         final ByteString qualifier = column.getQualifier();
                         for (final Cell cell : column.getCellsList()) {
-                            final Map<String, Object> primitives = new HashMap<>();
-                            primitives.put("rowKey", rowKey.toStringUtf8());
-                            primitives.put("family", familyName);
-                            primitives.put("qualifier", qualifier.toStringUtf8());
-                            primitives.put("timestamp", cell.getTimestampMicros());
+                            final GenericRecord record = new GenericRecordBuilder(outputSchema)
+                                    .set("rowKey", rowKey.toStringUtf8())
+                                    .set("family", familyName)
+                                    .set("qualifier", qualifier.toStringUtf8())
+                                    .set("value", cell.getValue().asReadOnlyByteBuffer())
+                                    .set("timestamp", cell.getTimestampMicros())
+                                    .build();
                             final Instant timestamp = Instant.ofEpochMilli(cell.getTimestampMicros() / 1000L);
-                            final MElement element = MElement.of(primitives, timestamp);
+                            final MElement element = MElement.of(record, timestamp);
                             c.outputWithTimestamp(element, timestamp);
+
+                            Logging.log(LOG, logs, "output", element);
                         }
                     }
                 }
