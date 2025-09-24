@@ -14,23 +14,23 @@
   <properties>
     <beam.version>2.67.0</beam.version>
 
-    <snakeyaml.version>2.4</snakeyaml.version>
+    <snakeyaml.version>2.5</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
     <exp4j.version>0.4.8</exp4j.version>
     <commons-math3.version>3.6.1</commons-math3.version>
-    <lucene.version>10.2.2</lucene.version>
+    <lucene.version>10.3.0</lucene.version>
     <pdfbox.version>3.0.5</pdfbox.version>
-    <jsoup.version>1.21.1</jsoup.version>
+    <jsoup.version>1.21.2</jsoup.version>
 
-    <hbase.version>2.6.2</hbase.version>
+    <hbase.version>2.6.3</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
-    <postgresql-connector.version>42.7.7</postgresql-connector.version>
+    <postgresql-connector.version>42.7.8</postgresql-connector.version>
     <sqlserver-connector.version>8.4.1.jre11</sqlserver-connector.version>
-    <alloydb-connector.version>1.2.5</alloydb-connector.version>
-    <jdbc-socket-factory.version>1.25.2</jdbc-socket-factory.version>
-    <hikaricp.version>6.3.0</hikaricp.version>
+    <alloydb-connector.version>1.2.6</alloydb-connector.version>
+    <jdbc-socket-factory.version>1.25.3</jdbc-socket-factory.version>
+    <hikaricp.version>7.0.2</hikaricp.version>
     <h2.version>2.3.232</h2.version>
-    <drive.version>v3-rev20250511-2.0.0</drive.version>
+    <drive.version>v3-rev20250910-2.0.0</drive.version>
 
     <onnxruntime.version>1.22.0</onnxruntime.version>
     <onnxruntime-extensions.version>0.13.0</onnxruntime-extensions.version>
@@ -46,9 +46,9 @@
     <maven-shade-plugin.version>3.1.0</maven-shade-plugin.version>
     <maven-surefire-plugin.version>2.21.0</maven-surefire-plugin.version>
 
-    <jetty.version>11.0.25</jetty.version>
+    <jetty.version>11.0.26</jetty.version>
     <jakarta-servlet.version>6.1.0</jakarta-servlet.version>
-    <mcp.version>0.11.2</mcp.version>
+    <mcp.version>0.13.0</mcp.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -354,6 +354,7 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
+        <jib.appRoot>/opt/spark/jars</jib.appRoot>
         <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=SparkRunner</jib.entrypoint>
       </properties>
       <dependencies>
@@ -428,10 +429,17 @@
       <artifactId>beam-sdks-java-io-parquet</artifactId>
     </dependency>
 
+    <!--
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-iceberg</artifactId>
     </dependency>
+
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-managed</artifactId>
+    </dependency>
+    -->
 
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-io-kafka -->
     <dependency>
@@ -451,15 +459,16 @@
       <artifactId>beam-sdks-java-io-clickhouse</artifactId>
     </dependency>
 
-    <dependency>
-      <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-managed</artifactId>
-    </dependency>
-
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-extensions-sql -->
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-extensions-sql</artifactId>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.hadoop</groupId>
+          <artifactId>hadoop-client-api</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
 
@@ -709,7 +718,6 @@
       <artifactId>mcp</artifactId>
       <version>${mcp.version}</version>
     </dependency>
-
 
   </dependencies>
 </project>

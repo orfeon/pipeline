@@ -1,9 +1,10 @@
 package com.mercari.solution.api.mcp;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mercari.solution.api.mcp.prompt.Prompt;
 import com.mercari.solution.api.mcp.resource.Resources;
 import com.mercari.solution.api.mcp.tool.Tool;
+import io.modelcontextprotocol.common.McpTransportContext;
+import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
@@ -18,11 +19,14 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Map;
 
 
 public class PipelineMcpStreamableServer extends HttpServlet {
 
     private static final Logger LOG = LoggerFactory.getLogger(PipelineMcpStreamableServer.class);
+
+    private static final String HEADER_NAME = "header";
 
     private static final String INSTRUCTION = """
             Mercari Pipeline is a tool that defines and executes data pipelines in YAML or JSON format.
@@ -40,11 +44,12 @@ public class PipelineMcpStreamableServer extends HttpServlet {
     public void init(ServletConfig config) throws ServletException {
 
         this.provider = HttpServletStreamableServerTransportProvider.builder()
-                .objectMapper(new ObjectMapper())
+                .jsonMapper(McpJsonMapper.createDefault())
                 .mcpEndpoint("/mcp")
                 .disallowDelete(true)
-                .contextExtractor((serverRequest, context) -> {
-                    return context;
+                .contextExtractor((HttpServletRequest r) -> {
+                    final String headerValue = r.getHeader(HEADER_NAME);
+                    return headerValue != null ? McpTransportContext.create(Map.of("server-side-header-value", headerValue)) : McpTransportContext.EMPTY;
                 })
                 .keepAliveInterval(Duration.ofSeconds(60))
                 .build();

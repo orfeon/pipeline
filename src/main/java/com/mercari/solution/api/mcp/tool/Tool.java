@@ -1,6 +1,7 @@
 package com.mercari.solution.api.mcp.tool;
 
 import com.google.common.reflect.ClassPath;
+import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -63,7 +64,7 @@ public interface Tool {
                                     .name(properties.name())
                                     .title(properties.title())
                                     .description(properties.description())
-                                    .inputSchema(properties.inputSchema())
+                                    .inputSchema(McpJsonMapper.createDefault(), properties.inputSchema())
                                     .build())
                             .callHandler(tool::sync)
                             .build();
