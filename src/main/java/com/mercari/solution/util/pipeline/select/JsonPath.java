@@ -80,7 +80,7 @@ public class JsonPath implements SelectFunction {
         final Object value = ElementSchemaUtil.getValue(input, field);
         final String json = (String)ElementSchemaUtil.getAsPrimitive(Schema.FieldType.STRING, value);
         try {
-            final Object str = org.apache.beam.vendor.calcite.v1_28_0.com.jayway.jsonpath.JsonPath.read(json, path);
+            final Object str = org.apache.beam.vendor.calcite.v1_40_0.com.jayway.jsonpath.JsonPath.read(json, path);
             return str;
         } catch (Throwable e) {
             System.out.println("field: " + field + ", path: " + path + ", json: " + json + e);

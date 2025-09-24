@@ -12,7 +12,7 @@
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.67.0</beam.version>
+    <beam.version>2.68.0</beam.version>
 
     <snakeyaml.version>2.5</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
@@ -355,7 +355,7 @@
       </activation>
       <properties>
         <jib.appRoot>/opt/spark/jars</jib.appRoot>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=SparkRunner</jib.entrypoint>
+        <jib.entrypoint_>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=SparkRunner</jib.entrypoint_>
       </properties>
       <dependencies>
         <dependency>
@@ -429,12 +429,12 @@
       <artifactId>beam-sdks-java-io-parquet</artifactId>
     </dependency>
 
-    <!--
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-iceberg</artifactId>
     </dependency>
 
+    <!--
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-managed</artifactId>

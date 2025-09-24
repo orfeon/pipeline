@@ -3,11 +3,11 @@ package com.mercari.solution.util.schema;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.linq4j.function.Function1;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.rel.type.*;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.sql.SqlOperatorBinding;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.sql.type.SqlReturnTypeInference;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.function.Function1;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.*;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlOperatorBinding;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.type.SqlReturnTypeInference;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.type.SqlTypeName;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.nio.ByteBuffer;

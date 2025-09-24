@@ -5,7 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.sql.*;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.*;
 
 import java.util.Map;
 

@@ -14,8 +14,6 @@ import com.mercari.solution.util.gcp.BigtableUtil;
 import com.mercari.solution.util.pipeline.Partition;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.BigtableSchemaUtil;
-import com.mercari.solution.util.schema.CalciteSchemaUtil;
-import com.mercari.solution.util.sql.calcite.MemorySchema;
 import freemarker.template.Template;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -24,18 +22,13 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.tools.Planner;
-import org.joda.time.Instant;
-
-import java.io.IOException;
 import java.io.Serializable;
-import java.sql.SQLException;
 import java.util.*;
+
 /*
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-
  */
 
 @Transform.Module(name="bigtable")
