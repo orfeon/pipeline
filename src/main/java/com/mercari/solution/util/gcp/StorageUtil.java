@@ -384,6 +384,14 @@ public class StorageUtil {
         }
     }
 
+    public static void downloadTo(final Storage storage, final StorageObject object, final OutputStream os) {
+        try {
+            storage.objects().get(object.getBucket(), object.getName()).executeMediaAndDownloadTo(os);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private static InputStream readStream(final String bucket, final String object) {
         try {
             return storage().objects().get(bucket, object).executeMediaAsInputStream();
