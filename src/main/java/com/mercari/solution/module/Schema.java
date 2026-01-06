@@ -739,6 +739,11 @@ public class Schema implements Serializable {
             return fieldType;
         }
 
+        public static FieldType matrix(FieldType matrixValueType, long[] shape) {
+            final List<Integer> i = Arrays.stream(shape).mapToInt(l -> Long.valueOf(l).intValue()).boxed().toList();
+            return matrix(matrixValueType, i);
+        }
+
         public FieldType withNullable(final boolean nullable) {
             final FieldType fieldType = this.copy();
             fieldType.nullable = nullable;

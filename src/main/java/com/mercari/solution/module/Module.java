@@ -192,7 +192,7 @@ public abstract class Module<T extends PInput> extends PTransform<T, MCollection
             final T inputs,
             final MErrorHandler errorHandler);
 
-    protected static BadRecord processError(
+    public static BadRecord processError(
             final String message,
             final Map<String, Object> input,
             final Throwable e,
@@ -201,7 +201,7 @@ public abstract class Module<T extends PInput> extends PTransform<T, MCollection
         return processError(message, MElement.of(input, Instant.now()), e, failFast);
     }
 
-    protected static BadRecord processError(
+    public static BadRecord processError(
             final String message,
             final MElement input,
             final Throwable e,

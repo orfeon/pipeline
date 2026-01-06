@@ -493,6 +493,18 @@
       </exclusions>
     </dependency>
 
+    <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-expansion-service -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-expansion-service</artifactId>
+    </dependency>
+
+    <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-extensions-python -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-extensions-python</artifactId>
+    </dependency>
+
     <!-- Big Data -->
     <!-- https://mvnrepository.com/artifact/org.apache.hbase/hbase-common -->
     <dependency>
