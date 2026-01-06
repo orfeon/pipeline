@@ -50,6 +50,8 @@ public interface SelectFunction extends Serializable {
         base64_encode,
         base64_decode,
         reshape,
+        tokenize_encode,
+        tokenize_decode,
         panic;
 
         public static Func is(String value) {
@@ -159,6 +161,8 @@ public interface SelectFunction extends Serializable {
             case base64_encode -> Base64Coder.of(name, jsonObject, inputFields, true, ignore);
             case base64_decode -> Base64Coder.of(name, jsonObject, inputFields, false, ignore);
             case reshape -> Reshape.of(name, jsonObject, inputFields, ignore);
+            case tokenize_encode -> Tokenize.of(name, jsonObject, inputFields, true, ignore);
+            case tokenize_decode -> Tokenize.of(name, jsonObject, inputFields, false, ignore);
             case panic -> Panic.of(name, jsonObject, inputFields, ignore);
             case null, default -> StatefulFunction.of(jsonObject, inputFields);
         };
