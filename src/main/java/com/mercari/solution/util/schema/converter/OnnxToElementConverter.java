@@ -33,8 +33,9 @@ public class OnnxToElementConverter {
                         case DOUBLE -> Schema.FieldType.FLOAT64.withNullable(false);
                         default -> throw new IllegalArgumentException("Not supported output type: " + tensorInfo.type);
                     };
-                    if(!tensorInfo.isScalar() || tensorInfo.getShape()[tensorInfo.getShape().length - 1] == 1) {
-                        elementType = Schema.FieldType.array(elementType);
+                    if(!tensorInfo.isScalar()
+                            || (tensorInfo.getShape().length > 0 && tensorInfo.getShape()[tensorInfo.getShape().length - 1] == 1)) {
+                        elementType = Schema.FieldType.matrix(elementType, tensorInfo.getShape());
                     }
                     builder.withField(outputName, elementType);
                 }

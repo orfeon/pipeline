@@ -12,27 +12,28 @@
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.68.0</beam.version>
+    <beam.version>2.70.0</beam.version>
 
     <snakeyaml.version>2.5</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
     <exp4j.version>0.4.8</exp4j.version>
     <commons-math3.version>3.6.1</commons-math3.version>
-    <lucene.version>10.3.0</lucene.version>
-    <pdfbox.version>3.0.5</pdfbox.version>
-    <jsoup.version>1.21.2</jsoup.version>
+    <lucene.version>10.3.2</lucene.version>
+    <pdfbox.version>3.0.6</pdfbox.version>
+    <jsoup.version>1.22.1</jsoup.version>
+    <djl.version>0.36.0</djl.version>
 
-    <hbase.version>2.6.3</hbase.version>
+    <hbase.version>2.6.4</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
     <postgresql-connector.version>42.7.8</postgresql-connector.version>
     <sqlserver-connector.version>8.4.1.jre11</sqlserver-connector.version>
-    <alloydb-connector.version>1.2.6</alloydb-connector.version>
-    <jdbc-socket-factory.version>1.25.3</jdbc-socket-factory.version>
+    <alloydb-connector.version>1.2.9</alloydb-connector.version>
+    <jdbc-socket-factory.version>1.27.1</jdbc-socket-factory.version>
     <hikaricp.version>7.0.2</hikaricp.version>
-    <h2.version>2.3.232</h2.version>
-    <drive.version>v3-rev20250910-2.0.0</drive.version>
+    <h2.version>2.4.240</h2.version>
+    <drive.version>v3-rev20251210-2.0.0</drive.version>
 
-    <onnxruntime.version>1.23.0</onnxruntime.version>
+    <onnxruntime.version>1.23.2</onnxruntime.version>
     <onnxruntime-extensions.version>0.13.0</onnxruntime-extensions.version>
     <onnx.version>1.18.0-1.5.12</onnx.version>
 
@@ -40,14 +41,14 @@
     <junit.version>4.13.1</junit.version>
     <mockito.version>3.0.0</mockito.version>
 
-    <maven-jib-plugin.version>3.4.6</maven-jib-plugin.version>
+    <maven-jib-plugin.version>3.5.1</maven-jib-plugin.version>
     <maven-compiler-plugin.version>3.14.1</maven-compiler-plugin.version>
-    <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
+    <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
 
-    <jetty.version>12.1.1</jetty.version>
-    <mcp.version>0.13.1</mcp.version>
+    <jetty.version>12.1.5</jetty.version>
+    <mcp.version>0.17.0</mcp.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -348,7 +349,7 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <flink.version>1.19</flink.version>
+        <flink.version>1.20</flink.version>
         <jib.image>apache/beam_flink${flink.version}_job_server</jib.image>
       </properties>
       <dependencies>
@@ -366,10 +367,17 @@
       <activation>
         <activeByDefault>false</activeByDefault>
       </activation>
-      <properties>
-        <jib.appRoot>/opt/spark/jars</jib.appRoot>
-        <jib.entrypoint_>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=SparkRunner</jib.entrypoint_>
-      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.google.cloud.tools</groupId>
+            <artifactId>jib-maven-plugin</artifactId>
+            <configuration>
+              <skip>true</skip>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
@@ -387,6 +395,7 @@
       </activation>
       <properties>
         <jib.image>nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04</jib.image>
+        <jib.appRoot>/var/lib/jetty/webapps/ROOT</jib.appRoot>
       </properties>
       <dependencies>
         <dependency>
@@ -484,7 +493,6 @@
       </exclusions>
     </dependency>
 
-
     <!-- Big Data -->
     <!-- https://mvnrepository.com/artifact/org.apache.hbase/hbase-common -->
     <dependency>
@@ -506,15 +514,6 @@
       <artifactId>onnxruntime</artifactId>
       <version>${onnxruntime.version}</version>
     </dependency>
-
-    <!-- https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime-extensions -->
-    <!--
-    <dependency>
-      <groupId>com.microsoft.onnxruntime</groupId>
-      <artifactId>onnxruntime-extensions</artifactId>
-      <version>${onnxruntime-extensions.version}</version>
-    </dependency>
-    -->
 
     <!-- https://mvnrepository.com/artifact/org.bytedeco/onnx-platform -->
     <dependency>
@@ -683,6 +682,20 @@
       <version>${commons-math3.version}</version>
     </dependency>
 
+    <!-- https://mvnrepository.com/artifact/ai.djl.huggingface/tokenizers -->
+    <dependency>
+      <groupId>ai.djl.huggingface</groupId>
+      <artifactId>tokenizers</artifactId>
+      <version>${djl.version}</version>
+    </dependency>
+
+    <!-- https://mvnrepository.com/artifact/ai.djl.sentencepiece/sentencepiece -->
+    <dependency>
+      <groupId>ai.djl.sentencepiece</groupId>
+      <artifactId>sentencepiece</artifactId>
+      <version>${djl.version}</version>
+    </dependency>
+
     <!-- Log -->
     <!-- Add slf4j API frontend binding with JUL backend -->
     <dependency>
@@ -727,6 +740,15 @@
       <groupId>io.modelcontextprotocol.sdk</groupId>
       <artifactId>mcp</artifactId>
       <version>${mcp.version}</version>
+    </dependency>
+
+    <!-- Experimental LLM -->
+    <dependency>
+      <groupId>com.microsoft.onnxruntime</groupId>
+      <artifactId>onnxruntime-genai</artifactId>
+      <version>0.12.0-SNAPSHOT</version>
+      <scope>system</scope>
+      <systemPath>${project.basedir}/src/main/resources/mocks/onnxruntime-genai-0.12.0-mock.jar</systemPath>
     </dependency>
 
   </dependencies>
