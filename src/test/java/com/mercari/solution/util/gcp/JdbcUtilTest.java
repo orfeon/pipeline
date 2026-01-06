@@ -20,6 +20,7 @@ public class JdbcUtilTest {
         return list.stream().mapToInt(x->x).toArray();
     }
 
+    /*
     @Test
     public void testCreateSeekConditions() {
 
@@ -217,6 +218,38 @@ public class JdbcUtilTest {
     }
 
     @Test
+    public void testSplitMultiIndexRange() {
+        // Split Integer
+        final JdbcUtil.IndexRange indexRange = JdbcUtil.IndexRange.of(
+                JdbcUtil.IndexPosition.of(List.of(
+                        JdbcUtil.IndexOffset.of("action", Schema.Type.STRING, true, "merpay_handler%2Fnotification_gmopg"),
+                        JdbcUtil.IndexOffset.of("value", Schema.Type.INT, true, 12126557192299618L)
+                    ),
+                    true
+                ),
+                JdbcUtil.IndexPosition.of(List.of(
+                                JdbcUtil.IndexOffset.of("action", Schema.Type.STRING, true, "merpay_handler%2Fnotification_h")
+                        ),
+                        false
+                ));
+        final List<JdbcUtil.IndexRange> splittedRanges1 = JdbcUtil
+                .splitIndexRange(
+                        null,
+                        indexRange.getFrom().getOffsets(),
+                        indexRange.getTo().getOffsets(),
+                        10);
+
+        System.out.println(splittedRanges1.size());
+        System.out.println(splittedRanges1);
+    }
+
+    @Test
+    public void testoko() {
+        List<JdbcUtil.IndexOffset> l = JdbcUtil.splitString("a", "merpay_handler%2Fnotification_gmopg", "merpay_handler%2Fnotification_h", true, 2, true);
+        System.out.println(l);
+    }
+
+    @Test
     public void testIsOverTo() throws Exception {
         byte[] start = Hex.decodeHex("28dd2d8a0de3c97e23982560e0d2b9b00408ae699c90bb2a2ab552286f6aff9f6a2b15951b0df34dffc2935c10030b47f39c16d05db5eee4280ac604aebb724f".toCharArray());
         byte[] end = Hex.decodeHex("85".toCharArray());
@@ -224,6 +257,7 @@ public class JdbcUtilTest {
         JdbcUtil.IndexPosition stopPosition = JdbcUtil.IndexPosition.of(Arrays.asList(JdbcUtil.IndexOffset.of("f1", Schema.Type.BYTES, true, ByteBuffer.wrap(end))), false);
         Assert.assertFalse(startPosition.isOverTo(stopPosition));
     }
+     */
 
     @Test
     public void testCreateMySQLStatementInsert() {

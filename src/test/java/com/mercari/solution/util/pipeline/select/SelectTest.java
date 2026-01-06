@@ -48,6 +48,7 @@ public class SelectTest {
                   { "name": "stdLongField", "func": "std", "field": "longField", "range": { "count": 20, "offset": 3 }},
                   { "name": "lastStringField", "func": "last", "field": "stringField" },
                   { "name": "maxAvgLongField", "func": "max", "field": "avgLongField" },
+                  { "name": "arrayAggLongField", "func": "array_agg", "field": "avgLongField", "range": { "count": "3" } },
                   { "name": "lagLongField", "func": "lag", "expression": "(longField[2] - longField[0])/(1 + longField[0])"}
                 ]
                 """;
@@ -88,6 +89,7 @@ public class SelectTest {
                   { "name": "minLongField", "func": "min", "field": "longField", "range": { "count": 3, "offset": 1 }},
                   { "name": "avgLongField", "func": "avg", "field": "longField", "range": { "count": 5, "offset": 3 }},
                   { "name": "stdLongField", "func": "std", "field": "longField", "range": { "count": 20, "offset": 3 }},
+                  { "name": "arrayAggLongField", "func": "array_agg", "field": "longField", "range": { "count": "6" } },
                   { "name": "lastStringField", "func": "last", "field": "stringField" }
                 ]
                 """;
