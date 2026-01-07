@@ -13,9 +13,6 @@ steps:
   - name: maven:3-amazoncorretto-21
     entrypoint: mvn
     args: ["clean", "package", "-DskipTests", "-Pserver", "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/server:${TAG_NAME}"]
-  - name: maven:3-amazoncorretto-21
-    entrypoint: mvn
-    args: ["clean", "package", "-DskipTests", "-Pportable", "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/portable:${TAG_NAME}"]
 substitutions:
   _BUCKET: "{SET YOUR BUCKET}"
   _REGION: "{SET YOUR GAR REPOSITORY REGION}"
