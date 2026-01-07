@@ -8,7 +8,7 @@ import com.google.firestore.v1.Document;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.RowSchemaUtil;
-import com.mercari.solution.util.sql.stmt.PreparedStatementTemplate;
+import com.mercari.solution.util.domain.db.stmt.PreparedStatementTemplate;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.schemas.Schema;

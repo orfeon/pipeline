@@ -16,7 +16,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.protobuf.util.Timestamps;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.domain.text.JsonUtil;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;

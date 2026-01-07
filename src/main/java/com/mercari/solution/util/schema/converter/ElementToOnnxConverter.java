@@ -2,7 +2,7 @@ package com.mercari.solution.util.schema.converter;
 
 import ai.onnxruntime.*;
 import com.mercari.solution.module.MElement;
-import com.mercari.solution.util.domain.ml.ONNXRuntimeUtil;
+import com.mercari.solution.util.domain.ml.onnx.OnnxRuntimeUtil;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.values.Row;
 
@@ -41,7 +41,7 @@ public class ElementToOnnxConverter {
                     final List<Object> tensorValues = elements.stream()
                             .map(element -> getValue(tensorInfo, element.get(field)))
                             .collect(Collectors.toList());
-                    final OnnxTensor tensor = ONNXRuntimeUtil.convertTensor(environment, tensorInfo, tensorValues);
+                    final OnnxTensor tensor = OnnxRuntimeUtil.convertTensor(environment, tensorInfo, tensorValues);
                     tensors.put(entry.getKey(), tensor);
                 }
                 case MapInfo mapInfo -> {
@@ -86,7 +86,7 @@ public class ElementToOnnxConverter {
                                 return getValue(tensorInfo, field, element);
                             })
                             .collect(Collectors.toList());
-                    final OnnxTensor tensor = ONNXRuntimeUtil.convertTensor(environment, tensorInfo, tensorValues);
+                    final OnnxTensor tensor = OnnxRuntimeUtil.convertTensor(environment, tensorInfo, tensorValues);
                     tensors.put(entry.getKey(), tensor);
                 }
                 case MapInfo mapInfo -> {

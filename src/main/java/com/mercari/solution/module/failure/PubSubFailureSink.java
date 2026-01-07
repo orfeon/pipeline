@@ -3,7 +3,7 @@ package com.mercari.solution.module.failure;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.FailureUtil;
-import com.mercari.solution.util.gcp.PubSubUtil;
+import com.mercari.solution.util.cloud.google.PubSubUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ElementToJsonConverter;
 import org.apache.avro.generic.GenericRecord;

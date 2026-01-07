@@ -3,7 +3,7 @@ package com.mercari.solution.util.pipeline;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.CalciteSchemaUtil;
-import com.mercari.solution.util.sql.calcite.MemorySchema;
+import com.mercari.solution.util.domain.sql.calcite.MemorySchema;
 
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.Lex;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;

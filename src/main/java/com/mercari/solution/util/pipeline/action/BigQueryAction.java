@@ -8,7 +8,7 @@ import com.google.api.services.bigquery.model.JobConfigurationQuery;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.gcp.BigQueryUtil;
+import com.mercari.solution.util.cloud.google.BigQueryUtil;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.slf4j.Logger;

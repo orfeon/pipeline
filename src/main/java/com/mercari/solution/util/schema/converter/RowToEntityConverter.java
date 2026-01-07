@@ -8,7 +8,7 @@ import com.google.datastore.v1.Value;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
 import com.mercari.solution.util.schema.RowSchemaUtil;
-import com.mercari.solution.util.gcp.DatastoreUtil;
+import com.mercari.solution.util.cloud.google.DatastoreUtil;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
 import org.apache.beam.sdk.values.Row;

@@ -1,6 +1,6 @@
 package com.mercari.solution.module.source;
 
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import freemarker.template.Configuration;
 import freemarker.template.TemplateException;
 import org.apache.beam.sdk.coders.*;

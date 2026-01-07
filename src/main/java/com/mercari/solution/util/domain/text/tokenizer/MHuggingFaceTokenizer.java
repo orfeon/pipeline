@@ -5,7 +5,7 @@ import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import com.google.api.services.storage.Storage;
 import com.google.api.services.storage.model.StorageObject;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
 
 import java.io.*;

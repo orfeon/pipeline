@@ -5,7 +5,7 @@ import com.google.datastore.v1.*;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
-import com.mercari.solution.util.gcp.DatastoreUtil;
+import com.mercari.solution.util.cloud.google.DatastoreUtil;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;

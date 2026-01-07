@@ -7,7 +7,7 @@ import com.google.firestore.v1.Value;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.gcp.FirestoreUtil;
+import com.mercari.solution.util.cloud.google.FirestoreUtil;
 import com.mercari.solution.util.schema.RowSchemaUtil;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.Row;

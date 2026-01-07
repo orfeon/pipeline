@@ -6,7 +6,7 @@ import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.gcp.DriveUtil;
+import com.mercari.solution.util.cloud.google.DriveUtil;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;

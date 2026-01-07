@@ -2,13 +2,13 @@ package com.mercari.solution.module.transform;
 
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.gcp.ParameterManagerUtil;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.RowSchemaUtil;
 import com.mercari.solution.util.schema.converter.ElementToRowConverter;
-import com.mercari.solution.util.sql.udf.AggregateFunctions;
-import com.mercari.solution.util.sql.udf.ArrayFunctions;
-import com.mercari.solution.util.sql.udf.MathFunctions;
+import com.mercari.solution.util.domain.sql.beamsql.udf.AggregateFunctions;
+import com.mercari.solution.util.domain.sql.beamsql.udf.ArrayFunctions;
+import com.mercari.solution.util.domain.sql.beamsql.udf.MathFunctions;
 import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.transforms.DoFn;

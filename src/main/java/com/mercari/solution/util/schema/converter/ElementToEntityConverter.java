@@ -8,7 +8,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.gcp.DatastoreUtil;
+import com.mercari.solution.util.cloud.google.DatastoreUtil;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.values.Row;
 import org.slf4j.Logger;

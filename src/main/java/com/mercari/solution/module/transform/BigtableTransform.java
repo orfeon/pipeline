@@ -10,7 +10,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.gcp.BigtableUtil;
+import com.mercari.solution.util.cloud.google.BigtableUtil;
 import com.mercari.solution.util.pipeline.Partition;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.BigtableSchemaUtil;

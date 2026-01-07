@@ -8,7 +8,7 @@ import com.google.cloud.spanner.Type;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.domain.text.JsonUtil;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.schema.RowSchemaUtil;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;

@@ -2,9 +2,9 @@ package com.mercari.solution.module.source;
 
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.aws.S3Util;
+import com.mercari.solution.util.cloud.amazon.S3Util;
 import com.mercari.solution.util.coder.ElementCoder;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.CsvToElementConverter;
 import com.mercari.solution.util.schema.converter.JsonToElementConverter;

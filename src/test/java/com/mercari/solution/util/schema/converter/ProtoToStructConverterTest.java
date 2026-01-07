@@ -11,7 +11,6 @@ import com.google.protobuf.util.JsonFormat;
 import com.google.protobuf.util.Timestamps;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
 import com.mercari.solution.util.ResourceUtil;
-import com.mercari.solution.util.gcp.SpannerUtil;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 import org.junit.Assert;
 import org.junit.Test;

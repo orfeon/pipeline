@@ -1,7 +1,7 @@
 package com.mercari.solution.util.pipeline;
 
 import com.mercari.solution.module.MElement;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import freemarker.template.Configuration;
 import freemarker.template.Template;
 import freemarker.template.TemplateException;

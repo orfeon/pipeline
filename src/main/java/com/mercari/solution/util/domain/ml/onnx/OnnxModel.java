@@ -6,7 +6,7 @@ import com.google.api.services.storage.Storage;
 import com.google.api.services.storage.model.StorageObject;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.converter.OnnxToElementConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

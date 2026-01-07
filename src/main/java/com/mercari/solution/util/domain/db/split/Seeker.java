@@ -2,7 +2,7 @@ package com.mercari.solution.util.domain.db.split;
 
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.domain.db.Properties;
-import com.mercari.solution.util.gcp.JdbcUtil;
+import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
 import org.apache.avro.Schema;

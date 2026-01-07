@@ -3,7 +3,7 @@ package com.mercari.solution.module.source;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.gcp.PubSubUtil;
+import com.mercari.solution.util.cloud.google.PubSubUtil;
 import com.mercari.solution.util.pipeline.*;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
 import org.apache.beam.sdk.io.kafka.KafkaIO;

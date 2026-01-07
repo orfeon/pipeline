@@ -8,7 +8,7 @@ import com.google.datastore.v1.Key;
 import com.google.datastore.v1.Value;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
-import com.mercari.solution.util.gcp.DatastoreUtil;
+import com.mercari.solution.util.cloud.google.DatastoreUtil;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 
 import java.util.List;

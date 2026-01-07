@@ -4,7 +4,7 @@ import com.google.api.services.bigquery.model.TableSchema;
 import com.google.gson.*;
 import com.google.protobuf.Descriptors;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;

@@ -8,7 +8,7 @@ import com.google.firestore.v1.Value;
 import com.google.firestore.v1.Document;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.NullValue;
-import com.mercari.solution.util.gcp.FirestoreUtil;
+import com.mercari.solution.util.cloud.google.FirestoreUtil;
 
 import java.util.stream.Collectors;
 

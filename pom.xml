@@ -26,7 +26,7 @@
     <hbase.version>2.6.4</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
     <postgresql-connector.version>42.7.8</postgresql-connector.version>
-    <sqlserver-connector.version>8.4.1.jre11</sqlserver-connector.version>
+    <sqlserver-connector.version>13.2.1.jre11</sqlserver-connector.version>
     <alloydb-connector.version>1.2.9</alloydb-connector.version>
     <jdbc-socket-factory.version>1.27.1</jdbc-socket-factory.version>
     <hikaricp.version>7.0.2</hikaricp.version>
@@ -34,7 +34,6 @@
     <drive.version>v3-rev20251210-2.0.0</drive.version>
 
     <onnxruntime.version>1.23.2</onnxruntime.version>
-    <onnxruntime-extensions.version>0.13.0</onnxruntime-extensions.version>
     <onnx.version>1.18.0-1.5.12</onnx.version>
 
     <slf4j.version>2.0.16</slf4j.version>
@@ -140,7 +139,7 @@
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>com.mercari.solution.api.mcp.PipelineMcpStreamableServer</mainClass>
+                  <mainClass>com.mercari.solution.server.PipelineMcpStreamableServer</mainClass>
                 </transformer>
               </transformers>
             </configuration>
