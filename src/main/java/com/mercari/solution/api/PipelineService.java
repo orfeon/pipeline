@@ -1,11 +1,11 @@
 package com.mercari.solution.api;
 
 import com.google.dataflow.v1beta3.*;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
+import com.google.gson.*;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.config.Options;
+import com.mercari.solution.config.Config.Format;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.config.options.DirectOptions;
 import com.mercari.solution.module.IllegalModuleException;
@@ -110,16 +110,22 @@ public class PipelineService {
                 throw new IllegalArgumentException("request parameter config is not found");
             }
             final String configText = jsonObject.get("config").getAsString();
+            final String argsText;
+            if (jsonObject.has("args")) {
+                argsText = jsonObject.get("args").getAsString();
+            } else {
+                argsText = null;
+            }
 
             switch (type.toLowerCase()) {
                 case "run", "dryrun" -> {
                     final boolean dryRun = type.startsWith("dry");
-                    final RunResult result = run(configText, dryRun);
+                    final RunResult result = run(configText, argsText, dryRun);
                     log(userEmail, dryRun ? "DryRun" : "Run", !result.isError, result.configText, result.errorMessage);
                     response.getWriter().println(result.responseText);
                 }
                 case "launch" -> {
-                    launch(configText, response, userEmail);
+                    launch(configText, argsText, response, userEmail);
                 }
                 default -> throw new IllegalArgumentException("Not supported type: " + type);
             }
@@ -141,7 +147,10 @@ public class PipelineService {
 
     }
 
-    public static RunResult run(final String configText, final Boolean dryRun) {
+    public static RunResult run(
+            final String configText,
+            final String argsText,
+            final Boolean dryRun) {
 
         String configContent = null;
         final long startMillis = Instant.now().toEpochMilli();
@@ -153,7 +162,7 @@ public class PipelineService {
             //response.getWriter().flush();
             //response.flushBuffer();
 
-            final Config config = Config.load(configText);
+            final Config config = Config.load(configText, null, Format.unknown, parseArgs(argsText));
             configContent = config.getContent();
 
             final MPipeline.MPipelineOptions pipelineOptions = createPipelineOptions(new String[0]);
@@ -236,6 +245,7 @@ public class PipelineService {
 
     private static void launch(
             final String configText,
+            final String argsText,
             final HttpServletResponse response,
             final String userEmail) throws IOException {
 
@@ -245,7 +255,7 @@ public class PipelineService {
         String configContent = null;
         final long startMillis = Instant.now().toEpochMilli();
         try {
-            final Config config = Config.load(configText);
+            final Config config = Config.load(configText, null, Format.unknown, parseArgs(argsText));
             configContent = config.getContent();
 
             final String project = getProject(config.getOptions());
@@ -413,4 +423,20 @@ public class PipelineService {
                 errorMessage);
     }
 
+    private static Map<String, String> parseArgs(String argsText) {
+        if(argsText == null || argsText.isEmpty()) {
+            return new HashMap<>();
+        }
+
+        try {
+            final Map<String, String> parsed = new HashMap<>();
+            final JsonObject jsonObject = new Gson().fromJson(argsText, JsonObject.class);
+            for(final Map.Entry<String, ?> entry : jsonObject.entrySet()) {
+                parsed.put(entry.getKey(), entry.getValue().toString());
+            }
+            return parsed;
+        } catch (final Throwable t) {
+            throw new IllegalArgumentException("Failed to parse pipeline args: " + argsText, t);
+        }
+    }
 }

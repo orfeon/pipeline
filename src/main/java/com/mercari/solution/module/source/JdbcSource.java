@@ -9,6 +9,7 @@ import com.mercari.solution.util.domain.db.split.RestrictionRecord;
 import com.mercari.solution.util.domain.db.split.SeekSource;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
 import com.mercari.solution.util.gcp.JdbcUtil;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.gcp.SecretManagerUtil;
 import com.mercari.solution.util.gcp.StorageUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
@@ -216,10 +217,10 @@ public class JdbcSource extends Source {
                 outputAvroSchema = Optional
                         .ofNullable(getSchema())
                         .map(com.mercari.solution.module.Schema::getAvroSchema)
-                        .orElseGet(() -> getQuerySchema(parameters));
+                        .orElseGet(() -> getQuerySchema(parameters, getTemplateArgs()));
                 output = begin
                         .apply("Query", new JdbcBatchQuerySource(
-                                parameters, getTimestampAttribute(), getTimestampDefault(), outputAvroSchema))
+                                parameters, getTimestampAttribute(), getTimestampDefault(), getTemplateArgs(), outputAvroSchema))
                         .setCoder(AvroCoder.of(outputAvroSchema));
                 failures = null; // TODO
                 restrictions = null;
@@ -262,12 +263,24 @@ public class JdbcSource extends Source {
         }
     }
 
-    private static Schema getQuerySchema(final Parameters parameters) {
+    private static Schema getTableSchema(final Parameters parameters) {
         try {
+            return JdbcUtil.createAvroSchemaFromTable(
+                    parameters.driver, parameters.url,
+                    parameters.user, parameters.password,
+                    parameters.table);
+        } catch (SQLException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+
+    private static Schema getQuerySchema(final Parameters parameters, Map<String, String> templateArgs) {
+        try {
+            final String query = TemplateUtil.executeStrictTemplate(parameters.query, templateArgs);
             final Schema queryOutputSchema = JdbcUtil.createAvroSchemaFromQuery(
                     parameters.driver, parameters.url,
                     parameters.user, parameters.password,
-                    parameters.query, parameters.prepareCalls);
+                    query, parameters.prepareCalls);
             if (!parameters.excludeFields.isEmpty()) {
                 return AvroSchemaUtil
                         .toSchemaBuilder(queryOutputSchema, null, parameters.excludeFields)
@@ -322,17 +335,21 @@ public class JdbcSource extends Source {
         private final String timestampAttribute;
         private final String timestampDefault;
 
+        private final Map<String, String> templateArgs;
+
         private final String outputSchemaString;
 
         private JdbcBatchQuerySource(
                 final Parameters parameters,
                 final String timestampAttribute,
                 final String timestampDefault,
+                final Map<String, String> templateArgs,
                 final Schema outputSchema) {
 
             this.parameters = parameters;
             this.timestampAttribute = timestampAttribute;
             this.timestampDefault = timestampDefault;
+            this.templateArgs = templateArgs;
             this.outputSchemaString = outputSchema.toString();
         }
 
@@ -345,14 +362,15 @@ public class JdbcSource extends Source {
             int num = 0;
             for(final PrepareParameterQuery preprocessQuery : parameters.prepareParameterQueries) {
                 try {
+                    final String prepQuery = TemplateUtil.executeStrictTemplate(preprocessQuery.getQuery(), templateArgs);
                     final Schema outputPreprocessSchema = JdbcUtil.createAvroSchemaFromQuery(
                             parameters.driver, parameters.url,
                             parameters.user, parameters.password,
-                            preprocessQuery.getQuery(), preprocessQuery.getPrepareCalls());
+                            prepQuery, preprocessQuery.getPrepareCalls());
 
                     records = records
                             .apply("PrepQuery" + num, ParDo
-                                    .of(new QueryDoFn(parameters, preprocessQuery.getQuery(), preprocessQuery.getPrepareCalls(), outputPreprocessSchema.toString())))
+                                    .of(new QueryDoFn(parameters, prepQuery, preprocessQuery.getPrepareCalls(), outputPreprocessSchema.toString())))
                             .setCoder(AvroCoder.of(outputPreprocessSchema))
                             .apply("Reshuffle" + num, Reshuffle.viaRandomKey());
                     num = num + 1;
@@ -360,9 +378,12 @@ public class JdbcSource extends Source {
                     throw new IllegalStateException(e);
                 }
             }
+
+            final String query = TemplateUtil.executeStrictTemplate(parameters.query, templateArgs);
+
             return records
                     .apply("ExecuteQuery", ParDo
-                            .of(new QueryDoFn(parameters, parameters.query, parameters.prepareCalls, outputSchemaString)));
+                            .of(new QueryDoFn(parameters, query, parameters.prepareCalls, outputSchemaString)));
         }
 
         public static class QueryDoFn extends DoFn<GenericRecord, GenericRecord> {
