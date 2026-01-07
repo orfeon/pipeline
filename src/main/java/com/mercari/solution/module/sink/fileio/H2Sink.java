@@ -7,7 +7,7 @@ import com.mercari.solution.util.domain.db.H2Util;
 import com.mercari.solution.util.domain.file.ZipFileUtil;
 import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.cloud.google.StorageUtil;
-import com.mercari.solution.util.sql.stmt.PreparedStatementTemplate;
+import com.mercari.solution.util.domain.db.stmt.PreparedStatementTemplate;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;

@@ -1,4 +1,4 @@
-package com.mercari.solution.util.sql.stmt;
+package com.mercari.solution.util.domain.db.stmt;
 
 import java.io.Serializable;
 import java.math.BigDecimal;

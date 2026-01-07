@@ -6,7 +6,7 @@ import com.mercari.solution.util.schema.converter.ToStatementConverter;
 import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.cloud.google.SecretManagerUtil;
 import com.mercari.solution.util.pipeline.Union;
-import com.mercari.solution.util.sql.stmt.PreparedStatementTemplate;
+import com.mercari.solution.util.domain.db.stmt.PreparedStatementTemplate;
 import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.transforms.*;

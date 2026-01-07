@@ -1,4 +1,4 @@
-package com.mercari.solution.util.sql.stmt;
+package com.mercari.solution.util.domain.db.stmt;
 
 import org.apache.commons.lang3.SerializationUtils;
 import org.junit.Assert;

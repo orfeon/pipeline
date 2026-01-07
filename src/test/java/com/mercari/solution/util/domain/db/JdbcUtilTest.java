@@ -1,7 +1,7 @@
 package com.mercari.solution.util.domain.db;
 
 import com.mercari.solution.util.schema.AvroSchemaUtil;
-import com.mercari.solution.util.sql.stmt.PreparedStatementTemplate;
+import com.mercari.solution.util.domain.db.stmt.PreparedStatementTemplate;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.junit.Assert;
