@@ -239,6 +239,6 @@ https://www.mercari.com/cla/
 
 ## License
 
-Copyright 2025 Mercari, Inc.
+Copyright 2026 Mercari, Inc.
 
 Licensed under the MIT License.
