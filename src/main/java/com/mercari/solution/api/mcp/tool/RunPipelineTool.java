@@ -60,7 +60,7 @@ public class RunPipelineTool implements Tool {
         }
 
         final String config = request.arguments().get("config").toString();
-        final PipelineService.RunResult result = PipelineService.run(config, false);
+        final PipelineService.RunResult result = PipelineService.run(config, null, false);
         return McpSchema.CallToolResult.builder()
                 .addTextContent(result.responseText)
                 .isError(result.isError)

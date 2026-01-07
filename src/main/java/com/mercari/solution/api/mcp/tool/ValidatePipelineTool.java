@@ -47,7 +47,7 @@ public class ValidatePipelineTool implements Tool {
         }
 
         final String config = request.arguments().get("config").toString();
-        final PipelineService.RunResult result = PipelineService.run(config, true);
+        final PipelineService.RunResult result = PipelineService.run(config, null, true);
         return McpSchema.CallToolResult.builder()
                 .addTextContent(result.responseText)
                 .isError(result.isError)
