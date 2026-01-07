@@ -1,10 +1,10 @@
 package com.mercari.solution.util.sql.calcite.udf;
 
-import org.apache.beam.vendor.calcite.v1_28_0.com.google.common.collect.ImmutableMultimap;
-import org.apache.beam.vendor.calcite.v1_28_0.com.google.common.collect.Multimap;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.linq4j.tree.Types;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.schema.Function;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.schema.impl.ScalarFunctionImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.com.google.common.collect.ImmutableMultimap;
+import org.apache.beam.vendor.calcite.v1_40_0.com.google.common.collect.Multimap;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.tree.Types;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.ScalarFunctionImpl;
 
 import java.sql.Date;
 import java.time.LocalDate;

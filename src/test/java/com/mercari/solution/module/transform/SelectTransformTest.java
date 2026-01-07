@@ -30,18 +30,23 @@ public class SelectTransformTest {
                         - field_string: string_value1
                           field_long: 10
                           field_ts: "2025-01-01T00:00:00Z"
+                          field_enum: a
                         - field_string: string_value2
                           field_long: 20
                           field_ts: "2025-01-01T00:00:01Z"
+                          field_enum: b
                         - field_string: string_value3
                           field_long: 30
                           field_ts: "2025-01-01T00:00:02Z"
+                          field_enum: c
                         - field_string: string_value4
                           field_long: 40
                           field_ts: "2025-01-01T00:00:03Z"
+                          field_enum: a
                         - field_string: string_value5
                           field_long: 50
                           field_ts: "2025-01-01T00:00:04Z"
+                          field_enum: e
                     schema:
                       fields:
                         - name: field_string
@@ -50,6 +55,12 @@ public class SelectTransformTest {
                           type: int64
                         - name: field_ts
                           type: timestamp
+                        - name: field_enum
+                          type: enumeration
+                          symbols:
+                            - a
+                            - b
+                            - c
                 transforms:
                   - name: select
                     module: select
@@ -62,6 +73,14 @@ public class SelectTransformTest {
                         - name: field_long_casted_string
                           type: string
                           field: field_long
+                        - name: field_enum_replaced
+                          func: replace
+                          field: field_enum
+                          type: string
+                          mapping:
+                            a: A
+                            b: B
+                          default: C
                 """;
         final Config config = Config.load(configYaml);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
@@ -165,7 +184,7 @@ public class SelectTransformTest {
                           range:
                             count: 3
                         - name: field_long_argmin_count3
-                          func: argmin
+                          func: arg_min
                           field: field_string
                           comparingField: field_long
                           range:

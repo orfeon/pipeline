@@ -5,7 +5,6 @@
   <meta charset="UTF-8">
   <title>Mercari Pipeline Playground</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM" crossorigin="anonymous">
-  <link rel="stylesheet" href="/layout.css?id=1">
 </head>
 <body style="height: 100%; margin: 0; display: flex; flex-direction: column;">
   <header id="header" class="navbar navbar-fixed-top navbar-inverse" role="navigation" style="height: 80px; flex-shrink: 0;">
@@ -20,7 +19,7 @@
     <div id="buttons" style="padding-right: 20px">
       <button id="dryRunButton" type="button" name="dryrun" class="btn btn-secondary" style="width: 150px">Dry Run<span id="dryRunButtonTimer" style="display:none; margin-left: 10px;"></span></button>
       <button id="runButton" type="button" name="run" class="btn btn-primary" style="width: 150px">Run<span id="runButtonTimer" style="display:none; margin-left: 10px;"></span></button>
-      <button id="launchButton" type="button" name="launch" class="btn btn-warning" style="width: 150px; display:none;">Launch<span id="launchButtonTimer" style="display:none; margin-left: 10px;"></span></button>
+      <button id="launchButton" type="button" name="launch" class="btn btn-warning" style="width: 150px;">Launch<span id="launchButtonTimer" style="display:none; margin-left: 10px;"></span></button>
     </div>
   </header>
   <main style="padding: 0px 20px 10px; flex: 1; display: flex; flex-direction: row; gap: 20px;">

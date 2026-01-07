@@ -57,7 +57,7 @@ public class HttpSource extends Source {
                 errorMessages.add("");
             } else {
                 for(var request : requests) {
-                    errorMessages.addAll(request.validate(name));
+                    errorMessages.addAll(request.validate());
                 }
             }
 

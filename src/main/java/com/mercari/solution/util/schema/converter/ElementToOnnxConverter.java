@@ -8,6 +8,7 @@ import org.apache.beam.sdk.values.Row;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,36 @@ public class ElementToOnnxConverter {
     }
 
      */
+
+    public static Map<String, OnnxTensor> convert_(
+            final OrtEnvironment environment,
+            final Map<String, NodeInfo> inputsInfo,
+            final List<Map<String, Object>> elements) throws OrtException {
+
+        final Map<String, OnnxTensor> tensors = new HashMap<>();
+        for(final Map.Entry<String, NodeInfo> entry : inputsInfo.entrySet()) {
+            final String field = entry.getKey();
+            System.out.println("field: " + field + " , value: " + elements);
+            switch (entry.getValue().getInfo()) {
+                case TensorInfo tensorInfo -> {
+                    final List<Object> tensorValues = elements.stream()
+                            .map(element -> getValue(tensorInfo, element.get(field)))
+                            .collect(Collectors.toList());
+                    final OnnxTensor tensor = ONNXRuntimeUtil.convertTensor(environment, tensorInfo, tensorValues);
+                    tensors.put(entry.getKey(), tensor);
+                }
+                case MapInfo mapInfo -> {
+                    //TODO
+                }
+                case SequenceInfo sequenceInfo -> {
+                    //TODO
+                }
+                default -> throw new IllegalArgumentException("Not supported onnx node info type: " + entry.getValue().getInfo());
+            }
+        }
+
+        return tensors;
+    }
 
     public static Map<String, OnnxTensor> convert(
             final OrtEnvironment environment,
@@ -114,7 +145,7 @@ public class ElementToOnnxConverter {
                 case ByteBuffer bb -> new String(bb.array(), StandardCharsets.UTF_8);
                 default -> value.toString();
             };
-            case INT8 -> switch (value) {
+            case INT8, UINT8 -> switch (value) {
                 case Boolean b -> b ? 1 : 0;
                 case Number n -> n.byteValue();
                 case String s -> Byte.parseByte(s);
@@ -136,13 +167,14 @@ public class ElementToOnnxConverter {
                 case Boolean b -> b ? 1L : 0L;
                 case Number n -> n.longValue();
                 case String s -> Long.parseLong(s);
-                default -> throw new IllegalArgumentException();
+                case List<?> l -> l.stream().map(v -> getValue(tensorInfo, v)).collect(Collectors.toList());
+                default -> throw new IllegalArgumentException("int64 value is illegal: " + value + ", with shape: " + Arrays.toString(tensorInfo.getShape()));
             };
-            case FLOAT16, FLOAT -> switch (value) {
+            case FLOAT16, FLOAT, BFLOAT16 -> switch (value) {
                 case Boolean b -> b ? 1f : 0f;
                 case Number n -> n.floatValue();
                 case String s -> Float.parseFloat(s);
-                default -> throw new IllegalArgumentException();
+                default -> throw new IllegalArgumentException("float value is illegal: " + value + ", with shape: " + Arrays.toString(tensorInfo.getShape()));
             };
             case DOUBLE -> switch (value) {
                 case Boolean b -> b ? 1d : 0d;

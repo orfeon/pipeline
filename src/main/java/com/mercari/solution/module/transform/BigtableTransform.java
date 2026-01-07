@@ -3,8 +3,8 @@ package com.mercari.solution.module.transform;
 import com.google.cloud.bigtable.data.v2.BigtableDataClient;
 import com.google.cloud.bigtable.data.v2.BigtableDataSettings;
 import com.google.cloud.bigtable.data.v2.models.*;
+import com.google.cloud.bigtable.data.v2.models.sql.PreparedStatement;
 import com.google.cloud.bigtable.data.v2.models.sql.ResultSet;
-import com.google.cloud.bigtable.data.v2.models.sql.Statement;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -14,8 +14,6 @@ import com.mercari.solution.util.gcp.BigtableUtil;
 import com.mercari.solution.util.pipeline.Partition;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.BigtableSchemaUtil;
-import com.mercari.solution.util.schema.CalciteSchemaUtil;
-import com.mercari.solution.util.sql.calcite.MemorySchema;
 import freemarker.template.Template;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -24,18 +22,13 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
-import org.apache.beam.vendor.calcite.v1_28_0.org.apache.calcite.tools.Planner;
-import org.joda.time.Instant;
-
-import java.io.IOException;
 import java.io.Serializable;
-import java.sql.SQLException;
 import java.util.*;
+
 /*
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-
  */
 
 @Transform.Module(name="bigtable")
@@ -392,7 +385,8 @@ public class BigtableTransform extends Transform {
         }
 
         private List<MElement> readBySql(final MElement input) {
-            try(final ResultSet resultSet = client.executeQuery(Statement.newBuilder(sql).build())) {
+            final PreparedStatement preparedStatement = client.prepareStatement(sql, new HashMap<>());
+            try(final ResultSet resultSet = client.executeQuery(preparedStatement.bind().build())) {
                 final List<MElement> results = new ArrayList<>();
                 while(resultSet.next()) {
                     final MElement result = BigtableSchemaUtil.convert(resultSet, input.getTimestamp());

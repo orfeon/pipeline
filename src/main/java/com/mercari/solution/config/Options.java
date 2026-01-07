@@ -34,6 +34,9 @@ public class Options implements Serializable {
 
     private BeamSQLOptions beamsql;
 
+    // expansion service options
+    private ExpansionOptions expansion;
+
 
     public String getJobName() {
         return jobName;
@@ -91,6 +94,9 @@ public class Options implements Serializable {
         return beamsql;
     }
 
+    public ExpansionOptions getExpansion() {
+        return expansion;
+    }
 
     public static void setOptions(final PipelineOptions pipelineOptions, final Options options) {
 
@@ -131,6 +137,7 @@ public class Options implements Serializable {
         }
 
         BeamSQLOptions.setOptions(pipelineOptions, options.beamsql);
+        ExpansionOptions.setOptions(pipelineOptions, options.expansion);
     }
 
 }

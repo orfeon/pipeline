@@ -9,6 +9,7 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.util.Utf8;
 import org.apache.beam.sdk.values.Row;
 
 import java.math.BigDecimal;
@@ -73,7 +74,48 @@ public class ElementToJsonConverter {
         } else {
             switch (field.getFieldType().getType()) {
                 case bool -> obj.addProperty(fieldName, (Boolean) primitiveValue);
-                case int8, int16, int32, int64, float8, float16, float32, float64, decimal -> obj.addProperty(fieldName, (Number) primitiveValue);
+                case int8, int16 -> {
+                    switch (primitiveValue) {
+                        case Utf8 s -> obj.addProperty(fieldName, Short.parseShort(s.toString()));
+                        case String s -> obj.addProperty(fieldName, Short.parseShort(s));
+                        case Number n -> obj.addProperty(fieldName, n);
+                        default -> throw new IllegalArgumentException("type: " + field.getFieldType().getType()
+                                + " for value: " + primitiveValue + " is not supported");
+                    }
+                }
+                case int32 -> {
+                    switch (primitiveValue) {
+                        case Utf8 s -> obj.addProperty(fieldName, Integer.parseInt(s.toString()));
+                        case String s -> obj.addProperty(fieldName, Integer.parseInt(s));
+                        case Number n -> obj.addProperty(fieldName, n);
+                        default -> throw new IllegalArgumentException("int32 for value: " + primitiveValue + " is not supported");
+                    }
+                }
+                case int64 -> {
+                    switch (primitiveValue) {
+                        case Utf8 s -> obj.addProperty(fieldName, Long.parseLong(s.toString()));
+                        case String s -> obj.addProperty(fieldName, Long.parseLong(s));
+                        case Number n -> obj.addProperty(fieldName, n);
+                        default -> throw new IllegalArgumentException("int64 for value: " + primitiveValue + " is not supported");
+                    }
+                }
+                case float32 -> {
+                    switch (primitiveValue) {
+                        case Utf8 s -> obj.addProperty(fieldName, Float.parseFloat(s.toString()));
+                        case String s -> obj.addProperty(fieldName, Float.parseFloat(s));
+                        case Number n -> obj.addProperty(fieldName, n);
+                        default -> throw new IllegalArgumentException("float32 for value: " + primitiveValue + " is not supported");
+                    }
+                }
+                case float64, decimal -> {
+                    switch (primitiveValue) {
+                        case Utf8 s -> obj.addProperty(fieldName, Double.parseDouble(s.toString()));
+                        case String s -> obj.addProperty(fieldName, Double.parseDouble(s));
+                        case Number n -> obj.addProperty(fieldName, n);
+                        default -> throw new IllegalArgumentException("type: " + field.getFieldType().getType()
+                                + " for value: " + primitiveValue + " is not supported");
+                    }
+                }
                 case string, json -> obj.addProperty(fieldName, primitiveValue.toString());
                 case bytes -> {
                     final byte[] bytes = switch (primitiveValue) {

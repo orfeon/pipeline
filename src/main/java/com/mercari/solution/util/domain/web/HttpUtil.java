@@ -6,11 +6,13 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.gcp.IAMUtil;
+import com.mercari.solution.util.schema.converter.JsonToElementConverter;
 import freemarker.template.Template;
-import org.joda.time.DateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.Serializable;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLEncoder;
@@ -23,31 +25,49 @@ import java.util.stream.Collectors;
 
 public class HttpUtil {
 
+    private static final Logger LOG = LoggerFactory.getLogger(HttpUtil.class);
+
     public static class Request {
 
+        private String name;
         public String endpoint;
-        public String method;
-        private Map<String,String> params;
-        private JsonElement body;
+        private String method;
+        private Map<String, String> params;
         private Map<String, String> headers;
-        private Jwt jwt;
-        private Type type;
+        private JsonElement body;
+
+        private Format format;
+        private JsonElement schema;
+        private List<Integer> acceptableStatusCodes;
 
         private transient Template templateEndpoint;
-        private transient Map<String,Template> templateParams;
-        private transient Map<String,Template> templateHeaders;
+        private transient Map<String, Template> templateParams;
+        private transient Map<String, Template> templateHeaders;
         private transient Template templateBody;
 
-        public List<String> validate(String name) {
+        private transient Schema schema_;
+
+        public String getName() {
+            return name;
+        }
+
+        public List<String> validate() {
             final List<String> errorMessages = new ArrayList<>();
 
             if(this.endpoint == null) {
-                errorMessages.add("http transform module[" + name + "].endpoint must not be null.");
+                errorMessages.add("requests[].endpoint must not be null.");
             }
 
-            if(this.jwt != null) {
-                errorMessages.addAll(this.jwt.validate(name));
+            if(this.acceptableStatusCodes != null) {
+                for(final Integer acceptableStatusCode : acceptableStatusCodes) {
+                    if(acceptableStatusCode == null) {
+                        errorMessages.add("requests[].acceptableStatusCodes value must not be null.");
+                    } else if(acceptableStatusCode >= 600 || acceptableStatusCode < 100) {
+                        errorMessages.add("requests[].acceptableStatusCodes value[" + acceptableStatusCode + "] must be between 100 and 599");
+                    }
+                }
             }
+
             return errorMessages;
         }
 
@@ -61,11 +81,8 @@ public class HttpUtil {
             if(this.headers == null) {
                 this.headers = new HashMap<>();
             }
-            if(this.type == null) {
-                this.type = Type.custom;
-            }
-            if(this.jwt != null) {
-                this.jwt.setDefaults();
+            if(this.format == null) {
+                this.format = Format.text;
             }
         }
 
@@ -92,6 +109,15 @@ public class HttpUtil {
             if(this.body != null) {
                 this.templateBody = TemplateUtil.createStrictTemplate("TemplateBody", this.body.toString());
             }
+            if(this.schema != null && this.schema.isJsonObject()) {
+                this.schema_ = Schema.parse(schema.getAsJsonObject());
+            }
+        }
+
+        public boolean isParamsBody() {
+            return headers != null
+                    && headers.containsKey("Content-Type")
+                    && headers.containsValue("application/x-www-form-urlencoded");
         }
 
         public JsonObject toJson() {
@@ -107,7 +133,7 @@ public class HttpUtil {
             }
             if(headers != null){
                 final JsonObject headersJsonObject = new JsonObject();
-                for(final Map.Entry<String, String> entry : params.entrySet()) {
+                for(final Map.Entry<String, String> entry : headers.entrySet()) {
                     headersJsonObject.addProperty(entry.getKey(), entry.getValue());
                 }
                 jsonObject.add("headers", headersJsonObject);
@@ -115,8 +141,29 @@ public class HttpUtil {
             if(body != null) {
                 jsonObject.add("body", body);
             }
+            if(format != null) {
+                jsonObject.addProperty("format", format.name());
+            }
+            if(schema != null) {
+                jsonObject.add("schema", schema);
+            }
+
+            if(acceptableStatusCodes != null){
+                final JsonArray acceptableStatusCodesArray = new JsonArray();
+                for(final Integer statusCode : acceptableStatusCodes) {
+                    acceptableStatusCodesArray.add(statusCode);
+                }
+                jsonObject.add("acceptableStatusCodes", acceptableStatusCodesArray);
+            }
 
             return jsonObject;
+        }
+
+        public Map<String, Object> convertJsonToMap(String jsonText) {
+            if(schema_ != null) {
+                return JsonToElementConverter.convert(schema_.getFields(), jsonText);
+            }
+            return null;
         }
 
         public String toJsonString() {
@@ -127,6 +174,56 @@ public class HttpUtil {
         public static Request fromJsonString(final String jsonString) {
             return new Gson().fromJson(jsonString, Request.class);
         }
+    }
+
+    public static class RetryParameters implements Serializable {
+
+        private BackoffParameters backoff;
+
+        public List<String> validate() {
+            return new ArrayList<>();
+        }
+
+        public void setDefaults() {
+            if(backoff == null) {
+                backoff = new BackoffParameters();
+            }
+            backoff.setDefaults();
+        }
+
+    }
+
+    public static class BackoffParameters implements Serializable {
+
+        private Double exponent;
+        private Integer initialBackoffSecond;
+        private Integer maxBackoffSecond;
+        private Integer maxCumulativeBackoffSecond;
+        private Integer maxRetries;
+
+        public List<String> validate() {
+            return new ArrayList<>();
+        }
+
+        public void setDefaults() {
+            // reference: FluentBackoff.DEFAULT
+            if(exponent == null) {
+                exponent = 1.5;
+            }
+            if(initialBackoffSecond == null) {
+                initialBackoffSecond = 1;
+            }
+            if(maxBackoffSecond == null) {
+                maxBackoffSecond = 60 * 60 * 24 * 1000;
+            }
+            if(maxCumulativeBackoffSecond == null) {
+                maxCumulativeBackoffSecond = 60 * 60 * 24 * 1000;
+            }
+            if(maxRetries == null) {
+                this.maxRetries = Integer.MAX_VALUE;
+            }
+        }
+
     }
 
     public static class Response {
@@ -176,7 +273,7 @@ public class HttpUtil {
             }
         }
 
-        public String toJsonString() {
+        public JsonObject toJson() {
             final JsonObject jsonObject = new JsonObject();
             jsonObject.addProperty("format", format.name());
             if(acceptableStatusCodes != null){
@@ -189,7 +286,11 @@ public class HttpUtil {
             if(schema != null){
                 jsonObject.add("schema", schema);
             }
+            return jsonObject;
+        }
 
+        public String toJsonString() {
+            final JsonObject jsonObject = toJson();
             return jsonObject.toString();
         }
 
@@ -197,22 +298,6 @@ public class HttpUtil {
             return new Gson().fromJson(jsonString, Response.class);
         }
 
-    }
-
-    public static class Jwt {
-        public String name;
-        public String account;
-        public Integer expireMinutes;
-        public Map<String, Object> payload;
-
-        public List<String> validate(String name) {
-            final List<String> errorMessages = new ArrayList<>();
-            return errorMessages;
-        }
-
-        public void setDefaults() {
-
-        }
     }
 
     public enum Format {
@@ -234,16 +319,27 @@ public class HttpUtil {
         };
     }
 
+    /*
+    public static Schema createResponseSchema(final Schema inputSchema, final List<Request> requests) {
+        return null;
+    }
+
+     */
+
     public static Schema createResponseSchema(final Response response) {
+        return createResponseSchema(response.schema, response.format);
+    }
+
+    public static Schema createResponseSchema(final JsonElement schema, final Format format) {
         final Schema.FieldType fieldType;
-        if(response.schema == null) {
-            fieldType = switch (response.format) {
+        if(schema == null || !schema.isJsonObject()) {
+            fieldType = switch (format) {
                 case bytes -> Schema.FieldType.BYTES.withNullable(true);
                 case text -> Schema.FieldType.STRING.withNullable(true);
                 case json -> Schema.FieldType.JSON.withNullable(true);
             };
         } else {
-            final Schema responseSchema = Schema.parse(response.schema.getAsJsonObject());
+            final Schema responseSchema = Schema.parse(schema.getAsJsonObject());
             fieldType = Schema.FieldType.element(responseSchema);
         }
 
@@ -255,24 +351,38 @@ public class HttpUtil {
                 .build();
     }
 
+    /*
+    public static <ResponseT> Map<String, Object> send(
+            final HttpClient client,
+            final Request request,
+            final Map<String, Object> standardValues,
+            final HttpResponse.BodyHandler<ResponseT> bodyHandler) throws IOException, InterruptedException, URISyntaxException {
+
+        final HttpResponse<ResponseT> response = sendRequest(client, request, standardValues, bodyHandler);
+    }
+
+     */
+
     public static <ResponseT> HttpResponse<ResponseT> sendRequest(
             final HttpClient client,
             final Request request,
             final Map<String, Object> standardValues,
             final HttpResponse.BodyHandler<ResponseT> bodyHandler) throws IOException, InterruptedException, URISyntaxException {
 
-        if(request.jwt != null) {
-            final Object code = getJwt(request.endpoint, request.jwt);
-            standardValues.put(request.jwt.name, code);
-        }
-
-        final String url = createEndpoint(request, standardValues);
+        final String url;
         final String bodyText;
-        if(request.templateBody != null) {
+        if(request.isParamsBody()) {
+            url = createEndpoint(request, standardValues);
+            bodyText = createUrlParams(request, standardValues);
+        } else if(request.templateBody != null) {
+            url = createEndpointWithParams(request, standardValues);
             bodyText = TemplateUtil.executeStrictTemplate(request.templateBody, standardValues);
         } else {
+            url = createEndpointWithParams(request, standardValues);
             bodyText = "";
         }
+        LOG.info("request url: {} body: {}", url, bodyText);
+
         final HttpRequest.BodyPublisher bodyPublisher = HttpRequest.BodyPublishers.ofString(bodyText);
 
         HttpRequest.Builder builder = HttpRequest.newBuilder()
@@ -288,42 +398,28 @@ public class HttpUtil {
         return client.send(builder.build(), bodyHandler);
     }
 
-    private static String getJwt(final String endpoint, final Jwt jwt) {
-
-        final JsonObject payload = new JsonObject();
-        for(Map.Entry<String, Object> entry : jwt.payload.entrySet()) {
-            switch (entry.getValue()) {
-                case String s -> payload.addProperty(entry.getKey(), s);
-                case Number i -> payload.addProperty(entry.getKey(), i);
-                case Boolean b -> payload.addProperty(entry.getKey(), b);
-                default -> {}
-            }
-        }
-        if(!payload.has("aud")) {
-            payload.addProperty("aud", endpoint);
-        }
-        if(!payload.has("jti")) {
-            payload.addProperty("jti", UUID.randomUUID().toString());
-        }
-        if(!payload.has("exp")) {
-            final long exp = DateTime.now().plusMinutes(jwt.expireMinutes).getMillis() / 1000;
-            payload.addProperty("exp", exp);
-        }
-        return IAMUtil.signJwt(jwt.account, payload);
-    }
-
     private static String createEndpoint(
             final Request request,
             final Map<?, ?> standardValues) {
 
-        final String params = request.templateParams.entrySet()
+        return TemplateUtil.executeStrictTemplate(request.templateEndpoint, standardValues);
+    }
+
+    private static String createUrlParams(final Request request, Map<?, ?> standardValues) {
+        return request.templateParams.entrySet()
                 .stream()
                 .map(e -> e.getKey() + "=" + URLEncoder
                         .encode(TemplateUtil
                                 .executeStrictTemplate(e.getValue(), standardValues), StandardCharsets.UTF_8))
                 .collect(Collectors.joining("&"));
+    }
 
-        return TemplateUtil.executeStrictTemplate(request.templateEndpoint, standardValues) + (params.isEmpty() ? "" : ("?" + params));
+    private static String createEndpointWithParams(
+            final Request request,
+            final Map<?, ?> standardValues) {
+
+        final String params = createUrlParams(request, standardValues);
+        return createEndpoint(request, standardValues) + (params.isEmpty() ? "" : ("?" + params));
     }
 
 }

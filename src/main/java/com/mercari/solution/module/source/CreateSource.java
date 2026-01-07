@@ -581,9 +581,9 @@ public class CreateSource extends Source {
         return switch (elementFieldType.getType()) {
             case string -> elementValue;
             case bytes -> ByteBuffer.wrap(Base64.getDecoder().decode(elementValue));
-            case date -> Long.valueOf(DateTimeUtil.toLocalDate(elementValue).toEpochDay()).intValue();
-            case time -> DateTimeUtil.toLocalTime(elementValue).toNanoOfDay() / 1000L;
-            case timestamp -> DateTimeUtil.toJodaInstant(elementValue).getMillis() * 1000L;
+            case date -> Long.valueOf(DateTimeUtil.toLocalDate(elementValue.replaceAll("\"", "")).toEpochDay()).intValue();
+            case time -> DateTimeUtil.toLocalTime(elementValue.replaceAll("\"", "")).toNanoOfDay() / 1000L;
+            case timestamp -> DateTimeUtil.toJodaInstant(elementValue.replaceAll("\"", "")).getMillis() * 1000L;
             case int16 -> Short.parseShort(elementValue);
             case int32 -> Integer.parseInt(elementValue);
             case int64 -> Long.parseLong(elementValue);
@@ -604,21 +604,21 @@ public class CreateSource extends Source {
         return switch (elementFieldType.getType()) {
             case date -> {
                 final ChronoUnit chronoUnit = DateTimeUtil.convertChronoUnit(intervalUnit);
-                final LocalDate fromDate = DateTimeUtil.toLocalDate(from);
+                final LocalDate fromDate = DateTimeUtil.toLocalDate(from.replaceAll("\"", ""));
                 final long plus = interval * sequence;
                 final LocalDate lastDate = fromDate.plus(plus, chronoUnit);
                 yield Long.valueOf(lastDate.toEpochDay()).intValue();
             }
             case time -> {
                 final ChronoUnit chronoUnit = DateTimeUtil.convertChronoUnit(intervalUnit);
-                final LocalTime fromTime = DateTimeUtil.toLocalTime(from);
+                final LocalTime fromTime = DateTimeUtil.toLocalTime(from.replaceAll("\"", ""));
                 final long plus = interval * sequence;
                 final LocalTime lastTime = fromTime.plus(plus, chronoUnit);
                 yield lastTime.toNanoOfDay() / 1000L;
             }
             case timestamp -> {
                 final ChronoUnit chronoUnit = DateTimeUtil.convertChronoUnit(intervalUnit);
-                final Instant fromInstant = DateTimeUtil.toInstant(from);
+                final Instant fromInstant = DateTimeUtil.toInstant(from.replaceAll("\"", ""));
                 final long plus = interval * sequence;
                 final Instant lastInstant = fromInstant.plus(plus, chronoUnit);
                 yield DateTimeUtil.toEpochMicroSecond(lastInstant);

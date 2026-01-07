@@ -42,6 +42,7 @@ public class DataflowOptions implements Serializable {
     private Integer workerCacheMb;
     private String createFromSnapshot;
     private String sdkContainerImage;
+    private String sdkHarnessContainerImageOverrides;
     private Boolean enableStreamingEngine;
     private Integer streamingSideInputCacheExpirationMillis;
     private Boolean update;
@@ -149,6 +150,9 @@ public class DataflowOptions implements Serializable {
             }
             if(dataflow.sdkContainerImage != null) {
                 clazz.getMethod("setSdkContainerImage", String.class).invoke(dataflowOptions, dataflow.sdkContainerImage);
+            }
+            if(dataflow.sdkHarnessContainerImageOverrides != null) {
+                clazz.getMethod("setSdkHarnessContainerImageOverrides", String.class).invoke(dataflowOptions, dataflow.sdkHarnessContainerImageOverrides);
             }
             if(dataflow.streamingSideInputCacheExpirationMillis != null) {
                 clazz.getMethod("setStreamingSideInputCacheExpirationMillis", Integer.class).invoke(dataflowOptions, dataflow.streamingSideInputCacheExpirationMillis);
@@ -268,6 +272,9 @@ public class DataflowOptions implements Serializable {
             }
             if(clazz.getMethod("getSdkContainerImage").invoke(dataflowOptions) != null) {
                 dataflow.sdkContainerImage = (String)clazz.getMethod("getSdkContainerImage").invoke(dataflowOptions);
+            }
+            if(clazz.getMethod("getSdkHarnessContainerImageOverrides").invoke(dataflowOptions) != null) {
+                dataflow.sdkHarnessContainerImageOverrides = (String)clazz.getMethod("getSdkHarnessContainerImageOverrides").invoke(dataflowOptions);
             }
             if(clazz.getMethod("getStreamingSideInputCacheExpirationMillis").invoke(dataflowOptions) != null) {
                 dataflow.streamingSideInputCacheExpirationMillis = (Integer) clazz.getMethod("getStreamingSideInputCacheExpirationMillis").invoke(dataflowOptions);

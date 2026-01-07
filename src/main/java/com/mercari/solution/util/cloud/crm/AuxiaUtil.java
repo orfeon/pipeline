@@ -46,6 +46,11 @@ public class AuxiaUtil {
         element
     }
 
+    public enum Mode {
+        event,
+        user
+    }
+
     public static Map<String, Descriptors.Descriptor> getMessageDescriptors() {
         try (final InputStream is = AuxiaUtil.class.getResourceAsStream(RESOURCE_EVENT_DESCRIPTOR_PATH)) {
             return ProtoSchemaUtil.getDescriptors(is);
@@ -74,16 +79,20 @@ public class AuxiaUtil {
             final String projectId,
             final String eventName,
             final Schema schema,
-            final Set<String> excludeFields) {
-        return new EventElementConverter(projectId, eventName, schema, excludeFields);
+            final Set<String> excludeFields,
+            final Mode mode) {
+
+        return new EventElementConverter(projectId, eventName, schema, excludeFields, mode);
     }
 
     public static EventJsonConverter createJsonConverter(
             final String projectId,
             final String eventName,
             final String field,
-            final Set<String> excludeFields) {
-        return new EventJsonConverter(projectId, eventName, field, excludeFields);
+            final Set<String> excludeFields,
+            final Mode mode) {
+
+        return new EventJsonConverter(projectId, eventName, field, excludeFields, mode);
     }
 
     public static class Event {
@@ -116,6 +125,7 @@ public class AuxiaUtil {
         protected final String projectId;
         protected final String eventName;
         protected final Set<String> excludeFields;
+        protected final Mode mode;
 
         // LogEventsRequest
         protected transient Descriptors.Descriptor message;
@@ -161,10 +171,13 @@ public class AuxiaUtil {
         protected EventConverter(
                 final String projectId,
                 final String eventName,
-                final Set<String> excludeFields) {
+                final Set<String> excludeFields,
+                final Mode mode) {
+
             this.projectId = projectId;
             this.eventName = eventName;
             this.excludeFields = excludeFields;
+            this.mode = Optional.ofNullable(mode).orElse(Mode.event);
         }
 
         public void setup() {
@@ -321,9 +334,10 @@ public class AuxiaUtil {
                 final String projectId,
                 final String eventName,
                 final Schema schema,
-                final Set<String> excludeFields) {
+                final Set<String> excludeFields,
+                final Mode mode) {
 
-            super(projectId, eventName, excludeFields);
+            super(projectId, eventName, excludeFields, mode);
             this.schema = schema;
         }
 
@@ -380,7 +394,6 @@ public class AuxiaUtil {
                 final Long timestampMillis = toEpochMillis(timestampMessage);
                 events.add(Event.of(message, userId, eventName, insertId, timestampMillis));
             }
-
 
             return events;
         }
@@ -447,9 +460,19 @@ public class AuxiaUtil {
             }
 
             if(!values.containsKey("event_properties") && !values.containsKey("user_properties")) {
-                final List<DynamicMessage> eventPropertiesMessages = createEventProperties(schema, values);
-                if(!eventPropertiesMessages.isEmpty()) {
-                    builder.setField(eventPropertiesField, eventPropertiesMessages);
+                switch (mode) {
+                    case event -> {
+                        final List<DynamicMessage> eventPropertiesMessages = createEventProperties(schema, values);
+                        if(!eventPropertiesMessages.isEmpty()) {
+                            builder.setField(eventPropertiesField, eventPropertiesMessages);
+                        }
+                    }
+                    case user -> {
+                        final List<DynamicMessage> userPropertiesMessages = createUserProperties(schema, values);
+                        if(!userPropertiesMessages.isEmpty()) {
+                            builder.setField(userPropertiesField, userPropertiesMessages);
+                        }
+                    }
                 }
             }
 
@@ -461,9 +484,12 @@ public class AuxiaUtil {
             return builder.build();
         }
 
-        private List<DynamicMessage> createEventProperties(
+        private List<DynamicMessage> createProperties(
                 final Schema schema,
-                final Map<String, Object> map) {
+                final Map<String, Object> map,
+                final Descriptors.Descriptor propertiesMessage,
+                final Descriptors.FieldDescriptor propertiesKeyField,
+                final Descriptors.FieldDescriptor propertiesValueField) {
 
             final List<DynamicMessage> eventProperties = new ArrayList<>();
             for(final Schema.Field field : schema.getFields()) {
@@ -478,9 +504,9 @@ public class AuxiaUtil {
                 final Object value = map.get(field.getName());
                 final DynamicMessage propertyValueMessage = createPropertyValue(field.getFieldType(), value);
                 if(propertyValueMessage != null) {
-                    final DynamicMessage.Builder builder = DynamicMessage.newBuilder(eventPropertiesMessage);
-                    builder.setField(eventPropertiesKeyField, field.getName());
-                    builder.setField(eventPropertiesValueField, propertyValueMessage);
+                    final DynamicMessage.Builder builder = DynamicMessage.newBuilder(propertiesMessage);
+                    builder.setField(propertiesKeyField, field.getName());
+                    builder.setField(propertiesValueField, propertyValueMessage);
                     final DynamicMessage eventProperty = builder.build();
                     eventProperties.add(eventProperty);
                 }
@@ -488,26 +514,20 @@ public class AuxiaUtil {
             return eventProperties;
         }
 
+        private List<DynamicMessage> createEventProperties(
+                final Schema schema,
+                final Map<String, Object> map) {
+            return createProperties(
+                    schema, map,
+                    eventPropertiesMessage, eventPropertiesKeyField, eventPropertiesValueField);
+        }
+
         private List<DynamicMessage> createUserProperties(
                 final Schema schema,
                 final Map<String, Object> map) {
-
-            final List<DynamicMessage> userProperties = new ArrayList<>();
-            for(final Schema.Field field : schema.getFields()) {
-                if(PROPERTIES_EVENT.contains(field.getName()) || PROPERTIES_MESSAGE.contains(field.getName())) {
-                    continue;
-                }
-                final Object value = map.get(field.getName());
-                final DynamicMessage propertyValueMessage = createPropertyValue(field.getFieldType(), value);
-                if(propertyValueMessage != null) {
-                    final DynamicMessage.Builder builder = DynamicMessage.newBuilder(userPropertiesMessage);
-                    builder.setField(userPropertiesKeyField, field.getName());
-                    builder.setField(userPropertiesValueField, propertyValueMessage);
-                    final DynamicMessage userProperty = builder.build();
-                    userProperties.add(userProperty);
-                }
-            }
-            return userProperties;
+             return createProperties(
+                     schema, map,
+                     userPropertiesMessage, userPropertiesKeyField, userPropertiesValueField);
         }
 
         private DynamicMessage createPropertyValue(
@@ -562,9 +582,10 @@ public class AuxiaUtil {
                 final String projectId,
                 final String eventName,
                 final String field,
-                final Set<String> excludeFields) {
+                final Set<String> excludeFields,
+                final Mode mode) {
 
-            super(projectId, eventName, excludeFields);
+            super(projectId, eventName, excludeFields, mode);
             this.field = field;
         }
 
@@ -715,9 +736,19 @@ public class AuxiaUtil {
             }
 
             if(!jsonObject.has("event_properties") && !jsonObject.has("user_properties")) {
-                final List<DynamicMessage> eventPropertiesMessages = createEventProperties(jsonObject);
-                if(!eventPropertiesMessages.isEmpty()) {
-                    builder.setField(eventPropertiesField, eventPropertiesMessages);
+                switch (mode) {
+                    case event -> {
+                        final List<DynamicMessage> eventPropertiesMessages = createEventProperties(jsonObject);
+                        if(!eventPropertiesMessages.isEmpty()) {
+                            builder.setField(eventPropertiesField, eventPropertiesMessages);
+                        }
+                    }
+                    case user -> {
+                        final List<DynamicMessage> userPropertiesMessages = createUserProperties(jsonObject);
+                        if(!userPropertiesMessages.isEmpty()) {
+                            builder.setField(userPropertiesField, userPropertiesMessages);
+                        }
+                    }
                 }
             }
 
@@ -729,7 +760,12 @@ public class AuxiaUtil {
             return builder.build();
         }
 
-        private List<DynamicMessage> createEventProperties(final JsonObject jsonObject) {
+        private List<DynamicMessage> createProperties(
+                final JsonObject jsonObject,
+                final Descriptors.Descriptor propertiesMessage,
+                final Descriptors.FieldDescriptor propertiesKeyField,
+                final Descriptors.FieldDescriptor propertiesValueField) {
+
             final List<DynamicMessage> eventProperties = new ArrayList<>();
             for(final Map.Entry<String, JsonElement> entry : jsonObject.entrySet()) {
                 if(PROPERTIES_EVENT.contains(entry.getKey()) || PROPERTIES_MESSAGE.contains(entry.getKey())) {
@@ -743,9 +779,9 @@ public class AuxiaUtil {
 
                 final DynamicMessage propertyValueMessage = createPropertyValue(entry.getValue());
                 if(propertyValueMessage != null) {
-                    final DynamicMessage.Builder builder = DynamicMessage.newBuilder(eventPropertiesMessage);
-                    builder.setField(eventPropertiesKeyField, entry.getKey());
-                    builder.setField(eventPropertiesValueField, propertyValueMessage);
+                    final DynamicMessage.Builder builder = DynamicMessage.newBuilder(propertiesMessage);
+                    builder.setField(propertiesKeyField, entry.getKey());
+                    builder.setField(propertiesValueField, propertyValueMessage);
                     final DynamicMessage eventProperty = builder.build();
                     eventProperties.add(eventProperty);
                 }
@@ -753,22 +789,14 @@ public class AuxiaUtil {
             return eventProperties;
         }
 
+        private List<DynamicMessage> createEventProperties(final JsonObject jsonObject) {
+            return createProperties(jsonObject,
+                    eventPropertiesMessage, eventPropertiesKeyField, eventPropertiesValueField);
+        }
+
         private List<DynamicMessage> createUserProperties(final JsonObject jsonObject) {
-            final List<DynamicMessage> userProperties = new ArrayList<>();
-            for(final Map.Entry<String, JsonElement> entry : jsonObject.entrySet()) {
-                if(PROPERTIES_EVENT.contains(entry.getKey()) || PROPERTIES_MESSAGE.contains(entry.getKey())) {
-                    continue;
-                }
-                final DynamicMessage propertyValueMessage = createPropertyValue(entry.getValue());
-                if(propertyValueMessage != null) {
-                    final DynamicMessage.Builder builder = DynamicMessage.newBuilder(userPropertiesMessage);
-                    builder.setField(userPropertiesKeyField, entry.getKey());
-                    builder.setField(userPropertiesValueField, propertyValueMessage);
-                    final DynamicMessage userProperty = builder.build();
-                    userProperties.add(userProperty);
-                }
-            }
-            return userProperties;
+            return createProperties(jsonObject,
+                    userPropertiesMessage, userPropertiesKeyField, userPropertiesValueField);
         }
 
         private DynamicMessage createPropertyValue(final JsonElement jsonElement) {

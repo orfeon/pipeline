@@ -160,7 +160,7 @@ public class Config implements Serializable {
 
     public static class Systems implements Serializable {
 
-        private Map<String, String> args;
+        private LinkedHashMap<String, String> args;
         private String context;
         private List<Import> imports;
         private Failure failure;
@@ -190,7 +190,7 @@ public class Config implements Serializable {
                 final String context,
                 final Map<String, String> args) {
             if(this.args == null) {
-                this.args = new HashMap<>();
+                this.args = new LinkedHashMap<>();
             }
             this.args.putAll(args);
 
@@ -358,13 +358,14 @@ public class Config implements Serializable {
     public static Config parse(final String configText, final String context, final Format format, final Map<String, String> templateArgs) {
         try {
             JsonObject jsonObject = convertConfigJson(configText, format);
-            LOG.info("Pipeline config: \n{}", new GsonBuilder().setPrettyPrinting().create().toJson(jsonObject));
 
             try {
                 jsonObject = processArgs(jsonObject, templateArgs);
             } catch (Throwable e) {
                 throw new IllegalModuleException("", "pipeline", e);
             }
+
+            LOG.info("Pipeline config: \n{}", new GsonBuilder().setPrettyPrinting().create().toJson(jsonObject));
 
             final Config config = new Gson().fromJson(jsonObject, Config.class);
             if(config == null) {
@@ -515,7 +516,7 @@ public class Config implements Serializable {
         return new LinkedHashMap<>(argsParameters.getOrDefault("args", new LinkedHashMap<>()));
     }
 
-    private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> args) {
+    private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
         final JsonObject argsJsonObject;
         if(configJson.has("args") && configJson.get("args").isJsonObject()) {
             argsJsonObject = configJson.getAsJsonObject("args");
@@ -528,6 +529,7 @@ public class Config implements Serializable {
             argsJsonObject = new JsonObject();
         }
 
+        final Map<String, String> args = new LinkedHashMap<>();
         for(final Map.Entry<String, JsonElement> entry : argsJsonObject.entrySet()) {
             if(entry.getValue().isJsonPrimitive()) {
                 final JsonPrimitive primitive = entry.getValue().getAsJsonPrimitive();
@@ -541,15 +543,23 @@ public class Config implements Serializable {
             }
         }
 
+        if(paramsArgs != null && !paramsArgs.isEmpty()) {
+            args.putAll(paramsArgs);
+        }
+
         if(args.isEmpty()) {
             return configJson;
         }
 
-        final Map<String,String> values = new HashMap<>();
+        final Map<String,String> values = new LinkedHashMap<>();
         for(final Map.Entry<String,String> entry : args.entrySet()) {
             final String value;
             if(TemplateUtil.isTemplateText(entry.getValue())) {
-                value = TemplateUtil.executeStrictTemplate(entry.getValue(), values);
+                String entryValue = entry.getValue();
+                for(final Map.Entry<String, String> ventry : values.entrySet()) {
+                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), ventry.getValue());
+                }
+                value = TemplateUtil.executeStrictTemplate(entryValue, values);
             } else {
                 value = entry.getValue();
             }

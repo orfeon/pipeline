@@ -85,7 +85,20 @@ public class PubSubSource extends Source {
                     }
                     case avro -> {
                         if(schema == null) {
-                            errorMessages.add("schema is required if format is avro");
+                            try {
+                                final org.apache.avro.Schema avroSchema;
+                                if(topic != null) {
+                                    avroSchema = PubSubUtil.getSchemaFromTopic(topic);
+                                } else if(subscription != null) {
+                                    avroSchema = PubSubUtil.getSchemaFromSubscription(subscription);
+                                } else {
+                                    avroSchema = null;
+                                    errorMessages.add("schema is required if format is avro.");
+                                }
+                                LOG.info("topic schema: {}", avroSchema);
+                            } catch (Throwable e) {
+                                errorMessages.add("schema is required if format is avro. could not get topic schema cause: " + e.getMessage());
+                            }
                         } else if(schema.getAvro() == null) {
                             errorMessages.add("schema.avro is required if format is avro");
                         }
@@ -225,8 +238,9 @@ public class PubSubSource extends Source {
         final DataType outputType = Optional
                 .ofNullable(getOutputType())
                 .orElse(DataType.AVRO);
+        final Schema inputSchema = getSourceSchema(parameters, getSchema());
 
-        final Schema inputDeserializedSchema = createDeserializedInputSchema(parameters, getSchema());
+        final Schema inputDeserializedSchema = createDeserializedInputSchema(parameters, inputSchema);
 
         final List<Partition> partitions;
         if(parameters.partitions == null || !parameters.partitions.isJsonArray()) {
@@ -250,7 +264,7 @@ public class PubSubSource extends Source {
 
         final Filter attributeFilter = Filter.of(parameters.attributeFilter);
 
-        final Serialize serialize = Serialize.of(parameters.format, getSchema());
+        final Serialize serialize = Serialize.of(parameters.format, inputSchema);
 
         final PCollectionTuple outputs = begin
                 .apply("Read", createRead(parameters, getTimestampAttribute(), errorHandler))
@@ -300,6 +314,25 @@ public class PubSubSource extends Source {
         }
 
         return outputTuple;
+    }
+
+    private static Schema getSourceSchema(Parameters parameters, Schema schema) {
+        if(schema != null) {
+            return schema;
+        }
+        try {
+            final org.apache.avro.Schema avroSchema;
+            if(parameters.topic != null) {
+                avroSchema = PubSubUtil.getSchemaFromTopic(parameters.topic);
+            } else if(parameters.subscription != null) {
+                avroSchema = PubSubUtil.getSchemaFromSubscription(parameters.subscription);
+            } else {
+                throw new IllegalArgumentException("Could not get topic schema. pubsub resource is empty");
+            }
+            return Schema.of(avroSchema);
+        } catch (final Throwable e) {
+            throw new IllegalModuleException("Could not get topic schema cause: " + e.getMessage());
+        }
     }
 
     private static PubsubIO.Read<PubsubMessage> createRead(

@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 public class SecretManagerUtil {
 
     private static final Pattern PATTERN_SECRET_NAME = Pattern
-            .compile("(projects/)[a-zA-Z]+?[a-zA-Z0-9\\-]*/secrets/[a-zA-Z0-9_\\-]+/versions/((latest)|([0-9]+))");
+            .compile("(projects/)[a-zA-Z0-9\\-]+/secrets/[a-zA-Z0-9_\\-]+/versions/((latest)|([0-9]+))");
 
     public static SecretManagerServiceClient createClient() {
         try {

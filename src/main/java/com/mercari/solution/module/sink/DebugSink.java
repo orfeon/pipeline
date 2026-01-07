@@ -59,10 +59,11 @@ public class DebugSink extends Sink {
         PCollectionList<Void> voids = PCollectionList.empty(inputs.getPipeline());
         for(final String tag : inputs.getAllInputs()) {
             final Schema schema = inputs.getSchema(tag);
+            printSchemas(schema, tag);
             final PCollection<MElement> element = inputs.get(tag);
             final String name = String.format("%s.%s", getName(), tag);
             final PCollection<Void> done = element
-                    .apply("Debug" + tag, ParDo.of(new DebugDoFn(getJobName(), name, schema, parameters)));
+                    .apply("Debug" + tag, ParDo.of(new DebugDoFn(name, schema, parameters)));
             voids = voids.and(done);
         }
 
@@ -72,7 +73,6 @@ public class DebugSink extends Sink {
 
     private static class DebugDoFn extends DoFn<MElement, Void> {
 
-        private final String jobName;
         private final String name;
         private final Schema schema;
         private final String templateText;
@@ -81,12 +81,10 @@ public class DebugSink extends Sink {
         private transient Template template;
 
         DebugDoFn(
-                final String jobName,
                 final String name,
                 final Schema schema,
                 final Parameters parameters) {
 
-            this.jobName = jobName;
             this.name = name;
             this.schema = schema;
             this.templateText = parameters.logTemplate;
@@ -117,7 +115,7 @@ public class DebugSink extends Sink {
                 try {
                     json.addProperty("input", element.toString());
                 } catch (Throwable ee) {
-                    LOG.error("failed to convert text: " + MFailure.convertThrowableMessage(ee));
+                    LOG.error("failed to convert text: {}", MFailure.convertThrowableMessage(ee));
                 }
                 json.addProperty("error", MFailure.convertThrowableMessage(e));
             }
@@ -193,5 +191,21 @@ public class DebugSink extends Sink {
             }
         }
 
+    }
+
+    private static void printSchemas(final Schema schema, final String tag) {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("input: ").append(tag).append(" schema fields: ").append(schema.getFields().toString()).append("\n");
+        try {
+            sb.append("input: ").append(tag).append(" avro schema: ").append(schema.getAvroSchema().toString()).append("\n");
+        } catch (final Throwable e) {
+            LOG.warn("failed to convert avro schema");
+        }
+        try {
+            sb.append("input: ").append(tag).append(" row schema: ").append(schema.getRowSchema().toString()).append("\n");
+        } catch (final Throwable e) {
+            LOG.warn("failed to convert row schema");
+        }
+        LOG.info(sb.toString());
     }
 }

@@ -16,7 +16,7 @@ public class ModuleConfig implements Serializable {
     private Set<String> tags;
     private Set<String> waits;
     private List<String> sideInputs;
-    private List<Logging> loggings;
+    private List<Logging> logs;
 
     private Boolean ignore;
     private Boolean failFast;
@@ -61,7 +61,7 @@ public class ModuleConfig implements Serializable {
     }
 
     public List<Logging> getLoggings() {
-        return loggings;
+        return logs;
     }
 
     public Boolean getIgnore() {

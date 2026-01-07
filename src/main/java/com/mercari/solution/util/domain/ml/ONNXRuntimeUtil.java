@@ -42,6 +42,7 @@ public class ONNXRuntimeUtil {
                         shape[idx] = tensorInfo.getShape()[idx];
                     }
                 }
+                System.out.println("s@: " + Arrays.stream(shape).boxed().collect(Collectors.toList()));
                 yield shape;
             }
             case MapInfo mapInfo -> {

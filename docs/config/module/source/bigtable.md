@@ -23,6 +23,7 @@ Source Module for loading data by specifying filter conditions from Cloud Bigtab
 | filter       | selective required | [Filter](../common/bigtable.md)   | Specify filter conditions for query from request to Bigtable                                                                                                                                                                                                                                                 |
 | columns      | required           | Array<Column\>                    | Define the output schema by defining the mapping of each column to its type and feed name                                                                                                                                                                                                                    |
 | format       | optional           | [Enum](../common/bigtable.md)     | Specify the cell value serialization format.　One of `bytes`, `avro` or `text`. Used as default value if not specified in each `columns` parameter. The default is `bytes`.                                                                                                                                   |
+| outputType   | optional           | Enum                              | Specify the output type.　One of `row` or `cell`. `row` output for each row using the schema specified in `columns`. `cell` output for each cell using a fixed common schema. The default is 'row'                                                                                                            |
 | cellType     | optional           | Enum                              | Specify cellType that defines how to retrieve the multiple cells associated with a column qualifier. Used as default value if not specified in each `columns` parameter. One of `last`, `first` or `all`. The default is `first`. If `all` is specified, it will be an array of the type specified in `type` |
 | appProfileId | optional           | String                            | Specify the app profile id                                                                                                                                                                                                                                                                                   |
 
@@ -52,7 +53,22 @@ If the parameters `format`,`cellType` are not specified, the upper-level setting
 | cellType  | optional | Enum   | Specify cellType that defines how to retrieve the multiple cells associated with a column qualifier. The default is parent `cellType` value |
 
 
+### Cell schema
+
+If `cell` is specified for `outputType` parameter, each cell will be output using the following common schema.
+
+
+| field     | type      | description                                                 |
+|-----------|-----------|-------------------------------------------------------------|
+| rowKey    | String    | The key of the row to which the cell belongs.               |
+| family    | String    | The name of the column family to which the cell belongs     |
+| qualifier | String    | The name of the column(qualifier) to which the cell belongs |
+| value     | Bytes     | The Cell value                                              |
+| timestamp | Timestamp | timestamp assigned to the cell                              |
+
 ## Example
+
+### Example with row specified for outputType
 
 ```json
 {
@@ -110,6 +126,54 @@ The above configuration retrieves records with the following schema.
     "https://xxx/yyy/002.png",
     "https://xxx/yyy/003.png"
   ]
+}
+```
+
+### Example with cell specified for outputType
+
+```yaml
+options:
+  jobName: bigtable-to-bigquery
+system:
+  args:
+    project: ${utils.gcp.project()}
+sources:
+  - name: bigtable_source
+    module: bigtable
+    parameters:
+      projectId: ${args.project}
+      instanceId: myinstance
+      tableId: mytable
+      appProfileId: myprofile
+      outputType: cell
+      flowControl: true
+      filter:
+        - type: family_name_regex
+          regex: g # filter only cells in column family is g
+        - type: column_qualifier_regex
+          regex: column_string_a # filter column name is column_string_a
+        - type: limit_cells_per_column
+          limit: 1 # get only latest cell value
+sinks:
+  - name: bigquery_sink
+    module: bigquery
+    inputs:
+      - bigtable_source
+    parameters:
+      table: "myproject.mydataset.mytable"
+      writeDisposition: WRITE_TRUNCATE
+      createDisposition: CREATE_IF_NEEDED
+```
+
+The above configuration retrieves records with the following schema.
+
+```json
+{
+  "rowKey": "1234567890#",
+  "family": "g",
+  "qualifier": "column_string_a",
+  "value": "YQ==",
+  "timestamp": "2025-08-01T12:34:56Z"
 }
 ```
 
