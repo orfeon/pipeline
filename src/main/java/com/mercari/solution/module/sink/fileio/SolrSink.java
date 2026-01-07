@@ -9,7 +9,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.module.sink.LocalSolrSink;
 import com.mercari.solution.util.domain.search.SolrUtil;
 import com.mercari.solution.util.domain.search.ZipFileUtil;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.SolrSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;
 import org.apache.avro.generic.GenericRecord;

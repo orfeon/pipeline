@@ -1,8 +1,8 @@
-package com.mercari.solution.util.hashicorp;
+package com.mercari.solution.util.cloud.hashicorp;
 
 import com.google.gson.*;
 import com.mercari.solution.util.domain.text.JsonUtil;
-import com.mercari.solution.util.gcp.IAMUtil;
+import com.mercari.solution.util.cloud.google.IAMUtil;
 import org.apache.beam.sdk.values.KV;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

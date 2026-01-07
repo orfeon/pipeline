@@ -1,4 +1,4 @@
-package com.mercari.solution.util.gcp;
+package com.mercari.solution.util.cloud.google;
 
 import com.google.bigtable.v2.ColumnRange;
 import com.google.bigtable.v2.RowFilter;

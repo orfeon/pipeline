@@ -3,7 +3,7 @@ package com.mercari.solution.module.source;
 import com.google.firestore.v1.*;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.gcp.FirestoreUtil;
+import com.mercari.solution.util.cloud.google.FirestoreUtil;
 import com.mercari.solution.util.schema.converter.ElementToDocumentConverter;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreIO;

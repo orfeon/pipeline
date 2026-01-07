@@ -1,4 +1,4 @@
-package com.mercari.solution.util.gcp;
+package com.mercari.solution.util.cloud.google;
 
 import org.junit.Assert;
 import org.junit.Test;

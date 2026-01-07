@@ -3,7 +3,7 @@ package com.mercari.solution.util.pipeline.action;
 import com.google.api.gax.longrunning.OperationFuture;
 import com.google.cloud.spanner.*;
 import com.google.spanner.admin.instance.v1.UpdateInstanceMetadata;
-import com.mercari.solution.util.gcp.SpannerUtil;
+import com.mercari.solution.util.cloud.google.SpannerUtil;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

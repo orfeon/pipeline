@@ -1,4 +1,4 @@
-package com.mercari.solution.util.gcp.vertexai;
+package com.mercari.solution.util.cloud.google.vertexai;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;

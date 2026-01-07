@@ -1,6 +1,6 @@
-package com.mercari.solution.util.aws;
+package com.mercari.solution.util.cloud.amazon;
 
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.avro.Schema;
 import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericDatumReader;

@@ -1,7 +1,5 @@
-package com.mercari.solution.util.gcp;
+package com.mercari.solution.util.domain.db;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
@@ -12,16 +10,6 @@ import org.apache.avro.LogicalType;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
-import org.apache.avro.reflect.Nullable;
-import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
-import org.apache.beam.sdk.coders.DefaultCoder;
-import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.dbcp2.BasicDataSource;
-import org.apache.commons.dbcp2.DataSourceConnectionFactory;
-import org.apache.commons.dbcp2.PoolableConnectionFactory;
-import org.apache.commons.dbcp2.PoolingDataSource;
-import org.apache.commons.pool2.impl.GenericObjectPool;
-import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,9 +18,7 @@ import javax.sql.DataSource;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.io.Serializable;
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.sql.*;
 import java.time.LocalDate;

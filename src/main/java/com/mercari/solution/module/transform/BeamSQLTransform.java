@@ -2,8 +2,8 @@ package com.mercari.solution.module.transform;
 
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.gcp.ParameterManagerUtil;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.RowSchemaUtil;
 import com.mercari.solution.util.schema.converter.ElementToRowConverter;
 import com.mercari.solution.util.sql.udf.AggregateFunctions;

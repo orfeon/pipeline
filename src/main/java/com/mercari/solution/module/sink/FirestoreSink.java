@@ -5,7 +5,7 @@ import com.google.firestore.v1.Write;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.gcp.FirestoreUtil;
+import com.mercari.solution.util.cloud.google.FirestoreUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.converter.ElementToDocumentConverter;

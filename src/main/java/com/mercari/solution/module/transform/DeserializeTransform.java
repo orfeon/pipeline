@@ -8,7 +8,7 @@ import com.mercari.solution.module.*;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.schema.converter.JsonToMapConverter;
 import com.mercari.solution.util.schema.converter.AvroToMapConverter;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.Select;
 import com.mercari.solution.util.pipeline.Union;

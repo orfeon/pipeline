@@ -1,6 +1,5 @@
-package com.mercari.solution.util.domain.search;
+package com.mercari.solution.util.domain.db;
 
-import com.mercari.solution.util.gcp.JdbcUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

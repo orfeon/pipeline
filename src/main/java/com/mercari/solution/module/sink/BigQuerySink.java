@@ -7,7 +7,7 @@ import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.ElementCoder;
-import com.mercari.solution.util.gcp.BigQueryUtil;
+import com.mercari.solution.util.cloud.google.BigQueryUtil;
 import com.mercari.solution.util.schema.*;
 import com.mercari.solution.util.schema.converter.*;
 import com.mercari.solution.util.pipeline.Union;

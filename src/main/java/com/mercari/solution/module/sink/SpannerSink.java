@@ -9,7 +9,7 @@ import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;
-import com.mercari.solution.util.gcp.SpannerUtil;
+import com.mercari.solution.util.cloud.google.SpannerUtil;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 import com.mercari.solution.util.schema.converter.ElementToSpannerMutationConverter;
 import org.apache.beam.sdk.Pipeline;

@@ -5,7 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.gcp.SecretManagerUtil;
+import com.mercari.solution.util.cloud.google.SecretManagerUtil;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import freemarker.template.Template;
 import org.joda.time.Instant;

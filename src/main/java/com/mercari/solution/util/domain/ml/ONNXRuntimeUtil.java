@@ -2,7 +2,7 @@ package com.mercari.solution.util.domain.ml;
 
 import ai.onnxruntime.*;
 import com.google.gson.JsonObject;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.beam.sdk.values.KV;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

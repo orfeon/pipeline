@@ -3,7 +3,7 @@ package com.mercari.solution.util.domain.text.template;
 import com.google.auth.oauth2.AccessToken;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.gson.JsonObject;
-import com.mercari.solution.util.gcp.IAMUtil;
+import com.mercari.solution.util.cloud.google.IAMUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

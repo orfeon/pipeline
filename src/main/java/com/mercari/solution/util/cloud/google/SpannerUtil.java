@@ -1,4 +1,4 @@
-package com.mercari.solution.util.gcp;
+package com.mercari.solution.util.cloud.google;
 
 import com.google.api.gax.longrunning.OperationFuture;
 import com.google.api.gax.retrying.RetrySettings;

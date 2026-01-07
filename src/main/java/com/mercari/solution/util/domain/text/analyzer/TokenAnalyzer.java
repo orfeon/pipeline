@@ -1,7 +1,7 @@
 package com.mercari.solution.util.domain.text.analyzer;
 
 import com.ibm.icu.text.*;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import opennlp.tools.chunker.ChunkerModel;
 import opennlp.tools.lemmatizer.LemmatizerModel;
 import opennlp.tools.postag.POSModel;

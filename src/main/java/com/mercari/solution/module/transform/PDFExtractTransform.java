@@ -7,7 +7,7 @@ import com.mercari.solution.util.domain.text.HtmlUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;

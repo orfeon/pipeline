@@ -3,7 +3,7 @@ package com.mercari.solution.module.sink.fileio;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.util.domain.search.Neo4jUtil;
 import com.mercari.solution.util.domain.search.ZipFileUtil;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;

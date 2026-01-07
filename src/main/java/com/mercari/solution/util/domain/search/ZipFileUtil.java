@@ -1,7 +1,7 @@
 package com.mercari.solution.util.domain.search;
 
 import com.mercari.solution.util.TemplateFileNaming;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.transforms.SerializableFunction;

@@ -1,4 +1,4 @@
-package com.mercari.solution.util.gcp;
+package com.mercari.solution.util.cloud.google;
 
 import com.google.auth.Credentials;
 import com.google.auth.oauth2.GoogleCredentials;

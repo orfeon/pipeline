@@ -8,7 +8,7 @@ import com.mercari.solution.module.sink.fileio.SolrSink;
 import com.mercari.solution.util.domain.text.XmlUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.search.ZipFileUtil;
-import com.mercari.solution.util.gcp.StorageUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.*;
 import com.mercari.solution.util.schema.converter.*;

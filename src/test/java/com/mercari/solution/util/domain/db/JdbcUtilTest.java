@@ -1,16 +1,12 @@
-package com.mercari.solution.util.gcp;
+package com.mercari.solution.util.domain.db;
 
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.sql.stmt.PreparedStatementTemplate;
-import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
-import org.apache.commons.codec.binary.Hex;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 

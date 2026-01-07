@@ -9,7 +9,7 @@ import com.google.protobuf.NullValue;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.gcp.FirestoreUtil;
+import com.mercari.solution.util.cloud.google.FirestoreUtil;
 import org.apache.avro.generic.GenericRecord;
 import org.joda.time.Instant;
 

@@ -11,7 +11,7 @@ import com.mercari.solution.config.options.DirectOptions;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.util.FailureUtil;
-import com.mercari.solution.util.gcp.DataflowUtil;
+import com.mercari.solution.util.cloud.google.DataflowUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;

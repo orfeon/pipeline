@@ -2,7 +2,6 @@ package com.mercari.solution.util.domain.db;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.mercari.solution.util.gcp.JdbcUtil;
 
 import java.io.Serializable;
 import java.sql.Connection;

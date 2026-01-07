@@ -3,7 +3,7 @@ package com.mercari.solution.module.sink;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.cloud.crm.AuxiaUtil;
-import com.mercari.solution.util.gcp.PubSubUtil;
+import com.mercari.solution.util.cloud.google.PubSubUtil;
 import com.mercari.solution.util.pipeline.Union;
 import freemarker.template.Template;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
