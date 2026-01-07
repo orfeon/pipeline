@@ -1,4 +1,4 @@
-package com.mercari.solution.api.mcp.prompt;
+package com.mercari.solution.server.mcp.prompt;
 
 import com.google.common.reflect.ClassPath;
 import io.modelcontextprotocol.server.McpServerFeatures;

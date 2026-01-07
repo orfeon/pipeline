@@ -1,4 +1,4 @@
-package com.mercari.solution.api;
+package com.mercari.solution.server.api;
 
 import com.google.dataflow.v1beta3.*;
 import com.google.gson.*;

@@ -1,4 +1,4 @@
-package com.mercari.solution.api.mcp.resource;
+package com.mercari.solution.server.mcp.resource;
 
 import com.google.common.reflect.ClassPath;
 import io.modelcontextprotocol.server.McpServerFeatures;

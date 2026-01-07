@@ -1,4 +1,4 @@
-package com.mercari.solution.api;
+package com.mercari.solution.server.api;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;

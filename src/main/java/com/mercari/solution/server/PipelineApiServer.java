@@ -1,9 +1,8 @@
-package com.mercari.solution;
+package com.mercari.solution.server;
 
-import com.mercari.solution.api.PipelineService;
-import com.mercari.solution.api.ProbeService;
-import com.mercari.solution.api.SchemaService;
-
+import com.mercari.solution.server.api.PipelineService;
+import com.mercari.solution.server.api.ProbeService;
+import com.mercari.solution.server.api.SchemaService;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
@@ -12,7 +11,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.*;
 
 
-public class MPipelineServer extends HttpServlet {
+public class PipelineApiServer extends HttpServlet {
 
     //private ServerLogHandler serverLogHandler;
 

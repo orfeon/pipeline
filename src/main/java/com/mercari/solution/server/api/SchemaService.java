@@ -1,4 +1,4 @@
-package com.mercari.solution.api;
+package com.mercari.solution.server.api;
 
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;

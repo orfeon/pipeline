@@ -1,8 +1,8 @@
-package com.mercari.solution.api.mcp;
+package com.mercari.solution.server;
 
-import com.mercari.solution.api.mcp.prompt.Prompt;
-import com.mercari.solution.api.mcp.resource.Resources;
-import com.mercari.solution.api.mcp.tool.Tool;
+import com.mercari.solution.server.mcp.prompt.Prompt;
+import com.mercari.solution.server.mcp.resource.Resources;
+import com.mercari.solution.server.mcp.tool.Tool;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;

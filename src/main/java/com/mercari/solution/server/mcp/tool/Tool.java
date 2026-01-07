@@ -1,4 +1,4 @@
-package com.mercari.solution.api.mcp.tool;
+package com.mercari.solution.server.mcp.tool;
 
 import com.google.common.reflect.ClassPath;
 import io.modelcontextprotocol.json.McpJsonMapper;

@@ -1,4 +1,4 @@
-package com.mercari.solution.api.mcp.resource;
+package com.mercari.solution.server.mcp.resource;
 
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
