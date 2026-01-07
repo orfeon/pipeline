@@ -1,4 +1,4 @@
-package com.mercari.solution.util.sql.udf;
+package com.mercari.solution.util.domain.sql.beamsql.udf;
 
 import org.apache.beam.sdk.transforms.Combine;
 

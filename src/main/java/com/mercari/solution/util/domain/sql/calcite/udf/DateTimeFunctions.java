@@ -1,4 +1,4 @@
-package com.mercari.solution.util.sql.calcite.udf;
+package com.mercari.solution.util.domain.sql.calcite.udf;
 
 import org.apache.beam.vendor.calcite.v1_40_0.com.google.common.collect.ImmutableMultimap;
 import org.apache.beam.vendor.calcite.v1_40_0.com.google.common.collect.Multimap;

@@ -1,9 +1,9 @@
-package com.mercari.solution.util.sql.calcite;
+package com.mercari.solution.util.domain.sql.calcite;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.CalciteSchemaUtil;
-import com.mercari.solution.util.sql.calcite.udf.DateTimeFunctions;
+import com.mercari.solution.util.domain.sql.calcite.udf.DateTimeFunctions;
 import org.apache.beam.vendor.calcite.v1_40_0.com.google.common.collect.ImmutableMultimap;
 import org.apache.beam.vendor.calcite.v1_40_0.com.google.common.collect.Multimap;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.DataContext;

@@ -1,4 +1,4 @@
-package com.mercari.solution.util.sql.udf;
+package com.mercari.solution.util.domain.sql.beamsql.udf;
 
 import org.apache.beam.vendor.calcite.v1_40_0.com.jayway.jsonpath.JsonPath;
 import org.apache.beam.sdk.extensions.sql.BeamSqlUdf;

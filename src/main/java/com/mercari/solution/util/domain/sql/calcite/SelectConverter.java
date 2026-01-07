@@ -1,4 +1,4 @@
-package com.mercari.solution.util.sql.calcite;
+package com.mercari.solution.util.domain.sql.calcite;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
