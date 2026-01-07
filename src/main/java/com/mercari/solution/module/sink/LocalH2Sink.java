@@ -3,7 +3,7 @@ package com.mercari.solution.module.sink;
 import com.mercari.solution.module.*;
 import com.mercari.solution.module.sink.fileio.H2Sink;
 import com.mercari.solution.util.domain.db.H2Util;
-import com.mercari.solution.util.domain.search.ZipFileUtil;
+import com.mercari.solution.util.domain.file.ZipFileUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.SchemaUtil;
 import org.apache.beam.sdk.io.FileIO;

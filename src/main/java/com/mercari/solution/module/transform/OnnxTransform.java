@@ -22,7 +22,7 @@ import java.util.*;
 
 
 @Transform.Module(name="onnx")
-public class ONNXTransform extends Transform {
+public class OnnxTransform extends Transform {
 
     private static class Parameters {
 

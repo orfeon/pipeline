@@ -4,7 +4,7 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.ToStatementConverter;
 import com.mercari.solution.util.domain.db.H2Util;
-import com.mercari.solution.util.domain.search.ZipFileUtil;
+import com.mercari.solution.util.domain.file.ZipFileUtil;
 import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.sql.stmt.PreparedStatementTemplate;

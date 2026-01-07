@@ -1,7 +1,7 @@
 package com.mercari.solution.util.schema.converter;
 
 import ai.onnxruntime.*;
-import com.mercari.solution.util.domain.ml.ONNXRuntimeUtil;
+import com.mercari.solution.util.domain.ml.onnx.OnnxRuntimeUtil;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.Row;
 
@@ -23,7 +23,7 @@ public class RowToOnnxConverter {
                 final List<Object> values = rows.stream()
                         .map(r -> r.getValue(entry.getKey()))
                         .collect(Collectors.toList());
-                tensors.put(entry.getKey(), ONNXRuntimeUtil.convertTensor(environment, tensorInfo, values));
+                tensors.put(entry.getKey(), OnnxRuntimeUtil.convertTensor(environment, tensorInfo, values));
             } else if(entry.getValue().getInfo() instanceof MapInfo) {
                 final MapInfo mapInfo = (MapInfo) entry.getValue().getInfo();
             } else if(entry.getValue().getInfo() instanceof SequenceInfo) {

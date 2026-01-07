@@ -1,4 +1,4 @@
-package com.mercari.solution.util.domain.text;
+package com.mercari.solution.util.domain.file;
 
 import com.mercari.solution.util.domain.text.analyzer.TokenAnalyzer;
 import org.apache.lucene.analysis.TokenStream;

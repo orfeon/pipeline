@@ -3,7 +3,7 @@ package com.mercari.solution.module.transform;
 import com.google.api.services.storage.Storage;
 import com.google.gson.JsonArray;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.domain.text.HtmlUtil;
+import com.mercari.solution.util.domain.file.HtmlUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.select.SelectFunction;

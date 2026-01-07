@@ -1,4 +1,4 @@
-package com.mercari.solution.util;
+package com.mercari.solution.util.domain.math;
 
 import com.google.gson.Gson;
 

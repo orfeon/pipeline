@@ -1,4 +1,4 @@
-package com.mercari.solution.util.domain.text;
+package com.mercari.solution.util.domain.file;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;

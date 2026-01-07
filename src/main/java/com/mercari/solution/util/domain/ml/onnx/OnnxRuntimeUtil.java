@@ -1,4 +1,4 @@
-package com.mercari.solution.util.domain.ml;
+package com.mercari.solution.util.domain.ml.onnx;
 
 import ai.onnxruntime.*;
 import com.google.gson.JsonObject;
@@ -13,9 +13,9 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class ONNXRuntimeUtil {
+public class OnnxRuntimeUtil {
 
-    private static final Logger LOG = LoggerFactory.getLogger(ONNXRuntimeUtil.class);
+    private static final Logger LOG = LoggerFactory.getLogger(OnnxRuntimeUtil.class);
 
     public static long[] convertShape(
             final ValueInfo valueInfo,

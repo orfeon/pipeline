@@ -1,4 +1,4 @@
-package com.mercari.solution.util.domain.search;
+package com.mercari.solution.util.domain.file;
 
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
