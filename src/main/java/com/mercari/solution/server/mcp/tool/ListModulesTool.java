@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.mercari.solution.server.api.SpecService;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
@@ -18,7 +19,7 @@ import java.util.List;
     title="List Pipeline Modules",
     description= """
         List of pipeline modules available in mercari/pipeline.
-        The response is in JSON format and includes the id and summary as well as the name of the module.
+        The response is in JSON format and includes the id and specs as well as the name of the module.
         By specifying this id in the 'ids' parameter of tool: 'describe-modules', you can check the detailed specification of the module.
         """,
     inputSchema = """
@@ -104,7 +105,7 @@ public class ListModulesTool implements Tool {
 
     @Override
     public void init(ServletContext servletContext) {
-
+        SpecService.init();
     }
 
     @Override
@@ -112,6 +113,15 @@ public class ListModulesTool implements Tool {
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
 
+        if (!request.arguments().containsKey("type")) {
+            return McpSchema.CallToolResult.builder().addTextContent("list-module mcp tool requires type parameter").isError(true).build();
+
+        }
+        final String type = request.arguments().get("type").toString();
+        final JsonArray jsonArray = SpecService.getModuleAbstracts(type);
+        return McpSchema.CallToolResult.builder().addTextContent(jsonArray.toString()).isError(false).build();
+
+        /*
         final JsonArray jsonArray = new JsonArray();
         {
             final JsonObject jsonObject = new JsonObject();
@@ -138,6 +148,7 @@ public class ListModulesTool implements Tool {
             jsonArray.add(jsonObject);
         }
         return new McpSchema.CallToolResult(jsonArray.toString(), false);
+         */
     }
 
 }

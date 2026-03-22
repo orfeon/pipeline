@@ -1,12 +1,12 @@
 package com.mercari.solution.util.pipeline;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.ExpressionUtil;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import net.objecthunter.exp4j.Expression;
 import org.apache.avro.util.Utf8;
@@ -301,7 +301,7 @@ public class Filter implements Serializable {
     }
 
     public static ConditionNode parse(final String filterJson) {
-        return parse(new Gson().fromJson(filterJson, JsonElement.class));
+        return parse(JsonUtil.fromJson(filterJson, JsonElement.class));
     }
 
     public static ConditionNode parse(final JsonElement jsonElement) {

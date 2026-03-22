@@ -6,9 +6,19 @@
 
     <display-name>Mercari Pipeline Server</display-name>
 
+    <welcome-file-list>
+        <welcome-file>index.jsp</welcome-file>
+    </welcome-file-list>
+
     <servlet>
         <servlet-name>MPipelineApiServer</servlet-name>
         <servlet-class>com.mercari.solution.server.PipelineApiServer</servlet-class>
+        <async-supported>true</async-supported>
+    </servlet>
+
+    <servlet>
+        <servlet-name>MPipelineWebhookServer</servlet-name>
+        <servlet-class>com.mercari.solution.server.PipelineWebhookServer</servlet-class>
         <async-supported>true</async-supported>
     </servlet>
 
@@ -20,17 +30,12 @@
 
     <servlet-mapping>
         <servlet-name>MPipelineApiServer</servlet-name>
-        <url-pattern>/api/pipeline/*</url-pattern>
+        <url-pattern>/api/*</url-pattern>
     </servlet-mapping>
 
     <servlet-mapping>
-        <servlet-name>MPipelineApiServer</servlet-name>
-        <url-pattern>/api/schema/*</url-pattern>
-    </servlet-mapping>
-
-    <servlet-mapping>
-        <servlet-name>MPipelineApiServer</servlet-name>
-        <url-pattern>/probe/*</url-pattern>
+        <servlet-name>MPipelineWebhookServer</servlet-name>
+        <url-pattern>/webhook/*</url-pattern>
     </servlet-mapping>
 
     <servlet-mapping>

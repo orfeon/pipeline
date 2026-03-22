@@ -49,7 +49,7 @@ public class CreateSource extends Source {
         private DateTimeUtil.TimeUnit rateUnit;
 
         private JsonArray select;
-        private String flattenField;
+        private String flatten;
 
         private Integer splitSize;
 
@@ -65,7 +65,7 @@ public class CreateSource extends Source {
                 if(type == null) {
                     errorMessages.add("create source module[" + name + "] requires type parameter in ['int','long','date','time','timestamp','string','element']");
                 } else {
-                    switch (Schema.Type.valueOf(type)) {
+                    switch (Schema.Type.of(type)) {
                         case element -> {
                             if(schema == null) {
                                 errorMessages.add("create source module[" + name + "].schema must not be null if type is element");
@@ -121,7 +121,7 @@ public class CreateSource extends Source {
                 this.rate = 0L;
             } else {
                 if(this.rateUnit == null) {
-                    this.rateUnit = DateTimeUtil.TimeUnit.minute;
+                    this.rateUnit = DateTimeUtil.TimeUnit.second;
                 }
             }
 
@@ -160,14 +160,16 @@ public class CreateSource extends Source {
             final DoFn<Long, MElement> elementDoFn = new StreamingElementDoFn(
                     getJobName(), getName(),
                     elementFieldType, parameters, getTimestampAttribute(), getLoggings(),
-                    outputSchema, selectFunctions, parameters.flattenField,
+                    outputSchema, selectFunctions, parameters.flatten,
                     outputTag, failuresTag, getFailFast());
+
             GenerateSequence generateSequence = GenerateSequence
                     .from(0)
                     .withRate(parameters.rate, DateTimeUtil.getDuration(parameters.rateUnit, 1L));
             if(elementSize > 0) {
                 generateSequence = generateSequence.to(elementSize);
             }
+
             outputs = begin
                     .apply("GenerateSequence", generateSequence)
                     .apply("CreateElement", ParDo
@@ -177,7 +179,7 @@ public class CreateSource extends Source {
             final DoFn<Long, MElement> elementDoFn = new BatchElementDoFn(
                     getJobName(), getName(),
                     elementFieldType, parameters, getTimestampAttribute(), elementSize, getLoggings(),
-                    outputSchema, selectFunctions, parameters.flattenField,
+                    outputSchema, selectFunctions, parameters.flatten,
                     outputTag, failuresTag, getFailFast());
             outputs = begin
                     .apply("Seed", Create.of(0L).withCoder(VarLongCoder.of()))
@@ -195,12 +197,16 @@ public class CreateSource extends Source {
             default -> Schema.FieldType.type(parameters.elementType);
         };
         final Schema elementSchema = createElementSchema(elementFieldType);
-        final Schema outputSchema;
+        Schema outputSchema;
         if(parameters.select == null || parameters.select.isEmpty()) {
             outputSchema = elementSchema;
         } else {
             final List<SelectFunction> selectFunctions = SelectFunction.of(parameters.select, elementSchema.getFields());
             outputSchema = SelectFunction.createSchema(selectFunctions);
+        }
+
+        if(parameters.flatten != null) {
+            outputSchema = Unnest.createSchema(outputSchema.getFields(), parameters.flatten);
         }
 
         final DataType outputType = Optional
@@ -324,11 +330,7 @@ public class CreateSource extends Source {
                 // output
                 for(final MElement output : outputs) {
                     final MElement output_ = output.convert(outputSchema);
-                    if (timestampAttribute != null) {
-                        outputReceiver.outputWithTimestamp(output_, eventTime);
-                    } else {
-                        outputReceiver.output(output_);
-                    }
+                    outputReceiver.outputWithTimestamp(output_, eventTime);
                     Logging.log(LOG, logging, "output", output);
                 }
             } catch (final Throwable e) {
@@ -391,9 +393,10 @@ public class CreateSource extends Source {
             if(offsetRange == null) {
                 return;
             }
+            org.joda.time.Instant currentTimestamp = org.joda.time.Instant.now();
             long position = offsetRange.getFrom();
             while (tracker.tryClaim(position)) {
-                super.process(position, c.timestamp(), outputReceivers.get(outputTag), outputReceivers.get(failuresTag));
+                super.process(position, currentTimestamp, outputReceivers.get(outputTag), outputReceivers.get(failuresTag));
                 position++;
             }
         }

@@ -12,29 +12,30 @@
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.70.0</beam.version>
+    <beam.version>2.71.0</beam.version>
 
-    <snakeyaml.version>2.5</snakeyaml.version>
+    <snakeyaml.version>2.6</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
     <exp4j.version>0.4.8</exp4j.version>
     <commons-math3.version>3.6.1</commons-math3.version>
     <lucene.version>10.3.2</lucene.version>
-    <pdfbox.version>3.0.6</pdfbox.version>
+    <pdfbox.version>3.0.7</pdfbox.version>
     <jsoup.version>1.22.1</jsoup.version>
     <djl.version>0.36.0</djl.version>
 
     <hbase.version>2.6.4</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
-    <postgresql-connector.version>42.7.8</postgresql-connector.version>
+    <postgresql-connector.version>42.7.10</postgresql-connector.version>
     <sqlserver-connector.version>13.2.1.jre11</sqlserver-connector.version>
-    <alloydb-connector.version>1.2.9</alloydb-connector.version>
-    <jdbc-socket-factory.version>1.27.1</jdbc-socket-factory.version>
+    <alloydb-connector.version>1.2.10</alloydb-connector.version>
+    <jdbc-socket-factory.version>1.28.1</jdbc-socket-factory.version>
     <hikaricp.version>7.0.2</hikaricp.version>
     <h2.version>2.4.240</h2.version>
-    <drive.version>v3-rev20251210-2.0.0</drive.version>
+    <drive.version>v3-rev20260220-2.0.0</drive.version>
+    <sheets.version>v4-rev20251110-2.0.0</sheets.version>
 
-    <onnxruntime.version>1.23.2</onnxruntime.version>
-    <onnx.version>1.18.0-1.5.12</onnx.version>
+    <onnxruntime.version>1.24.3</onnxruntime.version>
+    <onnx.version>1.20.1-1.5.13</onnx.version>
 
     <slf4j.version>2.0.16</slf4j.version>
     <junit.version>4.13.1</junit.version>
@@ -46,8 +47,8 @@
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
 
-    <jetty.version>12.1.5</jetty.version>
-    <mcp.version>0.17.0</mcp.version>
+    <jetty.version>12.1.6</jetty.version>
+    <mcp.version>1.0.0</mcp.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -450,10 +451,12 @@
       <artifactId>beam-sdks-java-io-parquet</artifactId>
     </dependency>
 
+    <!--
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-iceberg</artifactId>
     </dependency>
+    -->
 
     <!--
     <dependency>
@@ -589,6 +592,13 @@
       <groupId>com.google.apis</groupId>
       <artifactId>google-api-services-drive</artifactId>
       <version>${drive.version}</version>
+    </dependency>
+
+    <!-- https://mvnrepository.com/artifact/com.google.apis/google-api-services-sheets -->
+    <dependency>
+      <groupId>com.google.apis</groupId>
+      <artifactId>google-api-services-sheets</artifactId>
+      <version>${sheets.version}</version>
     </dependency>
 
     <!-- Databases -->

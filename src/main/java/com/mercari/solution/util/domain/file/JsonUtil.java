@@ -1,6 +1,8 @@
 package com.mercari.solution.util.domain.file;
 
+import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import org.apache.beam.vendor.calcite.v1_40_0.com.jayway.jsonpath.Configuration;
@@ -13,6 +15,7 @@ import org.apache.beam.vendor.calcite.v1_40_0.com.jayway.jsonpath.spi.mapper.Jac
 import org.apache.beam.vendor.calcite.v1_40_0.com.jayway.jsonpath.spi.mapper.MappingProvider;
 import org.apache.beam.sdk.values.KV;
 
+import java.lang.reflect.Type;
 import java.util.*;
 
 public class JsonUtil {
@@ -110,6 +113,35 @@ public class JsonUtil {
         }
 
         return dc.jsonString();
+    }
+
+    public static Gson createDefaultGson() {
+        return new GsonBuilder()
+                .serializeNulls()
+                .create();
+    }
+
+    public static <T> T fromJson(String jsonString, Class<T> clazz) {
+        final Gson gson = createDefaultGson();
+        return gson.fromJson(jsonString, clazz);
+    }
+
+    public static <T> T fromJson(JsonObject jsonString, Class<T> clazz) {
+        final Gson gson = createDefaultGson();
+        return gson.fromJson(jsonString, clazz);
+    }
+
+    public static <T> String toJson(T object) {
+        final Gson gson = createDefaultGson();
+        return gson.toJson(object);
+    }
+
+    public static <T> T copy(T object) {
+        final Gson gson = createDefaultGson();
+        final String json = gson.toJson(object, object.getClass());
+        final Type mapType = new TypeToken<Map<String, Object>>(){}.getType();
+        return gson.fromJson(json, mapType);
+
     }
 
 }

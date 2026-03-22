@@ -119,8 +119,10 @@ public class BeamSQLTransform extends Transform {
 
         PCollectionTuple tuple = PCollectionTuple.empty(inputs.getPipeline());
         for(final Map.Entry<String, MCollection> entry : inputs.asCollectionMap().entrySet()) {
-            final Schema schema = entry.getValue().getSchema();
+            Schema schema = entry.getValue().getSchema();
             schema.setup();
+            schema = convertSchema(schema);
+            schema.setup(DataType.ROW);
 
             final TupleTag<Row> outputTag = new TupleTag<>() {};
             final TupleTag<BadRecord> failuresTag = new TupleTag<>() {};
@@ -276,6 +278,24 @@ public class BeamSQLTransform extends Transform {
 
         }
 
+    }
+
+    private static Schema convertSchema(Schema schema) {
+        var builder = Schema.builder();
+        for(final Schema.Field field : schema.getFields()) {
+            builder.withField(field.getName(), convertFieldType(field.getFieldType()));
+        }
+        return builder.build();
+    }
+
+    private static Schema.FieldType convertFieldType(Schema.FieldType fieldType) {
+        return switch (fieldType.getType()) {
+            case enumeration -> Schema.FieldType.STRING.withNullable(fieldType.getNullable());
+            case element -> Schema.FieldType.element(convertSchema(fieldType.getElementSchema()));
+            case array -> Schema.FieldType.array(convertFieldType(fieldType.getArrayValueType()));
+            case map -> Schema.FieldType.map(convertFieldType(fieldType.getMapValueType()));
+            default -> fieldType;
+        };
     }
 
 }
