@@ -224,14 +224,14 @@ public class DocumentSchemaUtil {
             case DOUBLE_VALUE -> Double.valueOf(value.getDoubleValue()).longValue();
             case STRING_VALUE -> {
                 try {
-                    yield Long.parseLong(value.getStringValue());
+                    yield Long.parseLong(value.getStringValue   ());
                 } catch (Exception e) {
                     yield null;
                 }
             }
             case BYTES_VALUE, TIMESTAMP_VALUE, GEO_POINT_VALUE,
                  REFERENCE_VALUE, MAP_VALUE, ARRAY_VALUE,
-                 FUNCTION_VALUE, PIPELINE_VALUE, FIELD_REFERENCE_VALUE,
+                 FUNCTION_VALUE, PIPELINE_VALUE, VARIABLE_REFERENCE_VALUE, FIELD_REFERENCE_VALUE,
                  VALUETYPE_NOT_SET, NULL_VALUE -> null;
         };
     }

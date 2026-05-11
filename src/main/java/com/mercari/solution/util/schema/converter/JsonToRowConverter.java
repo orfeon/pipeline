@@ -73,13 +73,13 @@ public class JsonToRowConverter {
     public static boolean validateSchema(final Schema schema, final JsonObject jsonObject) {
         for(final Map.Entry<String,JsonElement> entry : jsonObject.entrySet()) {
             if(!schema.hasField(entry.getKey())) {
-                LOG.error("Validation error: json field: " + entry.getKey() + " is not present in schema.");
+                LOG.error("Validation error: json field: {} is not present in schema.", entry.getKey());
                 return false;
             }
             final Schema.Field field = schema.getField(entry.getKey());
             final JsonElement element = entry.getValue();
-            if(field.getType().getNullable() != null && !field.getType().getNullable() && element.isJsonNull()) {
-                LOG.error("Validation error: json field: " + entry.getKey() + " is null but schema is not nullable");
+            if(!field.getType().getNullable() && element.isJsonNull()) {
+                LOG.error("Validation error: json field: {} is null but schema is not nullable", entry.getKey());
                 return false;
             }
             if(element.isJsonNull()) {
@@ -88,7 +88,7 @@ public class JsonToRowConverter {
             switch (field.getType().getTypeName()) {
                 case ROW: {
                     if(!element.isJsonObject()) {
-                        LOG.error("Validation error: json field: " + entry.getKey() + " is not JsonObject. element: " + element);
+                        LOG.error("Validation error: json field: {} is not JsonObject. element: {}", entry.getKey(), element);
                         return false;
                     }
                     if(!validateSchema(field.getType().getRowSchema(), element.getAsJsonObject())) {
@@ -99,14 +99,14 @@ public class JsonToRowConverter {
                 case ITERABLE:
                 case ARRAY: {
                     if(!element.isJsonArray()) {
-                        LOG.error("Validation error: json field: " + entry.getKey() + " is not JsonArray. element: " + element);
+                        LOG.error("Validation error: json field: {} is not JsonArray. element: {}", entry.getKey(), element);
                         return false;
                     }
                     break;
                 }
                 default: {
                     if(!element.isJsonPrimitive()) {
-                        LOG.error("Validation error: json field: " + entry.getKey() + " is not JsonPrimitive. element: " + element);
+                        LOG.error("Validation error: json field: {} is not JsonPrimitive. element: {}", entry.getKey(), element);
                         return false;
                     }
                     break;
