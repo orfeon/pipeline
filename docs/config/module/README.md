@@ -10,6 +10,8 @@
 | [bigquery](source/bigquery.md)   | ○     | ○         | Import data from BigQuery with a specified query or table          |
 | [spanner](source/spanner.md)     | ○     | ○         | Import data from Cloud Spanner with a specified query or table     |
 | [jdbc](source/jdbc.md)           | ○     | ○(TODO)   | Import data from RDB using JDBC connector with a specified query   |
+| [postgres](source/postgres.md)   | ○     | -         | Import data from PostgreSQL using COPY BINARY format in parallel   |
+| [tidb](source/tidb.md)           | ○     | -         | Import data from TiDB in parallel using TiKV region based split    |
 | [firestore](source/firestore.md) | ○     | ○(TODO)   | Import data from Cloud Firestore with a specified filter condition |
 | [datastore](source/datastore.md) | ○     | ○(TODO)   | Import data from Cloud Datastore with a specified gql              |
 | [bigtable](source/bigtable.md)   | ○     | ○(TODO)   | Import data from Cloud Bigtable with a specified condition         |
@@ -40,6 +42,8 @@
 | [bigquery](sink/bigquery.md)             | ○     | ○         | Inserting Data into BigQuery Table                         |
 | [spanner](sink/spanner.md)               | ○     | ○         | Inserting Data into Cloud Spanner Table                    |
 | [jdbc](sink/jdbc.md)                     | ○     | ○(TODO)   | Inserting Data into RDB table using JDBC connector         |
+| [postgres](sink/postgres.md)             | ○     | ○(TODO)   | Inserting Data into PostgreSQL table using COPY BINARY     |
+| [tidb](sink/tidb.md)                     | ○     | ○         | Inserting Data into TiDB (jdbc / load data / import into)  |
 | [firestore](sink/firestore.md)           | ○     | ○         | Inserting Data into Cloud Firestore Collection             |
 | [datastore](sink/datastore.md)           | ○     | ○         | Inserting Data into Cloud Datastore kind                   |
 | [bigtable](sink/bigtable.md)             | ○     | ○         | Inserting Data into Cloud Bigtable table                   |

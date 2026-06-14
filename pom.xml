@@ -614,19 +614,19 @@
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/com.mysql/mysql-connector-j -->
+    <!-- compile scope to use the LOAD DATA LOCAL INFILE stream API in the tidb sink module -->
     <dependency>
       <groupId>com.mysql</groupId>
       <artifactId>mysql-connector-j</artifactId>
       <version>${mysql-connector.version}</version>
-      <scope>runtime</scope>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.postgresql/postgresql -->
+    <!-- compile scope to use CopyManager API in postgres source/sink modules -->
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
       <version>${postgresql-connector.version}</version>
-      <scope>runtime</scope>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc -->
