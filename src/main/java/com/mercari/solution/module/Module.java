@@ -136,7 +136,7 @@ public abstract class Module<T extends PInput> extends PTransform<T, MCollection
                 .ofNullable(config.getFailFast())
                 .orElseGet(() -> !OptionUtil.isStreaming(options));
         this.failureSinks = Optional
-                .ofNullable(config.getFailures())
+                .ofNullable(config.getFailureSinks())
                 .map(l -> l.stream().map(ll -> FailureSink.create(ll, config.getName(), options)).toList())
                 .orElseGet(ArrayList::new);
         this.outputFailure = Optional
@@ -182,7 +182,7 @@ public abstract class Module<T extends PInput> extends PTransform<T, MCollection
                 return expand(input, errorHandler);
             }
         } else {
-            try(final MErrorHandler errorHandler = MErrorHandler.empty()) {
+            try(final MErrorHandler errorHandler = MErrorHandler.dummy(input.getPipeline())) {
                 return expand(input, errorHandler);
             }
         }

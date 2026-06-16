@@ -72,6 +72,8 @@ public class MMutation {
             case REPLACE -> Op.REPLACE;
             case INSERT_OR_UPDATE -> Op.UPSERT;
             case DELETE -> Op.DELETE;
+            case ACK -> Op.ACK;
+            case SEND -> Op.SEND;
         };
         return new MMutation(DataType.MUTATION, op, table, commitTimestampMicros, sequence, mutation);
     }
@@ -124,7 +126,9 @@ public class MMutation {
         UPDATE(2),
         REPLACE(3),
         UPSERT(4),
-        DELETE(5);
+        DELETE(5),
+        ACK(6),
+        SEND(7);
 
         private final int id;
 

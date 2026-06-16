@@ -2,7 +2,7 @@ package com.mercari.solution.module.sink.fileio;
 
 import com.mercari.solution.module.DataType;
 import com.mercari.solution.module.MElement;
-import com.mercari.solution.module.sink.StorageSink;
+import com.mercari.solution.util.domain.file.FileUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
 import org.apache.avro.Schema;
@@ -24,7 +24,7 @@ import java.util.Map;
 public class AvroSink implements FileIO.Sink<KV<String, MElement>> {
 
     private final String jsonSchema;
-    private final StorageSink.CodecName codecName;
+    private final FileUtil.CodecName codecName;
     private final Map<String, String> metadata;
     private final boolean fitSchema;
 
@@ -33,7 +33,7 @@ public class AvroSink implements FileIO.Sink<KV<String, MElement>> {
 
     public static AvroSink of(
             final com.mercari.solution.module.Schema schema,
-            final StorageSink.CodecName codecName,
+            final FileUtil.CodecName codecName,
             final boolean fitSchema) {
 
         return new AvroSink(schema.getAvroSchema().toString(), codecName, fitSchema);
@@ -41,7 +41,7 @@ public class AvroSink implements FileIO.Sink<KV<String, MElement>> {
 
     AvroSink(
             final String jsonSchema,
-            final StorageSink.CodecName codecName,
+            final FileUtil.CodecName codecName,
             final boolean fitSchema) {
 
         this.jsonSchema = jsonSchema;

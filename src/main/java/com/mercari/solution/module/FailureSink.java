@@ -12,7 +12,9 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
@@ -227,6 +229,26 @@ public abstract class FailureSink extends PTransform<PCollection<BadRecord>, PDo
                 input.apply(sink);
             }
             return PDone.in(pipeline);
+        }
+    }
+
+    public static class LogFailureSinks extends PTransform<PCollection<BadRecord>, PDone> {
+        @Override
+        public PDone expand(PCollection<BadRecord> input) {
+            final Pipeline pipeline = input.getPipeline();
+            input.apply("Logging", ParDo.of(new LogDoFn()));
+            return PDone.in(pipeline);
+        }
+
+        private static class LogDoFn extends DoFn<BadRecord, Void> {
+            @ProcessElement
+            public void processElement(final ProcessContext c) {
+                final BadRecord record = c.element();
+                if(record == null) {
+                    return;
+                }
+                LOG.error("BadRecord: {}", record);
+            }
         }
     }
 

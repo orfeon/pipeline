@@ -8,6 +8,7 @@ import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.storage.Storage;
+import com.google.api.services.storage.model.Bucket;
 import com.google.api.services.storage.model.RewriteResponse;
 import com.google.api.services.storage.model.StorageObject;
 import com.google.auth.Credentials;
@@ -16,6 +17,9 @@ import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.hadoop.util.ChainingHttpRequestInitializer;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.ByteStreams;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import org.apache.avro.Schema;
 import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericDatumReader;
@@ -29,12 +33,16 @@ import org.apache.parquet.io.InputFile;
 import org.apache.parquet.io.SeekableInputStream;
 
 import java.io.*;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class StorageUtil {
+
+    private static final String ENDPOINT_TEST_PERMISSIONS = "https://storage.googleapis.com/storage/v1/b/%s/iam/testPermissions?permissions=%s";
 
     public static Storage storage() {
         final HttpTransport transport = new NetHttpTransport();
@@ -227,6 +235,27 @@ public class StorageUtil {
         }
     }
 
+    public static boolean existsBucket(final String gcsPath) {
+        return existsBucket(storage(), gcsPath);
+    }
+
+    public static boolean existsBucket(final Storage storage, final String gcsPath) {
+        if(gcsPath == null || !gcsPath.startsWith("gs://")) {
+            return false;
+        }
+        final String[] paths = parseGcsPath(gcsPath);
+        try {
+            final String bucketName = paths[0];
+            final Bucket bucket = storage.buckets().get(bucketName).execute();
+            if(bucket == null) {
+                return false;
+            }
+            return !bucket.isEmpty();
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     public static void copy(final Storage storage, final String sourceGcsPath, final String destinationGcsPath) throws IOException {
         copy(storage, sourceGcsPath, destinationGcsPath, null);
     }
@@ -414,6 +443,20 @@ public class StorageUtil {
         return paths;
     }
 
+    public static String getBucketName(String gcsPath) {
+        if(gcsPath == null) {
+            return null;
+        }
+        if(!gcsPath.startsWith("gs://")) {
+            throw new IllegalArgumentException("gcsPath must start with gs://");
+        }
+        final String[] paths = gcsPath.replaceAll("gs://", "").split("/");
+        if(paths.length < 2) {
+            throw new IllegalArgumentException("Illegal gcsPath: " + gcsPath);
+        }
+        return paths[0];
+    }
+
     public static String getFilename(String gcsPath) {
         if(gcsPath == null) {
             return null;
@@ -428,6 +471,47 @@ public class StorageUtil {
         return paths[paths.length - 1];
     }
 
+    public static boolean checkBucketPermissions(
+            final String bucketName,
+            final Collection<String> permissions) {
+        final String permission = String.join(",", permissions);
+        final String url = String.format(
+                ENDPOINT_TEST_PERMISSIONS,
+                bucketName, permission
+        );
+        try(final HttpClient client = HttpClient.newHttpClient()) {
+            final String bearerToken = IAMUtil.getTokenValue();
+            final HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .GET()
+                    .header("Authorization", "Bearer " + bearerToken)
+                    .build();
+            final HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            final int statusCode = response.statusCode();
+            final String responseBody = response.body();
+            if (statusCode == 200) {
+                final JsonObject responseBodyJson = JsonUtil.fromJson(responseBody, JsonObject.class);
+                if(!responseBodyJson.has("permissions")) {
+                    return false;
+                }
+                final JsonElement permissionsElement = responseBodyJson.get("permissions");
+                if(!permissionsElement.isJsonArray()) {
+                    return false;
+                }
+                final Set<String> permissionsTexts = new HashSet<>();
+                for(JsonElement element : permissionsElement.getAsJsonArray()) {
+                    permissionsTexts.add(element.getAsString());
+                }
+                return permissions.containsAll(permissionsTexts);
+            } else if (statusCode == 403) {
+                return false;
+            } else {
+                return false;
+            }
+        } catch (final IOException | InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     public static class ParquetStream implements InputFile {
         private final byte[] data;

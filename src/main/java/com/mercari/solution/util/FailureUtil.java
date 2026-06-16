@@ -287,6 +287,93 @@ public class FailureUtil {
     }
 
     public static Schema createBadRecordSchema() {
+        return AvroSchemaUtil.convertSchema("""
+                {
+                  "type" : "record",
+                  "name" : "BadRecord",
+                  "fields" : [
+                    {
+                      "name" : "job",
+                      "type" : "string",
+                      "order" : "ignore"
+                    },
+                    {
+                      "name" : "module",
+                      "type" : "string",
+                      "order" : "ignore"
+                    },
+                    {
+                      "name" : "record",
+                      "type" : [
+                        {
+                          "type" : "record",
+                          "name" : "Record",
+                          "fields" : [
+                            {
+                              "name" : "coder",
+                              "type" : [ "string", "null" ],
+                              "order" : "ignore"
+                            },
+                            {
+                              "name" : "json",
+                              "type" : [ "string", "null" ],
+                              "order" : "ignore"
+                            },
+                            {
+                              "name" : "bytes",
+                              "type" : [ "bytes", "null" ],
+                              "order" : "ignore"
+                            }
+                          ]
+                        }, "null" ],
+                      "order" : "ignore"
+                    },
+                    {
+                      "name" : "failure",
+                      "type" : [
+                        {
+                          "type" : "record",
+                          "name" : "Failure",
+                          "fields" : [
+                            {
+                              "name" : "description",
+                              "type" : [ "string", "null" ],
+                              "order" : "ignore"
+                            },
+                            {
+                              "name" : "exception",
+                              "type" : [ "string", "null" ],
+                              "order" : "ignore"
+                            },
+                            {
+                              "name" : "stacktrace",
+                              "type" : [ "string", "null" ],
+                              "order" : "ignore"
+                            }
+                          ]
+                        }, "null" ],
+                      "order" : "ignore"
+                    },
+                    {
+                      "name" : "timestamp",
+                      "type" : {
+                        "type" : "long",
+                        "logicalType" : "timestamp-micros"
+                      },
+                      "order" : "ignore"
+                    },
+                    {
+                      "name" : "eventtime",
+                      "type" : {
+                        "type" : "long",
+                        "logicalType" : "timestamp-micros"
+                      },
+                      "order" : "ignore"
+                    }
+                  ]
+                }
+                """);
+        /*
         try (final InputStream is = FailureUtil.class.getResourceAsStream(RESOURCE_BAD_RECORD_AVRO_SCHEMA_PATH)) {
             if(is == null) {
                 LOG.info("BadRecord avro file is not found: " + RESOURCE_BAD_RECORD_AVRO_SCHEMA_PATH);
@@ -302,6 +389,7 @@ public class FailureUtil {
         } catch (final IOException e) {
             throw new IllegalArgumentException("Not found event descriptor file", e);
         }
+         */
     }
 
 }

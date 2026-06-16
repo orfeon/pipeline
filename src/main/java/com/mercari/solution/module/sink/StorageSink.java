@@ -4,6 +4,7 @@ import com.mercari.solution.module.*;
 import com.mercari.solution.module.sink.fileio.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.domain.file.FileUtil;
 import com.mercari.solution.util.pipeline.Union;
 import freemarker.template.Template;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -32,15 +33,15 @@ public class StorageSink extends Sink {
 
     private static final Logger LOG = LoggerFactory.getLogger(StorageSink.class);
 
-    private static class Parameters implements Serializable {
+    public static class Parameters implements Serializable {
 
         private String output;
-        private WriteFormat format;
+        private FileUtil.Format format;
         private String suffix;
         private String tempDirectory;
         private Integer numShards;
         private Compression compression;
-        private CodecName codec;
+        private FileUtil.CodecName codec;
         private Boolean noSpilling;
 
         // csv
@@ -51,11 +52,23 @@ public class StorageSink extends Sink {
         // inner use
         private List<String> outputTemplateArgs;
 
-
-        private void validate() {
+        public Parameters validate() {
             final List<String> errorMessages = new ArrayList<>();
             if(this.output == null) {
                 errorMessages.add("parameters.output must not be null");
+            } else {
+                if(this.output.startsWith("gs://")) {
+                    /*
+                    final String bucketName = StorageUtil.getBucketName(this.output);
+                    if(!TemplateUtil.isTemplateText(bucketName) && !StorageUtil.existsBucket(this.output)) {
+                        errorMessages.add("parameters.output[" + this.output + "] bucket does not exist or is not accessible.");
+                    }
+                    if(!StorageUtil.checkBucketPermissions(bucketName, Set.of("storage.objects.create"))) {
+                        errorMessages.add("parameters.output[" + this.output + "] bucket requires write permission for worker service account");
+                    }
+
+                     */
+                }
             }
             if(this.format == null) {
                 errorMessages.add("parameters.format must not be null");
@@ -64,14 +77,15 @@ public class StorageSink extends Sink {
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
+            return this;
         }
 
-        private void setDefaults() {
+        public Parameters setDefaults() {
             if(this.suffix == null) {
                 this.suffix = "";
             }
             if(this.codec == null) {
-                this.codec = CodecName.SNAPPY;
+                this.codec = FileUtil.CodecName.SNAPPY;
             }
             if(this.noSpilling == null) {
                 this.noSpilling = false;
@@ -87,41 +101,17 @@ public class StorageSink extends Sink {
             if(this.bom == null) {
                 this.bom = false;
             }
+            return this;
         }
     }
-
-    private enum WriteFormat {
-        csv,
-        json,
-        avro,
-        parquet
-    }
-
-    public enum CodecName {
-        // common
-        SNAPPY,
-        ZSTD,
-        UNCOMPRESSED,
-        // avro only
-        BZIP2,
-        DEFLATE,
-        XZ,
-        // parquet only
-        LZO,
-        LZ4,
-        LZ4_RAW,
-        BROTLI,
-        GZIP
-    }
-
 
     public MCollectionTuple expand(
             final MCollectionTuple inputs,
             final MErrorHandler errorHandler) {
 
-        final Parameters parameters = getParameters(Parameters.class);
-        parameters.validate();
-        parameters.setDefaults();
+        final Parameters parameters = getParameters(Parameters.class)
+                .validate()
+                .setDefaults();
 
         final PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()
@@ -129,6 +119,21 @@ public class StorageSink extends Sink {
                         .withStrategy(getStrategy()));
         final Schema inputSchema = Union.createUnionSchema(inputs);
         final Schema outputSchema = Optional.ofNullable(getSchema()).orElse(inputSchema);
+
+        final PCollection<MElement> outputFiles = expand(
+                getName(), parameters, input, inputSchema, outputSchema, errorHandler);
+
+        return MCollectionTuple
+                .done(PDone.in(inputs.getPipeline()));
+    }
+
+    public static PCollection<MElement> expand(
+            final String name,
+            final Parameters parameters,
+            final PCollection<MElement> input,
+            final Schema inputSchema,
+            final Schema outputSchema,
+            final MErrorHandler errorHandler) {
 
         final String object = getObject(parameters.output);
 
@@ -138,7 +143,7 @@ public class StorageSink extends Sink {
 
         final PCollection<KV<String, MElement>> withKey = input
                 .apply("WithObjectName", ParDo.of(new ObjectNameDoFn(
-                        this.getName(), object, inputSchema, outputTemplateArgs)))
+                        name, object, inputSchema, outputTemplateArgs)))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), input.getCoder()));
 
         final FileIO.Sink<KV<String, MElement>> sink = switch (parameters.format) {
@@ -169,19 +174,18 @@ public class StorageSink extends Sink {
         final WriteFilesResult writeFilesResult;
         if(TemplateUtil.isTemplateText(object)) {
             final FileIO.Write<String, KV<String, MElement>> write = createDynamicWrite(parameters, errorHandler);
+            errorHandler.apply(write);
             writeFilesResult = withKey.apply(label + "Dynamic", write.via(sink));
         } else {
             final FileIO.Write<Void, KV<String, MElement>> write = createWrite(parameters, errorHandler);
+            errorHandler.apply(write);
             writeFilesResult = withKey.apply(label, write.via(sink));
         }
 
         final PCollection<KV> rows = writeFilesResult.getPerDestinationOutputFilenames();
-        PCollection<MElement> outputFiles =  rows
-                .apply("Output", ParDo.of(new OutputDoFn(this.getName())))
+        return rows
+                .apply("Output", ParDo.of(new OutputDoFn(name)))
                 .setCoder(ElementCoder.of(OutputDoFn.schema));
-
-        return MCollectionTuple
-                .done(PDone.in(inputs.getPipeline()));
     }
 
     private static FileIO.Write<Void, KV<String, MElement>> createWrite(
