@@ -2,8 +2,10 @@ package com.mercari.solution.util.domain.text.template;
 
 import com.google.auth.oauth2.AccessToken;
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.cloud.ServiceOptions;
 import com.google.gson.JsonObject;
 import com.mercari.solution.util.cloud.google.IAMUtil;
+import com.mercari.solution.util.cloud.google.SecretManagerUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,22 +17,39 @@ public class GcpFunctions {
 
     public String project() {
         try {
-            return Optional
-                    .ofNullable(IAMUtil.getProject())
-                    .orElse("");
+            return ServiceOptions.getDefaultProjectId();
         } catch (final Throwable e) {
             return "";
         }
     }
 
-    public String serviceAccount() {
+    public String account() {
         try {
-            return Optional
-                    .ofNullable(IAMUtil.getServiceAccount())
-                    .orElse("");
+            return IAMUtil.getAccount();
         } catch (final Throwable e) {
             return "";
         }
+    }
+
+
+    public String serviceAccount() {
+        return account();
+    }
+
+    public String secret(String resource) {
+        if(resource == null) {
+            return null;
+        }
+        if(resource.startsWith("secrets/")) {
+            final String project = ServiceOptions.getDefaultProjectId();
+            if(project != null) {
+                resource = String.format("projects/%s/%s", project, resource);
+            }
+        }
+        if(!SecretManagerUtil.isSecretName(resource)) {
+            return null;
+        }
+        return SecretManagerUtil.getSecret(resource).toStringUtf8();
     }
 
     public String accessToken() {
