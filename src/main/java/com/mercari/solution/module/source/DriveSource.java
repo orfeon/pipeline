@@ -7,8 +7,8 @@ import com.google.common.collect.Lists;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
+import com.mercari.solution.util.cloud.google.IAMUtil;
 import com.mercari.solution.util.cloud.google.workspace.DriveUtil;
 import com.mercari.solution.util.cloud.google.workspace.DocsUtil;
 import com.mercari.solution.util.cloud.google.workspace.FormsUtil;
@@ -18,10 +18,10 @@ import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.Unnest;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.values.*;
@@ -50,6 +50,7 @@ public class DriveSource extends Source {
 
         private String export;
         private Boolean content;
+        private DriveUtil.ContentFormat contentFormat;
 
         private JsonElement filter;
         private String flatten;
@@ -79,20 +80,14 @@ public class DriveSource extends Source {
                 }
             }
 
-            if(flatten != null) {
-                if(!"spreadsheet.sheets".equals(flatten)) {
-                    errorMessages.add("parameters.flatten: " + flatten + " must be array type");
-                }
-            }
-
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
         }
 
-        private void setDefaults(final PipelineOptions options) {
+        private void setDefaults() {
             if(user == null) {
-                user = DataflowOptions.getServiceAccount(options);
+                user = IAMUtil.getAccount();
             }
             if(queries == null) {
                 queries = new ArrayList<>();
@@ -112,6 +107,9 @@ public class DriveSource extends Source {
 
             if(content == null) {
                 content = false;
+            }
+            if(contentFormat == null) {
+                contentFormat = DriveUtil.ContentFormat.none;
             }
         }
 
@@ -208,9 +206,11 @@ public class DriveSource extends Source {
 
         final Parameters parameters = getParameters(Parameters.class);
         parameters.validate();
-        parameters.setDefaults(begin.getPipeline().getOptions());
+        parameters.setDefaults();
 
-        final Schema fileSchema = DriveUtil.createFileSchema2(parameters.fields);
+        final Schema fileSchema = DriveUtil.createFileSchema(parameters.fields);
+        final Schema outputSchema = createOutputSchema(parameters, fileSchema);
+        parameters.validate();
 
         final TupleTag<KV<String, KV<String, MElement>>> filesOutputTag = new TupleTag<>() {};
         final TupleTag<KV<String, KV<String, MElement>>> queriesOutputTag = new TupleTag<>() {};
@@ -249,7 +249,6 @@ public class DriveSource extends Source {
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
         final TupleTag<BadRecord> failuresTag = new TupleTag<>() {};
 
-        final Schema outputSchema = createOutputSchema(parameters, fileSchema);
         final PCollectionTuple outputs = files
                 .apply("ReadContent", ParDo
                         .of(new ReadDoFn(parameters, outputSchema, getLoggings(), getFailFast(), filesFailuresTag))
@@ -272,7 +271,14 @@ public class DriveSource extends Source {
                 .withField("presentation", Schema.FieldType.element(SlidesUtil.createSchema()))
                 .withField("form", Schema.FieldType.element(FormsUtil.createSchema()))
                 .build();
+
         if(parameters.flatten != null) {
+            final Schema.Field flattenField = ElementSchemaUtil.getInputField(parameters.flatten, outputSchema.getFields());
+            if(flattenField == null) {
+                throw new IllegalModuleException("parameters.flatten: " + parameters.flatten + " not found in input schema: " + outputSchema);
+            } else if(!Schema.Type.array.equals(flattenField.getFieldType().getType())) {
+                throw new IllegalModuleException("parameters.flatten: " + parameters.flatten + " must be array type. but: " + flattenField.getFieldType());
+            }
             return Unnest
                     .createSchema(outputSchema.getFields(), parameters.flatten)
                     .withType(DataType.AVRO);
@@ -338,6 +344,7 @@ public class DriveSource extends Source {
                     c.output(KV.of(file.getMimeType(), KV.of(parameters.toJsonString(), output)));
                 }
             } catch (final Throwable e) {
+                LOG.error("Failed to get drive file: {}", e.getMessage());
                 final Map<String, Object> map = new HashMap<>();
                 map.put("file", element);
                 final BadRecord badRecord = processError("Failed to get drive file", map, e, failFast);
@@ -419,6 +426,7 @@ public class DriveSource extends Source {
         private final String user;
         private final String export;
         private final boolean content;
+        private final DriveUtil.ContentFormat contentFormat;
 
         private final Schema outputSchema;
 
@@ -439,6 +447,7 @@ public class DriveSource extends Source {
             this.user = parameters.user;
             this.export = parameters.export;
             this.content = parameters.content;
+            this.contentFormat = parameters.contentFormat;
             this.outputSchema = outputSchema;
 
             this.filter = Filter.of(parameters.filter);
@@ -502,7 +511,7 @@ public class DriveSource extends Source {
                         final Map<String, Object> spreadsheetValues;
                         if(content) {
                             final List<String> ranges = Optional.ofNullable(parameters).map(fp -> fp.ranges).orElseGet(ArrayList::new);
-                            spreadsheetValues = SheetsUtil.get(getOrCreateSheets(), fileId, ranges);
+                            spreadsheetValues = SheetsUtil.get(getOrCreateSheets(), fileId, ranges, contentFormat);
                         } else {
                             spreadsheetValues = new HashMap<>();
                         }

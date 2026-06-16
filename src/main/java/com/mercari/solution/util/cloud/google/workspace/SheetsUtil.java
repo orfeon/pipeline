@@ -10,9 +10,10 @@ import com.google.api.services.sheets.v4.Sheets;
 import com.google.api.services.sheets.v4.model.*;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
-import com.google.auth.oauth2.ImpersonatedCredentials;
 import com.google.cloud.hadoop.util.ChainingHttpRequestInitializer;
 import com.google.common.collect.ImmutableList;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
 import org.apache.commons.csv.CSVFormat;
@@ -43,38 +44,23 @@ public class SheetsUtil {
     }
 
     public static Sheets sheets(final String targetPrincipalAccount, String... args) {
-
-        if(args.length == 0) {
-            args = new String[]{DriveScopes.DRIVE_READONLY};
-        }
-
+        final GoogleCredentials credentials = DriveUtil.credentialsWithScopes(targetPrincipalAccount, args);
+        final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
+                new HttpCredentialsAdapter(credentials),
+                // Do not log 404. It clutters the output and is possibly even required by the caller.
+                new RetryHttpRequestInitializer(ImmutableList.of(404)));
         final HttpTransport transport = new NetHttpTransport();
         final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
-        try {
-            final GoogleCredentials credentials = GoogleCredentials.getApplicationDefault().createScoped(args);
-            final ImpersonatedCredentials targetCredentials = ImpersonatedCredentials.create(
-                    credentials,
-                    targetPrincipalAccount,
-                    null,
-                    Arrays.asList(args),
-                    3600);
-
-            final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
-                    new HttpCredentialsAdapter(targetCredentials),
-                    // Do not log 404. It clutters the output and is possibly even required by the caller.
-                    new RetryHttpRequestInitializer(ImmutableList.of(404)));
-            return new Sheets.Builder(transport, jsonFactory, initializer)
-                    .setApplicationName("mercari-pipeline")
-                    .build();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        return new Sheets.Builder(transport, jsonFactory, initializer)
+                .setApplicationName("mercari-pipeline")
+                .build();
     }
 
     public static Map<String, Object> get(
             final Sheets sheets,
             final String sheetId,
-            final List<String> ranges) {
+            final List<String> ranges,
+            final DriveUtil.ContentFormat contentFormat) {
 
         try {
             final Spreadsheet spreadsheet = sheets.spreadsheets()
@@ -83,7 +69,7 @@ public class SheetsUtil {
                     .setIncludeGridData(true)
                     .execute();
 
-            return create(spreadsheet);
+            return create(spreadsheet, contentFormat);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -295,7 +281,7 @@ public class SheetsUtil {
         sheets.put(name, drive);
     }
 
-    public static Map<String, Object> create(Spreadsheet spreadsheet) {
+    private static Map<String, Object> create(Spreadsheet spreadsheet, DriveUtil.ContentFormat contentFormat) {
         final Map<String, Object> values = new HashMap<>();
         values.put("spreadsheetId", spreadsheet.getSpreadsheetId());
         values.put("spreadsheetUrl", spreadsheet.getSpreadsheetUrl());
@@ -304,14 +290,14 @@ public class SheetsUtil {
         values.put("timeZone", spreadsheet.getProperties().getTimeZone());
         final List<Map<String, Object>> sheets = new ArrayList<>();
         for(final Sheet sheet : spreadsheet.getSheets()) {
-            final Map<String, Object> sheetValues = createSheet(sheet);
+            final Map<String, Object> sheetValues = createSheet(sheet, contentFormat);
             sheets.add(sheetValues);
         }
         values.put("sheets", sheets);
         return values;
     }
 
-    public static Map<String, Object> createSheet(Sheet sheet) {
+    private static Map<String, Object> createSheet(Sheet sheet, DriveUtil.ContentFormat contentFormat) {
         final Map<String, Object> values = new HashMap<>();
         values.put("sheetId", sheet.getProperties().getSheetId());
         values.put("title", sheet.getProperties().getTitle());
@@ -323,13 +309,16 @@ public class SheetsUtil {
         //values.put("frozenRowCount", Optional.ofNullable(sheet.getProperties().getGridProperties()).map(GridProperties::getFrozenRowCount).orElse(null));
         //values.put("frozenColumnCount", Optional.ofNullable(sheet.getProperties().getGridProperties()).map(GridProperties::getFrozenColumnCount).orElse(null));
 
-        final String content = createSheetContent(sheet);
-        values.put("content", content);
+        final String contentValue = switch (contentFormat) {
+            case json -> createSheetContentJson(sheet);
+            default -> createSheetContentCsv(sheet);
+        };
+        values.put("content", contentValue);
 
         return values;
     }
 
-    public static String createSheetContent(Sheet sheet) {
+    private static String createSheetContentCsv(Sheet sheet) {
         final List<GridData> gridDataList = sheet.getData();
         if(gridDataList == null) {
             return null;
@@ -360,6 +349,42 @@ public class SheetsUtil {
         }
 
         return String.join("\n", lines);
+    }
+
+    private static String createSheetContentJson(Sheet sheet) {
+        final List<GridData> gridDataList = sheet.getData();
+        if(gridDataList == null) {
+            return null;
+        }
+        final JsonArray array = new JsonArray();
+        for(final GridData gridData : gridDataList) {
+            final List<RowData> rowDataList = gridData.getRowData();
+            if(rowDataList == null) {
+                continue;
+            }
+            for(int rowIndex=0; rowIndex<rowDataList.size(); rowIndex++) {
+                final RowData rowData = rowDataList.get(rowIndex);
+                final List<CellData> cellDataList = rowData.getValues();
+                if(cellDataList == null) {
+                    continue;
+                }
+                final JsonObject row = new JsonObject();
+                row.addProperty("row", rowIndex);
+                boolean flag = false;
+                for(int colIndex=0; colIndex<cellDataList.size(); colIndex++) {
+                    final CellData cellData = cellDataList.get(colIndex);
+                    final String value = toString(cellData);
+                    flag = flag || value != null;
+                    final String columnName = String.format("col_%d", colIndex);
+                    row.addProperty(columnName, value);
+                }
+                if(flag) {
+                    array.add(row);
+                }
+            }
+        }
+
+        return array.toString();
     }
 
     public static Schema createSchema() {

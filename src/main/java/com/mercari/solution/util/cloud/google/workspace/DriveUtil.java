@@ -18,6 +18,7 @@ import com.google.auth.oauth2.ImpersonatedCredentials;
 import com.google.cloud.hadoop.util.ChainingHttpRequestInitializer;
 import com.google.common.collect.ImmutableList;
 import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.cloud.google.IAMUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericRecord;
@@ -25,6 +26,8 @@ import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.Row;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.util.*;
@@ -33,6 +36,8 @@ import java.util.regex.Pattern;
 
 
 public class DriveUtil {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DriveUtil.class);
 
     private static final Pattern PATTERN_FIELDS = Pattern.compile("[a-z]+\\([a-zA-Z,]+\\)");
     private static final Pattern PATTERN_CONDITION = Pattern.compile("(.+?)(s*>=s*|s*<=s*|s*=s*|s*>s*|s*<s*)(.+)");
@@ -51,33 +56,60 @@ public class DriveUtil {
 
     private static final Map<String, Drive> drives = new HashMap<>();
 
-    public static Drive drive(final String targetPrincipalAccount, String... args) {
+    public enum ContentFormat {
+        none,
+        csv,
+        json
+    }
 
+    public static GoogleCredentials credentialsWithScopes(String targetPrincipalAccount, String[] args) {
         if(args.length == 0) {
             args = new String[]{DriveScopes.DRIVE_READONLY};
         }
 
-        final HttpTransport transport = new NetHttpTransport();
-        final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
         try {
-            final GoogleCredentials credentials = GoogleCredentials.getApplicationDefault().createScoped(args);
-            final ImpersonatedCredentials targetCredentials = ImpersonatedCredentials.create(
-                    credentials,
-                    targetPrincipalAccount,
-                    null,
-                    Arrays.asList(args),
-                    3600);
-
-            final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
-                    new HttpCredentialsAdapter(targetCredentials),
-                    // Do not log 404. It clutters the output and is possibly even required by the caller.
-                    new RetryHttpRequestInitializer(ImmutableList.of(404)));
-            return new Drive.Builder(transport, jsonFactory, initializer)
-                    .setApplicationName("mercari-pipeline")
-                    .build();
+            GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
+            final String account = IAMUtil.getAccount();
+            if (account != null && targetPrincipalAccount != null && !account.equals(targetPrincipalAccount)) {
+                credentials = ImpersonatedCredentials.create(
+                        credentials,
+                        targetPrincipalAccount,
+                        null,
+                        Arrays.asList(args),
+                        3600);
+            } else if (IAMUtil.AccountType.MACHINE_MANAGED.equals(IAMUtil.accountType(credentials))) {
+                // Because the credentials obtained via `GoogleCredentials.getApplicationDefault()` cannot have the `Drive` scope added later,
+                // we have changed the code to always use `Impersonate`.
+                credentials = ImpersonatedCredentials.create(
+                        credentials,
+                        targetPrincipalAccount,
+                        null,
+                        Arrays.asList(args),
+                        3600);
+            } else {
+                credentials = credentials.createScoped(args);
+            }
+            return credentials;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    public static Drive drive(final String targetPrincipalAccount, String... args) {
+        if(args.length == 0) {
+            args = new String[]{DriveScopes.DRIVE_READONLY};
+        }
+
+        final GoogleCredentials credentials = credentialsWithScopes(targetPrincipalAccount, args);
+        final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
+                new HttpCredentialsAdapter(credentials),
+                // Do not log 404. It clutters the output and is possibly even required by the caller.
+                new RetryHttpRequestInitializer(ImmutableList.of(404)));
+        final HttpTransport transport = new NetHttpTransport();
+        final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
+        return new Drive.Builder(transport, jsonFactory, initializer)
+                .setApplicationName("mercari-pipeline")
+                .build();
     }
 
     public static boolean isFolder(final File file) {
@@ -116,11 +148,13 @@ public class DriveUtil {
         final JsonBatchCallback<File> callback = new JsonBatchCallback<>() {
             @Override
             public void onSuccess(File file, HttpHeaders headers) {
+                LOG.info("success: {}", file);
                 files.add(file);
             }
 
             @Override
             public void onFailure(GoogleJsonError error, HttpHeaders headers) {
+                LOG.error("failed error: {} headers: {}", error, headers);
                 failures.add(error.getMessage());
             }
         };
@@ -263,7 +297,7 @@ public class DriveUtil {
         }
     }
 
-    public static com.mercari.solution.module.Schema createFileSchema2(final String fields) {
+    public static com.mercari.solution.module.Schema createFileSchema(final String fields) {
         final com.mercari.solution.module.Schema.Builder builder = com.mercari.solution.module.Schema.builder();
 
         final String fields_ = fields.trim().replaceAll(" ", "");
