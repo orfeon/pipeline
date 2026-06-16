@@ -37,6 +37,14 @@ public class MPipeline {
 
     }
 
+    public interface MPipelineServerOptions extends MPipelineOptions {
+
+        @Description("Working directory path for server.")
+        String getWorkDir();
+        void setWorkDir(String workDir);
+
+    }
+
     public enum Runner {
         direct,
         dataflow,
