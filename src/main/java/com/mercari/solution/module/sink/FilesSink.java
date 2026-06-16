@@ -57,7 +57,10 @@ public class FilesSink extends Sink {
             }
         }
 
-        private void setDefaults() {
+        private void setDefaults(Schema inputSchema) {
+            if(content != null) {
+                content.setDefaults(inputSchema);
+            }
             if(attributes == null) {
                 attributes = new HashMap<>();
             }
@@ -69,7 +72,7 @@ public class FilesSink extends Sink {
 
     private static class ContentParameters implements Serializable {
 
-        private ContentType type;
+        public Format format;
         private String field;
         private String text;
 
@@ -81,18 +84,31 @@ public class FilesSink extends Sink {
             return errorMessages;
         }
 
-        private void setDefaults() {
-            if(type == null) {
-                type = ContentType.json;
+        private void setDefaults(final Schema inputSchema) {
+            if(format == null) {
+                if(text != null) {
+                    format = Format.text;
+                } else if(field != null) {
+                    final Schema.Field inputField = ElementSchemaUtil.getInputField(field, inputSchema.getFields());
+                    format = switch (inputField.getFieldType().getType()) {
+                        case json, element, array, map -> Format.json;
+                        case bytes -> Format.bytes;
+                        case string -> Format.text;
+                        default -> Format.text;
+                    };
+                } else {
+                    format = Format.json;
+                }
             }
         }
     }
 
-    private enum ContentType {
+    private enum Format {
         csv,
         json,
         avro,
-        text
+        text,
+        bytes
     }
 
     @Override
@@ -102,13 +118,14 @@ public class FilesSink extends Sink {
 
         final Parameters parameters = getParameters(Parameters.class);
         parameters.validate();
-        parameters.setDefaults();
 
         PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()
                         .withWaits(getWaits())
                         .withStrategy(getStrategy()));
         final Schema inputSchema = Union.createUnionSchema(inputs);
+
+        parameters.setDefaults(inputSchema);
 
         if(parameters.reshuffle) {
             input = input.apply("Reshuffle", Reshuffle.viaRandomKey());
@@ -195,11 +212,11 @@ public class FilesSink extends Sink {
             try {
                 final Map<String, Object> templateValues = input.asStandardMap(inputSchema, null);
                 output = TemplateUtil.executeStrictTemplate(templateOutput, templateValues);
-                final Object content = createContent(inputSchema, templateValues);
+                final Object object = createContent(inputSchema, templateValues);
                 if(output.startsWith("gs://")) {
-                    writeGcs(output, content, templateValues);
+                    writeGcs(output, object, templateValues, content.format);
                 } else {
-                    writeLocal(output, content);
+                    writeLocal(output, object);
                 }
                 final MElement result = createOutput(output, c.timestamp());
                 c.output(result);
@@ -211,7 +228,7 @@ public class FilesSink extends Sink {
 
         private Object createContent(final Schema inputSchema, final Map<String, Object> input) {
             if(content.text == null && content.field == null) {
-                return switch (content.type) {
+                return switch (content.format) {
                     case csv -> ElementToCsvConverter.convert(inputSchema, input, inputSchema.getFields().stream().map(Schema.Field::getName).toList());
                     case json -> ElementToJsonConverter.convert(inputSchema, input);
                     case avro -> ElementToAvroConverter.convert(inputSchema, input);
@@ -222,7 +239,7 @@ public class FilesSink extends Sink {
                 if(fieldValue == null) {
                     return null;
                 }
-                return switch (content.type) {
+                return switch (content.format) {
                     case csv, text -> fieldValue.toString();
                     case json -> {
                         final Schema.Field field = ElementSchemaUtil.getInputField(content.field, inputSchema.getFields());
@@ -238,6 +255,13 @@ public class FilesSink extends Sink {
                         final Schema.Field field = ElementSchemaUtil.getInputField(content.field, inputSchema.getFields());
                         yield switch (field.getFieldType().getType()) {
                             case element -> ElementToAvroConverter.convert(field.getFieldType().getElementSchema(), (Map) fieldValue);
+                            default -> throw new IllegalArgumentException("not supported avro compatible fieldType: " + field.getFieldType());
+                        };
+                    }
+                    case bytes -> {
+                        final Schema.Field field = ElementSchemaUtil.getInputField(content.field, inputSchema.getFields());
+                        yield switch (field.getFieldType().getType()) {
+                            case bytes -> fieldValue;
                             default -> throw new IllegalArgumentException("not supported avro compatible fieldType: " + field.getFieldType());
                         };
                     }
@@ -267,7 +291,7 @@ public class FilesSink extends Sink {
             }
         }
 
-        private void writeGcs(final String output, final Object content, final Map<String, Object> templateValues) {
+        private void writeGcs(final String output, final Object content, final Map<String, Object> templateValues, Format format) {
             final StorageObject object = new StorageObject();
             final String[] gcsPaths = StorageUtil.parseGcsPath(output);
             object.setBucket(gcsPaths[0]);
@@ -278,8 +302,15 @@ public class FilesSink extends Sink {
                 object.set(entry.getKey(), value);
                 attributeValues.put(entry.getKey(), value);
             }
+            final String contentType = switch (format) {
+                case csv -> "text/csv";
+                case text -> "text/plain";
+                case json -> "application/json";
+                case avro -> "avro/binary";
+                default -> "application/octet-stream";
+            };
             if(object.getContentType() == null) {
-                object.setContentType("application/octet-stream");
+                object.setContentType(contentType);
             }
 
             try {

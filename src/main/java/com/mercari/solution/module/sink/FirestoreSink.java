@@ -11,7 +11,6 @@ import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.converter.ElementToDocumentConverter;
 import freemarker.template.Template;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreIO;
-import org.apache.beam.sdk.io.gcp.firestore.FirestoreOptions;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreV1;
 import org.apache.beam.sdk.io.gcp.firestore.RpcQosOptions;
 import org.apache.beam.sdk.transforms.*;
@@ -94,10 +93,6 @@ public class FirestoreSink extends Sink {
             }
             if(this.databaseId == null) {
                 this.databaseId = FirestoreUtil.DEFAULT_DATABASE_NAME;
-            }
-            if(!FirestoreUtil.DEFAULT_DATABASE_NAME.equals(this.databaseId)) {
-                input.getPipeline().getOptions().as(FirestoreOptions.class)
-                        .setFirestoreDb(this.databaseId);
             }
             if(this.nameFields == null) {
                 this.nameFields = new ArrayList<>();
@@ -202,6 +197,8 @@ public class FirestoreSink extends Sink {
                     .apply("WriteDocument", FirestoreIO.v1().write()
                             .batchWrite()
                             .withRpcQosOptions(parameters.getRpcQos().create())
+                            .setProjectId(parameters.projectId)
+                            .setDatabaseId(parameters.databaseId)
                             .build())
                     .apply("Format", ParDo.of(new SummaryDoFn()));
             return MCollectionTuple.of(output, createSummarySchema());
@@ -210,6 +207,8 @@ public class FirestoreSink extends Sink {
                     .apply("WriteDocument", FirestoreIO.v1().write()
                             .batchWrite()
                             .withRpcQosOptions(parameters.getRpcQos().create())
+                            .setProjectId(parameters.projectId)
+                            .setDatabaseId(parameters.databaseId)
                             .withDeadLetterQueue()
                             .build())
                     .apply("Format", ParDo.of(new FailureDoFn()));
