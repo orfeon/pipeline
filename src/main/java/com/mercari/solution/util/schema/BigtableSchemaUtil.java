@@ -454,7 +454,7 @@ public class BigtableSchemaUtil {
                 final Instant timestamp) {
 
             final Object primitiveValue = primitiveValues.get(field);
-            if(primitiveValue == null) {
+            if(primitiveValue == null && !MutationOp.DELETE_FROM_COLUMN.equals(mutationOp)) {
                 return null;
             }
             final Schema.Type dynamicType = getDynamicType(primitiveValues);
