@@ -16,7 +16,7 @@ public class FailureConfig implements Serializable {
     private JsonObject parameters;
 
     private Set<String> tags;
-    private List<Logging> loggings;
+    private List<Logging> logs;
 
     private Boolean ignore;
 
@@ -41,7 +41,7 @@ public class FailureConfig implements Serializable {
     }
 
     public List<Logging> getLoggings() {
-        return loggings;
+        return logs;
     }
 
     public Boolean getIgnore() {

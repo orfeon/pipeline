@@ -20,12 +20,9 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.ByteBuffer;
 import java.sql.*;
-import java.time.Instant;
-import java.time.LocalDate;
+import java.time.*;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
-
 
 public class ResultSetToRecordConverter {
 
@@ -109,7 +106,7 @@ public class ResultSetToRecordConverter {
             case Types.NVARCHAR:
             case Types.LONGVARCHAR:
             case Types.LONGNVARCHAR: {
-                if("json".equalsIgnoreCase(typeName)) {
+                if("json".equalsIgnoreCase(typeName) || "jsonb".equalsIgnoreCase(typeName)) {
                     return AvroSchemaUtil.NULLABLE_JSON;
                 }
                 return AvroSchemaUtil.NULLABLE_STRING;
@@ -130,86 +127,55 @@ public class ResultSetToRecordConverter {
             case Types.TIMESTAMP_WITH_TIMEZONE:
                 return AvroSchemaUtil.NULLABLE_SQL_DATETIME_TYPE;
             case Types.OTHER: {
-                if("json".equalsIgnoreCase(typeName)) {
+                if("json".equalsIgnoreCase(typeName) || "jsonb".equalsIgnoreCase(typeName)) {
                     return AvroSchemaUtil.NULLABLE_JSON;
                 } else if("uuid".equalsIgnoreCase(typeName)) {
                     return AvroSchemaUtil.NULLABLE_LOGICAL_UUID_TYPE;
                 }
-                LOG.warn("Type Other, TypeName: " + typeName + " as NULLABLE STRING");
+                LOG.warn("Type Other, TypeName: {} as NULLABLE STRING", typeName);
                 return AvroSchemaUtil.NULLABLE_STRING;
             }
             case Types.ARRAY: {
-                switch (typeName) {
-                    case "BLOB":
-                    case "BINARY":
-                    case "VARBINARY":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.BYTES)),
-                                Schema.create(Schema.Type.NULL));
-                    case "TINYINT":
-                    case "SMALLINT":
-                    case "INTEGER":
-                    case "INT2":
-                    case "INT4":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.INT)),
-                                Schema.create(Schema.Type.NULL));
-                    case "BIGINT":
-                    case "INT8":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.LONG)),
-                                Schema.create(Schema.Type.NULL));
-                    case "REAL":
-                    case "FLOAT4":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.FLOAT)),
-                                Schema.create(Schema.Type.NULL));
-                    case "FLOAT":
-                    case "DOUBLE":
-                    case "FLOAT8":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.DOUBLE)),
-                                Schema.create(Schema.Type.NULL));
-                    case "NUMERIC":
-                    case "DECIMAL":
-                    case "BIGDECIMAL":
-                        return Schema.createUnion(
-                                Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_DECIMAL_TYPE),
-                                Schema.create(Schema.Type.NULL));
-                    case "TEXT":
-                    case "CHAR":
-                    case "MCHAR":
-                    case "NCHAR":
-                    case "VARCHAR":
-                    case "MVARCHAR":
-                    case "NVARCHAR":
-                    case "CLOB":
-                    case "BPCHAR":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.STRING)),
-                                Schema.create(Schema.Type.NULL));
-                    case "DATE":
-                        return Schema.createUnion(
-                                Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_DATE_TYPE),
-                                Schema.create(Schema.Type.NULL));
-                    case "TIME":
-                        return Schema.createUnion(
-                                Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_TIME_MICRO_TYPE),
-                                Schema.create(Schema.Type.NULL));
-                    case "TIMESTAMP":
-                        return Schema.createUnion(
-                                Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_TIMESTAMP_MICRO_TYPE),
-                                Schema.create(Schema.Type.NULL));
-                    case "BIT":
-                    case "BOOLEAN":
-                        return Schema.createUnion(
-                                Schema.createArray(Schema.create(Schema.Type.BOOLEAN)),
-                                Schema.create(Schema.Type.NULL));
-                    case "JSON":
-                        return AvroSchemaUtil.NULLABLE_ARRAY_JSON_TYPE;
-                    default:
-                        throw new IllegalStateException("Not supported ArrayElementType: " + typeName);
-                }
+                final String arrayElementTypeName = (typeName.startsWith("_") ? typeName.substring(1) : typeName)
+                        .toUpperCase(java.util.Locale.ROOT);
+                return switch (arrayElementTypeName) {
+                    case "BLOB", "BINARY", "VARBINARY" -> Schema.createUnion(
+                            Schema.createArray(Schema.create(Schema.Type.BYTES)),
+                            Schema.create(Schema.Type.NULL));
+                    case "TINYINT", "SMALLINT", "INTEGER", "INT2", "INT4" -> Schema.createUnion(
+                            Schema.createArray(Schema.create(Schema.Type.INT)),
+                            Schema.create(Schema.Type.NULL));
+                    case "BIGINT", "INT8" -> Schema.createUnion(
+                            Schema.createArray(Schema.create(Schema.Type.LONG)),
+                            Schema.create(Schema.Type.NULL));
+                    case "REAL", "FLOAT4" -> Schema.createUnion(
+                            Schema.createArray(Schema.create(Schema.Type.FLOAT)),
+                            Schema.create(Schema.Type.NULL));
+                    case "FLOAT", "DOUBLE", "FLOAT8" -> Schema.createUnion(
+                            Schema.createArray(Schema.create(Schema.Type.DOUBLE)),
+                            Schema.create(Schema.Type.NULL));
+                    case "NUMERIC", "DECIMAL", "BIGDECIMAL" -> Schema.createUnion(
+                            Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_DECIMAL_TYPE),
+                            Schema.create(Schema.Type.NULL));
+                    case "TEXT", "CHAR", "MCHAR", "NCHAR", "VARCHAR", "MVARCHAR", "NVARCHAR", "CLOB", "BPCHAR" ->
+                            Schema.createUnion(
+                                    Schema.createArray(Schema.create(Schema.Type.STRING)),
+                                    Schema.create(Schema.Type.NULL));
+                    case "DATE" -> Schema.createUnion(
+                            Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_DATE_TYPE),
+                            Schema.create(Schema.Type.NULL));
+                    case "TIME" -> Schema.createUnion(
+                            Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_TIME_MICRO_TYPE),
+                            Schema.create(Schema.Type.NULL));
+                    case "TIMESTAMP", "TIMESTAMPTZ" -> Schema.createUnion(
+                            Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_TIMESTAMP_MICRO_TYPE),
+                            Schema.create(Schema.Type.NULL));
+                    case "BIT", "BOOLEAN" -> Schema.createUnion(
+                            Schema.createArray(Schema.create(Schema.Type.BOOLEAN)),
+                            Schema.create(Schema.Type.NULL));
+                    case "JSON", "JSONB" -> AvroSchemaUtil.NULLABLE_ARRAY_JSON_TYPE;
+                    default -> throw new IllegalStateException("Not supported ArrayElementType: " + typeName);
+                };
             }
             case Types.STRUCT:
             case Types.REF:
@@ -329,15 +295,6 @@ public class ResultSetToRecordConverter {
                     return clob.getSubString(1, (int)clob.length());
                 }
             }
-            case Types.TIME:
-            case Types.TIME_WITH_TIMEZONE: {
-                final Time time = resultSet.getTime(column);
-                if (resultSet.wasNull() || time == null) {
-                    return null;
-                } else {
-                    return DateTimeUtil.toMicroOfDay(time.toLocalTime());
-                }
-            }
             case Types.DATE: {
                 final java.sql.Date sqlDate = resultSet.getDate(column);
                 if (resultSet.wasNull() || sqlDate == null) {
@@ -349,8 +306,23 @@ public class ResultSetToRecordConverter {
                     return days.getDays();
                 }
             }
-            case Types.TIMESTAMP:
-            case Types.TIMESTAMP_WITH_TIMEZONE: {
+            case Types.TIME: {
+                final Time time = resultSet.getTime(column);
+                if (resultSet.wasNull() || time == null) {
+                    return null;
+                } else {
+                    return DateTimeUtil.toMicroOfDay(time.toLocalTime());
+                }
+            }
+            case Types.TIME_WITH_TIMEZONE: {
+                final OffsetTime offsetTime = resultSet.getObject(column, OffsetTime.class);
+                if (resultSet.wasNull() || offsetTime == null) {
+                    return null;
+                }
+                final OffsetTime utcTime = offsetTime.withOffsetSameInstant(ZoneOffset.UTC);
+                return DateTimeUtil.toMicroOfDay(utcTime.toLocalTime());
+            }
+            case Types.TIMESTAMP: {
                 final java.sql.Timestamp timestamp = resultSet.getTimestamp(column);
                 if (resultSet.wasNull() || timestamp == null) {
                     return null;
@@ -358,6 +330,18 @@ public class ResultSetToRecordConverter {
                     return SQL_TIMESTAMP_MIN.getTime() * 1000;
                 } else {
                     return timestamp.getTime() * 1000;
+                }
+            }
+            case Types.TIMESTAMP_WITH_TIMEZONE: {
+                final OffsetDateTime offsetDateTime = resultSet.getObject(column, OffsetDateTime.class);
+                if (resultSet.wasNull() || offsetDateTime == null) {
+                    return null;
+                }
+                final Instant timestamp = offsetDateTime.toInstant();
+                if (timestamp.isBefore(SQL_TIMESTAMP_MIN.toInstant())) {
+                    return SQL_TIMESTAMP_MIN.getTime() * 1000;
+                } else {
+                    return DateTimeUtil.toEpochMicroSecond(timestamp);
                 }
             }
             case Types.ARRAY: {
@@ -488,6 +472,15 @@ public class ResultSetToRecordConverter {
                         }
                         break;
                     }
+                    case Types.DATE: {
+                        for (final java.sql.Date v : (java.sql.Date[]) array.getArray()) {
+                            if (v == null) {
+                                continue;
+                            }
+                            list.add(DateTimeUtil.toEpochDay(v));
+                        }
+                        break;
+                    }
                     case Types.TIME:
                     case Types.TIME_WITH_TIMEZONE: {
                         for (final Time v : (Time[]) array.getArray()) {
@@ -495,15 +488,6 @@ public class ResultSetToRecordConverter {
                                 continue;
                             }
                             list.add(DateTimeUtil.toMicroOfDay(v.toLocalTime()));
-                        }
-                        break;
-                    }
-                    case Types.DATE: {
-                        for (final java.sql.Date v : (java.sql.Date[]) array.getArray()) {
-                            if (v == null) {
-                                continue;
-                            }
-                            list.add(DateTimeUtil.toEpochDay(v));
                         }
                         break;
                     }

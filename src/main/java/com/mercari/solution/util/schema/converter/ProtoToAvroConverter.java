@@ -17,10 +17,7 @@ import org.apache.avro.generic.GenericRecordBuilder;
 
 import java.nio.ByteBuffer;
 import java.time.*;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class ProtoToAvroConverter {
@@ -60,10 +57,7 @@ public class ProtoToAvroConverter {
          */
         messageNames.add(messageType.getFullName());
 
-        final String namespace = messageType
-                .getFullName()
-                .substring(0, messageType.getFullName().length() - messageType.getName().length() - 1);
-
+        final String namespace = extractNamespace(messageType.getFullName(), messageType.getName());
         final SchemaBuilder.FieldAssembler<Schema> schemaFields = SchemaBuilder
                 .record(messageType.getName())
                 .namespace(namespace)
@@ -160,7 +154,8 @@ public class ProtoToAvroConverter {
                 final List<String> enumNames = field.getEnumType().getValues().stream()
                         .map(Descriptors.EnumValueDescriptor::getName)
                         .collect(Collectors.toList());
-                yield Schema.createEnum(field.getName(), "", "", enumNames);
+                final String namespace = extractNamespace(field.getEnumType().getFullName(), field.getEnumType().getName());
+                yield Schema.createEnum(field.getEnumType().getName(), "", namespace, enumNames);
             }
             case STRING ->
                 // TODO Fix when handle NULL schema for all avro converter
@@ -211,7 +206,11 @@ public class ProtoToAvroConverter {
         };
 
         if(field.isRepeated()) {
-            return Schema.createArray(elementSchema);
+            if(AvroSchemaUtil.isNullable(elementSchema)) {
+                return Schema.createArray(AvroSchemaUtil.unnestUnion(elementSchema));
+            } else {
+                return Schema.createArray(elementSchema);
+            }
         } else {
             return elementSchema;
         }
@@ -346,6 +345,13 @@ public class ProtoToAvroConverter {
             }
             default -> throw new IllegalStateException("Not support data type: " + field);
         };
+    }
+
+    private static String extractNamespace(String fullName, String name) {
+        if(fullName == null || !fullName.contains(".")) {
+            return "";
+        }
+        return fullName.substring(0, fullName.length() - name.length() - 1);
     }
 
 }

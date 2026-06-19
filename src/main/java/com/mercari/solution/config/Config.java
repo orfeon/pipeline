@@ -8,6 +8,7 @@ import com.mercari.solution.util.cloud.google.ArtifactRegistryUtil;
 import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
 import com.mercari.solution.util.cloud.google.PubSubUtil;
 import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
@@ -47,7 +48,6 @@ public class Config implements Serializable {
     private List<SourceConfig> sources;
     private List<TransformConfig> transforms;
     private List<SinkConfig> sinks;
-    private List<FailureConfig> failures;
 
     private Boolean empty;
 
@@ -93,8 +93,12 @@ public class Config implements Serializable {
         return sinks;
     }
 
-    public List<FailureConfig> getFailures() {
-        return failures;
+    public List<FailureConfig> getFailureSinks() {
+        return system.getFailure().getSinks();
+    }
+
+    public void setFailureSinks(final List<FailureConfig> failureSinks) {
+        this.system.failure.sinks = failureSinks;
     }
 
     public Boolean getEmpty() {
@@ -217,6 +221,7 @@ public class Config implements Serializable {
 
         private Boolean failFast;
         private Boolean union;
+        private List<FailureConfig> sinks;
         private String alterConfig;
 
         public Boolean getFailFast() {
@@ -225,6 +230,10 @@ public class Config implements Serializable {
 
         public Boolean getUnion() {
             return union;
+        }
+
+        public List<FailureConfig> getSinks() {
+            return sinks;
         }
 
         public String getAlterConfig() {
@@ -239,6 +248,9 @@ public class Config implements Serializable {
         public void setDefaults() {
             if(union == null) {
                 union = false;
+            }
+            if(sinks == null) {
+                sinks = new ArrayList<>();
             }
         }
     }
@@ -298,6 +310,10 @@ public class Config implements Serializable {
     public static Config load(final String configParam, final String context, final Format format, final String[] args) throws IOException {
         final Map<String, String> templateArgs = extractArgs(args);
         return load(configParam, context, format, templateArgs);
+    }
+
+    public static Config load(final String configParam, final String context, final Format format, final String argsText) throws IOException {
+        return load(configParam, context, format, parseArgs(argsText));
     }
 
     public static Config load(final String configParam, final String context, final Format format, final Map<String, String> args) throws IOException {
@@ -365,16 +381,16 @@ public class Config implements Serializable {
                 throw new IllegalModuleException("", "pipeline", e);
             }
 
-            LOG.info("Pipeline config: \n{}", new GsonBuilder().setPrettyPrinting().create().toJson(jsonObject));
+            LOG.info("Pipeline config: \n{}", new GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(jsonObject));
 
-            final Config config = new Gson().fromJson(jsonObject, Config.class);
+            final Config config = JsonUtil.fromJson(jsonObject, Config.class);
             if(config == null) {
                 throw new IllegalModuleException("", "pipeline", List.of("config must not be empty"));
             }
             config.validate();
             config.setDefaults(context, templateArgs);
 
-            final List<FailureConfig> failures = Optional.ofNullable(config.getFailures()).orElseGet(ArrayList::new)
+            final List<FailureConfig> failureSinks = Optional.ofNullable(config.getSystem().getFailure().getSinks()).orElseGet(ArrayList::new)
                     .stream()
                     .filter(Objects::nonNull)
                     .peek(c -> c.setArgs(templateArgs))
@@ -387,7 +403,7 @@ public class Config implements Serializable {
                     .peek(c -> c.setArgs(templateArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
-                    .peek(c -> c.addFailures(failures))
+                    .peek(c -> c.addFailureSinks(failureSinks))
                     .collect(Collectors.toList());
             final List<TransformConfig> transforms = Optional.ofNullable(config.getTransforms()).orElseGet(ArrayList::new)
                     .stream()
@@ -395,7 +411,7 @@ public class Config implements Serializable {
                     .peek(c -> c.setArgs(templateArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
-                    .peek(c -> c.addFailures(failures))
+                    .peek(c -> c.addFailureSinks(failureSinks))
                     .collect(Collectors.toList());
             final List<SinkConfig> sinks = Optional.ofNullable(config.getSinks()).orElseGet(ArrayList::new)
                     .stream()
@@ -403,7 +419,7 @@ public class Config implements Serializable {
                     .peek(c -> c.setArgs(templateArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
-                    .peek(c -> c.addFailures(failures))
+                    .peek(c -> c.addFailureSinks(failureSinks))
                     .collect(Collectors.toList());
 
             for(final Import i : config.getSystem().getImports()) {
@@ -416,7 +432,7 @@ public class Config implements Serializable {
                                 .peek(c -> c.setArgs(i.args))
                                 .peek(c -> c.applyContext(config.system.context))
                                 .peek(c -> c.setFailFast(config.system.failure.failFast))
-                                .peek(c -> c.addFailures(failures))
+                                .peek(c -> c.addFailureSinks(failureSinks))
                                 .toList());
                     }
                     if(importConfig.getTransforms() != null) {
@@ -425,7 +441,7 @@ public class Config implements Serializable {
                                 .peek(c -> c.setArgs(i.args))
                                 .peek(c -> c.applyContext(config.system.context))
                                 .peek(c -> c.setFailFast(config.system.failure.failFast))
-                                .peek(c -> c.addFailures(failures))
+                                .peek(c -> c.addFailureSinks(failureSinks))
                                 .toList());
                     }
                     if(importConfig.getSinks() != null) {
@@ -434,7 +450,7 @@ public class Config implements Serializable {
                                 .peek(c -> c.setArgs(i.args))
                                 .peek(c -> c.applyContext(config.system.context))
                                 .peek(c -> c.setFailFast(config.system.failure.failFast))
-                                .peek(c -> c.addFailures(failures))
+                                .peek(c -> c.addFailureSinks(failureSinks))
                                 .toList());
                     }
                 }
@@ -447,7 +463,7 @@ public class Config implements Serializable {
             config.sources = sources;
             config.transforms = transforms;
             config.sinks = sinks;
-            config.failures = failures;
+            config.setFailureSinks(failureSinks);
 
             config.content = jsonObject.toString();
 
@@ -484,7 +500,7 @@ public class Config implements Serializable {
             }
             case json -> {
                 try {
-                    return new Gson().fromJson(configText, JsonObject.class);
+                    return JsonUtil.fromJson(configText, JsonObject.class);
                 } catch (final Throwable e) {
                     final String errorMessage = "Failed to parse config json error: " + e.getMessage() + ", json: " + configText;
                     LOG.error(errorMessage);
@@ -493,7 +509,7 @@ public class Config implements Serializable {
             }
             default -> {
                 try {
-                    return new Gson().fromJson(configText, JsonObject.class);
+                    return JsonUtil.fromJson(configText, JsonObject.class);
                 } catch (final JsonSyntaxException e) {
                     try {
                         return parseYaml(configText);
@@ -514,6 +530,23 @@ public class Config implements Serializable {
     static Map<String, String> extractArgs(final String[] args) {
         final Map<String, Map<String, String>> argsParameters = filterConfigArgs(args);
         return new LinkedHashMap<>(argsParameters.getOrDefault("args", new LinkedHashMap<>()));
+    }
+
+    private static Map<String, String> parseArgs(String argsText) {
+        if(argsText == null || argsText.isEmpty()) {
+            return new HashMap<>();
+        }
+
+        try {
+            final Map<String, String> parsed = new HashMap<>();
+            final JsonObject jsonObject = JsonUtil.fromJson(argsText, JsonObject.class);
+            for(final Map.Entry<String, ?> entry : jsonObject.entrySet()) {
+                parsed.put(entry.getKey(), entry.getValue().toString());
+            }
+            return parsed;
+        } catch (final Throwable t) {
+            throw new IllegalArgumentException("Failed to parse pipeline args: " + argsText, t);
+        }
     }
 
     private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
@@ -570,7 +603,8 @@ public class Config implements Serializable {
         for(final Map.Entry<String, String> entry : values.entrySet()) {
             configText = configText.replaceAll(Pattern.quote(entry.getKey()), entry.getValue());
         }
-        return new Gson().fromJson(configText, JsonObject.class);
+
+        return JsonUtil.fromJson(configText, JsonObject.class);
     }
 
     private static Map<String, Map<String, String>> filterConfigArgs(final String[] args) {
@@ -588,9 +622,9 @@ public class Config implements Serializable {
     private static JsonObject parseYaml(final String text) {
         final Yaml yaml = new Yaml();
         final Map<?, ?> loadedYaml = yaml.loadAs(text, Map.class);
-        final Gson gson = new GsonBuilder().setPrettyPrinting().create();
+        final Gson gson = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
         final String jsonText = gson.toJson(loadedYaml, Map.class);
-        return new Gson().fromJson(jsonText, JsonObject.class);
+        return gson.fromJson(jsonText, JsonObject.class);
     }
 
 }
