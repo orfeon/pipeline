@@ -10,6 +10,8 @@
 | [bigquery](source/bigquery.md)   | ○     | ○         | Import data from BigQuery with a specified query or table          |
 | [spanner](source/spanner.md)     | ○     | ○         | Import data from Cloud Spanner with a specified query or table     |
 | [jdbc](source/jdbc.md)           | ○     | ○(TODO)   | Import data from RDB using JDBC connector with a specified query   |
+| [postgres](source/postgres.md)   | ○     | -         | Import data from PostgreSQL using COPY BINARY format in parallel   |
+| [tidb](source/tidb.md)           | ○     | -         | Import data from TiDB in parallel using TiKV region based split    |
 | [firestore](source/firestore.md) | ○     | ○(TODO)   | Import data from Cloud Firestore with a specified filter condition |
 | [datastore](source/datastore.md) | ○     | ○(TODO)   | Import data from Cloud Datastore with a specified gql              |
 | [bigtable](source/bigtable.md)   | ○     | ○(TODO)   | Import data from Cloud Bigtable with a specified condition         |

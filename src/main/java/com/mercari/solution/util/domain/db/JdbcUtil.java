@@ -81,31 +81,6 @@ public class JdbcUtil {
         config.setMaximumPoolSize(1);
         config.setAutoCommit(false);
         final DataSource dataSource = new HikariDataSource(config);
-
-        /*
-        final BasicDataSource basicDataSource = new BasicDataSource();
-        basicDataSource.setDriverClassName(driverClassName);
-        basicDataSource.setUrl(url);
-        basicDataSource.setUsername(username);
-        basicDataSource.setPassword(password);
-
-
-        // Wrapping the datasource as a pooling datasource
-        final DataSourceConnectionFactory connectionFactory = new DataSourceConnectionFactory(basicDataSource);
-        final PoolableConnectionFactory poolableConnectionFactory = new PoolableConnectionFactory(connectionFactory, null);
-
-        final GenericObjectPoolConfig poolConfig = new GenericObjectPoolConfig();
-        poolConfig.setMaxTotal(1);
-        poolConfig.setMinIdle(0);
-        poolConfig.setMinEvictableIdleTimeMillis(10000);
-        poolConfig.setSoftMinEvictableIdleTimeMillis(30000);
-        final GenericObjectPool connectionPool = new GenericObjectPool(poolableConnectionFactory, poolConfig);
-        poolableConnectionFactory.setPool(connectionPool);
-        poolableConnectionFactory.setDefaultAutoCommit(false);
-        poolableConnectionFactory.setDefaultReadOnly(readOnly);
-        return new CloseableDataSource(new PoolingDataSource(connectionPool));
-
-         */
         return new CloseableDataSource(dataSource);
     }
 
