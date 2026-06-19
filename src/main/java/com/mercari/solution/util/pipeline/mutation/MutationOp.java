@@ -10,7 +10,9 @@ public enum MutationOp implements Serializable {
     UPDATE(2),
     REPLACE(3),
     UPSERT(4),
-    DELETE(5);
+    DELETE(5),
+    ACK(6),
+    SEND(7);
 
     private final int id;
 

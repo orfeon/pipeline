@@ -61,6 +61,8 @@ public class UnifiedMutation implements Serializable {
             case REPLACE -> MutationOp.REPLACE;
             case INSERT_OR_UPDATE -> MutationOp.UPSERT;
             case DELETE -> MutationOp.DELETE;
+            case ACK -> MutationOp.ACK;
+            case SEND -> MutationOp.SEND;
         };
         return new UnifiedMutation(DataType.MUTATION, op, table, commitTimestampMicros, sequence, mutation);
     }
