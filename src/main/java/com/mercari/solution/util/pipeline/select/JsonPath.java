@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -45,7 +46,31 @@ public class JsonPath implements SelectFunction {
         final String path = jsonObject.get("path").getAsString();
         final Schema.Field inputField = ElementSchemaUtil.getInputField(field, inputFields);
 
-        final Schema.FieldType outputFieldType = Schema.FieldType.STRING.withNullable(true);
+        Schema.FieldType outputFieldType;
+        if(jsonObject.has("type")) {
+            final String typeString = jsonObject.get("type").getAsString();
+            final Schema.Type type = Schema.Type.of(typeString);
+            outputFieldType = switch (type) {
+                case element -> {
+                    if(!jsonObject.has("fields")) {
+                        throw new IllegalArgumentException("SelectField: " + name + " requires fields parameter when type is element");
+                    }
+                    yield Schema.FieldType.element(Schema.parse(jsonObject));
+                }
+                default -> Schema.FieldType.type(type);
+            };
+            if(jsonObject.has("mode")) {
+                final String modeString = jsonObject.get("mode").getAsString();
+                final Schema.Mode mode = Schema.Mode.valueOf(modeString);
+                outputFieldType = switch (mode) {
+                    case nullable -> outputFieldType.withNullable(true);
+                    case required -> outputFieldType.withNullable(false);
+                    case repeated -> Schema.FieldType.array(outputFieldType);
+                };
+            }
+        } else {
+            outputFieldType = Schema.FieldType.STRING.withNullable(true);
+        }
 
         return new JsonPath(name, field, path, inputField, outputFieldType, ignore);
     }
@@ -81,11 +106,50 @@ public class JsonPath implements SelectFunction {
         final String json = (String)ElementSchemaUtil.getAsPrimitive(Schema.FieldType.STRING, value);
         try {
             final Object str = org.apache.beam.vendor.calcite.v1_40_0.com.jayway.jsonpath.JsonPath.read(json, path);
-            return str;
+            return extract(outputFieldType, str);
         } catch (Throwable e) {
-            System.out.println("field: " + field + ", path: " + path + ", json: " + json + e);
             return null;
         }
+    }
+
+    private static Object extract(final Schema.FieldType fieldType, Object value) {
+        return switch (fieldType.getType()) {
+            case array -> {
+                final List<Object> list = new ArrayList<>();
+                for(final Object element : (Iterable<? extends Object>) value) {
+                    final Object object = extract(fieldType.getArrayValueType(), element);
+                    list.add(object);
+                }
+                yield list;
+            }
+            case element -> switch (value) {
+                case Map<?,?> map -> {
+                    final Map<String, Object> result = new HashMap<>();
+                    for(final Schema.Field f : fieldType.getElementSchema().getFields()) {
+                        final Object mapValue = extract(f.getFieldType(), map.get(f.getName()));
+                        result.put(f.getName(), mapValue);
+                    }
+                    yield result;
+                }
+                default -> value;
+            };
+            case map -> switch (value) {
+                case Map<?,?> map -> {
+                    final Map<String, Object> result = new HashMap<>();
+                    for(final Map.Entry<?,?> entry : map.entrySet()) {
+                        final Object mapValue = extract(fieldType.getMapValueType(), entry.getValue());
+                        result.put(entry.getKey().toString(), mapValue);
+                    }
+                    for(final Schema.Field f : fieldType.getElementSchema().getFields()) {
+                        final Object mapValue = extract(f.getFieldType(), map.get(f.getName()));
+                        result.put(f.getName(), mapValue);
+                    }
+                    yield result;
+                }
+                default -> value;
+            };
+            default -> value;
+        };
     }
 
 }

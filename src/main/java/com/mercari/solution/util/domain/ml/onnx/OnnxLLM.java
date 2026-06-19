@@ -57,7 +57,7 @@ public class OnnxLLM implements Serializable {
             kv_values.add(OnnxTensor.createTensor(environment, FloatBuffer.wrap(new float[0]), shape_init));
         }
 
-        for(int j=0; j<80; j++) {
+        for(int j=0; j<580; j++) {
             final Map<String, OnnxTensor> values = new HashMap<>();
             values.put(modelConfig.decoder.inputs.input_ids, input_ids);
             values.put(modelConfig.decoder.inputs.attention_mask, attention_mask);
@@ -108,28 +108,39 @@ public class OnnxLLM implements Serializable {
 
         OnnxTensor input_ids = OnnxTensor.createTensor(environment, LongBuffer.wrap(input_ids_), new long[]{1, input_ids_.length});
         OnnxTensor attention_mask = OnnxTensor.createTensor(environment, LongBuffer.wrap(attention_mask_), new long[]{1, attention_mask_.length});
+        OnnxTensor position_ids = sequence(environment, input_ids_.length);
 
         final Map<String, OnnxTensor> inputs = new HashMap<>();
-        for(final Map.Entry<String,String> entry : config.inputs.feeds.entrySet()) {
+        for(final Map.Entry<String, String> entry : config.inputs.feeds.entrySet()) {
             final TensorInfo tensorInfo = config.inputs.tensorInfos.get(entry.getValue());
-            if(tensorInfo == null) {
-                System.out.println(entry.getValue());
-            }
             final OnnxTensor tensor = zeros(environment, tensorInfo);
             inputs.put(entry.getValue(), tensor);
         }
 
-        for(int j=0; j<80; j++) {
+        final boolean usePositionIds = session.getInputInfo().containsKey(config.inputs.position_ids);
+        final boolean useNumLogitsToKeep = session.getInputInfo().containsKey(config.inputs.num_logits_to_keep);
+
+        int pos = input_ids_.length;
+        for(int j=0; j<580; j++) {
             final Map<String, OnnxTensor> values = new HashMap<>();
             values.put(config.inputs.input_ids, input_ids);
             values.put(config.inputs.attention_mask, attention_mask);
-
+            if(usePositionIds) {
+                values.put(config.inputs.position_ids, position_ids);
+            }
+            if(useNumLogitsToKeep) {
+                OnnxTensor num_logits_to_keep = OnnxTensor.createTensor(environment, LongBuffer.wrap(new long[]{1L}), new long[]{});
+                values.put(config.inputs.num_logits_to_keep, num_logits_to_keep);
+            }
             values.putAll(inputs);
 
             try(final OrtSession.Result result = session.run(values)) {
-                int token_id = OnnxModel.argmax((OnnxTensor)result.get(config.outputs.logits).get());
+                final int token_id = OnnxModel.argmax((OnnxTensor)result.get(config.outputs.logits).get());
                 if(config.eos_token_id.contains(token_id)) {
+                    System.out.println("finished");
                     break;
+                } else {
+                    System.out.println("n: " + token_id);
                 }
                 outputs.add(Integer.valueOf(token_id).longValue());
 
@@ -143,6 +154,8 @@ public class OnnxLLM implements Serializable {
 
                 input_ids = OnnxTensor.createTensor(environment, LongBuffer.wrap(new long[]{token_id}), new long[]{1, 1});
                 attention_mask = OnnxTensor.createTensor(environment, LongBuffer.wrap(attention_mask_values), new long[]{1, attention_mask_values.length});
+                position_ids = OnnxTensor.createTensor(environment, LongBuffer.wrap(new long[]{pos}), new long[]{1, 1});
+                pos = pos + 1;
             }
         }
 
@@ -171,6 +184,8 @@ public class OnnxLLM implements Serializable {
         public static class InputsConfig implements Serializable {
             public String input_ids;
             public String attention_mask;
+            public String position_ids;
+            public String num_logits_to_keep;
             public Map<String, String> feeds;
 
             public transient Map<String, TensorInfo> tensorInfos;
@@ -179,9 +194,14 @@ public class OnnxLLM implements Serializable {
                 if(input_ids == null) {
                     input_ids = "input_ids";
                 }
-
                 if(attention_mask == null) {
                     attention_mask = "attention_mask";
+                }
+                if(position_ids == null) {
+                    position_ids = "position_ids";
+                }
+                if(num_logits_to_keep == null) {
+                    num_logits_to_keep = "num_logits_to_keep";
                 }
                 if(feeds == null) {
                     feeds = new HashMap<>();
@@ -337,6 +357,15 @@ public class OnnxLLM implements Serializable {
             case DOUBLE -> OnnxTensor.createTensor(environment, DoubleBuffer.wrap(new double[elementCount]), tensorInfo.getShape());
             default -> throw new IllegalArgumentException();
         };
+    }
+
+    static OnnxTensor sequence(OrtEnvironment environment, int length) throws OrtException {
+        long[] ls = new long[length];
+        for(int l=0; l<length; l++) {
+            ls[l] = l;
+        }
+        long[] shape = new long[]{1L, length};
+        return OnnxTensor.createTensor(environment, LongBuffer.wrap(ls), shape);
     }
 
 }
