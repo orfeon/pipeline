@@ -28,7 +28,7 @@ If neither `field` nor `text` is specified, the entire record will be written to
 
 | parameter | optional | type   | description                                                                                                                  |
 |-----------|----------|--------|------------------------------------------------------------------------------------------------------------------------------|
-| type      | optional | Enum   | Specifies the format of file. Supported `text`, `csv`, `json` and `avro`.                                                    |
+| format    | optional | Enum   | Specifies the format of file. Supported `text`, `csv`, `json`, `bytes` and `avro`.                                           |
 | field     | optional | String | The value of the field specified here will be written to the file. If fields are nested, you can specify them using periods. |
 | text      | optional | String | Specify text as the file content using an Apache FreeMarker template                                                         |
 

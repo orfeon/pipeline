@@ -12,11 +12,14 @@ Source Module for loading file information by specifying queries or files into G
 
 ## Drive source module parameters
 
+Specify queries to retrieve files from Drive, or specify file IDs directly.
+(You can specify both.)
+
 | parameter | optional           | type          | description                                                                                                                                                  |
 |-----------|--------------------|---------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| queries   | selective required | Array<Query\> | Specify a [query](https://developers.google.com/drive/api/v3/search-files#query_string_examples) for Google Drive.                                           |
-| files     | selective required | Array<File\>  | Specify a [query](https://developers.google.com/drive/api/v3/search-files#query_string_examples) for Google Drive.                                           |
-| user      | required           | String        | Specify service account to access Google Drive                                                                                                               |
+| queries   | selective required | Array<Query\> | Specify [query](https://developers.google.com/drive/api/v3/search-files#query_string_examples) list for Google Drive.                                        |
+| files     | selective required | Array<File\>  | Specify File ids for Google Drive.                                                                                                                           |
+| user      | optional           | String        | Specify service account to access Google Drive. If not specified, the worker's service account will be used.                                                 |
 | fields    | optional           | String        | Specify the [fields](https://developers.google.com/drive/api/v3/reference/files) you want to retrieve. Nesting field is not supported, default is as follows |
 | export    | optional           | String        | Specify the [export mime type](https://developers.google.com/workspace/drive/api/guides/ref-export-formats) you want to retrieve.                            |
 | content   | optional           | Boolean       | Specify true if you want to retrieve the file content. The default is false.                                                                                 |
@@ -49,7 +52,7 @@ Source Module for loading file information by specifying queries or files into G
 
 ### Assign role
 
-The drivefile module uses [impersonating service accounts](https://cloud.google.com/iam/docs/impersonating-service-accounts).
+The drive source module uses [impersonating service accounts](https://cloud.google.com/iam/docs/impersonating-service-accounts).
 
 The following roles must be assigned to dataflow worker service accounts to impersonate a drive user service account
 
