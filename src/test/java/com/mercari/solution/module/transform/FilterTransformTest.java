@@ -44,7 +44,7 @@ public class FilterTransformTest {
                   "transforms": [
                     {
                       "name": "filter",
-                      "module": "filter",
+                      "module": "select",
                       "inputs": ["create"],
                       "parameters": {
                         "select": [
@@ -58,7 +58,7 @@ public class FilterTransformTest {
                     },
                     {
                       "name": "filter2",
-                      "module": "filter",
+                      "module": "select",
                       "inputs": ["filter"],
                       "parameters": {
                         "select": [
