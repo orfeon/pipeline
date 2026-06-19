@@ -274,7 +274,7 @@ public class Auth {
                         }
 
                         final Object body = switch (parameters.format) {
-                            case text -> httpResponse.body();
+                            case text, xml -> httpResponse.body();
                             case bytes -> ByteBuffer.wrap((byte[])httpResponse.body());
                             case json -> {
                                 final String bodyString = (String) httpResponse.body();

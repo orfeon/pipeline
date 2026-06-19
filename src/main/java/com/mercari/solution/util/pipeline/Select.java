@@ -1,11 +1,12 @@
 package com.mercari.solution.util.pipeline;
 
-import com.google.common.collect.Ordering;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.pipeline.aggregation.Accumulator;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
 import com.mercari.solution.util.pipeline.select.navigation.NavigationFunction;
@@ -29,13 +30,20 @@ public class Select implements Serializable {
 
     private static final Logger LOG = LoggerFactory.getLogger(Select.class);
 
+    private final String selectJson;
+
     private final List<SelectFunction> selectFunctions;
 
     public List<SelectFunction> getSelectFunctions() {
         return selectFunctions;
     }
 
-    public Select(final List<SelectFunction> selectFunctions) {
+    private Select(final List<SelectFunction> selectFunctions, final JsonElement selectJson) {
+        if(selectJson != null && selectJson.isJsonArray()) {
+            this.selectJson = selectJson.toString();
+        } else {
+            this.selectJson = null;
+        }
         this.selectFunctions = Optional
                 .ofNullable(selectFunctions)
                 .orElseGet(ArrayList::new);
@@ -43,11 +51,11 @@ public class Select implements Serializable {
 
     public static Select of(final JsonArray select, final List<Schema.Field> inputFields) {
         final List<SelectFunction > selectFunctions = SelectFunction.of(select, inputFields);
-        return new Select(selectFunctions);
+        return new Select(selectFunctions, select);
     }
 
     public static Select of(final List<SelectFunction> selectFunctions) {
-        return new Select(selectFunctions);
+        return new Select(selectFunctions, JsonNull.INSTANCE);
     }
 
     public static Schema createOutputSchema(final Select select) {
@@ -172,6 +180,14 @@ public class Select implements Serializable {
 
     public boolean useSelect() {
         return !selectFunctions.isEmpty();
+    }
+
+    public JsonElement toJson() {
+        if(selectJson != null) {
+            return JsonUtil.fromJson(selectJson);
+        } else {
+            return JsonNull.INSTANCE;
+        }
     }
 
     public static List<String> getInputFieldNames(final List<SelectFunction> selectFunctions) {

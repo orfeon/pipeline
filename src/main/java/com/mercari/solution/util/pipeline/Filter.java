@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline;
 
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
@@ -79,6 +80,13 @@ public class Filter implements Serializable {
 
     public boolean filter(final Map<String, Object> primitiveValues) {
         return filter(conditionNode, primitiveValues);
+    }
+
+    public JsonElement toJson() {
+        if(filterJson == null) {
+            return JsonNull.INSTANCE;
+        }
+        return JsonUtil.fromJson(filterJson);
     }
 
     public enum Type implements Serializable {
