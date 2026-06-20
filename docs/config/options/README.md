@@ -9,6 +9,7 @@ The following items can be defined as options.
 | streaming | Boolean                         | Specify whether the dataflow job starts in streaming mode or not.                                          |
 | dataflow  | [Dataflow Options](dataflow.md) | Specify [Cloud Dataflow runner](https://beam.apache.org/documentation/runners/dataflow/) specific options. |
 | direct    | [Direct Options](direct.md)     | Specify [Direct runner](https://beam.apache.org/documentation/runners/direct/) specific options.           |
+| flink     | [Flink Options](flink.md)       | Specify [Apache Flink runner](https://beam.apache.org/documentation/runners/flink/) specific options.      |
 | gcp       | [GCP Options](gcp.md)           | Specify Google Cloud options.                                                                              |
 
 

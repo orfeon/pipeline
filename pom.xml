@@ -382,8 +382,18 @@
       </activation>
       <properties>
         <flink.version>1.20</flink.version>
-        <jib.image>apache/beam_flink${flink.version}_job_server</jib.image>
       </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.google.cloud.tools</groupId>
+            <artifactId>jib-maven-plugin</artifactId>
+            <configuration>
+              <skip>true</skip>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
