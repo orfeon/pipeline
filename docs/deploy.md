@@ -68,6 +68,13 @@ The image contains the pipeline fat JAR and can serve as both JobManager and Tas
 
 ### Build Docker Image
 
+#### Dockerfile
+
+```Dockerfile
+FROM flink:1.20-java21
+COPY target/pipeline-bundled-*.jar /opt/flink/usrlib/pipeline.jar
+```
+
 ```sh
 # 1. Build the fat JAR with the Flink profile
 mvn clean package -DskipTests -Pflink
@@ -128,6 +135,90 @@ docker run -d --name taskmanager \
   -e JOB_MANAGER_RPC_ADDRESS=jobmanager \
   {region}-docker.pkg.dev/{project}/{repo}/flink:latest \
   taskmanager
+```
+
+## Deploy for Apache Spark
+
+Mercari Pipeline for Apache Spark is deployed as a Docker image that can run in Spark Application Mode on [Kubernetes](https://spark.apache.org/docs/latest/running-on-kubernetes.html) or standalone clusters.
+The image contains the pipeline fat JAR and can serve as both driver and executor.
+
+### Build Docker Image
+
+#### Dockerfile
+
+```Dockerfile
+FROM apache/spark:4.0.0-java21
+COPY target/pipeline-bundled-*.jar /opt/spark/usrlib/pipeline.jar
+```
+
+```sh
+# 1. Build the fat JAR with the Spark profile
+mvn clean package -DskipTests -Pspark
+
+# 2. Build the Docker image
+docker build -f containers/spark/Dockerfile -t {region}-docker.pkg.dev/{project}/{repo}/spark:latest .
+```
+
+### Push Docker Image to GAR
+
+```sh
+docker push {region}-docker.pkg.dev/{project}/{repo}/spark:latest
+```
+
+### Deploy on Kubernetes with spark-submit
+
+```sh
+spark-submit \
+  --master k8s://https://{k8s-apiserver-host}:{port} \
+  --deploy-mode cluster \
+  --class com.mercari.solution.MPipeline \
+  --conf spark.kubernetes.container.image={region}-docker.pkg.dev/{project}/{repo}/spark:latest \
+  --conf spark.kubernetes.namespace={namespace} \
+  --conf spark.executor.instances=2 \
+  local:///opt/spark/usrlib/pipeline.jar \
+  --config=gs://path/to/config.json
+```
+
+### Deploy with Spark Kubernetes Operator
+
+Example `SparkApplication` resource for [Spark on Kubernetes Operator](https://github.com/kubeflow/spark-operator):
+
+```yaml
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: mercari-pipeline
+spec:
+  type: Java
+  mode: cluster
+  image: {region}-docker.pkg.dev/{project}/{repo}/spark:latest
+  mainClass: com.mercari.solution.MPipeline
+  mainApplicationFile: local:///opt/spark/usrlib/pipeline.jar
+  arguments:
+    - "--config=gs://path/to/config.json"
+  sparkVersion: "4.0.0"
+  driver:
+    cores: 1
+    memory: "2048m"
+  executor:
+    cores: 1
+    instances: 2
+    memory: "2048m"
+```
+
+### Deploy as Standalone Spark Cluster
+
+```sh
+docker run -d --name spark-master \
+  -p 8080:8080 -p 7077:7077 \
+  {region}-docker.pkg.dev/{project}/{repo}/spark:latest \
+  /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+
+docker run -d --name spark-worker \
+  --link spark-master:spark-master \
+  -e SPARK_MASTER=spark://spark-master:7077 \
+  {region}-docker.pkg.dev/{project}/{repo}/spark:latest \
+  /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
 ```
 
 ## Deploy for Direct Runner (for single node execution)
