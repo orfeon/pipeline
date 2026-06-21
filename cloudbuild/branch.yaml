@@ -28,6 +28,7 @@ steps:
       - "-Pdirect"
       - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/direct:${_VERSION}"
       - "-Dmaven.repo.local=/workspace/.m2"
+    id: 'build-direct'
     waitFor: ['build-dataflow']
   - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
@@ -38,7 +39,8 @@ steps:
       - "-Pserver"
       - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/server:${_VERSION}"
       - "-Dmaven.repo.local=/workspace/.m2"
-    waitFor: ['build-dataflow']
+    id: 'build-server'
+    waitFor: ['build-direct']
   # Dataflow GPU: launcher image (Jib) + template
   - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
@@ -50,7 +52,7 @@ steps:
       - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu:${_VERSION}"
       - "-Dmaven.repo.local=/workspace/.m2"
     id: 'build-dataflow-gpu'
-    waitFor: ['build-dataflow']
+    waitFor: ['build-server']
   # Dataflow GPU flex template build
   - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli:slim'
     args:
