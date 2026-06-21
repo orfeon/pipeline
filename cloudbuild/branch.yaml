@@ -21,17 +21,6 @@ steps:
       - "--sdk-language"
       - "JAVA"
     waitFor: ['build-dataflow']
-  - name: 'alpine'
-    entrypoint: 'sh'
-    args:
-      - '-c'
-      - |
-        mkdir -p direct server gpu
-        cp -r src pom.xml direct/
-        cp -r src pom.xml server/
-        cp -r src pom.xml gpu/
-    id: 'prepare-dirs'
-    waitFor: [ 'build-dataflow' ]
   # Direct runner image (Jib)
   - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
@@ -43,7 +32,7 @@ steps:
       - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/direct:${_VERSION}"
       - "-Dmaven.repo.local=/workspace/.m2"
     id: 'build-direct'
-    waitFor: ['prepare-dirs']
+    waitFor: ['build-dataflow']
   # Server image (Jib)
   - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
@@ -55,7 +44,7 @@ steps:
       - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/server:${_VERSION}"
       - "-Dmaven.repo.local=/workspace/.m2"
     id: 'build-server'
-    waitFor: ['prepare-dirs']
+    waitFor: ['build-direct']
   # Dataflow GPU: launcher image (Jib)
   - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
@@ -67,7 +56,7 @@ steps:
       - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu:${_VERSION}"
       - "-Dmaven.repo.local=/workspace/.m2"
     id: 'build-dataflow-gpu'
-    waitFor: ['prepare-dirs']
+    waitFor: ['build-server']
   # Dataflow GPU: flex template build
   - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli:slim'
     args:
@@ -91,6 +80,47 @@ steps:
       - "--cache=true"
       - "--cache-ttl=168h"
     waitFor: ['-']
+  # Flink: fat JAR build (Jib skipped)
+  - name: maven:3.9-eclipse-temurin-21
+    entrypoint: mvn
+    args:
+      - "clean"
+      - "package"
+      - "-DskipTests"
+      - "-Pflink"
+      - "-Dmaven.repo.local=/workspace/.m2"
+    id: 'build-flink'
+    waitFor: ['build-dataflow-gpu']
+  # Flink: worker SDK container image
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - "--destination=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/flink:${_VERSION}"
+      - "--context=dir:///workspace"
+      - "--dockerfile=containers/flink/Dockerfile"
+      - "--cache=true"
+      - "--cache-ttl=168h"
+    id: 'image-flink'
+    waitFor: ['build-flink']
+  # Spark: fat JAR build (Jib skipped)
+  - name: maven:3.9-eclipse-temurin-21
+    entrypoint: mvn
+    args:
+      - "clean"
+      - "package"
+      - "-DskipTests"
+      - "-Pspark"
+      - "-Dmaven.repo.local=/workspace/.m2"
+    id: 'build-spark'
+    waitFor: ['image-flink']
+  # Spark: worker SDK container image
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - "--destination=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/spark:${_VERSION}"
+      - "--context=dir:///workspace"
+      - "--dockerfile=containers/spark/Dockerfile"
+      - "--cache=true"
+      - "--cache-ttl=168h"
+    waitFor: ['build-spark']
 substitutions:
   _BUCKET: "{SET YOUR BUCKET}"
   _REGION: "{SET YOUR GAR REPOSITORY REGION}"
