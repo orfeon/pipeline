@@ -61,6 +61,69 @@ gcloud dataflow flex-template build gs://{path/to/template_file} \
   --sdk-language "JAVA"
 ```
 
+## Deploy for Cloud Dataflow (GPU)
+
+Mercari Pipeline for Cloud Dataflow with GPU support.
+Two images are required: a Flex Template **launcher** image (built with Jib, same as standard Dataflow) and a **worker SDK container** image with CUDA/cuDNN runtime libraries for GPU-accelerated ONNX Runtime inference.
+
+The `dataflow-gpu` profile replaces `onnxruntime` (CPU) with `onnxruntime_gpu` so that the GPU-enabled native library is staged to workers.
+
+### Build Launcher Image (Flex Template)
+
+The launcher image is built with Jib using the standard Dataflow template base. It does not need GPU support — it only constructs the pipeline DAG and submits the job.
+
+```sh
+mvn clean package -DskipTests -Pdataflow-gpu -Dimage={region}-docker.pkg.dev/{project}/{repo}/dataflow-gpu:latest
+```
+
+### Upload template file
+
+```sh
+gcloud dataflow flex-template build gs://{path/to/template_file_gpu} \
+  --image "{region}-docker.pkg.dev/{project}/{repo}/dataflow-gpu:latest" \
+  --sdk-language "JAVA"
+```
+
+### Build Worker SDK Container Image
+
+The worker SDK container image extends the Apache Beam Java SDK image with CUDA/cuDNN runtime libraries so that `onnxruntime_gpu` can access the GPU on worker VMs.
+
+#### Dockerfile
+
+```Dockerfile
+ARG BEAM_VERSION=2.74.0
+FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04 AS cuda
+
+FROM apache/beam_java21_sdk:${BEAM_VERSION}
+
+COPY --from=cuda /usr/local/cuda/lib64/ /usr/local/cuda/lib64/
+COPY --from=cuda /usr/lib/x86_64-linux-gnu/libcudnn* /usr/lib/x86_64-linux-gnu/
+
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+```
+
+```sh
+docker build -f containers/dataflow-gpu/Dockerfile -t {region}-docker.pkg.dev/{project}/{repo}/dataflow-gpu-worker:latest .
+docker push {region}-docker.pkg.dev/{project}/{repo}/dataflow-gpu-worker:latest
+```
+
+### Launch Dataflow job with GPU
+
+Specify the worker SDK container image, a GPU-enabled machine type, and GPU accelerators:
+
+```sh
+gcloud dataflow flex-template run {job_name} \
+  --template-file-gcs-location=gs://{path/to/template_file_gpu} \
+  --region={region} \
+  --worker-machine-type=g2-standard-4 \
+  --additional-experiments=use_runner_v2 \
+  --additional-user-labels=gpu=true \
+  --dataflow-service-options=worker_accelerator=type:nvidia-l4\;count:1\;install-nvidia-driver \
+  --parameters ^~^config=gs://path/to/config.json~sdkContainerImage={region}-docker.pkg.dev/{project}/{repo}/dataflow-gpu-worker:latest
+```
+
 ## Deploy for Apache Flink
 
 Mercari Pipeline for Apache Flink is deployed as a Docker image that can run in [Flink Application Mode](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/deployment/overview/#application-mode).

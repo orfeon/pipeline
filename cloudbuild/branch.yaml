@@ -1,23 +1,85 @@
 steps:
-  - name: maven:3-amazoncorretto-21
+  - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
-    args: ["clean", "package", "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow:${_VERSION}"]
+    args:
+      - "clean"
+      - "package"
+      - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow:${_VERSION}"
+      - "-Dmaven.repo.local=/workspace/.m2"
+    id: 'build-dataflow'
   - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli:slim'
-    args: ["gcloud", "dataflow", "flex-template", "build",
-           "gs://${_BUCKET}/${_VERSION}",
-           "--image", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow:${_VERSION}",
-           "--sdk-language", "JAVA"]
-  - name: maven:3-amazoncorretto-21
+    args:
+      - "gcloud"
+      - "dataflow"
+      - "flex-template"
+      - "build"
+      - "gs://${_BUCKET}/${_VERSION}"
+      - "--image"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow:${_VERSION}"
+      - "--sdk-language"
+      - "JAVA"
+    waitFor: ['build-dataflow']
+  - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
-    args: ["clean", "package", "-DskipTests", "-Pdirect", "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/direct:${_VERSION}"]
-  - name: maven:3-amazoncorretto-21
+    args:
+      - "clean"
+      - "package"
+      - "-DskipTests"
+      - "-Pdirect"
+      - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/direct:${_VERSION}"
+      - "-Dmaven.repo.local=/workspace/.m2"
+    waitFor: ['build-dataflow']
+  - name: maven:3.9-eclipse-temurin-21
     entrypoint: mvn
-    args: ["clean", "package", "-DskipTests", "-Pserver", "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/server:${_VERSION}"]
+    args:
+      - "clean"
+      - "package"
+      - "-DskipTests"
+      - "-Pserver"
+      - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/server:${_VERSION}"
+      - "-Dmaven.repo.local=/workspace/.m2"
+    waitFor: ['build-dataflow']
+  # Dataflow GPU: launcher image (Jib) + template
+  - name: maven:3.9-eclipse-temurin-21
+    entrypoint: mvn
+    args:
+      - "clean"
+      - "package"
+      - "-DskipTests"
+      - "-Pdataflow-gpu"
+      - "-Dimage=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu:${_VERSION}"
+      - "-Dmaven.repo.local=/workspace/.m2"
+    id: 'build-dataflow-gpu'
+    waitFor: ['build-dataflow']
+  # Dataflow GPU flex template build
+  - name: 'gcr.io/google.com/cloudsdktool/google-cloud-cli:slim'
+    args:
+      - "gcloud"
+      - "dataflow"
+      - "flex-template"
+      - "build"
+      - "gs://${_BUCKET}/${_VERSION}-gpu"
+      - "--image"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu:${_VERSION}"
+      - "--sdk-language"
+      - "JAVA"
+    waitFor: ['build-dataflow-gpu']
+  # Dataflow GPU: worker SDK container image with CUDA/cuDNN
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    args:
+      - "--destination=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/dataflow-gpu-worker:${_VERSION}"
+      - "--context=dir:///workspace/containers/dataflow-gpu"
+      - "--dockerfile=Dockerfile"
+      - "--build-arg=BEAM_VERSION=${_BEAM_VERSION}"
+      - "--cache=true"
+      - "--cache-ttl=168h"
+    waitFor: ['-']
 substitutions:
   _BUCKET: "{SET YOUR BUCKET}"
   _REGION: "{SET YOUR GAR REPOSITORY REGION}"
   _REPOSITORY: "{SET YOUR GAR REPOSITORY NAME}"
   _VERSION: ${BRANCH_NAME}
+  _BEAM_VERSION: "2.74.0"
 options:
   dynamic_substitutions: true
   logging: CLOUD_LOGGING_ONLY

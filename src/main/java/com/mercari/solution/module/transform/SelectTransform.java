@@ -48,7 +48,7 @@ public class SelectTransform extends Transform {
                     && (this.select == null || !this.select.isJsonArray())) {
 
                 errorMessages.add("requires filter or select parameter.");
-            } else if(this.select.isJsonArray()) {
+            } else if(this.select != null && this.select.isJsonArray()) {
                 int i=0;
                 for(final JsonElement e : this.select.getAsJsonArray()) {
                     if(!e.isJsonObject()) {

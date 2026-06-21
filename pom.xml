@@ -429,21 +429,35 @@
       </dependencies>
     </profile>
 
-    <!-- Makes the DataflowRunner available when running a dataflow pipeline job. -->
+    <!-- Makes the DataflowRunner available with GPU support when running a dataflow pipeline job. -->
+    <!-- Launcher image is built with Jib (standard Dataflow base). -->
+    <!-- Worker SDK container image with CUDA is built separately via containers/dataflow-gpu/Dockerfile. -->
     <profile>
       <id>dataflow-gpu</id>
       <activation>
         <activeByDefault>false</activeByDefault>
       </activation>
-      <properties>
-        <jib.image>nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04</jib.image>
-        <jib.appRoot>/var/lib/jetty/webapps/ROOT</jib.appRoot>
-      </properties>
+      <dependencyManagement>
+        <dependencies>
+          <!-- Override onnxruntime CPU to provided scope so onnxruntime_gpu is used instead -->
+          <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>${onnxruntime.version}</version>
+            <scope>provided</scope>
+          </dependency>
+        </dependencies>
+      </dependencyManagement>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
           <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>com.microsoft.onnxruntime</groupId>
+          <artifactId>onnxruntime_gpu</artifactId>
+          <version>${onnxruntime.version}</version>
         </dependency>
       </dependencies>
     </profile>
