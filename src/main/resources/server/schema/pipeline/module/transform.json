@@ -1,0 +1,28 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform",
+  "title": "Sink Module",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/modules/module" },
+    {
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "title": "Name",
+          "description": "Type of elements",
+          "items": {
+            "type": "string"
+          }
+        },
+        "waits": {
+          "type": "array",
+          "title": "Name",
+          "description": "Type of elements",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

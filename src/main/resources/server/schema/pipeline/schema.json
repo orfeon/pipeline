@@ -1,0 +1,80 @@
+{
+  "$id": "https://mercari.com/pipeline/schema",
+  "title": "Schema",
+  "type": "object",
+  "description": "Define fields",
+  "properties": {
+    "fields": { "$ref": "#/$defs/fields" }
+  },
+  "required": ["fields"],
+  "$defs": {
+    "field": {
+      "type": "object",
+      "title": "Field",
+      "properties": {
+        "name": { "type": "string", "title": "Name" },
+        "type": { "$ref": "#/$defs/type" },
+        "mode": { "$ref": "#/$defs/mode" }
+      },
+      "required": ["name", "type"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "element" } }
+          },
+          "then": {
+            "properties": {
+              "fields": { "$ref": "#/$defs/fields" }
+            },
+            "required": ["fields"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "map" } }
+          },
+          "then": {
+            "properties": {
+              "valueType": { "$ref": "#/$defs/type" }
+            },
+            "required": ["valueType"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "enumeration" } }
+          },
+          "then": {
+            "properties": {
+              "symbols": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["symbols"]
+          }
+        }
+      ]
+    },
+    "fields": {
+      "type": "array",
+      "title": "Fields",
+      "description": "Fields of schema",
+      "items": { "$ref": "#/$defs/field" },
+      "minItems": 1
+    },
+    "type": {
+      "type": "string",
+      "title": "Type",
+      "enum": ["bool", "string", "json", "bytes", "int32", "int64", "float32", "float64", "date", "time", "timestamp", "enumeration", "map", "element"]
+    },
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "enum": ["nullable", "required", "repeated"],
+      "default": "nullable"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/select",
+  "title": "Select",
+  "description": "Transform module for field selection, transformation, and filtering",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "select" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Select Transform Parameters",
+      "description": "Parameters for field selection and transformation",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "title": "Filter",
+          "description": "Filter condition to apply before selection"
+        },
+        "select": {
+          "$ref": "https://mercari.com/pipeline/util/pipeline/select"
+        },
+        "flattenField": {
+          "type": "string",
+          "title": "Flatten Field",
+          "description": "Field to flatten (unnest)"
+        },
+        "groupFields": {
+          "type": "array",
+          "title": "Group Fields",
+          "description": "Fields for grouping (for stateful processing)",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

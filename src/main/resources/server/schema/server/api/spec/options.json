@@ -1,0 +1,374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mercari.com/server/api/spec/options",
+  "title": "Pipeline Options",
+  "description": "Pipeline execution options",
+  "type": "object",
+  "x-metadata": {
+    "name": "options",
+    "label": "Pipeline Options"
+  },
+  "properties": {
+    "jobName": {
+      "type": "string",
+      "title": "Job Name",
+      "description": "Pipeline job name"
+    },
+    "streaming": {
+      "type": "boolean",
+      "title": "Streaming Mode",
+      "description": "Enable streaming mode"
+    },
+    "tempLocation": {
+      "type": "string",
+      "title": "Temp Location",
+      "description": "GCS path for temporary files (gs://...)"
+    },
+    "expansion": {
+      "type": "object",
+      "title": "Expansion",
+      "description": "Cross-language expansion options",
+      "properties": {
+        "alsoStartLoopbackWorker": {
+          "type": "boolean",
+          "title": "Also Start Loopback Worker",
+          "description": "Start loopback worker for expansion"
+        },
+        "expansionServiceConfigFile": {
+          "type": "string",
+          "title": "Expansion Service Config File",
+          "description": "Path to expansion service config file"
+        },
+        "useAltsServer": {
+          "type": "boolean",
+          "title": "Use ALTS Server",
+          "description": "Use ALTS for secure communication"
+        },
+        "useConfigDependenciesForManaged": {
+          "type": "boolean",
+          "title": "Use Config Dependencies for Managed",
+          "description": "Use config for managed transform dependencies"
+        },
+        "python": {
+          "type": "object",
+          "title": "Python",
+          "description": "Python cross-language expansion options",
+          "properties": {
+            "useTransformService": {
+              "type": "boolean",
+              "title": "Use Transform Service",
+              "description": "Use transform service for Python transforms"
+            },
+            "customBeamRequirement": {
+              "type": "string",
+              "title": "Custom Beam Requirement",
+              "description": "Custom Apache Beam Python package requirement"
+            },
+            "alsoStartLoopbackWorker": {
+              "type": "boolean",
+              "title": "Also Start Loopback Worker",
+              "description": "Start loopback worker for Python expansion"
+            }
+          }
+        }
+      }
+    },
+    "runner": {
+      "type": "string",
+      "title": "Runner",
+      "description": "Select pipeline runner",
+      "enum": [
+        "Dataflow",
+        "Spark",
+        "Direct",
+        "Flink"
+      ]
+    },
+    "environment": {
+      "type": "string",
+      "title": "Environment",
+      "description": "Select execution environment",
+      "enum": [
+        "GCP",
+        "AWS"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runner": {
+            "const": "Dataflow"
+          }
+        },
+        "required": [
+          "runner"
+        ]
+      },
+      "then": {
+        "properties": {
+          "dataflow": {
+            "type": "object",
+            "title": "Dataflow",
+            "description": "Cross-language expansion options",
+            "properties": {
+              "workerMachineType": {
+                "type": "string",
+                "title": "Worker Machine Type",
+                "description": "GCE machine type for workers (e.g. n1-standard-4)"
+              },
+              "maxWorkers": {
+                "type": "integer",
+                "title": "Max Workers",
+                "description": "Maximum number of workers"
+              },
+              "usePublicIps": {
+                "type": "boolean",
+                "title": "Use Public IPs",
+                "description": "Whether to use public IPs for workers"
+              },
+              "serviceAccount": {
+                "type": "string",
+                "title": "Service Account",
+                "description": "Service account email for workers"
+              },
+              "subnetwork": {
+                "type": "string",
+                "title": "Subnetwork",
+                "description": "Subnetwork for workers (regions/REGION/subnetworks/NAME)"
+              },
+              "stagingLocation": {
+                "type": "string",
+                "title": "Staging Location",
+                "description": "GCS path for staging files (gs://...)"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runner": {
+            "const": "Spark"
+          }
+        },
+        "required": [
+          "runner"
+        ]
+      },
+      "then": {
+        "properties": {
+          "spark": {
+            "type": "object",
+            "title": "Spark",
+            "description": "Cross-language expansion options",
+            "properties": {
+              "sparkMaster": {
+                "type": "string",
+                "title": "Spark Master",
+                "description": "Spark master URL (e.g. yarn, spark://host:port)"
+              },
+              "checkpointDir": {
+                "type": "string",
+                "title": "Checkpoint Dir",
+                "description": "Checkpoint directory path"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runner": {
+            "const": "Direct"
+          }
+        },
+        "required": [
+          "runner"
+        ]
+      },
+      "then": {
+        "properties": {
+          "direct": {
+            "type": "object",
+            "title": "Direct",
+            "description": "Cross-language expansion options",
+            "properties": {
+              "targetParallelism": {
+                "type": "integer",
+                "title": "Target Parallelism",
+                "description": "Target parallelism level"
+              },
+              "blockOnRun": {
+                "type": "boolean",
+                "title": "Block on Run",
+                "description": "Block until pipeline completes"
+              },
+              "enforceImmutability": {
+                "type": "boolean",
+                "title": "Enforce Immutability",
+                "description": "Enforce immutability of PCollection contents"
+              },
+              "enforceEncodability": {
+                "type": "boolean",
+                "title": "Enforce Encodability",
+                "description": "Enforce encodability of PCollection contents"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runner": {
+            "const": "Flink"
+          }
+        },
+        "required": [
+          "runner"
+        ]
+      },
+      "then": {
+        "properties": {
+          "flink": {
+            "type": "object",
+            "title": "Flink",
+            "description": "Cross-language expansion options",
+            "properties": {
+              "flinkMaster": {
+                "type": "string",
+                "title": "Flink Master",
+                "description": "Flink JobManager URL (e.g. http://host:8081)"
+              },
+              "parallelism": {
+                "type": "integer",
+                "title": "Parallelism",
+                "description": "Default parallelism for Flink pipeline"
+              },
+              "maxParallelism": {
+                "type": "integer",
+                "title": "Max Parallelism",
+                "description": "Maximum parallelism for Flink pipeline"
+              },
+              "attachedMode": {
+                "type": "boolean",
+                "title": "Attached Mode",
+                "description": "Run in attached mode (wait for job completion)"
+              },
+              "executionModeForBatch": {
+                "type": "string",
+                "title": "Execution Mode for Batch",
+                "description": "Flink execution mode for batch jobs"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "environment": {
+            "const": "GCP"
+          }
+        },
+        "required": [
+          "environment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "gcp": {
+            "type": "object",
+            "title": "GCP",
+            "description": "Cross-language expansion options",
+            "properties": {
+              "project": {
+                "type": "string",
+                "title": "Project",
+                "description": "GCP Project ID"
+              },
+              "impersonateServiceAccount": {
+                "type": "string",
+                "title": "Impersonate Service Account",
+                "description": "Service account to impersonate"
+              },
+              "workerRegion": {
+                "type": "string",
+                "title": "Worker Region",
+                "description": "GCP region for workers (e.g. us-central1)"
+              },
+              "workerZone": {
+                "type": "string",
+                "title": "Worker Zone",
+                "description": "GCP zone for workers (e.g. us-central1-a)"
+              },
+              "gcpOauthScopes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "title": "GCP OAuth Scopes",
+                  "description": "OAuth scopes for GCP access"
+                },
+                "title": "GCP OAuth Scopes",
+                "description": "OAuth scopes for GCP access"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "environment": {
+            "const": "AWS"
+          }
+        },
+        "required": [
+          "environment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "aws": {
+            "type": "object",
+            "title": "AWS",
+            "description": "Cross-language expansion options",
+            "properties": {
+              "region": {
+                "type": "string",
+                "title": "Region",
+                "description": "AWS region"
+              },
+              "credentials": {
+                "type": "object",
+                "properties": {
+                  "profileFile": {
+                    "type": "string",
+                    "title": "Profile File",
+                    "description": "AWS profile file path"
+                  },
+                  "asyncCredentialUpdateEnabled": {
+                    "type": "boolean",
+                    "title": "Async Credential Update",
+                    "description": "Enable asynchronous credential update"
+                  }
+                },
+                "title": "Credentials",
+                "description": "AWS credentials configuration"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

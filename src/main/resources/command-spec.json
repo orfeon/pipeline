@@ -2,6 +2,6 @@
   "mainClass": "com.mercari.solution.MPipeline",
   "classPath": "/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*",
   "defaultParameterValues": {
-    "labels": "{\"app-name\":\"mercari-pipeline\", \"app-version\":\"v1-0-0-beta2\"}"
+    "labels": "{\"app-name\":\"mercari-pipeline\", \"app-version\":\"v1-0-0-beta3\"}"
   }
 }

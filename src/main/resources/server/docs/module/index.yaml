@@ -1,0 +1,78 @@
+sources:
+  - title: bigquery
+    description: Reads data from Google BigQuery via SQL query or table direct read. Supports Standard SQL with query result caching, Storage Read API for direct table access with field/row filtering, view mode for periodic polling, and microbatch mode for near real-time streaming.
+    tags: [source, bigquery, batch, gcp, sql]
+  - title: create
+    description: Generates data directly from configuration without external data sources. Supports listing explicit elements or generating sequences from a range specification.
+    tags: [source, create, batch, streaming, generate, test, dummy]
+  - title: datastore
+    description: Reads entities from Google Cloud Datastore using GQL queries. Supports namespace filtering, query splitting for parallel reads, and optional entity key extraction.
+    tags: [source, datastore, batch, gcp, nosql, entity, gql]
+  - title: drive
+    description: Retrieves file metadata and content from Google Drive. Supports searching files by query, specifying file IDs directly, reading Google Sheets content, and exporting Google Workspace files to various formats.
+    tags: [source, drive, batch, google, sheets, docs, workspace]
+  - title: files
+    description: Lists file metadata by matching glob patterns on Cloud Storage, S3, or local file systems. Optionally reads file content as bytes. Useful for file inventory, metadata-driven pipelines, and file content ingestion.
+    tags: [source, files, batch, gcs, s3, metadata, glob]
+  - title: firestore
+    description: Reads documents from Google Cloud Firestore. Supports collection queries with field filters, field projection, ordering, parallel partition queries, and subcollection traversal via allDescendants.
+    tags: [source, firestore, batch, gcp, nosql, document]
+  - title: http
+    description: Sends HTTP requests and outputs the responses. Supports GET/POST/PUT/DELETE methods, FreeMarker template expressions for endpoint/params/headers/body, loop-based pagination, request chaining with input dependencies, response format handling (text/json/xml/bytes), backoff/retry configuration, and rate limiting.
+    tags: [source, http, batch, api, rest]
+  - title: postgres
+    description: .
+    tags: [source, postgres, batch]
+  - title: pubsub
+    description: Reads messages from Google Cloud Pub/Sub topics or subscriptions. Supports JSON, Avro, Protocol Buffers, and raw message formats. Includes attribute-based filtering, partition routing with inline filter/select/flatten, additional metadata field injection, seek-based replay, and multi-partition output.
+    tags: [source, pubsub, streaming, gcp, messaging]
+  - title: spanner
+    description: Reads data from Google Cloud Spanner via SQL query or table scan. Supports batch partitioned queries, table key range filtering, change streams for CDC, view mode for periodic polling, microbatch mode for near real-time streaming, Data Boost, and timestamp-bound reads.
+    tags: [source, spanner, batch, streaming, gcp, sql, cdc]
+  - title: storage
+    description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, and JSON formats with schema auto-inference for binary formats. Includes column projection for Parquet, header skipping and line filtering for CSV, and compression support for text formats.
+    tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json]
+  - title: tidb
+    description: .
+    tags: [source, postgres, batch]
+transforms:
+  - title: aggregation
+    description: Performs aggregation processing on multiple inputs with grouping, filtering, and field selection. Supports 12 aggregation functions (count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, array_agg) with per-record conditions, expression-based fields, weighted calculations, and configurable output limiting. Works consistently in both batch and streaming modes.
+    tags: [transform, aggregation, batch, streaming, groupby]
+  - title: beamsql
+    description: Processes and combines input data using SQL queries based on Apache Beam SQL (Calcite). Supports JOIN across multiple inputs, aggregation with windowing, and built-in UDFs/UDAFs.
+    tags: [transform, beamsql, batch, streaming, sql, join, aggregation]
+  - title: partition
+    description: Splits input data into multiple named outputs based on filter conditions. Each partition can have its own filter and optional select processing. Supports exclusive routing (first match only) or non-exclusive routing (multiple matches). Unmatched records are routed to an excluded output. Optionally merges all partitions into a single union output.
+    tags: [transform, partition, filter, routing, batch, streaming]
+  - title: select
+    description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
+    tags: [transform, select, filter, batch, streaming, field, projection]
+sinks:
+  - title: bigquery
+    description: Writes input data to Google BigQuery tables. Supports multiple write methods (FILE_LOADS, STREAMING_INSERTS, STORAGE_WRITE_API, STORAGE_API_AT_LEAST_ONCE), dynamic destination tables via FreeMarker templates, time partitioning, clustering, primary key, schema update options, auto-sharding, KMS encryption, and failure handling.
+    tags: [sink, bigquery, batch, streaming, gcp, sql]
+  - title: bigtable
+    description: Writes, updates, or deletes cells and rows in Google Cloud Bigtable. Supports flexible row key generation with FreeMarker templates, multiple column families and qualifiers, per-record dynamic mutation operations, cell timestamp control, flow control, and batching.
+    tags: [sink, bigtable, batch, streaming, gcp, nosql, wide-column]
+  - title: datastore
+    description: Writes or deletes entities in Google Cloud Datastore. Supports flexible key generation from fields, templates, or auto-generated UUIDs, and can exclude fields from indexing.
+    tags: [sink, datastore, batch, streaming, gcp, nosql, entity]
+  - title: debug
+    description: Outputs input data to logs for debugging and inspection. Each record is logged as JSON with window and pane metadata. In DirectRunner mode, results are written as Avro files to a work directory.
+    tags: [sink, debug, batch, streaming, log, test]
+  - title: files
+    description: Writes each input record as an individual file to Cloud Storage (GCS) or local file system. The output path and content are dynamically determined per record using FreeMarker template expressions.
+    tags: [sink, files, batch, streaming, gcs, storage, write, export]
+  - title: firestore
+    description: Writes or deletes documents in Google Cloud Firestore. Supports flexible document name generation from fields, templates, or auto-generated UUIDs. Includes RPC QoS tuning for write throughput control.
+    tags: [sink, firestore, batch, streaming, gcp, nosql, document]
+  - title: pubsub
+    description: Publishes input data as messages to Google Cloud Pub/Sub topics. Supports JSON, Avro, and Protocol Buffers serialization formats. Includes dynamic topic routing via FreeMarker templates, custom message attributes with template expressions, message ID and ordering key control, batch size tuning, and passthrough of PubsubMessage inputs.
+    tags: [sink, pubsub, batch, streaming, gcp, messaging]
+  - title: spanner
+    description: Writes input data to Google Cloud Spanner tables using mutations. Supports INSERT, UPDATE, INSERT_OR_UPDATE, REPLACE, and DELETE operations. Includes commit timestamp injection, batch tuning parameters, RPC priority control, max commit delay, failure handling with dead-letter output, and emulator support.
+    tags: [sink, spanner, batch, streaming, gcp, sql]
+  - title: storage
+    description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
+    tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]

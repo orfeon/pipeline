@@ -1,0 +1,51 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/jdbc",
+  "title": "JDBC",
+  "description": "Sink module for writing data to databases via JDBC",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "jdbc" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "example": "jdbc:postgresql://<host>:<port>/database"
+        },
+        "driver": {
+          "type": "string",
+          "enum": [
+            "org.postgresql.Driver",
+            "org.mysql.cj.jdbc.Driver"
+          ]
+        },
+        "user": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        },
+        "keyFields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "batchSize": {
+          "type": "integer"
+        }
+      },
+      "required": ["url", "driver", "table"]
+    }
+  }
+}

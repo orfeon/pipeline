@@ -1,0 +1,114 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/http",
+  "title": "HTTP",
+  "description": "Get http response",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "http2" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Http Source Parameters",
+      "description": "create module can specify data directly in elements, or it can generate data by specifying a range from and to. You can also process the generated data by specifying a select parameter.",
+      "properties": {
+        "requests": {
+          "type": "array",
+          "title": "Http Requests Content",
+          "description": "Specify the http requests contents",
+          "items": {
+            "type": "object",
+            "properties": {
+              "endpoint": {
+                "type": "string",
+                "title": "Request Endpoint",
+                "description": ""
+              },
+              "method": {
+                "type": "string",
+                "title": "Request Method",
+                "enum": ["GET", "POST"]
+              },
+              "params": {
+                "type": "object",
+                "title": "Request Params",
+                "description": "",
+                "additionalProperties": {
+                  "type": ["string","number"]
+                }
+              },
+              "headers": {
+                "type": "object",
+                "title": "Request Headers",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "body": {
+                "type": "string",
+                "title": "Request Body"
+              },
+              "format": {
+                "type": "string",
+                "title": "Response Format",
+                "enum": ["json", "text", "bytes"]
+              },
+              "loop": {
+                "type": "object",
+                "title": "Request Loop",
+                "properties": {
+                  "condition": {
+                    "type": "array",
+                    "title": "Loop condition",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "op": {
+                          "type": "string",
+                          "enum": ["=","!=",">",">=","<","<="]
+                        },
+                        "value": {
+                          "type": ["string", "number"]
+                        }
+                      },
+                      "required": ["key", "op", "value"]
+                    }
+                  },
+                  "vars": {
+                    "type": "object",
+                    "title": "Loop variables",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "feeds": {
+                    "type": "object",
+                    "title": "Loop variables feed mappings",
+                    "additionalProperties": {
+                      "type": ["string", "number"]
+                    }
+                  }
+                }
+              },
+              "name": {
+                "type": "string",
+                "title": "Label"
+              }
+            },
+            "required": ["endpoint", "method"]
+          },
+          "minItems": 1
+        }
+      },
+      "required": ["requests"]
+    }
+  }
+}

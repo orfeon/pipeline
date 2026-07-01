@@ -1,0 +1,23 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/reshuffle",
+  "title": "Reshuffle",
+  "description": "Transform module for reshuffling data to prevent fusion and enable checkpointing",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "reshuffle" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Reshuffle Transform Parameters",
+      "description": "Parameters for reshuffling (no additional parameters required)",
+      "type": "object",
+      "properties": {}
+    }
+  }
+}

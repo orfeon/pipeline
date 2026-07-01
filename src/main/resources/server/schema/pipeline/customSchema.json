@@ -1,0 +1,48 @@
+{
+  "$id": "https://mercari.com/pipeline/customSchema",
+  "title": "Schema",
+  "type": "object",
+  "description": "Define fields or specify an Avro or Protobuf schema",
+  "oneOf": [
+    { "$ref": "https://mercari.com/pipeline/schema" },
+    {
+      "properties": {
+        "avro": {
+          "title": "Avro Schema",
+          "type": "object",
+          "description": "Specify the Avro Schema. Provide either the schema definition JSON or the file path",
+          "oneOf": [
+            {
+              "properties": {
+                "file": { "type": "string" }
+              },
+              "required": ["file"]
+            },
+            {
+              "properties": {
+                "json": { "type": "string" }
+              },
+              "required": ["json"]
+            }
+          ]
+        }
+      },
+      "required": ["avro"]
+    },
+    {
+      "properties": {
+        "protobuf": {
+          "title": "Protobuf Schema",
+          "type": "object",
+          "description": "Specify the Protobuf schema. Provide both the path to the descriptor file and the message name",
+          "properties": {
+            "descriptorFile": { "type": "string" },
+            "messageName": { "type": "string" }
+          },
+          "required": ["descriptorFile", "messageName"]
+        }
+      },
+      "required": ["protobuf"]
+    }
+  ]
+}

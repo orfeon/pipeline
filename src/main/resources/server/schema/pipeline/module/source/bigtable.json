@@ -1,0 +1,160 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/bigtable",
+  "title": "Bigtable",
+  "description": "Source module for reading data from Cloud Bigtable",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "bigtable" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Bigtable Source Parameters",
+      "description": "Parameters for reading data from Cloud Bigtable",
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "title": "Project ID",
+          "description": "GCP Project ID"
+        },
+        "instanceId": {
+          "type": "string",
+          "title": "Instance ID",
+          "description": "Bigtable Instance ID"
+        },
+        "tableId": {
+          "type": "string",
+          "title": "Table ID",
+          "description": "Bigtable Table ID"
+        },
+        "filter": {
+          "type": "object",
+          "title": "Filter",
+          "description": "Row filter conditions"
+        },
+        "keyRange": {
+          "type": "object",
+          "title": "Key Range",
+          "description": "Key range for reading"
+        },
+        "columns": {
+          "type": "array",
+          "title": "Columns",
+          "description": "Column family definitions with qualifiers",
+          "items": {
+            "type": "object",
+            "properties": {
+              "family": {
+                "type": "string",
+                "title": "Family",
+                "description": "Column family name"
+              },
+              "qualifiers": {
+                "type": "array",
+                "title": "Qualifiers",
+                "description": "Column qualifiers",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "format": {
+          "type": "string",
+          "title": "Format",
+          "description": "Data format",
+          "enum": ["bytes", "avro", "text"],
+          "default": "bytes"
+        },
+        "cellType": {
+          "type": "string",
+          "title": "Cell Type",
+          "description": "Which cell to read",
+          "enum": ["last", "first", "all"],
+          "default": "last"
+        },
+        "outputType": {
+          "type": "string",
+          "title": "Output Type",
+          "description": "Output type",
+          "enum": ["row", "cell"],
+          "default": "row"
+        },
+        "withRowKey": {
+          "type": "boolean",
+          "title": "With Row Key",
+          "description": "Include row key in output",
+          "default": false
+        },
+        "withFirstTimestamp": {
+          "type": "boolean",
+          "title": "With First Timestamp",
+          "description": "Include first timestamp in output",
+          "default": false
+        },
+        "withLastTimestamp": {
+          "type": "boolean",
+          "title": "With Last Timestamp",
+          "description": "Include last timestamp in output",
+          "default": false
+        },
+        "rowKeyField": {
+          "type": "string",
+          "title": "Row Key Field",
+          "description": "Field name for row key",
+          "default": "row_key"
+        },
+        "appProfileId": {
+          "type": "string",
+          "title": "App Profile ID",
+          "description": "Application profile ID"
+        },
+        "maxBufferElementCount": {
+          "type": "integer",
+          "title": "Max Buffer Element Count",
+          "description": "Maximum buffer element count"
+        },
+        "changeStream": {
+          "type": "object",
+          "title": "Change Stream",
+          "description": "Change Data Capture configuration",
+          "properties": {
+            "changeStreamName": {
+              "type": "string",
+              "title": "Change Stream Name",
+              "description": "Name of the change stream"
+            },
+            "metadataProjectId": {
+              "type": "string",
+              "title": "Metadata Project ID"
+            },
+            "metadataInstanceId": {
+              "type": "string",
+              "title": "Metadata Instance ID"
+            },
+            "metadataTableId": {
+              "type": "string",
+              "title": "Metadata Table ID"
+            },
+            "startTime": {
+              "type": "string",
+              "title": "Start Time"
+            },
+            "createOrUpdateMetadataTable": {
+              "type": "boolean",
+              "title": "Create Or Update Metadata Table"
+            }
+          },
+          "required": ["changeStreamName"]
+        }
+      },
+      "required": ["projectId", "instanceId", "tableId"]
+    }
+  }
+}

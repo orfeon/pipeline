@@ -1,0 +1,94 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/storage",
+  "title": "Storage",
+  "description": "Source module for reading files from Cloud Storage or S3",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "storage" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Storage Source Parameters",
+      "description": "Parameters for reading files from Cloud Storage or S3",
+      "type": "object",
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "title": "Inputs",
+          "description": "Multiple file path patterns. File path pattern (gs:// or s3://)",
+          "items": { "type": "string" }
+        },
+        "format": {
+          "type": "string",
+          "title": "Format",
+          "description": "File format",
+          "enum": ["avro", "parquet", "csv", "json"]
+        }
+      },
+      "required": ["inputs"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "format": { "enum": ["csv","json"] } }
+          },
+          "then": {
+            "properties": {
+              "compression": {
+                "type": "string",
+                "title": "Compression",
+                "description": "Compression type (for csv/json)",
+                "enum": ["zip", "gzip", "bzip2", "zstd", "lzo", "lzop"]
+              },
+              "filterPrefix": {
+                "type": "string",
+                "title": "Filter Prefix",
+                "description": "Filter files by prefix (for csv/json)"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "format": { "const": "csv" } }
+          },
+          "then": {
+            "properties": {
+              "skipHeaderLines": {
+                "type": "integer",
+                "title": "Skip Header Lines",
+                "description": "Number of header lines to skip (for csv)"
+              },
+              "delimiter": {
+                "type": "string",
+                "title": "Delimiter",
+                "description": "Field delimiter (for csv)"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "format": { "const": "parquet" } }
+          },
+          "then": {
+            "properties": {
+              "fields": {
+                "type": "array",
+                "title": "Fields",
+                "description": "Fields to read (for parquet projection)",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

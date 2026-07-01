@@ -1,0 +1,70 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/files",
+  "title": "Files",
+  "description": "Source module for reading file metadata from Cloud Storage",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "files" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Files Source Parameters",
+      "description": "Parameters for reading file metadata from Cloud Storage",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "title": "Pattern",
+          "description": "File pattern (gs:// or s3://)"
+        },
+        "patterns": {
+          "type": "array",
+          "title": "Patterns",
+          "description": "Multiple file patterns",
+          "items": { "type": "string" }
+        },
+        "withContent": {
+          "type": "boolean",
+          "title": "With Content",
+          "description": "Include file content in output",
+          "default": false
+        },
+        "emptyMatchTreatment": {
+          "type": "string",
+          "title": "Empty Match Treatment",
+          "description": "How to handle no matching files",
+          "enum": ["ALLOW", "DISALLOW", "ALLOW_IF_WILDCARD"],
+          "default": "ALLOW"
+        },
+        "filter": {
+          "type": "object",
+          "title": "Filter",
+          "description": "Filter condition"
+        },
+        "continuously": {
+          "type": "object",
+          "title": "Continuously",
+          "description": "Streaming file watching configuration",
+          "properties": {
+            "interval": {
+              "type": "string",
+              "title": "Interval",
+              "description": "Check interval duration"
+            },
+            "matchUpdatedFiles": {
+              "type": "boolean",
+              "title": "Match Updated Files",
+              "description": "Include updated files"
+            }
+          }
+        }
+      }
+    }
+  }
+}

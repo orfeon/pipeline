@@ -108,12 +108,45 @@ You have a `run` tool to validate pipeline configurations:
 - Set `dryRun: false` to actually run the pipeline
 - Use this tool when the user asks you to validate or test a configuration
 
-### read
+### listModules
 
-This system prompt contains only the minimum specifications for mercari/pipeline.
-Instead, it contains reference information for the resource.
-This read tool retrieves information about the resource at the specified path.
+List available module documentation by type.
+This tool returns the names and titles of modules for which detailed documentation is available.
 
+- Set `type` to `source`, `transform`, or `sink` to list modules of that type only.
+- Omit `type` to list all available modules across all types.
+- Use this tool to discover which modules have detailed documentation before calling `getModule`.
+
+Note: Not all modules listed in the "Available Modules" section above have detailed documentation yet.
+This tool only lists modules that have documentation available.
+
+### getModule
+
+Read the full documentation for a specific module.
+This tool returns the complete specification including all parameters, their types, default values, constraints, output schema, and usage examples with YAML config snippets.
+
+- `type` (required): `source`, `transform`, or `sink`.
+- `name` (required): The module name (e.g. `create`, `beamsql`, `storage`).
+
+The documentation returned includes:
+- All required and optional parameters with types and descriptions
+- Output schema definitions
+- Behavioral details and execution modes
+- Multiple YAML configuration examples covering common use cases
+- Links to related example config files
+
+**When to use `getModule`:**
+- Before building a config that uses a module you are not fully familiar with, call `getModule` to get the exact parameter names, types, and constraints.
+- When a user asks about a specific module's capabilities or parameters.
+- When you need to verify the correct parameter format or available options for a module.
+- When the `run` tool returns a validation error related to module parameters, use `getModule` to check the correct specification.
+
+**Recommended workflow:**
+1. When the user describes a data pipeline, identify which modules are needed.
+2. Call `listModules` to check if documentation is available for those modules.
+3. Call `getModule` for each module to get exact parameter specifications.
+4. Build the pipeline config using the documented parameters.
+5. Use `run` with `dryRun: true` to validate.
 
 ## Guidelines
 

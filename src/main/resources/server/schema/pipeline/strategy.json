@@ -1,0 +1,199 @@
+{
+  "$id": "https://mercari.com/pipeline/strategy",
+  "title": "Strategy",
+  "type": "object",
+  "description": "Windowing Strategy",
+  "properties": {
+    "window": { "$ref": "#/$defs/window" },
+    "trigger": { "$ref": "#/$defs/trigger" },
+    "accumulationMode": {
+      "type": "string",
+      "title": "Accumulation Mode",
+      "enum": ["discarding","accumulating"],
+      "default": "discarding"
+    },
+    "allowedLateness": {
+      "type": "integer",
+      "title": "AllowedLateness",
+      "default": 0
+    }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "title": "Window",
+      "properties": {
+        "type": {
+          "type": "string",
+          "title": "Window Type",
+          "enum": ["global","fixed","sliding","session","calendar"]
+        },
+        "unit": {
+          "type": "string",
+          "title": "Window Size unit",
+          "enum": ["second","minute","hour","day","week","month","year"]
+        },
+        "allowedLateness": {
+          "type": "integer",
+          "title": "Allowed Lateness"
+        },
+        "timestampCombiner": {
+          "type": "string",
+          "title": "Window Timestamp Combiner",
+          "enum": ["EARLIEST","LATEST","END_OF_WINDOW"],
+          "default": "END_OF_WINDOW"
+        }
+      },
+      "required": ["name", "type"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "enum": ["fixed","sliding","calendar"] } }
+          },
+          "then": {
+            "properties": {
+              "size": {
+                "type": "integer",
+                "title": "Window Size"
+              }
+            },
+            "required": ["size"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "sliding" } }
+          },
+          "then": {
+            "properties": {
+              "period": {
+                "type": "integer",
+                "title": "Window Period"
+              }
+            },
+            "required": ["period"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "session" } }
+          },
+          "then": {
+            "properties": {
+              "gap": {
+                "type": "integer",
+                "title": "Window Session Gap"
+              }
+            },
+            "required": ["gap"]
+          }
+        }
+      ]
+    },
+    "trigger": {
+      "$dynamicAnchor": "trigger",
+      "type": "object",
+      "title": "Trigger",
+      "description": "Trigger of Window",
+      "properties": {
+        "type": {
+          "type": "string",
+          "title": "Trigger Type",
+          "enum": ["afterWatermark","afterProcessingTime","afterPane","repeatedly","afterEach","afterFirst","afterAll"],
+          "default": "afterWatermark"
+        },
+        "finalTrigger": {
+          "title": "FinalTrigger",
+          "$dynamicRef": "#trigger"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "afterWatermark" } }
+          },
+          "then": {
+            "properties": {
+              "earlyFiringTrigger": {
+                "title": "EarlyFiringTrigger",
+                "$dynamicRef": "#trigger"
+              },
+              "lateFiringTrigger": {
+                "title": "LateFiringTrigger",
+                "$dynamicRef": "#trigger"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "repeatedly" } }
+          },
+          "then": {
+            "properties": {
+              "foreverTrigger": {
+                "title": "ForeverTrigger",
+                "$dynamicRef": "#trigger"
+              }
+            },
+            "required": ["foreverTrigger"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "enum": ["afterEach","afterFirst","afterAll"] } }
+          },
+          "then": {
+            "properties": {
+              "childrenTriggers": {
+                "type": "array",
+                "title": "Children Triggers",
+                "items": {
+                  "$dynamicRef": "#trigger"
+                }
+              }
+            },
+            "required": ["childrenTriggers"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "afterProcessingTime" } }
+          },
+          "then": {
+            "properties": {
+              "pastFirstElementDelay": {
+                "type": "integer",
+                "title": "PastFirstElementDelay",
+                "description": "Specify the interval of time that has elapsed since the arrival of the first data"
+              },
+              "pastFirstElementDelayUnit": {
+                "type": "string",
+                "title": "PastFirstElementDelay",
+                "enum": ["second","minute","hour","day"],
+                "description": "Specify the unit of pastFirstElementDelay",
+                "default": "second"
+              }
+            },
+            "required": ["pastFirstElementDelay"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "afterPane" } }
+          },
+          "then": {
+            "properties": {
+              "elementCountAtLeast": {
+                "type": "integer",
+                "title": "ElementCountAtLeast",
+                "description": "Specify the number of data to be the firing condition"
+              }
+            },
+            "required": ["elementCountAtLeast"]
+          }
+        }
+      ]
+    }
+  }
+}

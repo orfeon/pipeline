@@ -444,7 +444,7 @@ public class SpecService {
 
     private static class ConfigSchema {
 
-        private static final String RESOURCES_JSON_SCHEMA_DIR = "schema/json";
+        private static final String RESOURCES_JSON_SCHEMA_DIR = "server/schema";
         private static final String ID_PREFIX = "https://mercari.com/"; //module/transform/onnxgen
 
         private static SchemaRegistry schemaRegistry;

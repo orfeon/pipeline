@@ -1,0 +1,152 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/pubsub",
+  "title": "PubSub",
+  "description": "Source module for reading messages from Cloud Pub/Sub (streaming only)",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "pubsub" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "PubSub Source Parameters",
+      "description": "Parameters for reading messages from Cloud Pub/Sub",
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "title": "Topic",
+          "description": "Pub/Sub topic resource name"
+        },
+        "subscription": {
+          "type": "string",
+          "title": "Subscription",
+          "description": "Pub/Sub subscription resource name"
+        },
+        "format": {
+          "type": "string",
+          "title": "Format",
+          "description": "Message format",
+          "enum": ["avro", "json", "protobuf", "message"],
+          "default": "message"
+        },
+        "seek": {
+          "type": "object",
+          "title": "Seek",
+          "description": "Seek to specific time or snapshot",
+          "properties": {
+            "time": {
+              "type": "string",
+              "title": "Time",
+              "description": "Seek to specific time"
+            },
+            "snapshot": {
+              "type": "string",
+              "title": "Snapshot",
+              "description": "Seek to snapshot"
+            }
+          }
+        },
+        "idAttribute": {
+          "type": "string",
+          "title": "ID Attribute",
+          "description": "Message attribute for deduplication"
+        },
+        "additionalFields": {
+          "type": "object",
+          "title": "Additional Fields",
+          "description": "Include message metadata in output",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "title": "Topic Field"
+            },
+            "id": {
+              "type": "string",
+              "title": "ID Field"
+            },
+            "timestamp": {
+              "type": "string",
+              "title": "Timestamp Field"
+            },
+            "orderingKey": {
+              "type": "string",
+              "title": "Ordering Key Field"
+            },
+            "attributes": {
+              "type": "object",
+              "title": "Attributes",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "outputOriginal": {
+          "type": "boolean",
+          "title": "Output Original",
+          "description": "Output original message",
+          "default": false
+        },
+        "outputExcluded": {
+          "type": "boolean",
+          "title": "Output Excluded",
+          "description": "Output excluded messages",
+          "default": false
+        },
+        "deserializeOriginal": {
+          "type": "boolean",
+          "title": "Deserialize Original",
+          "description": "Deserialize original message",
+          "default": false
+        },
+        "charset": {
+          "type": "string",
+          "title": "Charset",
+          "description": "Character encoding",
+          "default": "UTF-8"
+        },
+        "attributeFilter": {
+          "type": "object",
+          "title": "Attribute Filter",
+          "description": "Filter by message attributes"
+        },
+        "filter": {
+          "type": "object",
+          "title": "Filter",
+          "description": "Filter condition"
+        },
+        "select": {
+          "type": "array",
+          "title": "Select",
+          "description": "Field selection"
+        },
+        "flattenField": {
+          "type": "string",
+          "title": "Flatten Field",
+          "description": "Field to flatten"
+        },
+        "exclusive": {
+          "type": "boolean",
+          "title": "Exclusive",
+          "description": "Exclusive partition handling",
+          "default": true
+        },
+        "partitions": {
+          "type": "array",
+          "title": "Partitions",
+          "description": "Multi-partition configuration"
+        }
+      },
+      "required": ["format"],
+      "oneOf": [
+        { "required": ["topic"] },
+        { "required": ["subscription"] }
+      ]
+    }
+  }
+}

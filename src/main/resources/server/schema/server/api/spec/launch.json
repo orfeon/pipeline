@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mercari.com/server/api/spec/launch",
+  "type": "object",
+  "title": "Launch Configuration",
+  "description": "Pipeline launch configuration with runners and environments",
+  "properties": {
+
+  },
+  "oneOf": [
+    {
+      "$id": "https://mercari.com/server/api/spec/launch/dataflow",
+      "type": "object",
+      "title": "Dataflow",
+      "description": "Run pipeline on Google Cloud Dataflow",
+      "properties": {
+      }
+    },
+    {
+      "$id": "https://mercari.com/server/api/spec/launch/spark",
+      "type": "object",
+      "title": "Spark",
+      "description": "Run pipeline on Spark Runner",
+      "properties": {
+        "jars": {
+          "type": "string",
+          "title": "Jar files",
+          "description": "GCS path to the pipeline jar file (gs://...)"
+        }
+      },
+      "required": ["jars"],
+      "oneOf": [
+        {
+          "type": "object",
+          "title": "Serverless version",
+          "description": "",
+          "properties": {
+            "version": {
+              "type": "string",
+              "title": "Version",
+              "description": "Serverless version",
+              "readonly": true,
+              "default": "3.0"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "title": "Spark Cluster",
+          "description": "",
+          "properties": {
+          }
+        }
+      ]
+    },
+    {
+      "$id": "https://mercari.com/server/api/spec/launch/flink",
+      "type": "object",
+      "title": "Flink",
+      "description": "Run pipeline on Flink Runner",
+      "properties": {
+        "jars": {
+          "type": "string",
+          "title": "Jar files",
+          "description": "GCS path to the pipeline jar file (gs://...)"
+        }
+      },
+      "required": ["jars"]
+    }
+  ]
+}

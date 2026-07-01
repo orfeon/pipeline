@@ -1,0 +1,86 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/bigquery",
+  "title": "BigQuery",
+  "description": "Write data to the specified BigQuery table",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "bigquery" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "BigQuery Sink Parameters",
+      "type": "object",
+      "properties": {
+        "table": {
+          "type": "string",
+          "title": "Table",
+          "description": "Table in project.dataset.table format",
+          "x-format": "textarea"
+        },
+        "writeDisposition": {
+          "type": "string",
+          "title": "Write Disposition",
+          "enum": ["WRITE_EMPTY", "WRITE_APPEND", "WRITE_TRUNCATE"]
+        },
+        "createDisposition": {
+          "type": "string",
+          "title": "Create Disposition",
+          "enum": ["CREATE_NEVER", "CREATE_IF_NEEDED"]
+        },
+        "method": {
+          "type": "string",
+          "title": "Method",
+          "enum": ["DEFAULT", "FILE_LOADS", "STREAMING_INSERTS", "STORAGE_WRITE_API", "STORAGE_API_AT_LEAST_ONCE"]
+        },
+        "partitioning": {
+          "type": "string",
+          "title": "Partitioning Unit",
+          "enum": ["DAY","HOUR","MONTH","YEAR"]
+        },
+        "partitioningField": {
+          "type": "string",
+          "title": "Partitioning Field"
+        },
+        "clusteringFields": {
+          "type": "array",
+          "title": "Clustering Fields",
+          "items": { "type": "string" }
+        },
+        "primaryKeyFields": {
+          "type": "array",
+          "title": "Primary Key Fields",
+          "items": { "type": "string" }
+        },
+        "skipInvalidRows": {
+          "type": "boolean",
+          "title": "Skip Invalid Rows",
+          "default": false
+        },
+        "ignoreUnknownValues": {
+          "type": "boolean",
+          "title": "Ignore Unknown Values",
+          "default": false
+        },
+        "autoSharding": {
+          "type": "boolean",
+          "title": "Auto Sharding"
+        },
+        "triggeringFrequencySecond": {
+          "type": "integer",
+          "title": "Triggering Frequency Second"
+        },
+        "kmsKey": {
+          "type": "string",
+          "title": "KMS Key"
+        }
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.mercari.solution.server.agent.tool.DocsReader;
 import com.mercari.solution.server.agent.tool.PipelineExecutor;
 import dev.langchain4j.agent.tool.*;
 import dev.langchain4j.data.message.AiMessage;
@@ -41,7 +42,8 @@ public interface PipelineAgent {
                 .chatModel(chatModel)
                 .chatMemory(historyMemory)
                 .tools(
-                        PipelineExecutor.create()
+                        PipelineExecutor.create(),
+                        DocsReader.create()
                 )
                 .afterToolExecution((e) -> {
                     System.out.println(e.request());

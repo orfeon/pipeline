@@ -1,0 +1,91 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/firestore",
+  "title": "Firestore",
+  "description": "Source module for reading data from Cloud Firestore",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "firestore" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Firestore Source Parameters",
+      "description": "Parameters for reading data from Cloud Firestore",
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "title": "Project ID",
+          "description": "GCP Project ID"
+        },
+        "databaseId": {
+          "type": "string",
+          "title": "Database ID",
+          "description": "Firestore Database ID (default: (default))"
+        },
+        "collection": {
+          "type": "string",
+          "title": "Collection",
+          "description": "Collection name to read"
+        },
+        "parent": {
+          "type": "string",
+          "title": "Parent",
+          "description": "Parent document path"
+        },
+        "filter": {
+          "type": "string",
+          "title": "Filter",
+          "description": "Filter condition with comparison operators"
+        },
+        "fields": {
+          "type": "array",
+          "title": "Fields",
+          "description": "Fields to retrieve",
+          "items": { "type": "string" }
+        },
+        "orderField": {
+          "type": "string",
+          "title": "Order Field",
+          "description": "Field for ordering results"
+        },
+        "orderDirection": {
+          "type": "string",
+          "title": "Order Direction",
+          "description": "Order direction",
+          "enum": ["ASCENDING", "DESCENDING"],
+          "default": "ASCENDING"
+        },
+        "allDescendants": {
+          "type": "boolean",
+          "title": "All Descendants",
+          "description": "Include all descendant documents",
+          "default": false
+        },
+        "parallel": {
+          "type": "boolean",
+          "title": "Parallel",
+          "description": "Enable parallel query execution",
+          "default": false
+        },
+        "pageSize": {
+          "type": "integer",
+          "title": "Page Size",
+          "description": "Page size for pagination"
+        },
+        "partitionCount": {
+          "type": "integer",
+          "title": "Partition Count",
+          "description": "Number of partitions for parallel execution"
+        }
+      },
+      "required": ["collection"]
+    }
+  }
+}

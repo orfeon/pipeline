@@ -1,0 +1,40 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/bigtable",
+  "title": "Bigtable",
+  "description": "Sink module for writing data to Cloud Bigtable",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "bigtable" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string"
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "tableId": {
+          "type": "string"
+        },
+        "columnFamily": {
+          "type": "string"
+        },
+        "rowKeyFields": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["projectId", "instanceId", "tableId"]
+    }
+  }
+}

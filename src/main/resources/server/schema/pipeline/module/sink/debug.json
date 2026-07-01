@@ -1,0 +1,21 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/debug",
+  "title": "Debug",
+  "description": "",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "debug" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "properties": {}
+    }
+  }
+}

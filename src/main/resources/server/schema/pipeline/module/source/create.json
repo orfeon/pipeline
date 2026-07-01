@@ -1,0 +1,100 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/create",
+  "title": "Create",
+  "description": "Generates records with specified conditions",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "create" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Create Source Parameters",
+      "description": "create module can specify data directly in elements, or it can generate data by specifying a range from and to. You can also process the generated data by specifying a select parameter.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "title": "Type",
+          "description": "Specify the type of data listed in elements, or data to be generated within the range specified by from (and to)",
+          "enum": ["int", "long", "date", "time", "timestamp", "string", "element"]
+        },
+        "rate": {
+          "type": "number",
+          "title": "Rate",
+          "description": "Specify the frequency of generation per unit of time when executing in streaming mode"
+        }
+      },
+      "required": ["type"],
+      "oneOf": [
+        {
+          "title": "elements",
+          "description": "List the data you need to process in following modules",
+          "properties": {
+            "elements": {
+              "type": "array",
+              "items": {
+                "type": ["string", "integer", "number", "object"]
+              },
+              "minItems": 1
+            }
+          },
+          "required": ["elements"]
+        },
+        {
+          "title": "range",
+          "properties": {
+            "from": {
+              "type": ["string","integer","number"],
+              "title": "From",
+              "description": "Specify the initial value of the range of data to be generated"
+            },
+            "to": {
+              "type": ["string","integer","number"],
+              "title": "To",
+              "description": "Specify the last value in the range of data to be generated. If not specified, the data will be generated indefinitely (only streaming mode)"
+            }
+          },
+          "required": ["from"],
+          "dependentSchemas": {
+            "to": {
+              "properties": {
+                "interval": {
+                  "type": "integer",
+                  "title": "Interval",
+                  "description": "Specify the interval for generating the range of data specified by from and to"
+                }
+              }
+            },
+            "interval": {
+              "properties": {
+                "intervalUnit": {
+                  "type": "string",
+                  "title": "IntervalUnit",
+                  "description": "If type is date, time, or timestamp, specify the unit of interval",
+                  "enum": ["second","minute","hour","day","week","month","year"]
+                }
+              }
+            },
+            "rate": {
+              "properties": {
+                "rateUnit": {
+                  "type": "string",
+                  "title": "RateUnit",
+                  "description": "Specify the unit of time when rate is specified",
+                  "enum": ["second","minute"],
+                  "default": "second"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

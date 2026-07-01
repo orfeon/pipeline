@@ -1,0 +1,37 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/datastore",
+  "title": "Datastore",
+  "description": "Sink module for writing data to Cloud Datastore",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "datastore" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "keyFields": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["kind"]
+    }
+  }
+}
