@@ -41,7 +41,7 @@ public class BigtableSink extends Sink {
 
         // default config
         private BigtableSchemaUtil.Format format;
-        private BigtableSchemaUtil.MutationOp mutationOp;
+        private String mutationOp;
         private BigtableSchemaUtil.TimestampType timestampType;
         private String timestampField;
         private String timestampValue;
@@ -79,8 +79,15 @@ public class BigtableSink extends Sink {
             if(rowKey == null) {
                 errorMessages.add("parameters.rowKey must not be null");
             }
+            if(mutationOp != null && !TemplateUtil.isTemplateText(mutationOp)) {
+                try {
+                    BigtableSchemaUtil.MutationOp.valueOf(mutationOp);
+                } catch (IllegalArgumentException e) {
+                    errorMessages.add("parameters.mutationOp is invalid value: " + mutationOp);
+                }
+            }
             if(columns == null || columns.isEmpty()) {
-                if(!BigtableSchemaUtil.MutationOp.DELETE_FROM_ROW.equals(mutationOp)) {
+                if(!BigtableSchemaUtil.MutationOp.DELETE_FROM_ROW.name().equals(mutationOp)) {
                     //errorMessages.add("parameters.columns must not be empty");
                 }
             } else {
@@ -130,7 +137,7 @@ public class BigtableSink extends Sink {
                 format = BigtableSchemaUtil.Format.bytes;
             }
             if(mutationOp == null) {
-                mutationOp = BigtableSchemaUtil.MutationOp.SET_CELL;
+                mutationOp = BigtableSchemaUtil.MutationOp.SET_CELL.name();
             }
             if(timestampType == null) {
                 timestampType = BigtableSchemaUtil.TimestampType.server;
@@ -260,7 +267,7 @@ public class BigtableSink extends Sink {
 
         private final String rowKey;
         private final List<BigtableSchemaUtil.ColumnFamilyProperties> columns;
-        private final BigtableSchemaUtil.MutationOp mutationOp;
+        private final String mutationOp;
         private final Schema inputSchema;
 
         private final Set<String> valueArgs;
@@ -274,6 +281,7 @@ public class BigtableSink extends Sink {
         private transient org.apache.avro.Schema avroSchema;
 
         private transient Template templateRowKey;
+        private transient Template templateMutationOp;
 
 
         public MutationDoFn(
@@ -301,6 +309,9 @@ public class BigtableSink extends Sink {
 
             this.templateArgs = new HashSet<>();
             this.templateArgs.addAll(TemplateUtil.extractTemplateArgs(rowKey, inputSchema));
+            if(TemplateUtil.isTemplateText(this.mutationOp)) {
+                this.templateArgs.addAll(TemplateUtil.extractTemplateArgs(mutationOp, inputSchema));
+            }
             this.valueArgs = new HashSet<>();
             if(columns != null && !columns.isEmpty()) {
                 for(var column : columns) {
@@ -314,6 +325,9 @@ public class BigtableSink extends Sink {
         public void setup() {
             this.inputSchema.setup();
             this.templateRowKey = TemplateUtil.createStrictTemplate("rowKeyTemplate", rowKey);
+            if(TemplateUtil.isTemplateText(this.mutationOp)) {
+                this.templateMutationOp = TemplateUtil.createStrictTemplate("templateMutationOp", mutationOp);
+            }
             for(var column : columns) {
                 column.setupSink();
             }
@@ -333,7 +347,8 @@ public class BigtableSink extends Sink {
                 final String rowKeyString = TemplateUtil.executeStrictTemplate(templateRowKey, templateVariables);
                 final ByteString rowKey = ByteString.copyFrom(rowKeyString, StandardCharsets.UTF_8);
 
-                if (BigtableSchemaUtil.MutationOp.DELETE_FROM_ROW.equals(mutationOp)) {
+                final BigtableSchemaUtil.MutationOp resolvedMutationOp = BigtableSchemaUtil.resolveMutationOp(mutationOp, templateMutationOp, templateVariables);
+                if (BigtableSchemaUtil.MutationOp.DELETE_FROM_ROW.equals(resolvedMutationOp)) {
                     final Mutation mutation = Mutation.newBuilder()
                             .setDeleteFromRow(Mutation.DeleteFromRow.newBuilder()
                                     .build())
