@@ -22,7 +22,7 @@
     <pdfbox.version>3.0.7</pdfbox.version>
     <jsoup.version>1.22.2</jsoup.version>
     <djl.version>0.36.0</djl.version>
-    <ojalgo.version>56.2.1</ojalgo.version>
+    <ojalgo.version>57.0.0</ojalgo.version>
 
     <hbase.version>2.6.6</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
@@ -51,9 +51,9 @@
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
 
-    <jetty.version>12.1.9</jetty.version>
+    <jetty.version>12.1.10</jetty.version>
     <mcp.version>2.0.0</mcp.version>
-    <langchain4j.version>1.16.3</langchain4j.version>
+    <langchain4j.version>1.17.0</langchain4j.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -820,7 +820,7 @@
     <dependency>
       <groupId>dev.langchain4j</groupId>
       <artifactId>langchain4j-google-genai</artifactId>
-      <version>${langchain4j.version}-beta26</version>
+      <version>${langchain4j.version}-beta27</version>
     </dependency>
 
     <!-- Experimental LLM -->
