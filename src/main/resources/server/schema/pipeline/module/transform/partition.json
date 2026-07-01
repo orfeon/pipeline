@@ -1,0 +1,65 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/partition",
+  "title": "Partition",
+  "description": "Transform module for partitioning data into multiple outputs based on conditions",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "partition" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Partition Transform Parameters",
+      "description": "Parameters for partitioning data",
+      "type": "object",
+      "properties": {
+        "exclusive": {
+          "type": "boolean",
+          "title": "Exclusive",
+          "description": "If true, each record goes to only one partition",
+          "default": true
+        },
+        "union": {
+          "type": "boolean",
+          "title": "Union",
+          "description": "If true, union input collections first",
+          "default": false
+        },
+        "partitions": {
+          "type": "array",
+          "title": "Partitions",
+          "description": "Partition definitions",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "title": "Name",
+                "description": "Output name for this partition"
+              },
+              "filter": {
+                "type": "object",
+                "title": "Filter",
+                "description": "Filter condition for this partition"
+              },
+              "select": {
+                "type": "array",
+                "title": "Select",
+                "description": "Field selection for this partition",
+                "items": { "type": "object" }
+              }
+            },
+            "required": ["name"]
+          },
+          "minItems": 1
+        }
+      },
+      "required": ["partitions"]
+    }
+  }
+}

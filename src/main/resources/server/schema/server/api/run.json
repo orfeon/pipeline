@@ -1,0 +1,81 @@
+{
+  "$id": "https://mercari.com/server/run",
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "title": "Response Status",
+      "enum": ["ok", "ng"]
+    },
+    "millis": {
+      "type": "integer",
+      "title": "Response Duration"
+    },
+    "spec": {
+      "type": "object",
+      "properties": {
+        "modules": {
+          "type": "array",
+          "title": "",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "title": "Module Name"
+              },
+              "schema": {
+                "$ref": ""
+              },
+              "records": {
+                "type": "array",
+                "title": "output records",
+                "items": {
+                  "$ref": "#/$defs/record"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "title": "outputs records",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "module name"
+          },
+          "schema": {
+            "$ref": "https://mercari.com/pipeline/schema"
+          },
+          "records": {
+            "type": "array",
+            "title": "output records",
+            "items": {
+              "$ref": "#/$defs/record"
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["status"],
+  "$defs": {
+    "record": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

@@ -60,6 +60,10 @@ public class DocumentToMapConverter {
                         .collect(Collectors.toList());
             case REFERENCE_VALUE -> value.getReferenceValue();
             case GEO_POINT_VALUE -> value.getGeoPointValue().toString();
+            case FUNCTION_VALUE -> value.getFunctionValue().toString();
+            case FIELD_REFERENCE_VALUE -> value.getFieldReferenceValue();
+            case VARIABLE_REFERENCE_VALUE -> value.getVariableReferenceValue();
+            case PIPELINE_VALUE -> value.getPipelineValue().toString();
             case NULL_VALUE, VALUETYPE_NOT_SET -> null;
         };
     }

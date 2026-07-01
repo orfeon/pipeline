@@ -1,0 +1,129 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/aggregation",
+  "title": "Aggregation",
+  "description": "Transform module for grouping and aggregation operations",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "aggregation" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Aggregation Transform Parameters",
+      "description": "Parameters for grouping and aggregation",
+      "type": "object",
+      "properties": {
+        "groupFields": {
+          "type": "array",
+          "title": "Group Fields",
+          "description": "Fields to group by",
+          "items": { "type": "string" }
+        },
+        "aggregations": {
+          "type": "array",
+          "title": "Aggregations",
+          "description": "Aggregation definitions",
+          "items": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "string",
+                "title": "Input",
+                "description": "Input name to aggregate"
+              },
+              "fields": {
+                "type": "array",
+                "title": "Fields",
+                "description": "Aggregation field definitions",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "title": "Name",
+                      "description": "Output field name"
+                    },
+                    "field": {
+                      "type": "string",
+                      "title": "Field",
+                      "description": "Input field name"
+                    },
+                    "op": {
+                      "type": "string",
+                      "title": "Operation",
+                      "description": "Aggregation operation",
+                      "enum": ["count", "sum", "avg", "min", "max", "first", "last", "argmax", "argmin", "collect_list", "collect_set"]
+                    }
+                  }
+                }
+              }
+            },
+            "required": ["input"]
+          },
+          "minItems": 1
+        },
+        "filter": {
+          "type": "object",
+          "title": "Filter",
+          "description": "Filter condition to apply after aggregation"
+        },
+        "select": {
+          "type": "array",
+          "title": "Select",
+          "description": "Field selection after aggregation",
+          "items": { "type": "object" }
+        },
+        "limit": {
+          "type": "object",
+          "title": "Limit",
+          "description": "Limit parameters",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "title": "Count",
+              "description": "Number of records to output per group"
+            },
+            "orderField": {
+              "type": "string",
+              "title": "Order Field",
+              "description": "Field for ordering"
+            },
+            "ascending": {
+              "type": "boolean",
+              "title": "Ascending",
+              "description": "Order direction"
+            }
+          }
+        },
+        "flattenField": {
+          "type": "string",
+          "title": "Flatten Field",
+          "description": "Field to flatten"
+        },
+        "fanout": {
+          "type": "integer",
+          "title": "Fanout",
+          "description": "Number of intermediate aggregators"
+        },
+        "outputEmpty": {
+          "type": "boolean",
+          "title": "Output Empty",
+          "description": "Output empty groups",
+          "default": false
+        },
+        "outputPaneInfo": {
+          "type": "boolean",
+          "title": "Output Pane Info",
+          "description": "Include pane info in output",
+          "default": false
+        }
+      },
+      "required": ["aggregations"]
+    }
+  }
+}

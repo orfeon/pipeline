@@ -1,10 +1,7 @@
 package com.mercari.solution.util;
 
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.domain.text.template.BigtableFunctions;
-import com.mercari.solution.util.domain.text.template.DateTimeFunctions;
-import com.mercari.solution.util.domain.text.template.GcpFunctions;
-import com.mercari.solution.util.domain.text.template.StringFunctions;
+import com.mercari.solution.util.domain.text.template.*;
 import freemarker.core.Environment;
 import freemarker.ext.beans.BeansWrapper;
 import freemarker.template.*;
@@ -23,7 +20,8 @@ public class TemplateUtil {
             "string", new StringFunctions(),
             "datetime", new DateTimeFunctions(),
             "bigtable", new BigtableFunctions(),
-            "gcp", new GcpFunctions()
+            "gcp", new GcpFunctions(),
+            "oauth", new OAuthFunctions()
     );
 
     public static Template createSafeTemplate(final String name, final String template) {

@@ -1,19 +1,21 @@
 package com.mercari.solution.util.pipeline;
 
-import com.google.auth.Credentials;
-import com.google.auth.oauth2.*;
+import com.google.cloud.ServiceOptions;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonPrimitive;
 import com.google.gson.JsonSyntaxException;
 import com.mercari.solution.MPipeline;
+import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.StreamingOptions;
+import org.apache.beam.sdk.runners.TransformHierarchy;
+import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PInput;
+import org.apache.beam.sdk.values.PValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -27,7 +29,7 @@ public class OptionUtil {
             case "PrismRunner" -> MPipeline.Runner.prism;
             case "PortableRunner" -> MPipeline.Runner.portable;
             case "DataflowRunner" -> MPipeline.Runner.dataflow;
-            case "SparkRunner" -> MPipeline.Runner.spark;
+            case "SparkRunner", "SparkStructuredStreamingRunner" -> MPipeline.Runner.spark;
             case "FlinkRunner" -> MPipeline.Runner.flink;
             default -> throw new IllegalArgumentException("Not supported runner: " + options.getRunner().getSimpleName());
         };
@@ -56,6 +58,20 @@ public class OptionUtil {
         return map;
     }
 
+    public static boolean isUnbounded(final PInput input) {
+        if (input instanceof PCollection<?>) {
+            PCollection<?> pCol = (PCollection<?>) input;
+            return pCol.isBounded() == PCollection.IsBounded.UNBOUNDED;
+        }
+        return false;
+    }
+
+    public static boolean isUnbounded(final Pipeline pipeline) {
+        final UnboundedCheckVisitor visitor = new UnboundedCheckVisitor();
+        pipeline.traverseTopologically(visitor);
+        return visitor.isUnbounded();
+    }
+
     public static String[] filterPipelineArgs(final String[] args) {
         final List<String> filteredArgs = Arrays.stream(args)
                 .filter(s -> !s.contains("=") || !s.split("=")[0].contains("."))
@@ -76,47 +92,7 @@ public class OptionUtil {
     }
 
     public static String getDefaultProject() {
-        try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
-            return getDefaultProject(credential);
-        } catch (final IOException e) {
-            throw new IllegalArgumentException("Failed to get default gcp project", e);
-        }
-    }
-
-    public static String getDefaultProject(final Credentials credential) {
-        return switch (credential) {
-            case UserCredentials c -> c.getQuotaProjectId();
-            case ComputeEngineCredentials c -> c.getQuotaProjectId();
-            case ServiceAccountCredentials c -> c.getProjectId();
-            case ServiceAccountJwtAccessCredentials c -> c.getQuotaProjectId();
-            default -> {
-                LOG.error("Not supported credentials: {}, class:{}", credential, credential.getClass().getSimpleName());
-                yield null;
-            }
-        };
-    }
-
-    public static String getServiceAccount() {
-        try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
-            return getServiceAccount(credential);
-        } catch (final IOException e) {
-            throw new IllegalArgumentException("Failed to get service account", e);
-        }
-    }
-
-    public static String getServiceAccount(final Credentials credential) {
-        return switch (credential) {
-            case UserCredentials c -> c.getClientId();
-            case ComputeEngineCredentials c -> c.getAccount();
-            case ServiceAccountCredentials c -> c.getServiceAccountUser();
-            case ServiceAccountJwtAccessCredentials c -> c.getAccount();
-            default -> {
-                LOG.error("Not supported credentials: {}, class:{}", credential, credential.getClass().getSimpleName());
-                yield null;
-            }
-        };
+        return ServiceOptions.getDefaultProjectId();
     }
 
     public static boolean isDirectRunner(final PInput input) {
@@ -151,6 +127,25 @@ public class OptionUtil {
             return list;
         }
         return null;
+    }
+
+    private static class UnboundedCheckVisitor extends Pipeline.PipelineVisitor.Defaults {
+
+        private boolean hasUnboundedPCollection = false;
+
+        @Override
+        public void visitValue(PValue value, TransformHierarchy.Node producer) {
+            if (value instanceof PCollection<?>) {
+                PCollection<?> pCol = (PCollection<?>) value;
+                if (pCol.isBounded() == PCollection.IsBounded.UNBOUNDED) {
+                    hasUnboundedPCollection = true;
+                }
+            }
+        }
+
+        public boolean isUnbounded() {
+            return hasUnboundedPCollection;
+        }
     }
 
 }

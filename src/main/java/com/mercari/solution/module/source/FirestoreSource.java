@@ -7,7 +7,6 @@ import com.mercari.solution.util.cloud.google.FirestoreUtil;
 import com.mercari.solution.util.schema.converter.ElementToDocumentConverter;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.gcp.firestore.FirestoreIO;
-import org.apache.beam.sdk.io.gcp.firestore.FirestoreOptions;
 import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
@@ -59,10 +58,6 @@ public class FirestoreSource extends Source {
             }
             if(this.databaseId == null) {
                 this.databaseId = FirestoreUtil.DEFAULT_DATABASE_NAME;
-            }
-            if(!FirestoreUtil.DEFAULT_DATABASE_NAME.equals(this.databaseId)) {
-                input.getPipeline().getOptions().as(FirestoreOptions.class)
-                        .setFirestoreDb(this.databaseId);
             }
             if(this.parallel == null) {
                 this.parallel = false;
@@ -121,7 +116,11 @@ public class FirestoreSource extends Source {
                     .apply("CreateListDocumentRequest", Create
                             .of(request)
                             .withCoder(SerializableCoder.of(ListDocumentsRequest.class)))
-                    .apply("ListDocument", FirestoreIO.v1().read().listDocuments().build())
+                    .apply("ListDocument", FirestoreIO.v1().read()
+                            .listDocuments()
+                            .setProjectId(parameters.projectId)
+                            .setDatabaseId(parameters.databaseId)
+                            .build())
                     .apply("Convert", ParDo.of(new ConvertListResponseDoFn()));
         } else {
             final StructuredQuery structuredQuery = createQuery(getSchema(), parameters);
@@ -137,7 +136,11 @@ public class FirestoreSource extends Source {
                         .apply("CreatePartitionQuery", Create
                                 .of(request)
                                 .withCoder(SerializableCoder.of(PartitionQueryRequest.class)))
-                        .apply("SplitPartitionQuery", FirestoreIO.v1().read().partitionQuery().build());
+                        .apply("SplitPartitionQuery", FirestoreIO.v1().read()
+                                .partitionQuery()
+                                .setProjectId(parameters.projectId)
+                                .setDatabaseId(parameters.databaseId)
+                                .build());
             } else {
                 final RunQueryRequest runQueryRequest = RunQueryRequest.newBuilder()
                         .setParent(parent)
@@ -150,7 +153,11 @@ public class FirestoreSource extends Source {
                                 .withCoder(SerializableCoder.of(RunQueryRequest.class)));
             }
             output = runQueryRequests
-                    .apply("RunQuery", FirestoreIO.v1().read().runQuery().build())
+                    .apply("RunQuery", FirestoreIO.v1().read()
+                            .runQuery()
+                            .setProjectId(parameters.projectId)
+                            .setDatabaseId(parameters.databaseId)
+                            .build())
                     .apply("FilterEmpty", Filter.by((RunQueryResponse::hasDocument)))
                     .apply("Convert", ParDo.of(new ConvertQueryResponseDoFn()));
 

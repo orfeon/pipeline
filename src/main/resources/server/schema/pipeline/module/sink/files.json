@@ -1,0 +1,58 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/files",
+  "title": "Files",
+  "description": "Sink module for writing files",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "files" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "type": "string",
+          "title": "Output Path",
+          "description": ""
+        },
+        "content": {
+          "type": "object",
+          "title": "File Content Definition",
+          "properties": {
+            "format": {
+              "type": "string",
+              "title": "File Format",
+              "enum": ["text","csv","json","avro","bytes"]
+            },
+            "field": {
+              "type": "string",
+              "title": "Field Name",
+              "description": ""
+            },
+            "text": {
+              "type": "string",
+              "title": "Text Template",
+              "description": ""
+            }
+          }
+        },
+        "attributes": {
+          "type": "object",
+          "title": "Object Attributes",
+          "description": "",
+          "additionalProperties": {
+            "type": ["string", "number"]
+          }
+        }
+      },
+      "required": ["output"]
+    }
+  }
+}

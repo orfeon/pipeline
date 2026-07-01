@@ -1,0 +1,1008 @@
+/* Mercari Pipeline GUI Editor Styles (Simplified) */
+
+:root {
+    --header-height: 56px;
+    --footer-height: 32px;
+    --left-pane-width: 280px;
+    --resize-handle-width: 6px;
+    --source-color: #198754;
+    --transform-color: #0d6efd;
+    --sink-color: #fd7e14;
+    --source-bg: #d1e7dd;
+    --transform-bg: #cfe2ff;
+    --sink-bg: #ffe5d0;
+    --focus-color: #fff3cd;
+    --focus-border-color: #ffc107;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    overflow: hidden;
+    background-color: #f8f9fa;
+}
+
+/* Header */
+header.navbar {
+    height: var(--header-height);
+    z-index: 1030;
+}
+
+/* Main Container */
+.main-container {
+    display: flex;
+    position: fixed;
+    top: var(--header-height);
+    left: 0;
+    right: 0;
+    bottom: var(--footer-height);
+}
+
+/* Left Pane */
+.left-pane {
+    width: var(--left-pane-width);
+    min-width: 200px;
+    max-width: 500px;
+    background-color: #fff;
+    border-right: 1px solid #dee2e6;
+    overflow-y: auto;
+    padding: 10px;
+    flex-shrink: 0;
+}
+
+/* Resize Handle */
+.resize-handle {
+    width: var(--resize-handle-width);
+    background-color: #dee2e6;
+    cursor: col-resize;
+    flex-shrink: 0;
+    transition: background-color 0.2s;
+}
+
+.resize-handle:hover,
+.resize-handle.active {
+    background-color: #0d6efd;
+}
+
+/* Right Pane */
+.right-pane {
+    flex: 1;
+    overflow: hidden;
+    background-color: #e9ecef;
+}
+
+/* Drawflow Container */
+.drawflow-container {
+    width: 100%;
+    height: 100%;
+    background-color: #f8f9fa;
+    background-image:
+        linear-gradient(rgba(0, 0, 0, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
+    background-size: 20px 20px;
+}
+
+/* Footer */
+.footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: var(--footer-height);
+    background-color: #fff;
+    border-top: 1px solid #dee2e6;
+    padding: 5px 15px;
+    z-index: 1020;
+}
+
+/* Module List */
+.module-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.module-item {
+    padding: 8px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.module-item:hover {
+    transform: translateX(4px);
+}
+
+.module-item.source {
+    background-color: var(--source-bg);
+    color: var(--source-color);
+    border-left: 3px solid var(--source-color);
+}
+
+.module-item.source:hover {
+    background-color: #a3cfbb;
+}
+
+.module-item.transform {
+    background-color: var(--transform-bg);
+    color: var(--transform-color);
+    border-left: 3px solid var(--transform-color);
+}
+
+.module-item.transform:hover {
+    background-color: #9ec5fe;
+}
+
+.module-item.sink {
+    background-color: var(--sink-bg);
+    color: var(--sink-color);
+    border-left: 3px solid var(--sink-color);
+}
+
+.module-item.sink:hover {
+    background-color: #ffd3b0;
+}
+
+/* Drawflow Node Styles */
+.drawflow .drawflow-node {
+    border-radius: 8px;
+    min-width: 180px;
+    background-color: #fff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.drawflow .drawflow-node.selected {
+    box-shadow: 0 0 0 3px var(--focus-border-color);
+    background-color: var(--focus-color);
+}
+
+.drawflow .drawflow-node .inputs,
+.drawflow .drawflow-node .outputs {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+}
+
+.drawflow .drawflow-node .input,
+.drawflow .drawflow-node .output {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid #6c757d;
+    background-color: #fff;
+}
+
+.drawflow .drawflow-node .output:hover {
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+/* === Port dot colors per type === */
+/* inputs port - blue (primary, left side center) */
+.drawflow .drawflow-node .input.input_1 {
+    border-color: #0d6efd;
+    background-color: #cfe2ff;
+}
+/* waits port - amber (top of node) */
+.drawflow .drawflow-node .input.input_2 {
+    border-color: #ffc107;
+    background-color: #fff3cd;
+    width: 11px;
+    height: 11px;
+    position: absolute;
+    top: -6px;
+    left: 35%;
+    transform: translateX(-50%);
+    margin: 0;
+}
+/* sideInputs port - purple (top of node) */
+.drawflow .drawflow-node .input.input_3 {
+    border-color: #6f42c1;
+    background-color: #e2d9f3;
+    width: 11px;
+    height: 11px;
+    position: absolute;
+    top: -6px;
+    left: 65%;
+    transform: translateX(-50%);
+    margin: 0;
+}
+
+/* Hide inputs port on source nodes */
+.drawflow .drawflow-node.source .input.input_1 {
+    display: none;
+}
+
+/* === Port hover styles === */
+.drawflow .drawflow-node .input.input_1:hover { background-color: #0d6efd; border-color: #0d6efd; }
+.drawflow .drawflow-node .input.input_2:hover { background-color: #ffc107; border-color: #ffc107; }
+.drawflow .drawflow-node .input.input_3:hover { background-color: #6f42c1; border-color: #6f42c1; }
+
+/* === Port labels (CSS pseudo-elements) === */
+.drawflow .drawflow-node .input {
+    position: relative;
+}
+.drawflow .drawflow-node .input::after {
+    position: absolute;
+    font-weight: 600;
+    white-space: nowrap;
+    pointer-events: none;
+}
+/* input label - right of port */
+.drawflow .drawflow-node .input.input_1::after {
+    content: "in";
+    color: #0d6efd;
+    font-size: 9px;
+    left: 18px;
+    top: -1px;
+}
+/* wait label - below port (top of node) */
+.drawflow .drawflow-node .input.input_2::after {
+    content: "wait";
+    color: #b8860b;
+    font-size: 8px;
+    top: 13px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+/* side label - below port (top of node) */
+.drawflow .drawflow-node .input.input_3::after {
+    content: "side";
+    color: #6f42c1;
+    font-size: 8px;
+    top: 13px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+/* Source: hide label for hidden input_1 */
+.drawflow .drawflow-node.source .input.input_1::after {
+    display: none;
+}
+
+/* === Connection line styles === */
+.drawflow .connection .main-path {
+    stroke: #6c757d;
+    stroke-width: 2px;
+}
+/* inputs connection - solid blue */
+.drawflow .connection.input_1 .main-path {
+    stroke: #0d6efd;
+    stroke-width: 2px;
+}
+/* waits connection - dashed amber */
+.drawflow .connection.input_2 .main-path {
+    stroke: #ffc107;
+    stroke-width: 2px;
+    stroke-dasharray: 8, 4;
+}
+/* sideInputs connection - dotted purple */
+.drawflow .connection.input_3 .main-path {
+    stroke: #6f42c1;
+    stroke-width: 2px;
+    stroke-dasharray: 3, 3;
+}
+
+.drawflow .connection .main-path:hover {
+    stroke-width: 3px;
+}
+
+/* Node Content */
+.node-content {
+    padding: 0;
+}
+
+.node-header {
+    padding: 10px 15px;
+    border-radius: 8px 8px 0 0;
+    font-weight: 600;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.node-header.source {
+    background-color: var(--source-bg);
+    color: var(--source-color);
+}
+
+.node-header.transform {
+    background-color: var(--transform-bg);
+    color: var(--transform-color);
+}
+
+.node-header.sink {
+    background-color: var(--sink-bg);
+    color: var(--sink-color);
+}
+
+.node-body {
+    padding: 10px 15px;
+    font-size: 12px;
+    color: #495057;
+    border-top: 1px solid #dee2e6;
+}
+
+.node-name {
+    font-weight: 600;
+    color: #212529;
+    margin-bottom: 4px;
+}
+
+.node-module {
+    font-size: 11px;
+    color: #6c757d;
+}
+
+/* Accordion Styles */
+.accordion-button {
+    padding: 10px 15px;
+    font-size: 14px;
+}
+
+.accordion-body {
+    padding: 15px;
+}
+
+/* Form Styles */
+.code-input {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 12px;
+}
+
+/* Result Output */
+.result-output {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 15px;
+    border-radius: 6px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 12px;
+    max-height: 400px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+/* Modal Styles */
+.modal-header .badge {
+    font-size: 12px;
+    padding: 5px 10px;
+}
+
+.modal-header .badge.source {
+    background-color: var(--source-color) !important;
+}
+
+.modal-header .badge.transform {
+    background-color: var(--transform-color) !important;
+}
+
+.modal-header .badge.sink {
+    background-color: var(--sink-color) !important;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
+
+/* Loading Spinner */
+.spinner-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+/* Validation Styles */
+.is-invalid {
+    border-color: #dc3545 !important;
+}
+
+.invalid-feedback {
+    display: block;
+    color: #dc3545;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+/* Tooltip for module items */
+.module-item[title] {
+    position: relative;
+}
+
+/* Status Message Animation */
+#status-message {
+    transition: color 0.3s;
+}
+
+#status-message.success {
+    color: var(--source-color) !important;
+}
+
+#status-message.error {
+    color: var(--sink-color) !important;
+}
+
+#status-message.warning {
+    color: #ffc107 !important;
+}
+
+/* Drawflow Delete Button - shown on hover */
+.drawflow .drawflow-node .drawflow-delete {
+    position: absolute;
+    top: -10px;
+    right: -10px;
+    width: 24px;
+    height: 24px;
+    background-color: #6c757d;
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: bold;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.2s, background-color 0.2s;
+}
+
+.drawflow .drawflow-node:hover .drawflow-delete,
+.drawflow .drawflow-node.selected .drawflow-delete {
+    opacity: 1;
+}
+
+.drawflow .drawflow-node .drawflow-delete:hover {
+    background-color: #dc3545;
+}
+
+/* Connection styling for drag-and-drop */
+.drawflow .connection .main-path {
+    cursor: pointer;
+}
+
+.drawflow .drawflow-node .input:hover,
+.drawflow .drawflow-node .output:hover {
+    transform: scale(1.3);
+    cursor: crosshair;
+}
+
+/* Drag preview styling */
+.drawflow svg.connection {
+    pointer-events: stroke;
+}
+
+/* YAML Editor styling */
+.yaml-editor {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    tab-size: 2;
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+}
+
+.yaml-editor:focus {
+    background-color: #fff;
+    border-color: #86b7fe;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+/* Left pane settings styling */
+.accordion-body hr {
+    border-color: #dee2e6;
+}
+
+.accordion-body small.text-muted {
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* Collapsible module categories */
+.module-category {
+    margin-bottom: 15px;
+}
+
+.module-category-header {
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+}
+
+.module-category-header:hover {
+    background-color: #f8f9fa;
+}
+
+.module-category-header .collapse-icon {
+    transition: transform 0.3s ease;
+}
+
+.module-category-header[aria-expanded="false"] .collapse-icon,
+.module-category-header.collapsed .collapse-icon {
+    transform: rotate(-90deg);
+}
+
+.module-category .module-list {
+    padding-top: 5px;
+}
+
+/* Result modal styling */
+#result-modal-header.success {
+    background-color: #d1e7dd;
+    border-bottom-color: #badbcc;
+}
+
+#result-modal-header.error {
+    background-color: #f8d7da;
+    border-bottom-color: #f5c2c7;
+}
+
+/* Schema display styling */
+.schema-field {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+    font-size: 13px;
+    padding: 4px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.schema-field:last-child {
+    border-bottom: none;
+}
+
+.schema-field-name {
+    font-weight: 600;
+    color: #0d6efd;
+}
+
+.schema-field-type {
+    color: #6c757d;
+    margin-left: 8px;
+}
+
+.schema-field-type.type-string { color: #198754; }
+.schema-field-type.type-int32,
+.schema-field-type.type-int64,
+.schema-field-type.type-float32,
+.schema-field-type.type-float64,
+.schema-field-type.type-decimal { color: #0d6efd; }
+.schema-field-type.type-bool { color: #dc3545; }
+.schema-field-type.type-timestamp,
+.schema-field-type.type-date,
+.schema-field-type.type-time { color: #6f42c1; }
+.schema-field-type.type-element { color: #fd7e14; }
+.schema-field-type.type-array,
+.schema-field-type.type-map { color: #20c997; }
+
+.schema-field-nullable {
+    font-size: 11px;
+    color: #adb5bd;
+    margin-left: 4px;
+}
+
+.schema-field-mode {
+    font-size: 11px;
+    color: #6c757d;
+    margin-left: 4px;
+}
+
+.schema-nested {
+    margin-left: 20px;
+    padding-left: 10px;
+    border-left: 2px solid #dee2e6;
+}
+
+/* Schema info in node */
+.node-schema-indicator {
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+    font-size: 14px;
+    color: #6c757d;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.node-schema-indicator:hover {
+    opacity: 1;
+    color: #0d6efd;
+}
+
+.node-schema-indicator.has-schema {
+    color: #198754;
+    opacity: 1;
+}
+
+/* Output records indicator in node (for sink modules) */
+.node-output-indicator {
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+    font-size: 14px;
+    color: #6c757d;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.node-output-indicator:hover {
+    opacity: 1;
+    color: #0d6efd;
+}
+
+.node-output-indicator.has-output {
+    color: #0dcaf0;
+    opacity: 1;
+}
+
+/* =============================
+   Schema Viewer Styles (Improved)
+   ============================= */
+
+/* Schema fields list */
+.schema-fields-list {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+    font-size: 13px;
+}
+
+/* Schema field item */
+.schema-field-item {
+    transition: background-color 0.15s;
+}
+
+.schema-field-item:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+}
+
+/* Schema field name */
+.schema-fields-list .schema-field-name {
+    color: #212529;
+    min-width: 120px;
+}
+
+/* Toggle button and icon */
+.schema-toggle-btn {
+    color: #6c757d;
+    transition: color 0.15s;
+}
+
+.schema-toggle-btn:hover {
+    color: #0d6efd;
+}
+
+.schema-toggle-icon {
+    transition: transform 0.2s ease;
+    font-size: 12px;
+}
+
+/* Rotate icon when expanded */
+.schema-toggle-btn[aria-expanded="true"] .schema-toggle-icon {
+    transform: rotate(90deg);
+}
+
+/* Custom badge colors for schema types */
+.badge.bg-purple {
+    background-color: #6f42c1 !important;
+}
+
+.badge.bg-orange {
+    background-color: #fd7e14 !important;
+}
+
+.badge.bg-pink {
+    background-color: #d63384 !important;
+}
+
+/* Nested schema fields styling */
+.schema-fields-list.schema-nested {
+    margin-top: 8px;
+    border-color: #dee2e6;
+}
+
+/* Schema type badges in viewer */
+.schema-field-item .badge {
+    font-weight: 500;
+    font-size: 11px;
+    padding: 3px 8px;
+}
+
+/* Mode badges */
+.schema-field-item .badge.bg-secondary {
+    opacity: 0.7;
+}
+
+/* Records table styling for Run results */
+.accordion-body.p-0 .table-responsive,
+#schemaAccordion > .table-responsive {
+    border-radius: 0 0 4px 4px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.accordion-body.p-0 .table,
+#schemaAccordion > .table-responsive .table {
+    margin-bottom: 0;
+}
+
+.accordion-body.p-0 .table thead.sticky-top th,
+#schemaAccordion > .table-responsive .table thead.sticky-top th {
+    position: sticky;
+    top: 0;
+    background-color: #f8f9fa;
+    z-index: 1;
+    border-bottom: 2px solid #dee2e6;
+}
+
+.accordion-body.p-0 .table td,
+#schemaAccordion > .table-responsive .table td {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.accordion-body.p-0 .table td:hover,
+#schemaAccordion > .table-responsive .table td:hover {
+    white-space: normal;
+    word-break: break-word;
+}
+
+/* Monaco Editor containers */
+.monaco-container {
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    overflow: hidden;
+}
+.monaco-container.monaco-sm { height: 180px; }
+.monaco-container.monaco-md { height: 280px; }
+.monaco-container.monaco-lg { height: 400px; }
+.monaco-container.monaco-xl { height: 480px; }
+
+/* Help tooltip left-align */
+.tooltip-left-align .tooltip-inner {
+    text-align: left;
+    max-width: 360px;
+}
+
+/* =============================
+   Agent Chat Modal Styles
+   ============================= */
+
+.agent-chat-messages {
+    overflow-y: auto;
+    padding: 20px;
+    background-color: #f8f9fa;
+}
+
+.agent-message {
+    display: flex;
+    margin-bottom: 16px;
+    gap: 10px;
+    align-items: flex-start;
+}
+
+.agent-message.user {
+    flex-direction: row-reverse;
+}
+
+.agent-message-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.agent-message.user .agent-message-avatar {
+    background-color: #0d6efd;
+    color: #fff;
+}
+
+.agent-message.assistant .agent-message-avatar {
+    background-color: #198754;
+    color: #fff;
+}
+
+.agent-message-bubble {
+    max-width: 75%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+
+.agent-message.user .agent-message-bubble {
+    background-color: #0d6efd;
+    color: #fff;
+    border-bottom-right-radius: 4px;
+}
+
+.agent-message.assistant .agent-message-bubble {
+    background-color: #fff;
+    color: #212529;
+    border: 1px solid #dee2e6;
+    border-bottom-left-radius: 4px;
+}
+
+.agent-message-bubble pre {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    padding: 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    margin: 8px 0 4px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.agent-message-bubble .agent-config-badge {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 4px 10px;
+    background-color: #d1e7dd;
+    color: #198754;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.agent-message-bubble .agent-config-badge:hover {
+    background-color: #a3cfbb;
+}
+
+/* Tool call messages (collapsed) */
+.agent-tool-group {
+    margin-bottom: 12px;
+}
+
+.agent-tool-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background-color: #e9ecef;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #6c757d;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.agent-tool-toggle:hover {
+    background-color: #dee2e6;
+}
+
+.agent-tool-toggle .bi {
+    transition: transform 0.2s;
+}
+
+.agent-tool-toggle.expanded .bi-chevron-right {
+    transform: rotate(90deg);
+}
+
+.agent-tool-detail {
+    display: none;
+    margin-top: 4px;
+    padding: 8px 12px;
+    background-color: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 11px;
+    color: #495057;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.agent-tool-detail.show {
+    display: block;
+}
+
+/* Loading indicator */
+.agent-loading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.agent-loading .agent-message-avatar {
+    background-color: #198754;
+    color: #fff;
+}
+
+.agent-loading-dots {
+    display: flex;
+    gap: 4px;
+    padding: 12px 16px;
+    background-color: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 12px;
+    border-bottom-left-radius: 4px;
+}
+
+.agent-loading-dots span {
+    width: 8px;
+    height: 8px;
+    background-color: #adb5bd;
+    border-radius: 50%;
+    animation: agentDotPulse 1.4s infinite ease-in-out both;
+}
+
+.agent-loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+.agent-loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+.agent-loading-dots span:nth-child(3) { animation-delay: 0s; }
+
+@keyframes agentDotPulse {
+    0%, 80%, 100% {
+        transform: scale(0.6);
+        opacity: 0.4;
+    }
+    40% {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+.agent-chat-input-area {
+    background-color: #fff;
+}
+
+.agent-chat-input-area textarea:focus {
+    border-color: #198754;
+    box-shadow: 0 0 0 0.25rem rgba(25, 135, 84, 0.25);
+}
+
+.agent-welcome {
+    color: #6c757d;
+}

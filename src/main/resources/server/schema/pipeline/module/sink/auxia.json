@@ -1,0 +1,62 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/auxia",
+  "title": "Auxia",
+  "description": "Sink module for Auxia",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    { "properties": {
+        "module": { "const": "auxia" },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "title": "Auxia Project ID"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["element","json"]
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["event","user"]
+        },
+        "field": {
+          "type": "string",
+          "title": "Field",
+          "description": "aaa"
+        },
+        "eventName": {
+          "type": "string",
+          "title": "Event Name"
+        },
+        "pubsub": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "title": "Auxia Pub/Sub Topic Name"
+            },
+            "attributes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": ["projectId","topic"]
+        }
+      },
+      "required": ["pubsub"]
+    }
+  }
+}

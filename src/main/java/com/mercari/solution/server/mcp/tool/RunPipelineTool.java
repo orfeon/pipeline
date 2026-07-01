@@ -56,7 +56,10 @@ public class RunPipelineTool implements Tool {
             final McpSchema.CallToolRequest request) {
 
         if(!request.arguments().containsKey("config")) {
-            return new McpSchema.CallToolResult("run-pipeline mcp tool requires config parameter", true);
+            return McpSchema.CallToolResult.builder()
+                    .addTextContent("run-pipeline mcp tool requires config parameter")
+                    .isError(true)
+                    .build();
         }
 
         final String config = request.arguments().get("config").toString();

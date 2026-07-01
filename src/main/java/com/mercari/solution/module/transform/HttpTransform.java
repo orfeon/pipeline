@@ -388,7 +388,7 @@ public class HttpTransform extends Transform {
                 output.put("timestamp", DateTimeUtil.toEpochMicroSecond(java.time.Instant.now()));
 
                 final Object body = switch (format) {
-                    case text -> httpResponse.body();
+                    case text, xml -> httpResponse.body();
                     case bytes -> ByteBuffer.wrap((byte[])httpResponse.body());
                     case json -> {
                         final String bodyString = (String) httpResponse.body();

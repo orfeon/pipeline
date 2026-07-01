@@ -1,0 +1,17 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source",
+  "title": "Sink Module",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/module" },
+    {
+      "properties": {
+        "timestampAttribute": {
+          "type": "string",
+          "title": "Timestamp Attribute",
+          "description": "defines which field or attribute of the source record should be treated as event time. The default is the time of input"
+        }
+      }
+    }
+  ]
+}

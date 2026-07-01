@@ -1,0 +1,62 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/datastore",
+  "title": "Datastore",
+  "description": "Source module for reading data from Cloud Datastore using GQL query",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "datastore" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Datastore Source Parameters",
+      "description": "Parameters for reading data from Cloud Datastore",
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "title": "Project ID",
+          "description": "GCP Project ID"
+        },
+        "gql": {
+          "type": "string",
+          "title": "GQL",
+          "description": "GQL query to read data"
+        },
+        "kind": {
+          "type": "string",
+          "title": "Kind",
+          "description": "Entity kind"
+        },
+        "namespace": {
+          "type": "string",
+          "title": "Namespace",
+          "description": "Datastore namespace"
+        },
+        "numQuerySplits": {
+          "type": "integer",
+          "title": "Num Query Splits",
+          "description": "Number of query splits for parallel execution"
+        },
+        "withKey": {
+          "type": "boolean",
+          "title": "With Key",
+          "description": "Include entity key in output",
+          "default": false
+        },
+        "emulator": {
+          "type": "boolean",
+          "title": "Emulator",
+          "description": "Use Datastore emulator"
+        }
+      },
+      "required": ["gql"]
+    }
+  }
+}

@@ -87,6 +87,9 @@ public class AggregationTransform extends Transform {
         }
 
         public void setDefaults() {
+            if(this.groupFields == null) {
+                this.groupFields = new ArrayList<>();
+            }
             if(this.limit != null) {
                 this.limit.setDefaults();
             }

@@ -6,6 +6,7 @@ import com.google.protobuf.Descriptors;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
+import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;
 import org.slf4j.Logger;
@@ -473,14 +474,49 @@ public class Schema implements Serializable {
         public JsonObject toJsonObject() {
             final JsonObject jsonObject = new JsonObject();
             jsonObject.addProperty("name", name);
+            jsonObject.addProperty("type", type.getType().name());
+            final Mode mode = switch (type.getType()) {
+                case array, matrix -> Mode.repeated;
+                default -> Optional.ofNullable(type.getNullable()).orElse(true) ? Mode.nullable : Mode.required;
+            };
+            jsonObject.addProperty("mode", mode.name());
+
+            switch (type.getType()) {
+                case element -> {
+                    final JsonArray fields = new JsonArray();
+                    for(final Field field : type.getElementSchema().getFields()) {
+                        final JsonObject fieldObject = field.toJsonObject();
+                        fields.add(fieldObject);
+                    }
+                    jsonObject.add("fields", fields);
+                }
+                case enumeration -> {
+                    final JsonArray symbols = new JsonArray();
+                    for(final String symbol : type.getSymbols()) {
+                        symbols.add(symbol);
+                    }
+                    jsonObject.add("symbols", symbols);
+                }
+                case map -> {
+                    jsonObject.addProperty("valueType", type.getMapValueType().getType().name());
+                }
+                case array -> {
+                    jsonObject.add("arrayValueType", type.getArrayValueType().toJsonObject());
+                }
+            }
+
+            return jsonObject;
+            /*
+            final JsonObject jsonObject = new JsonObject();
+            jsonObject.addProperty("name", name);
             jsonObject.add("type", type.toJsonObject());
             if(alterName != null) {
                 jsonObject.addProperty("alterName", alterName);
 
             }
             return jsonObject;
+             */
         }
-
     }
 
     public static class FieldType implements Serializable {
@@ -1259,6 +1295,156 @@ public class Schema implements Serializable {
             fieldJsonObject.addProperty("valueType", field.getValueType());
             return fieldJsonObject;
         }
+    }
+
+    public static String createJsonSchema() {
+        return """
+        {
+          "title": "Schema",
+          "type": "object",
+          "description": "Define fields or specify an Avro or Protobuf schema",
+          "oneOf": [
+            {
+              "properties": {
+                "fields": { "$ref": "#/$defs/fields" }
+              },
+              "required": ["fields"]
+            },
+            {
+              "properties": {
+                "avro": {
+                  "title": "Avro Schema",
+                  "type": "object",
+                  "description": "Specify the Avro Schema. Provide either the schema definition JSON or the file path",
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "file": { "type": "string" }
+                      },
+                      "required": ["file"]
+                    },
+                    {
+                      "properties": {
+                        "json": { "type": "string" }
+                      },
+                      "required": ["json"]
+                    }
+                  ]
+                }
+              },
+              "required": ["avro"]
+            },
+            {
+              "properties": {
+                "protobuf": {
+                  "title": "Protobuf Schema",
+                  "type": "object",
+                  "description": "Specify the Protobuf schema. Provide both the path to the descriptor file and the message name",
+                  "properties": {
+                    "descriptorFile": { "type": "string" },
+                    "messageName": { "type": "string" }
+                  },
+                  "required": ["descriptorFile", "messageName"]
+                }
+              },
+              "required": ["protobuf"]
+            }
+          ],
+          "$defs": {
+            "schema": {
+              "$id": "https://mercari.com/pipeline/schema",
+              "type": "object",
+              "title": "Simple Schema",
+              "properties": {
+                "fields": { "$ref": "#/$defs/fields" }
+              },
+              "required": ["fields"]
+            },
+            "field": {
+              "$id": "https://mercari.com/pipeline/schema/field",
+              "type": "object",
+              "title": "Field",
+              "properties": {
+                "name": { "type": "string", "title": "Name" },
+                "type": { "$ref": "#/$defs/type" },
+                "mode": { "$ref": "#/$defs/mode" }
+              },
+              "required": ["name", "type"],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": { "type": { "const": "element" } }
+                  },
+                  "then": {
+                    "properties": {
+                      "fields": { "$ref": "#/$defs/fields" }
+                    },
+                    "required": ["fields"]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": { "type": { "const": "map" } }
+                  },
+                  "then": {
+                    "properties": {
+                      "valueType": { "$ref": "#/$defs/type" }
+                    },
+                    "required": ["valueType"]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": { "type": { "const": "enumeration" } }
+                  },
+                  "then": {
+                    "properties": {
+                      "symbols": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": ["symbols"]
+                  }
+                }
+              ]
+            },
+            "fields": {
+              "$id": "https://mercari.com/pipeline/schema/fields",
+              "type": "array",
+              "title": "Fields",
+              "description": "Fields of schema",
+              "items": { "$ref": "#/$defs/field" },
+              "minItems": 1
+            },
+            "type": {
+              "$id": "https://mercari.com/pipeline/schema/type",
+              "type": "string",
+              "title": "Type",
+              "enum": ["bool", "string", "json", "bytes", "int32", "int64", "float32", "float64", "date", "time", "timestamp", "enumeration", "map", "element"]
+            },
+            "mode": {
+              "$id": "https://mercari.com/pipeline/schema/mode",
+              "type": "string",
+              "title": "Mode",
+              "enum": ["nullable", "required", "repeated"],
+              "default": "nullable"
+            }
+          }
+        }
+        """;
+    }
+
+    public static JsonObject createJsonSchemaObject() {
+        final String jsonSchema = createJsonSchema();
+        return new Gson().fromJson(jsonSchema, JsonObject.class);
+    }
+
+    public static List<JsonSchemaUtil.ValidateError> validate(String schemaJson) {
+        final com.networknt.schema.Schema jsonSchema = JsonSchemaUtil.getSchema(createJsonSchema());
+        return JsonSchemaUtil.validate(jsonSchema, schemaJson);
     }
 
 }

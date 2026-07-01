@@ -4,7 +4,6 @@ import com.mercari.solution.server.mcp.prompt.Prompt;
 import com.mercari.solution.server.mcp.resource.Resources;
 import com.mercari.solution.server.mcp.tool.Tool;
 import io.modelcontextprotocol.common.McpTransportContext;
-import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTransportProvider;
@@ -44,7 +43,7 @@ public class PipelineMcpStreamableServer extends HttpServlet {
     public void init(ServletConfig config) throws ServletException {
 
         this.provider = HttpServletStreamableServerTransportProvider.builder()
-                .jsonMapper(McpJsonMapper.createDefault())
+                //.jsonMapper(McpJsonMapper.createDefault())
                 .mcpEndpoint("/mcp")
                 .disallowDelete(true)
                 .contextExtractor((HttpServletRequest r) -> {

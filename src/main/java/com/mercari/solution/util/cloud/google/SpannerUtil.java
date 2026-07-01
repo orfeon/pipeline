@@ -605,7 +605,7 @@ public class SpannerUtil {
                 .forEach(f -> sb.append(String.format("%s %s%s,",
                         replaceReservedKeyword(f.getName()),
                         getColumnType(f.getType(), f.getOptions()),
-                        f.getType().getNullable() == null || f.getType().getNullable() ? "" : " NOT NULL")));
+                        f.getType().getNullable() ? "" : " NOT NULL")));
         sb.deleteCharAt(sb.length() - 1);
         final String primaryKey;
         if(primaryKeyFields == null) {

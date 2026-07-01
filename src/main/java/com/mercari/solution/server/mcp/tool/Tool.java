@@ -64,7 +64,7 @@ public interface Tool {
                                     .name(properties.name())
                                     .title(properties.title())
                                     .description(properties.description())
-                                    .inputSchema(McpJsonMapper.createDefault(), properties.inputSchema())
+                                    //.inputSchema(McpJsonMapper.createDefault(), properties.inputSchema())
                                     .build())
                             .callHandler(tool::sync)
                             .build();

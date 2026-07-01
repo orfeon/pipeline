@@ -1,0 +1,49 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/pubsub",
+  "title": "PubSub",
+  "description": "Sink module for publishing messages to Cloud Pub/Sub",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "pubsub" },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string",
+          "description": "Specify the PubSub topic name of the destination",
+          "example": "projects/{gcp project}/topics/{topic name}"
+        },
+        "format": {
+          "type": "string",
+          "description": "Specifies the format of the message to publish",
+          "enum": ["json", "avro", "protobuf"]
+        },
+        "idAttribute": {
+          "type": "string",
+          "description": "Specify the attribute name when you want to give an ID to a message as attribute value. The value of the record of the field with the name specified here is used as the ID"
+        },
+        "timestampAttribute": {
+          "type": "string",
+          "title": "",
+          "description": "Specify the attribute name when you want to save the event time of the record as attribute value"
+        },
+        "attributes": {
+          "type": "object",
+          "description": "Specify the field names you want to register as attributes in the message"
+        }
+      },
+      "required": ["topic", "format"]
+    }
+  }
+}

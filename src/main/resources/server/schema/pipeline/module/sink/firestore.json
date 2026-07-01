@@ -1,0 +1,28 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/firestore",
+  "title": "Firestore",
+  "description": "Sink module for writing data to Cloud Firestore",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "firestore" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "databaseId": { "type": "string" },
+        "collection": { "type": "string" },
+        "documentIdField": { "type": "string" }
+      },
+      "required": ["collection"]
+    }
+  }
+}

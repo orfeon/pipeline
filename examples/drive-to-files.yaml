@@ -1,0 +1,23 @@
+sources:
+  - name: drive_source
+    module: drive
+    parameters:
+      user: xxxx-compute@developer.gserviceaccount.com
+      files:
+        - id: xxxxxxxx
+          ranges:
+            - MySheet!A3:G
+      content: true
+      flatten: spreadsheet.sheets
+sinks:
+  - name: files_sink
+    module: files
+    inputs:
+      - drive_source
+    parameters:
+      output: gs://example-bucket/drive/${id}/${spreadsheet.sheets.sheetId}.csv
+      content:
+        type: csv
+        field: spreadsheet.sheets.content
+      attributes:
+        contentType: text/csv

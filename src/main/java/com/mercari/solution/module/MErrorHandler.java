@@ -34,8 +34,14 @@ public class MErrorHandler implements AutoCloseable, Serializable {
         return new MErrorHandler(null);
     }
 
+    public static MErrorHandler dummy(Pipeline pipeline) {
+        final ErrorHandler.BadRecordErrorHandler<?> badRecordErrorHandler = pipeline
+                .registerBadRecordErrorHandler(new FailureSink.LogFailureSinks());
+        return new MErrorHandler(badRecordErrorHandler);
+    }
+
     public static MErrorHandler createPipelineErrorHandler(final Pipeline pipeline, final Config config) {
-        if(config.getFailures().isEmpty()) {
+        if(config.getFailureSinks().isEmpty()) {
             return empty();
         }
         if(Optional.ofNullable(config.getSystem().getFailure().getFailFast()).orElse(false)) {
@@ -51,16 +57,17 @@ public class MErrorHandler implements AutoCloseable, Serializable {
             final Pipeline pipeline,
             final Config config) {
 
-        if(config.getFailures().isEmpty()) {
+        if(config.getFailureSinks().isEmpty()) {
             return null;
         }
-        final FailureSink.FailureSinks failureSinks = FailureSink.merge(getFailureSinks(config, pipeline.getOptions()));
+        final List<FailureSink> failureSinkList = getFailureSinks(config, pipeline.getOptions());
+        final FailureSink.FailureSinks failureSinks = FailureSink.merge(failureSinkList);
         return pipeline.registerBadRecordErrorHandler(failureSinks);
     }
 
     private static List<FailureSink> getFailureSinks(Config config, PipelineOptions options) {
         return Optional
-                .ofNullable(config.getFailures())
+                .ofNullable(config.getFailureSinks())
                 .map(l -> l.stream().map(ll -> FailureSink.create(ll, "pipeline", options)).toList())
                 .orElseGet(ArrayList::new);
     }

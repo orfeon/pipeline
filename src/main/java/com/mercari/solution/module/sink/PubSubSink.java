@@ -127,7 +127,7 @@ public class PubSubSink extends Sink {
         parameters.validate(outputSchema);
         parameters.setDefaults();
 
-        //final Serialize serialize = Serialize.of(parameters.format, outputSchema);
+        final Serialize serialize = Serialize.of(parameters.format, outputSchema);
 
         if(getUnion().each) {
             for(final Map.Entry<String, PCollection<MElement>> entry : inputs.getAll().entrySet()) {

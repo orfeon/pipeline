@@ -20,6 +20,13 @@ public class GCPOptions implements Serializable {
     private BigQueryOptions bigquery;
     private FirestoreOptions firestore;
 
+    public String getProject() {
+        return project;
+    }
+
+    public String getWorkerRegion() {
+        return workerRegion;
+    }
 
     public static void setOptions(
             final PipelineOptions pipelineOptions,

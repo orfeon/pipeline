@@ -1,0 +1,217 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/spanner",
+  "title": "Spanner",
+  "description": "Source module for reading data from Cloud Spanner",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "spanner" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Spanner Source Parameters",
+      "description": "Parameters for reading data from Cloud Spanner",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "title": "Mode",
+          "description": "Execution mode",
+          "enum": ["query", "table", "changeDataCapture", "view"],
+          "default": "batch"
+        },
+        "projectId": {
+          "type": "string",
+          "title": "Project ID",
+          "description": "GCP Project ID"
+        },
+        "instanceId": {
+          "type": "string",
+          "title": "Instance ID",
+          "description": "Spanner Instance ID"
+        },
+        "databaseId": {
+          "type": "string",
+          "title": "Database ID",
+          "description": "Spanner Database ID"
+        },
+        "timestampBound": {
+          "type": "string",
+          "title": "Timestamp Bound",
+          "description": "Timestamp bound for read"
+        },
+        "enableDataBoost": {
+          "type": "boolean",
+          "title": "Enable Data Boost",
+          "description": "Enable Data Boost for faster reads",
+          "default": false
+        },
+        "requestTag": {
+          "type": "string",
+          "title": "Request Tag",
+          "description": "Tag for the request"
+        },
+        "emulator": {
+          "type": "boolean",
+          "title": "Emulator",
+          "description": "Use Spanner emulator",
+          "default": false
+        },
+        "priority": {
+          "type": "string",
+          "title": "Priority",
+          "description": "RPC priority",
+          "enum": ["HIGH", "MEDIUM", "LOW"],
+          "default": "MEDIUM"
+        }
+      },
+      "required": ["projectId", "instanceId", "databaseId"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mode": { "const": "query" } }
+          },
+          "then": {
+            "properties": {
+              "query": {
+                "type": "string",
+                "title": "Query",
+                "description": "SQL query to read data",
+                "x-format": "textarea"
+              }
+            },
+            "required": ["query"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "mode": { "const": "table" } }
+          },
+          "then": {
+            "properties": {
+              "table": {
+                "type": "string",
+                "title": "Table",
+                "description": "Table name to read"
+              },
+              "fields": {
+                "type": "array",
+                "title": "Fields",
+                "description": "Fields to read from table",
+                "items": { "type": "string" }
+              },
+              "keyRange": {
+                "type": "array",
+                "title": "Key Range",
+                "description": "Key ranges for table read",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "startType": { "type": "string" },
+                    "endType": { "type": "string" },
+                    "startKeys": { "type": "object" },
+                    "endKeys": { "type": "object" }
+                  }
+                }
+              }
+            },
+            "required": ["table"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "mode": { "const": "changeDataCapture" } }
+          },
+          "then": {
+            "properties": {
+              "changeStream": {
+                "type": "object",
+                "title": "Change Stream",
+                "description": "Change Data Capture configuration",
+                "properties": {
+                  "changeStreamName": {
+                    "type": "string",
+                    "title": "Change Stream Name"
+                  },
+                  "metadataInstance": {
+                    "type": "string",
+                    "title": "Metadata Instance"
+                  },
+                  "metadataDatabase": {
+                    "type": "string",
+                    "title": "Metadata Database"
+                  },
+                  "metadataTable": {
+                    "type": "string",
+                    "title": "Metadata Table"
+                  },
+                  "inclusiveStartAt": {
+                    "type": "string",
+                    "title": "Inclusive Start At"
+                  },
+                  "inclusiveEndAt": {
+                    "type": "string",
+                    "title": "Inclusive End At"
+                  }
+                }
+              },
+              "microBatch": {
+                "type": "object",
+                "title": "MicroBatch Parameters",
+                "description": "Parameters for microbatch mode",
+                "properties": {
+                  "intervalSecond": {
+                    "type": "integer",
+                    "title": "Interval Second",
+                    "default": 60
+                  },
+                  "gapSecond": {
+                    "type": "integer",
+                    "title": "Gap Second",
+                    "default": 30
+                  },
+                  "maxDurationMinute": {
+                    "type": "integer",
+                    "title": "Max Duration Minute",
+                    "default": 60
+                  },
+                  "startDatetime": {
+                    "type": "string",
+                    "title": "Start Datetime"
+                  },
+                  "outputCheckpoint": {
+                    "type": "string",
+                    "title": "Output Checkpoint"
+                  }
+                }
+              },
+              "view": {
+                "type": "object",
+                "title": "View Parameters",
+                "description": "Parameters for view mode",
+                "properties": {
+                  "keyField": {
+                    "type": "string",
+                    "title": "Key Field"
+                  },
+                  "intervalMinute": {
+                    "type": "integer",
+                    "title": "Interval Minute",
+                    "default": 60
+                  }
+                },
+                "required": ["keyField"]
+              }
+            },
+            "required": ["changeStream"]
+          }
+        }
+      ]
+    }
+  }
+}

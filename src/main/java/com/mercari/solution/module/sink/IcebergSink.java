@@ -1,16 +1,13 @@
 package com.mercari.solution.module.sink;
 
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.Union;
-import org.apache.beam.sdk.coders.RowCoder;
-import org.apache.beam.sdk.io.iceberg.*;
+//import org.apache.beam.sdk.io.iceberg.*;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
-import org.apache.iceberg.catalog.TableIdentifier;
+//import org.apache.iceberg.catalog.TableIdentifier;
 import org.jetbrains.annotations.NotNull;
 import org.joda.time.Duration;
 
@@ -72,11 +69,14 @@ public class IcebergSink extends Sink {
                         .withStrategy(getStrategy()));
         final Schema inputSchema = Union.createUnionSchema(inputs);
 
+        /*
         final IcebergWriteResult result = input
                 .apply("ConvertToRow", ParDo
                         .of(new FormatDoFn(inputSchema)))
                 .setCoder(RowCoder.of(inputSchema.getRowSchema()))
                 .apply("Write", createWrite(parameters));
+
+         */
 
         return MCollectionTuple
                 .done(PDone.in(inputs.getPipeline()));
@@ -109,6 +109,7 @@ public class IcebergSink extends Sink {
 
     }
 
+    /*
     private static IcebergIO.WriteRows createWrite(Parameters parameters) {
         IcebergIO.WriteRows writeRows = IcebergIO
                 .writeRows(IcebergCatalogConfig.builder()
@@ -130,5 +131,7 @@ public class IcebergSink extends Sink {
 
         return writeRows;
     }
+
+     */
 
 }

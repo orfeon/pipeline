@@ -20,12 +20,12 @@ import com.google.api.services.bigquery.model.TableSchema;
 import com.google.auth.Credentials;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
+import com.google.cloud.ServiceOptions;
 import com.google.cloud.bigquery.storage.v1.*;
 import com.google.cloud.hadoop.util.ChainingHttpRequestInitializer;
 import com.google.common.collect.ImmutableList;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.TableRecordToRowConverter;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
@@ -200,7 +200,7 @@ public class BigQueryUtil {
             if(projectId != null) {
                 queryRunProjectId = projectId;
             } else {
-                queryRunProjectId = OptionUtil.getDefaultProject(credential);
+                queryRunProjectId = getDefaultProjectId();
             }
 
             return getQueryDryRunJob(bigquery, queryRunProjectId, query);
@@ -235,11 +235,10 @@ public class BigQueryUtil {
         final Bigquery bigquery = getBigquery();
         String queryRunProjectId = null;
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
             if(defaultProjectId != null) {
                 queryRunProjectId = defaultProjectId;
             } else {
-                queryRunProjectId = OptionUtil.getDefaultProject(credential);
+                queryRunProjectId = getDefaultProjectId();
             }
             final TableReference tableReference = getTableReference(tableName, queryRunProjectId);
 
@@ -267,9 +266,6 @@ public class BigQueryUtil {
     public static Map<String, TableSchema> getTableSchemasFromDataset(final String datasetName) {
         final Bigquery bigquery = getBigquery();
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
-            final String queryRunProjectId = OptionUtil.getDefaultProject(credential);
-
             final String[] strs = datasetName.split("\\.");
 
             final Map<String, TableSchema> tableSchemas = new HashMap<>();
@@ -291,11 +287,10 @@ public class BigQueryUtil {
         final Bigquery bigquery = getBigquery();
         String queryRunProjectId = null;
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
             if(defaultProjectId != null) {
                 queryRunProjectId = defaultProjectId;
             } else {
-                queryRunProjectId = OptionUtil.getDefaultProject(credential);
+                queryRunProjectId = getDefaultProjectId();
             }
 
             final String[] strs = datasetName.split("\\.");
@@ -451,7 +446,7 @@ public class BigQueryUtil {
             if(projectId != null) {
                 queryRunProjectId = projectId;
             } else {
-                queryRunProjectId = OptionUtil.getDefaultProject(credential);
+                queryRunProjectId = getDefaultProjectId();
             }
             final Bigquery bigquery = new Bigquery.Builder(transport, jsonFactory, initializer)
                     .setApplicationName("BigQueryClient")
@@ -482,10 +477,9 @@ public class BigQueryUtil {
         final String queryRunProjectId;
         if(projectId == null) {
             try {
-                final Credentials credential = GoogleCredentials.getApplicationDefault();
-                queryRunProjectId = OptionUtil.getDefaultProject(credential);
+                queryRunProjectId = getDefaultProjectId();
                 if(queryRunProjectId == null) {
-                    throw new IllegalArgumentException("Failed to get default project from credentials: " + credential.getClass().getSimpleName());
+                    throw new IllegalArgumentException("Failed to get default project");
                 }
             } catch (Exception e) {
                 throw new RuntimeException("failed to get default project", e);
@@ -761,6 +755,10 @@ public class BigQueryUtil {
             return false;
         }
         return true;
+    }
+
+    private static String getDefaultProjectId() {
+        return ServiceOptions.getDefaultProjectId();
     }
 
 }

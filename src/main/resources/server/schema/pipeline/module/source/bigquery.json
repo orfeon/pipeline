@@ -1,0 +1,160 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/bigquery",
+  "title": "BigQuery",
+  "description": "Source module for loading data by specifying a query or table from BigQuery",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "bigquery" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "BigQuery Source Parameters",
+      "description": "Parameters for reading data from BigQuery using query or table",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "title": "Mode",
+          "description": "Execution mode for reading data",
+          "enum": ["batch", "microBatch", "view"],
+          "default": "batch"
+        },
+        "query": {
+          "type": "string",
+          "title": "Query",
+          "description": "SQL query to read data from BigQuery. Can also specify GCS path to SQL file"
+        },
+        "table": {
+          "type": "string",
+          "title": "Table",
+          "description": "Table to load data from BigQuery in {project}.{dataset}.{table} format"
+        },
+        "projectId": {
+          "type": "string",
+          "title": "Project ID",
+          "description": "GCP Project ID"
+        },
+        "datasetId": {
+          "type": "string",
+          "title": "Dataset ID",
+          "description": "BigQuery Dataset ID"
+        },
+        "fields": {
+          "type": "array",
+          "title": "Fields",
+          "description": "Fields to read from the table (optional when using table)",
+          "items": { "type": "string" }
+        },
+        "rowRestriction": {
+          "type": "string",
+          "title": "Row Restriction",
+          "description": "Conditions for filtering records when reading from table"
+        },
+        "queryTempDataset": {
+          "type": "string",
+          "title": "Query Temp Dataset",
+          "description": "Temporary dataset to store query results"
+        },
+        "queryLocation": {
+          "type": "string",
+          "title": "Query Location",
+          "description": "Query execution location (e.g., US)"
+        },
+        "queryPriority": {
+          "type": "string",
+          "title": "Query Priority",
+          "description": "Priority for query execution",
+          "enum": ["INTERACTIVE", "BATCH"],
+          "default": "INTERACTIVE"
+        },
+        "queryRunProjectId": {
+          "type": "string",
+          "title": "Query Run Project ID",
+          "description": "Project ID to run the query"
+        },
+        "method": {
+          "type": "string",
+          "title": "Method",
+          "description": "Read method",
+          "enum": ["DIRECT_READ", "EXPORT"]
+        },
+        "format": {
+          "type": "string",
+          "title": "Format",
+          "description": "Data format for reading",
+          "enum": ["AVRO", "ARROW"]
+        },
+        "kmsKey": {
+          "type": "string",
+          "title": "KMS Key",
+          "description": "KMS encryption key"
+        },
+        "microBatch": {
+          "type": "object",
+          "title": "MicroBatch Parameters",
+          "description": "Parameters for microbatch mode",
+          "properties": {
+            "intervalSecond": {
+              "type": "integer",
+              "title": "Interval Second",
+              "description": "Interval at which query is executed (default: 60)",
+              "default": 60
+            },
+            "gapSecond": {
+              "type": "integer",
+              "title": "Gap Second",
+              "description": "Buffer time between query end time and current time (default: 30)",
+              "default": 30
+            },
+            "maxDurationMinute": {
+              "type": "integer",
+              "title": "Max Duration Minute",
+              "description": "Maximum time range for query (default: 60)",
+              "default": 60
+            },
+            "catchupIntervalSecond": {
+              "type": "integer",
+              "title": "Catchup Interval Second",
+              "description": "Interval for catchup queries"
+            },
+            "startDatetime": {
+              "type": "string",
+              "title": "Start Datetime",
+              "description": "Start time of first query"
+            },
+            "outputCheckpoint": {
+              "type": "string",
+              "title": "Output Checkpoint",
+              "description": "GCS path to record query execution time"
+            }
+          }
+        },
+        "view": {
+          "type": "object",
+          "title": "View Parameters",
+          "description": "Parameters for view mode",
+          "properties": {
+            "keyField": {
+              "type": "string",
+              "title": "Key Field",
+              "description": "Key field for view"
+            },
+            "intervalMinute": {
+              "type": "integer",
+              "title": "Interval Minute",
+              "description": "Interval in minutes (default: 60)",
+              "default": 60
+            }
+          },
+          "required": ["keyField"]
+        }
+      }
+    }
+  }
+}

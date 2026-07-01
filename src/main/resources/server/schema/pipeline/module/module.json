@@ -1,0 +1,59 @@
+{
+  "$id": "https://mercari.com/pipeline/module/module",
+  "title": "Module",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "title": "Name",
+      "description": "Unique identifier for this module",
+      "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$"
+    },
+    "module": {
+      "type": "string",
+      "title": "Module",
+      "description": "Module Name"
+    },
+    "schema": {
+      "$ref": "https://mercari.com/pipeline/customSchema"
+    },
+    "strategy": {
+      "$ref": "https://mercari.com/pipeline/strategy"
+    },
+    "tags": {
+      "type": "array",
+      "title": "Tags",
+      "description": "Tags for categorizing and filtering modules",
+      "items": {
+        "type": "string"
+      }
+    },
+    "waits": {
+      "type": "array",
+      "title": "Waits",
+      "description": "If you want to wait for the completion of other steps and then start this step, assign a step Name to wait for completion",
+      "items": {
+        "type": "string"
+      }
+    },
+    "logs": {
+      "type": "array",
+      "title": "Log configs",
+      "items": {
+        "type": "string",
+        "enum": ["input","output"]
+      }
+    },
+    "timestampAttribute": {
+      "type": "string",
+      "title": "Timestamp Attribute",
+      "description": "defines which field or attribute of the source record should be treated as event time. The default is the time of input"
+    },
+    "failFast": {
+      "type": "boolean",
+      "title": "FailFast",
+      "description": "Specify true if you want the job to fail immediately when an error occurs. The default is true for batch and false for streaming"
+    }
+  },
+  "required": ["name", "module"]
+}

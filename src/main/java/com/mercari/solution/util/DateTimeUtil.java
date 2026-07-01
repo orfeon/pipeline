@@ -183,7 +183,12 @@ public class DateTimeUtil {
                                 .replaceFirst("-", "")
                                 .replaceAll(":", "");
                         final String hour = time.substring(0, 2);
-                        final String minute = time.substring(2);
+                        final String minute;
+                        if(time.length() > 2) {
+                            minute = time.substring(2);
+                        } else {
+                            minute = "0";
+                        }
                         if (zone.startsWith("-")) {
                             return localDateTime.toInstant(ZoneOffset.ofHoursMinutes(-Integer.valueOf(hour), -Integer.valueOf(minute)));
                         } else {

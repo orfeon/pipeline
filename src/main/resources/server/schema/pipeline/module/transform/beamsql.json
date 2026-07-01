@@ -1,0 +1,54 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/beamsql",
+  "title": "BeamSQL",
+  "description": "Transform module for SQL-based data processing using Apache Beam SQL",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "beamsql" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "BeamSQL Transform Parameters",
+      "description": "Parameters for SQL-based data processing",
+      "type": "object",
+      "properties": {
+        "sql": {
+          "type": "string",
+          "title": "SQL",
+          "description": "SQL query to execute (can be inline SQL or GCS path)",
+          "x-format": "textarea"
+        },
+        "ddl": {
+          "type": "string",
+          "title": "DDL",
+          "description": "DDL statements for table definitions",
+          "x-format": "textarea"
+        },
+        "namedParameters": {
+          "type": "object",
+          "title": "Named Parameters",
+          "description": "Named parameters for SQL query",
+          "additionalProperties": { "type": "string" }
+        },
+        "positionalParameters": {
+          "type": "array",
+          "title": "Positional Parameters",
+          "description": "Positional parameters for SQL query",
+          "items": { "type": "string" }
+        },
+        "autoLoading": {
+          "type": "boolean",
+          "title": "Auto Loading",
+          "description": "Enable auto loading of UDFs"
+        }
+      },
+      "required": ["sql"]
+    }
+  }
+}

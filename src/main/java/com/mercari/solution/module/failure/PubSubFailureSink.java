@@ -156,6 +156,7 @@ public class PubSubFailureSink extends FailureSink {
         if (parameters.maxBatchBytesSize != null) {
             write = write.withMaxBatchBytesSize(parameters.maxBatchBytesSize);
         }
+        MErrorHandler.empty().apply(write);
         return write;
     }
 }

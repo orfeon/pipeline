@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mercari.com/server/api/spec/system",
+  "title": "System Settings",
+  "description": "Pipeline system configuration",
+  "type": "object",
+  "x-metadata": {
+    "name": "system",
+    "label": "System Settings"
+  },
+  "properties": {
+    "args": {
+      "type": [
+        "object",
+        "array",
+        "string"
+      ],
+      "x-format": "json",
+      "title": "Arguments",
+      "description": "Template variables accessible via ${args.key}"
+    },
+    "context": {
+      "type": "string",
+      "title": "Context",
+      "description": "Base path for relative file references"
+    },
+    "imports": {
+      "type": [
+        "object",
+        "array",
+        "string"
+      ],
+      "x-format": "json",
+      "title": "Imports",
+      "description": "Import configuration files (JSON array)"
+    },
+    "failure": {
+      "type": "object",
+      "title": "Failure Handling",
+      "description": "Failure handling options",
+      "properties": {
+        "failFast": {
+          "type": "boolean",
+          "title": "Fail Fast",
+          "description": "Stop pipeline immediately on first error"
+        },
+        "union": {
+          "type": "boolean",
+          "title": "Union Failures",
+          "description": "Collect all failure records into a single output"
+        },
+        "sinks": {
+          "type": "array",
+          "title": "Dead-Letter sink modules",
+          "description": "dead-letter sinks",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

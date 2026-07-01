@@ -1,0 +1,142 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/jdbc",
+  "title": "JDBC",
+  "description": "Source module for reading data from databases via JDBC",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "jdbc" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "JDBC Source Parameters",
+      "description": "Parameters for reading data from databases via JDBC",
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "title": "URL",
+          "description": "JDBC connection URL"
+        },
+        "driver": {
+          "type": "string",
+          "title": "Driver",
+          "description": "JDBC driver class name"
+        },
+        "user": {
+          "type": "string",
+          "title": "User",
+          "description": "Database user (supports Secret Manager)"
+        },
+        "password": {
+          "type": "string",
+          "title": "Password",
+          "description": "Database password (supports Secret Manager)"
+        },
+        "query": {
+          "type": "string",
+          "title": "Query",
+          "description": "SQL query to execute",
+          "x-format": "textarea"
+        },
+        "table": {
+          "type": "string",
+          "title": "Table",
+          "description": "Table name to read"
+        },
+        "prepareCalls": {
+          "type": "array",
+          "title": "Prepare Calls",
+          "description": "SQL statements to execute before main query",
+          "items": { "type": "string" }
+        },
+        "prepareParameterQueries": {
+          "type": "array",
+          "title": "Prepare Parameter Queries",
+          "description": "Parameterized queries to execute before main query",
+          "items": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "title": "Query"
+              },
+              "prepareCalls": {
+                "type": "array",
+                "title": "Prepare Calls",
+                "items": { "type": "string" }
+              }
+            },
+            "required": ["query"]
+          }
+        },
+        "select": {
+          "type": "string",
+          "title": "Select",
+          "description": "Columns to select (default: *)",
+          "default": "*"
+        },
+        "seekFields": {
+          "type": "array",
+          "title": "Seek Fields",
+          "description": "Fields for seek-based reading",
+          "items": { "type": "string" }
+        },
+        "excludeFields": {
+          "type": "array",
+          "title": "Exclude Fields",
+          "description": "Fields to exclude from output",
+          "items": { "type": "string" }
+        },
+        "fetchSize": {
+          "type": "integer",
+          "title": "Fetch Size",
+          "description": "JDBC fetch size",
+          "default": 50000
+        },
+        "enableSplit": {
+          "type": "boolean",
+          "title": "Enable Split",
+          "description": "Enable query splitting",
+          "default": false
+        },
+        "enableInitialSplit": {
+          "type": "boolean",
+          "title": "Enable Initial Split",
+          "description": "Enable initial split",
+          "default": false
+        },
+        "initialSplitSize": {
+          "type": "integer",
+          "title": "Initial Split Size",
+          "description": "Initial number of splits",
+          "default": 10
+        },
+        "collations": {
+          "type": "object",
+          "title": "Collations",
+          "description": "Column collation settings",
+          "additionalProperties": { "type": "string" }
+        },
+        "properties": {
+          "type": "object",
+          "title": "Properties",
+          "description": "Additional JDBC properties",
+          "additionalProperties": { "type": "string" }
+        },
+        "transactionIsolation": {
+          "type": "integer",
+          "title": "Transaction Isolation",
+          "description": "Transaction isolation level",
+          "default": 2
+        }
+      },
+      "required": ["url", "driver"]
+    }
+  }
+}

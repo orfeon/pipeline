@@ -2,7 +2,7 @@ package com.mercari.solution.module.sink.fileio;
 
 import com.mercari.solution.module.DataType;
 import com.mercari.solution.module.MElement;
-import com.mercari.solution.module.sink.StorageSink;
+import com.mercari.solution.util.domain.file.FileUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
 import org.apache.avro.Schema;
@@ -27,7 +27,7 @@ import static org.apache.parquet.hadoop.ParquetFileWriter.Mode.OVERWRITE;
 public class ParquetSink implements FileIO.Sink<KV<String, MElement>> {
 
     private final com.mercari.solution.module.Schema schema;
-    private final StorageSink.CodecName codecName;
+    private final FileUtil.CodecName codecName;
     private final Properties properties;
     private final boolean fitSchema;
 
@@ -36,7 +36,7 @@ public class ParquetSink implements FileIO.Sink<KV<String, MElement>> {
 
     public static class Properties implements Serializable {
 
-        private StorageSink.CodecName codecName;
+        private FileUtil.CodecName codecName;
         private Integer pageSize;
         private Integer dictionaryPageSize;
         private Integer maxPaddingSize;
@@ -48,7 +48,7 @@ public class ParquetSink implements FileIO.Sink<KV<String, MElement>> {
 
     public static ParquetSink of(
             final com.mercari.solution.module.Schema schema,
-            final StorageSink.CodecName codecName,
+            final FileUtil.CodecName codecName,
             final boolean fitSchema) {
 
         return new ParquetSink(schema, codecName, fitSchema);
@@ -56,7 +56,7 @@ public class ParquetSink implements FileIO.Sink<KV<String, MElement>> {
 
     private ParquetSink(
             final com.mercari.solution.module.Schema schema,
-            final StorageSink.CodecName codecName,
+            final FileUtil.CodecName codecName,
             final boolean fitSchema) {
 
         this.schema = schema;

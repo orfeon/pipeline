@@ -97,7 +97,7 @@ public class BigtableSchemaUtil {
         private Format format;
 
         // for sink
-        private MutationOp mutationOp;
+        private String mutationOp;
         private TimestampType timestampType;
         private String timestampField;
         private String timestampValue;
@@ -106,6 +106,7 @@ public class BigtableSchemaUtil {
         private CellType cellType;
 
         private transient Template templateFamily;
+        private transient Template templateMutationOp;
 
         public List<String> validate(int i) {
             final List<String> errorMessages = new ArrayList<>();
@@ -113,7 +114,7 @@ public class BigtableSchemaUtil {
                 errorMessages.add("parameters.columns[" + i + "].family must not be null");
             }
             if(qualifiers == null || qualifiers.isEmpty()) {
-                if(!MutationOp.DELETE_FROM_FAMILY.equals(mutationOp)) {
+                if(!TemplateUtil.isTemplateText(mutationOp) && !MutationOp.DELETE_FROM_FAMILY.name().equals(mutationOp)) {
                     errorMessages.add("parameters.columns[" + i + "].qualifiers must not be empty");
                 }
             } else {
@@ -135,13 +136,13 @@ public class BigtableSchemaUtil {
         // for sink write cell
         public void setDefaults(
                 final Format defaultFormat,
-                final MutationOp defaultOp,
+                final String defaultMutationOp,
                 final TimestampType defaultTimestampType,
                 final String defaultTimestampField,
                 final String defaultTimestampValue,
                 final List<Schema.Field> fields) {
 
-            setDefaults(defaultFormat, defaultOp,
+            setDefaults(defaultFormat, defaultMutationOp,
                     defaultTimestampType, defaultTimestampField, defaultTimestampValue,
                     null, fields);
         }
@@ -149,7 +150,7 @@ public class BigtableSchemaUtil {
         // for read cell
         private void setDefaults(
                 final Format defaultFormat,
-                final MutationOp defaultOp,
+                final String defaultMutationOp,
                 final TimestampType defaultTimestampType,
                 final String defaultTimestampField,
                 final String defaultTimestampValue,
@@ -161,8 +162,8 @@ public class BigtableSchemaUtil {
             }
             if(mutationOp == null) {
                 mutationOp = Optional
-                        .ofNullable(defaultOp)
-                        .orElse(MutationOp.SET_CELL);
+                        .ofNullable(defaultMutationOp)
+                        .orElse(MutationOp.SET_CELL.name());
             }
             if(timestampType == null) {
                 timestampType = Optional
@@ -180,11 +181,13 @@ public class BigtableSchemaUtil {
             }
             if(qualifiers == null) {
                 qualifiers = new ArrayList<>();
-                switch (mutationOp) {
-                    case SET_CELL, DELETE_FROM_COLUMN -> {
-                        for(final Schema.Field field : fields) {
-                            final ColumnQualifierProperties qualifier = ColumnQualifierProperties.of(field);
-                            qualifiers.add(qualifier);
+                if(!TemplateUtil.isTemplateText(mutationOp)) {
+                    switch (MutationOp.valueOf(mutationOp)) {
+                        case SET_CELL, DELETE_FROM_COLUMN -> {
+                            for(final Schema.Field field : fields) {
+                                final ColumnQualifierProperties qualifier = ColumnQualifierProperties.of(field);
+                                qualifiers.add(qualifier);
+                            }
                         }
                     }
                 }
@@ -201,15 +204,15 @@ public class BigtableSchemaUtil {
                 if(qualifier.timestampField != null) {
                     valueArgs.add(qualifier.timestampField);
                 }
-                if(qualifier.dynamicTypeField != null) {
-                    valueArgs.add(qualifier.dynamicTypeField);
-                }
             }
             return valueArgs;
         }
 
         public List<String> extractTemplateArgs(final Schema inputSchema) {
             final List<String> templateArgs = TemplateUtil.extractTemplateArgs(family, inputSchema);
+            if(TemplateUtil.isTemplateText(mutationOp)) {
+                templateArgs.addAll(TemplateUtil.extractTemplateArgs(mutationOp, inputSchema));
+            }
             for(final ColumnQualifierProperties qualifier : qualifiers) {
                 templateArgs.addAll(qualifier.extractTemplateArgs(inputSchema));
             }
@@ -225,6 +228,9 @@ public class BigtableSchemaUtil {
 
         public void setupSink() {
             this.templateFamily = TemplateUtil.createStrictTemplate("templateColumnFamily", family);
+            if(TemplateUtil.isTemplateText(mutationOp)) {
+                this.templateMutationOp = TemplateUtil.createStrictTemplate("templateMutationOp", mutationOp);
+            }
             for(final ColumnQualifierProperties qualifier : qualifiers) {
                 qualifier.setupSink();
             }
@@ -236,8 +242,9 @@ public class BigtableSchemaUtil {
                 final Instant timestamp) {
 
             final String cf = TemplateUtil.executeStrictTemplate(templateFamily, standardValues);
+            final MutationOp resolvedMutationOp = resolveMutationOp(mutationOp, templateMutationOp, standardValues);
             final List<Mutation> mutations = new ArrayList<>();
-            if(MutationOp.DELETE_FROM_FAMILY.equals(mutationOp)) {
+            if(MutationOp.DELETE_FROM_FAMILY.equals(resolvedMutationOp)) {
                 final Mutation mutation = Mutation.newBuilder()
                         .setDeleteFromFamily(Mutation.DeleteFromFamily.newBuilder()
                                 .setFamilyName(cf)
@@ -298,7 +305,7 @@ public class BigtableSchemaUtil {
         private Format format;
 
         // for sink
-        private MutationOp mutationOp;
+        private String mutationOp;
         private TimestampType timestampType;
         private String timestampField;
         private String timestampValue;
@@ -314,9 +321,9 @@ public class BigtableSchemaUtil {
 
         private Schema.FieldType fieldType;
 
-        private String dynamicTypeField;
-
         private transient Template templateQualifier;
+        private transient Template templateMutationOp;
+        private transient Template templateType;
         private transient long fixedTimestampMicros;
 
         @Override
@@ -392,12 +399,12 @@ public class BigtableSchemaUtil {
         // for write
         public void setDefaults(
                 final Format defaultFormat,
-                final MutationOp defaultOp,
+                final String defaultMutationOp,
                 final TimestampType defaultTimestampType,
                 final String defaultTimestampField,
                 final String defaultTimestampValue) {
 
-            setDefaults(defaultFormat, defaultOp,
+            setDefaults(defaultFormat, defaultMutationOp,
                     defaultTimestampType, defaultTimestampField, defaultTimestampValue,
                     null);
         }
@@ -405,7 +412,7 @@ public class BigtableSchemaUtil {
         // for read
         private void setDefaults(
                 final Format defaultFormat,
-                final MutationOp defaultOp,
+                final String defaultMutationOp,
                 final TimestampType defaultTimestampType,
                 final String defaultTimestampField,
                 final String defaultTimestampValue,
@@ -418,7 +425,7 @@ public class BigtableSchemaUtil {
                 format = defaultFormat;
             }
             if(mutationOp == null) {
-                mutationOp = defaultOp;
+                mutationOp = defaultMutationOp;
             }
             if(timestampType == null) {
                 timestampType = defaultTimestampType;
@@ -435,7 +442,14 @@ public class BigtableSchemaUtil {
         }
 
         public List<String> extractTemplateArgs(final Schema inputSchema) {
-            return TemplateUtil.extractTemplateArgs(name, inputSchema);
+            final List<String> templateArgs = TemplateUtil.extractTemplateArgs(name, inputSchema);
+            if(TemplateUtil.isTemplateText(mutationOp)) {
+                templateArgs.addAll(TemplateUtil.extractTemplateArgs(mutationOp, inputSchema));
+            }
+            if(type != null && TemplateUtil.isTemplateText(type)) {
+                templateArgs.addAll(TemplateUtil.extractTemplateArgs(type, inputSchema));
+            }
+            return templateArgs;
         }
 
         public void setupSource() {
@@ -445,6 +459,12 @@ public class BigtableSchemaUtil {
 
         public void setupSink() {
             this.templateQualifier = TemplateUtil.createStrictTemplate("templateQualifier", name);
+            if(TemplateUtil.isTemplateText(mutationOp)) {
+                this.templateMutationOp = TemplateUtil.createStrictTemplate("templateMutationOp", mutationOp);
+            }
+            if(type != null && TemplateUtil.isTemplateText(type)) {
+                this.templateType = TemplateUtil.createStrictTemplate("templateType", type);
+            }
         }
 
         private Mutation toMutation(
@@ -453,14 +473,15 @@ public class BigtableSchemaUtil {
                 final Map<String, Object> standardValues,
                 final Instant timestamp) {
 
+            final MutationOp resolvedMutationOp = resolveMutationOp(mutationOp, templateMutationOp, standardValues);
             final Object primitiveValue = primitiveValues.get(field);
-            if(primitiveValue == null) {
+            if(primitiveValue == null && !MutationOp.DELETE_FROM_COLUMN.equals(resolvedMutationOp)) {
                 return null;
             }
-            final Schema.Type dynamicType = getDynamicType(primitiveValues);
+            final Schema.Type dynamicType = getDynamicType(standardValues);
 
             final String cq = TemplateUtil.executeStrictTemplate(templateQualifier, standardValues);
-            return switch (mutationOp) {
+            return switch (resolvedMutationOp) {
                 case SET_CELL -> {
                     final ByteString fieldValue = toByteString(format, primitiveValue, dynamicType);
                     final long timestampMicros = switch (timestampType) {
@@ -515,15 +536,20 @@ public class BigtableSchemaUtil {
             };
         }
 
-        private Schema.Type getDynamicType(Map<String,Object> primitiveValues) {
-            if(dynamicTypeField == null) {
+        private Schema.Type getDynamicType(final Map<String, Object> standardValues) {
+            if(type == null) {
                 return null;
             }
-            final Object dynamicTypeFieldValue = primitiveValues.get(dynamicTypeField);
-            if(dynamicTypeFieldValue == null) {
+            final String resolvedType;
+            if(templateType != null) {
+                resolvedType = TemplateUtil.executeStrictTemplate(templateType, standardValues);
+            } else {
+                resolvedType = type;
+            }
+            if(resolvedType == null || resolvedType.isEmpty()) {
                 return null;
             }
-            return Schema.Type.of(dynamicTypeFieldValue.toString());
+            return Schema.Type.of(resolvedType);
         }
 
         private List<Object> toPrimitiveValues(final Column column) {
@@ -736,6 +762,18 @@ public class BigtableSchemaUtil {
             map.put(family.family, family);
         }
         return map;
+    }
+
+    public static MutationOp resolveMutationOp(
+            final String mutationOp,
+            final Template templateOp,
+            final Map<String, Object> templateVariables) {
+
+        if(templateOp != null) {
+            final String resolved = TemplateUtil.executeStrictTemplate(templateOp, templateVariables);
+            return MutationOp.valueOf(resolved);
+        }
+        return MutationOp.valueOf(mutationOp);
     }
 
     public static List<Mutation> toMutations(

@@ -21,7 +21,7 @@ public class ModuleConfig implements Serializable {
     private Boolean ignore;
     private Boolean failFast;
     private Boolean outputFailure;
-    private List<FailureConfig> failures;
+    private List<FailureConfig> failureSinks;
 
     private DataType outputType;
 
@@ -73,7 +73,7 @@ public class ModuleConfig implements Serializable {
     }
 
     public void setFailFast(Boolean failFast) {
-        if(failFast != null) {
+        if(this.failFast == null && failFast != null) {
             this.failFast = failFast;
         }
     }
@@ -109,15 +109,15 @@ public class ModuleConfig implements Serializable {
         this.args = args;
     }
 
-    public List<FailureConfig> getFailures() {
-        return failures;
+    public List<FailureConfig> getFailureSinks() {
+        return failureSinks;
     }
 
-    public void addFailures(final List<FailureConfig> failures) {
-        if(this.failures == null) {
-            this.failures = new ArrayList<>();
+    public void addFailureSinks(final List<FailureConfig> failureSinks) {
+        if(this.failureSinks == null) {
+            this.failureSinks = new ArrayList<>();
         }
-        this.failures.addAll(failures);
+        this.failureSinks.addAll(failureSinks);
     }
 
 }

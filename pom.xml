@@ -12,29 +12,34 @@
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.70.0</beam.version>
+    <beam.version>2.74.0</beam.version>
 
-    <snakeyaml.version>2.5</snakeyaml.version>
+    <snakeyaml.version>2.6</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
     <exp4j.version>0.4.8</exp4j.version>
     <commons-math3.version>3.6.1</commons-math3.version>
     <lucene.version>10.3.2</lucene.version>
-    <pdfbox.version>3.0.6</pdfbox.version>
-    <jsoup.version>1.22.1</jsoup.version>
+    <pdfbox.version>3.0.7</pdfbox.version>
+    <jsoup.version>1.22.2</jsoup.version>
     <djl.version>0.36.0</djl.version>
+    <ojalgo.version>57.0.0</ojalgo.version>
 
-    <hbase.version>2.6.4</hbase.version>
+    <hbase.version>2.6.6</hbase.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
-    <postgresql-connector.version>42.7.8</postgresql-connector.version>
-    <sqlserver-connector.version>13.2.1.jre11</sqlserver-connector.version>
-    <alloydb-connector.version>1.2.9</alloydb-connector.version>
-    <jdbc-socket-factory.version>1.27.1</jdbc-socket-factory.version>
-    <hikaricp.version>7.0.2</hikaricp.version>
+    <postgresql-connector.version>42.7.11</postgresql-connector.version>
+    <alloydb-connector.version>1.3.1</alloydb-connector.version>
+    <jdbc-socket-factory.version>1.28.4</jdbc-socket-factory.version>
+    <hikaricp.version>7.1.0</hikaricp.version>
     <h2.version>2.4.240</h2.version>
-    <drive.version>v3-rev20251210-2.0.0</drive.version>
 
-    <onnxruntime.version>1.23.2</onnxruntime.version>
-    <onnx.version>1.18.0-1.5.12</onnx.version>
+    <drive.version>v3-rev20260428-2.0.0</drive.version>
+    <sheets.version>v4-rev20260213-2.0.0</sheets.version>
+    <docs.version>v1-rev20260427-2.0.0</docs.version>
+    <slides.version>v1-rev20260408-2.0.0</slides.version>
+    <forms.version>v1-rev20250422-2.0.0</forms.version>
+
+    <onnxruntime.version>1.26.0</onnxruntime.version>
+    <onnx.version>1.20.1-1.5.13</onnx.version>
 
     <slf4j.version>2.0.16</slf4j.version>
     <junit.version>4.13.1</junit.version>
@@ -46,8 +51,9 @@
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
 
-    <jetty.version>12.1.5</jetty.version>
-    <mcp.version>0.17.0</mcp.version>
+    <jetty.version>12.1.10</jetty.version>
+    <mcp.version>2.0.0</mcp.version>
+    <langchain4j.version>1.17.0</langchain4j.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -79,6 +85,9 @@
         <configuration>
           <source>21</source>
           <target>21</target>
+          <excludes>
+            <exclude>com/mercari/solution/server/**/*.java</exclude>
+          </excludes>
         </configuration>
       </plugin>
 
@@ -236,9 +245,22 @@
           <artifactId>beam-runners-direct-java</artifactId>
           <scope>runtime</scope>
         </dependency>
+        <dependency>
+          <groupId>org.apache.beam</groupId>
+          <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
+          <scope>runtime</scope>
+        </dependency>
       </dependencies>
       <build>
         <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <configuration>
+              <excludes combine.self="override">
+              </excludes>
+            </configuration>
+          </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-war-plugin</artifactId>
@@ -263,16 +285,27 @@
             <groupId>com.google.cloud.tools</groupId>
             <artifactId>jib-maven-plugin</artifactId>
             <configuration>
-              <container>
-                <user>root</user>
-                <entrypoint>
-                  /bin/sh,-c,
-                  /docker-entrypoint.sh java -jar /usr/local/jetty/start.jar --add-modules=ee11-deploy &amp;&amp; \
-                  /docker-entrypoint.sh java -jar /usr/local/jetty/start.jar --add-modules=ee11-jsp &amp;&amp; \
-                  /docker-entrypoint.sh java -jar /usr/local/jetty/start.jar
-                </entrypoint>
-              </container>
+              <pluginExtensions>
+                <pluginExtension>
+                  <implementation>com.google.cloud.tools.jib.maven.extension.ownership.JibOwnershipExtension</implementation>
+                  <configuration implementation="com.google.cloud.tools.jib.maven.extension.ownership.Configuration">
+                    <rules>
+                      <rule>
+                        <glob>/var/lib/jetty**</glob>
+                        <ownership>999:999</ownership>
+                      </rule>
+                    </rules>
+                  </configuration>
+                </pluginExtension>
+              </pluginExtensions>
             </configuration>
+            <dependencies>
+              <dependency>
+                <groupId>com.google.cloud.tools</groupId>
+                <artifactId>jib-ownership-extension-maven</artifactId>
+                <version>0.1.0</version>
+              </dependency>
+            </dependencies>
           </plugin>
           <plugin>
             <groupId>org.eclipse.jetty.ee11</groupId>
@@ -348,9 +381,19 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <flink.version>1.20</flink.version>
-        <jib.image>apache/beam_flink${flink.version}_job_server</jib.image>
+        <flink.version>2.0</flink.version>
       </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.google.cloud.tools</groupId>
+            <artifactId>jib-maven-plugin</artifactId>
+            <configuration>
+              <skip>true</skip>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
@@ -380,27 +423,41 @@
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
-          <artifactId>beam-runners-spark-3</artifactId>
+          <artifactId>beam-runners-spark-4</artifactId>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
     </profile>
 
-    <!-- Makes the DataflowRunner available when running a dataflow pipeline job. -->
+    <!-- Makes the DataflowRunner available with GPU support when running a dataflow pipeline job. -->
+    <!-- Launcher image is built with Jib (standard Dataflow base). -->
+    <!-- Worker SDK container image with CUDA is built separately via containers/dataflow-gpu/Dockerfile. -->
     <profile>
       <id>dataflow-gpu</id>
       <activation>
         <activeByDefault>false</activeByDefault>
       </activation>
-      <properties>
-        <jib.image>nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04</jib.image>
-        <jib.appRoot>/var/lib/jetty/webapps/ROOT</jib.appRoot>
-      </properties>
+      <dependencyManagement>
+        <dependencies>
+          <!-- Override onnxruntime CPU to provided scope so onnxruntime_gpu is used instead -->
+          <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>${onnxruntime.version}</version>
+            <scope>provided</scope>
+          </dependency>
+        </dependencies>
+      </dependencyManagement>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
           <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>com.microsoft.onnxruntime</groupId>
+          <artifactId>onnxruntime_gpu</artifactId>
+          <version>${onnxruntime.version}</version>
         </dependency>
       </dependencies>
     </profile>
@@ -450,10 +507,12 @@
       <artifactId>beam-sdks-java-io-parquet</artifactId>
     </dependency>
 
+    <!--
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-iceberg</artifactId>
     </dependency>
+    -->
 
     <!--
     <dependency>
@@ -478,6 +537,12 @@
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-clickhouse</artifactId>
+    </dependency>
+
+    <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-io-clickhouse -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-io-datadog</artifactId>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-extensions-sql -->
@@ -591,6 +656,13 @@
       <version>${drive.version}</version>
     </dependency>
 
+    <!-- https://mvnrepository.com/artifact/com.google.apis/google-api-services-sheets -->
+    <dependency>
+      <groupId>com.google.apis</groupId>
+      <artifactId>google-api-services-sheets</artifactId>
+      <version>${sheets.version}</version>
+    </dependency>
+
     <!-- Databases -->
     <!-- https://mvnrepository.com/artifact/com.google.cloud.sql/mysql-socket-factory -->
     <dependency>
@@ -603,13 +675,6 @@
     <dependency>
       <groupId>com.google.cloud.sql</groupId>
       <artifactId>postgres-socket-factory</artifactId>
-      <version>${jdbc-socket-factory.version}</version>
-    </dependency>
-
-    <!-- https://mvnrepository.com/artifact/com.google.cloud.sql/cloud-sql-connector-jdbc-sqlserver -->
-    <dependency>
-      <groupId>com.google.cloud.sql</groupId>
-      <artifactId>cloud-sql-connector-jdbc-sqlserver</artifactId>
       <version>${jdbc-socket-factory.version}</version>
     </dependency>
 
@@ -626,15 +691,6 @@
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
       <version>${postgresql-connector.version}</version>
-      <scope>runtime</scope>
-    </dependency>
-
-    <!-- https://mvnrepository.com/artifact/com.microsoft.sqlserver/mssql-jdbc -->
-    <dependency>
-      <groupId>com.microsoft.sqlserver</groupId>
-      <artifactId>mssql-jdbc</artifactId>
-      <version>${sqlserver-connector.version}</version>
-      <scope>runtime</scope>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/com.google.cloud/alloydb-jdbc-connector -->
@@ -700,11 +756,11 @@
       <version>${djl.version}</version>
     </dependency>
 
-    <!-- https://mvnrepository.com/artifact/ai.djl.sentencepiece/sentencepiece -->
+    <!-- Source: https://mvnrepository.com/artifact/org.ojalgo/ojalgo -->
     <dependency>
-      <groupId>ai.djl.sentencepiece</groupId>
-      <artifactId>sentencepiece</artifactId>
-      <version>${djl.version}</version>
+      <groupId>org.ojalgo</groupId>
+      <artifactId>ojalgo</artifactId>
+      <version>${ojalgo.version}</version>
     </dependency>
 
     <!-- Log -->
@@ -751,6 +807,20 @@
       <groupId>io.modelcontextprotocol.sdk</groupId>
       <artifactId>mcp</artifactId>
       <version>${mcp.version}</version>
+    </dependency>
+
+    <!-- Source: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j</artifactId>
+      <version>${langchain4j.version}</version>
+    </dependency>
+
+    <!-- Source: https://mvnrepository.com/artifact/dev.langchain4j/langchain4j-google-genai -->
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-google-genai</artifactId>
+      <version>${langchain4j.version}-beta27</version>
     </dependency>
 
     <!-- Experimental LLM -->

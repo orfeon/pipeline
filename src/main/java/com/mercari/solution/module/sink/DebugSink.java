@@ -1,10 +1,14 @@
 package com.mercari.solution.module.sink;
 
 import com.google.gson.JsonObject;
+import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
+import com.mercari.solution.util.pipeline.Debug;
+import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.converter.ElementToJsonConverter;
 import freemarker.template.Template;
+import org.apache.beam.sdk.io.WriteFilesResult;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -49,8 +53,9 @@ public class DebugSink extends Sink {
     public MCollectionTuple expand(
             final MCollectionTuple inputs,
             MErrorHandler errorHandler) {
-        if (inputs.size() == 0) {
-            throw new IllegalArgumentException("debug sink module requires inputs parameter");
+
+        if(MPipeline.Runner.direct.equals(getRunner())) {
+            return expandLocal(inputs, errorHandler);
         }
 
         final Parameters parameters = getParameters(Parameters.class);
@@ -66,6 +71,30 @@ public class DebugSink extends Sink {
                     .apply("Debug" + tag, ParDo.of(new DebugDoFn(name, schema, parameters)));
             voids = voids.and(done);
         }
+
+        return MCollectionTuple
+                .done(PDone.in(inputs.getPipeline()));
+    }
+
+    private MCollectionTuple expandLocal(
+            final MCollectionTuple inputs,
+            MErrorHandler errorHandler) {
+
+        final String workDirPath = inputs.getPipeline().getOptions().as(MPipeline.MPipelineServerOptions.class).getWorkDir();
+        if(workDirPath == null) {
+            LOG.error("workDir is empty");
+            return MCollectionTuple
+                    .done(PDone.in(inputs.getPipeline()));
+        }
+
+        final PCollection<MElement> input = inputs
+                .apply("Union", Union.flatten()
+                        .withWaits(getWaits())
+                        .withStrategy(getStrategy()));
+        final Schema inputSchema = Union.createUnionSchema(inputs);
+
+        final WriteFilesResult<Void> results = input
+                .apply("Debug", Debug.create(inputSchema, workDirPath, getName(), errorHandler));
 
         return MCollectionTuple
                 .done(PDone.in(inputs.getPipeline()));

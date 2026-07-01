@@ -1,0 +1,92 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/spanner",
+  "title": "Spanner",
+  "description": "Sink module for writing data to Cloud Spanner",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "spanner" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Spanner Sink Parameters",
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "title": "Project ID"
+        },
+        "instanceId": {
+          "type": "string",
+          "title": "Instance ID"
+        },
+        "databaseId": {
+          "type": "string",
+          "title": "Database ID"
+        },
+        "table": {
+          "type": "string",
+          "title": "Table"
+        },
+        "mutationOp": {
+          "type": "string",
+          "title": "Mutation Op",
+          "enum": ["INSERT", "UPDATE", "INSERT_OR_UPDATE", "REPLACE", "DELETE"],
+          "default": "INSERT_OR_UPDATE"
+        },
+        "keyFields": {
+          "type": "array",
+          "title": "Key Fields",
+          "items": { "type": "string" }
+        },
+        "commitTimestampFields": {
+          "type": "array",
+          "title": "Commit Timestamp Fields",
+          "items": { "type": "string" }
+        },
+        "priority": {
+          "type": "string",
+          "title": "Priority",
+          "enum": ["HIGH", "MEDIUM", "LOW"],
+          "default": "MEDIUM"
+        },
+        "maxCommitDelay": {
+          "type": "integer",
+          "title": "Max Commit Delay",
+          "minimum": 0, "maximum": 500
+        },
+        "maxNumRows": {
+          "type": "integer",
+          "title": "Max Num Rows",
+          "default": 500
+        },
+        "maxNumMutations": {
+          "type": "integer",
+          "title": "Max Num Mutations",
+          "default": 5000
+        },
+        "batchSizeBytes": {
+          "type": "integer",
+          "title": "Batch Size Bytes"
+        },
+        "groupingFactor": {
+          "type": "integer",
+          "title": "Grouping Factor",
+          "default": 1000
+        },
+        "emulator": {
+          "type": "boolean",
+          "title": "Emulator",
+          "default": false
+        }
+      },
+      "required": ["projectId", "instanceId", "databaseId", "table"]
+    }
+  }
+}

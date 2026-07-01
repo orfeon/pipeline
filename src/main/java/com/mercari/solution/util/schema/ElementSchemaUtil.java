@@ -8,10 +8,7 @@ import com.mercari.solution.util.schema.converter.JsonToMapConverter;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class ElementSchemaUtil {
 
@@ -67,6 +64,52 @@ public class ElementSchemaUtil {
         throw new IllegalArgumentException("Not found field: " + field + " in input fields: " + inputFields);
     }
 
+    public static List<Schema.Field> setFieldType(
+            final List<Schema.Field> inputFields,
+            String fieldPath,
+            Schema.FieldType fieldType_) {
+
+        final String fieldName;
+        if(fieldPath.contains(".")) {
+            final String[] fields = fieldPath.split("\\.", 2);
+            fieldName = fields[0];
+            fieldPath = fields[1];
+        } else {
+            fieldName = fieldPath;
+        }
+        final Schema.FieldType fieldType = getInputFieldType(fieldName, inputFields);
+
+        final List<Schema.Field> resultFields = new ArrayList<>();
+        for(final Schema.Field inputField : inputFields) {
+            if(!inputField.getName().equals(fieldName)) {
+                resultFields.add(inputField);
+            } else if(fieldName.equals(fieldPath)) {
+                resultFields.add(Schema.Field.of(inputField.getName(), fieldType_));
+            } else {
+                switch (fieldType.getType()) {
+                    case element -> {
+                        final List<Schema.Field> childFields = setFieldType(
+                                fieldType.getElementSchema().getFields(), fieldPath, fieldType_);
+                        final Schema.Field childField = Schema.Field.of(fieldName, Schema.FieldType.element(Schema.of(childFields)));
+                        resultFields.add(childField);
+                    }
+                    case array -> {
+                        if (!Schema.Type.element.equals(fieldType.getArrayValueType().getType())) {
+                            throw new IllegalArgumentException();
+                        }
+                        final List<Schema.Field> childFields = setFieldType(
+                                fieldType.getArrayValueType().getElementSchema().getFields(), fieldPath, fieldType_);
+                        final Schema.Field childField = Schema.Field.of(fieldName, Schema.FieldType.element(Schema.of(childFields)));
+                        resultFields.add(childField);
+                        System.out.println("oijsdlkjflaksjdflajfd");
+                    }
+                    default -> throw new IllegalArgumentException();
+                }
+            }
+        }
+        return resultFields;
+    }
+
     public static Object getValue(Map<?, ?> input, String field) {
         if(input.containsKey(field)) {
             return input.get(field);
@@ -116,6 +159,21 @@ public class ElementSchemaUtil {
             };
         } else {
             return null;
+        }
+    }
+
+    public static void setValue(Map<String, Object> input, String field, Object value_) {
+        if(input.containsKey(field)) {
+            input.put(field, value_);
+        } else if(field.contains(".")) {
+            final String[] fields = field.split("\\.", 2);
+            final Object value = input.get(fields[0]);
+            switch (value) {
+                case Map map -> {
+                    setValue(map, fields[1], value_);
+                }
+                default -> throw new IllegalArgumentException("Illegal nested field: " + field + ", value: " + value);
+            }
         }
     }
 
@@ -229,6 +287,51 @@ public class ElementSchemaUtil {
                 default -> null;
             };
             default -> null;
+        };
+    }
+
+    public static Map<String, Object> deepCopyMap(final Map<String, Object> original) {
+        if (original == null) {
+            return null;
+        }
+        final Map<String, Object> copy = new HashMap<>();
+        for (final Map.Entry<String, Object> entry : original.entrySet()) {
+            copy.put(entry.getKey(), deepCopyObject(entry.getValue()));
+        }
+        return copy;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object deepCopyObject(Object obj) {
+        if (obj == null) {
+            return null;
+        }
+
+        return switch (obj) {
+            case Number n -> n;
+            case String s -> s;
+            case Boolean b -> b;
+            case byte[] b -> Arrays.copyOf(b, b.length);
+            case ByteBuffer bytes -> {
+                ByteBuffer copyBuffer = bytes.isDirect() ?
+                        ByteBuffer.allocateDirect(bytes.capacity()) :
+                        ByteBuffer.allocate(bytes.capacity());
+                ByteBuffer readOnlyCopy = bytes.duplicate();
+                readOnlyCopy.clear();
+                copyBuffer.put(readOnlyCopy);
+                copyBuffer.position(bytes.position());
+                copyBuffer.limit(bytes.limit());
+                yield copyBuffer;
+            }
+            case Map<?, ?> map -> deepCopyMap((Map<String, Object>) map);
+            case List<?> list -> {
+                List<Object> copyList = new ArrayList<>(list.size());
+                for (Object item : list) {
+                    copyList.add(deepCopyObject(item));
+                }
+                yield copyList;
+            }
+            default -> throw new IllegalArgumentException("Unsupported type encountered during deep copy:" + obj.getClass().getName());
         };
     }
 

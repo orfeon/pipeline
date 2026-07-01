@@ -11,7 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 
-
+/*
 @Tool.Module(
     name="describe-module",
     title="Describe Pipeline Module",
@@ -34,6 +34,8 @@ import java.util.List;
     outputSchema = """
         """
 )
+
+ */
 public class DescribeModuleTool implements Tool {
 
     private File docsDir;
@@ -57,7 +59,10 @@ public class DescribeModuleTool implements Tool {
             final McpSchema.CallToolRequest request) {
 
         if(!request.arguments().containsKey("id")) {
-            return new McpSchema.CallToolResult("describe-module mcp tool requires id parameter", true);
+            return McpSchema.CallToolResult.builder()
+                    .addTextContent("describe-module mcp tool requires id parameter")
+                    .isError(true)
+                    .build();
         }
 
         final String id = request.arguments().get("id").toString();
@@ -66,14 +71,23 @@ public class DescribeModuleTool implements Tool {
                     .get(docsDir.getPath(), "/config/module/" + id + ".md")
                     .toFile();
             if(!file.exists()) {
-                return new McpSchema.CallToolResult("Not found module: " + id, true);
+                return McpSchema.CallToolResult.builder()
+                        .addTextContent("Not found module: " + id)
+                        .isError(true)
+                        .build();
             }
 
             final List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
             final String content = getContent(lines);
-            return new McpSchema.CallToolResult(content, false);
+            return McpSchema.CallToolResult.builder()
+                    .addTextContent(content)
+                    .isError(false)
+                    .build();
         } catch (Exception e) {
-            return new McpSchema.CallToolResult("Not found module: " + id + ", cause: " + e.getMessage(), true);
+            return McpSchema.CallToolResult.builder()
+                    .addTextContent("Not found module: " + id + ", cause: " + e.getMessage())
+                    .isError(true)
+                    .build();
         }
     }
 

@@ -4,7 +4,6 @@ import com.mercari.solution.server.mcp.prompt.Prompt;
 import com.mercari.solution.server.mcp.resource.Resources;
 import com.mercari.solution.server.mcp.tool.Tool;
 import io.modelcontextprotocol.common.McpTransportContext;
-import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.server.transport.HttpServletSseServerTransportProvider;
@@ -39,7 +38,7 @@ public class PipelineMcpSseServer extends HttpServlet {
     public void init(ServletConfig config) throws ServletException {
 
         this.provider = HttpServletSseServerTransportProvider.builder()
-                .jsonMapper(McpJsonMapper.createDefault())
+                //.jsonMapper(McpJsonMapper.createDefault())
                 .baseUrl("/mcp")
                 .sseEndpoint("/sse")
                 .messageEndpoint("/message")

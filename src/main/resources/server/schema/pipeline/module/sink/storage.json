@@ -1,0 +1,43 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/storage",
+  "title": "Storage",
+  "description": "Sink module for writing files to Cloud Storage",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "storage" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": ["avro", "parquet", "csv", "json"]
+        },
+        "suffix": {
+          "type": "string"
+        },
+        "compression": {
+          "type": "string"
+        },
+        "numShards": {
+          "type": "integer"
+        },
+        "tempDirectory": {
+          "type": "string"
+        }
+      },
+      "required": ["output", "format"]
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "$id": "https://mercari.com/pipeline/module/source/drive",
+  "title": "Drive",
+  "description": "Source module for reading file metadata from Google Drive",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "properties": {
+        "module": { "const": "drive" },
+        "parameters": { "$ref": "#/$defs/parameters" },
+        "schema": { "$ref": "https://mercari.com/pipeline/schema" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "Drive Source Parameters",
+      "description": "Parameters for reading file metadata from Google Drive",
+      "type": "object",
+      "properties": {
+        "user": {
+          "type": "string",
+          "title": "User",
+          "description": "Service account for authentication"
+        },
+        "queries": {
+          "type": "array",
+          "title": "Drive Search Queries",
+          "description": "Specify the http requests contents",
+          "items": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "title": "Search Query",
+                "description": "ref: https://developers.google.com/workspace/drive/api/guides/search-files"
+              },
+              "driveId": {
+                "type": "string",
+                "title": "Drive ID",
+                "description": "Shared Drive ID"
+              },
+              "folderId": {
+                "type": "string",
+                "title": "Folder ID",
+                "description": "Folder ID to search within"
+              },
+              "recursive": {
+                "type": "boolean",
+                "title": "Recursive",
+                "description": "Search recursively in subfolders",
+                "default": true
+              }
+            },
+            "required": ["query"]
+          }
+        },
+        "files": {
+          "type": "array",
+          "title": "Drive Files",
+          "description": "Specify File ids",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "title": "File ID",
+                "description": "File ID to lookup"
+              },
+              "ranges": {
+                "type": "array",
+                "title": "Sheets ranges",
+                "description": "Sheets ranges",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["id"]
+          }
+        },
+        "fields": {
+          "type": "string",
+          "title": "Drive File Fields to retrieve",
+          "description": "example: files(id,kind,...) ref: https://developers.google.com/workspace/drive/api/guides/fields-parameter"
+        },
+        "content": {
+          "type": "boolean",
+          "title": "With File Content",
+          "description": "Service account for authentication"
+        },
+        "export": {
+          "type": "string",
+          "title": "Export MimeType",
+          "description": "Service account for authentication"
+        },
+        "flatten": {
+          "type": "string",
+          "title": "Flatten Field Name",
+          "description": "Service account for authentication"
+        }
+      },
+      "required": ["user"]
+    }
+  }
+}

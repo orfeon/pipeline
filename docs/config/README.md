@@ -1,22 +1,24 @@
 # Define Pipeline
 
+Define the pipeline contents in YAML/JSON format and specify using the config parameter.
+
 ## Config file contents
 
 In the Config file, six modules, `system`, `options`, `sources`, `transforms`, `sinks` and `failures`, are combined to define the processing contents.
 `sources` is for input data acquisition, `transforms` is for data processing, and `sinks` is for data output.
 `options` defines pipeline options.
 
-| parameter  | type                         | description                            |
-|------------|------------------------------|----------------------------------------|
-| system     | [System](system.md)          | System configuration.                  |
-| options    | [Options](options/README.md) | Pipeline option definitions.           |
-| sources    | Array<Source\>               | Pipeline data source definitions.      |
-| transforms | Array<Transform\>            | Pipeline data processing definitions.  |
-| sinks      | Array<Sink\>                 | Pipeline data sink definitions.        |
-| failures   | Array<Failure\>              | Pipeline dead-letter sink definitions. |
+| parameter  | type                         | description                                |
+|------------|------------------------------|--------------------------------------------|
+| system     | [System](system.md)          | System configuration.                      |
+| options    | [Options](options/README.md) | Pipeline option definitions.               |
+| sources    | Array<Source\>               | Pipeline data source definitions.          |
+| transforms | Array<Transform\>            | Pipeline data processing definitions.      |
+| sinks      | Array<Sink\>                 | Pipeline data sink definitions.            |
+| failures   | Array<Failure\>              | Pipeline-wide dead-letter sink definition. |
 
 
-```JSON:config
+```json:config
 {
   "system": {...},
   "options": {...},
@@ -39,7 +41,7 @@ In the Config file, six modules, `system`, `options`, `sources`, `transforms`, `
 }
 ```
 
-You can define and run a pipeline by combining these three types of various build-in modules.
+You can define and run a pipeline by combining these types of various build-in modules.
 
 The list of build-in modules can be found on [Modules Page](module/README.md).
 
@@ -52,16 +54,16 @@ Below is an overview of these built-in modules.
 In the three types of modules, the contents of input, processing, and output are described as JSON parameters.
 The common settings of the three types of modules are as follows.
 
-| attribute  | type                 | optional | description                                                                                                                                                                                                                                                                                         |
-|------------|----------------------|----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| name       | String               | required | Set unique name in Config JSON                                                                                                                                                                                                                                                                      |
-| module     | String               | required | Set [module](module/README.md) name                                                                                                                                                                                                                                                                 |
-| parameters | Map<String, Object\> | required | Specify the parameters defined in each module.                                                                                                                                                                                                                                                      |
-| strategy   | Strategy             | optional | Specify beam windowing strategy([Window](https://beam.apache.org/documentation/programming-guide/#windowing), [Trigger](https://beam.apache.org/documentation/programming-guide/#triggers), [AccumulationMode](https://beam.apache.org/documentation/programming-guide/#window-accumulation-modes)) |
-| waits      | Array<String\>       | optional | If you want to wait for the completion of other steps and then start this step, assign a step Name to wait for completion.                                                                                                                                                                          |
-| failFast   | Boolean              | optional | Specify true if you want the job to fail immediately when an error occurs. The default is true for batch and false for streaming.                                                                                                                                                                   |
-| logs       | Array<String\>       | optional | Specify logging condition.                                                                                                                                                                                                                                                                          |
-| ignore     | Boolean              | optional | Specify true if you want to ignore this module.                                                                                                                                                                                                                                                     |
+| attribute  | type                                  | optional | description                                                                                                                                                                                                                                                                                                                                       |
+|------------|---------------------------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| name       | String                                | required | Set unique name in config file                                                                                                                                                                                                                                                                                                                    |
+| module     | String                                | required | Set [module](module/README.md) name                                                                                                                                                                                                                                                                                                               |
+| parameters | Map<String, Object\>                  | required | Specify the parameters defined in each module.                                                                                                                                                                                                                                                                                                    |
+| strategy   | [Strategy](module/common/strategy.md) | optional | Specify the beam windowing strategy([Window](https://beam.apache.org/documentation/programming-guide/#windowing), [Trigger](https://beam.apache.org/documentation/programming-guide/#triggers), [AccumulationMode](https://beam.apache.org/documentation/programming-guide/#window-accumulation-modes)) to apply to the processing of the module. |
+| waits      | Array<String\>                        | optional | If you want to wait for the completion of other steps and then start this step, assign a step Name to wait for completion.                                                                                                                                                                                                                        |
+| failFast   | Boolean                               | optional | Specify true if you want the job to fail immediately when an error occurs. The default is true for batch and false for streaming.                                                                                                                                                                                                                 |
+| logs       | Array<String\>                        | optional | Specify logging condition.                                                                                                                                                                                                                                                                                                                        |
+| ignore     | Boolean                               | optional | Specify true if you want to ignore this module.                                                                                                                                                                                                                                                                                                   |
 
 
 ### Module Common Properties Matrix
@@ -78,6 +80,7 @@ The common settings of the three types of modules are as follows.
 | strategy           | -        | optional  | optional |
 | timestampAttribute | optional | -         | -        |
 | failFast           | optional | optional  | optional |
+| logs               | optional | optional  | optional |
 | ignore             | optional | optional  | optional |
 
 
@@ -174,3 +177,5 @@ curl -X POST -H "Content-Type: application/json"  -H "Authorization: Bearer $(gc
     'jobName':'myJobName',
   }"
 ```
+
+

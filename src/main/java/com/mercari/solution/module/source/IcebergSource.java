@@ -1,14 +1,8 @@
 package com.mercari.solution.module.source;
 
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.coder.ElementCoder;
-import com.mercari.solution.util.pipeline.OptionUtil;
-import org.apache.beam.sdk.io.iceberg.IcebergCatalogConfig;
-import org.apache.beam.sdk.io.iceberg.IcebergIO;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.*;
-import org.apache.iceberg.catalog.TableIdentifier;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.Serializable;
@@ -60,6 +54,7 @@ public class IcebergSource extends Source {
         parameters.validate();
         parameters.setDefaults();
 
+        /*
         final PCollection<Row> rows = begin
                 .apply("Read", createRead(begin, parameters));
 
@@ -70,6 +65,9 @@ public class IcebergSource extends Source {
 
         return MCollectionTuple
                 .of(output, schema);
+
+         */
+        return null;
 
     }
 
@@ -87,6 +85,7 @@ public class IcebergSource extends Source {
 
     }
 
+    /*
     private static IcebergIO.ReadRows createRead(
             final PBegin begin,
             final Parameters parameters) {
@@ -104,5 +103,7 @@ public class IcebergSource extends Source {
 
         return readRows;
     }
+
+     */
 
 }

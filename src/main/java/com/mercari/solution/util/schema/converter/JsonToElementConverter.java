@@ -35,6 +35,9 @@ public class JsonToElementConverter {
                 }
             }
             return map;
+        } else if(jsonElement.isJsonPrimitive() && jsonElement.getAsJsonPrimitive().isString()) {
+            final JsonElement jsonElement_ = JsonParser.parseString(jsonElement.getAsString());
+            return convert(fields, jsonElement_);
         } else {
             return null;
         }
