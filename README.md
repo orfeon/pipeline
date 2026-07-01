@@ -2,15 +2,15 @@
 
 The Mercari Pipeline enables you to run various pipelines without writing programs by simply defining a configuration file.
 
-Currently Mercari Pipeline's primary target is Cloud Dataflow, but we are in the process of preparing to run on Apache Spark and Apache Flink clusters as well.
+Mercari Pipeline's primary target is Cloud Dataflow, and the same configuration files can also be run locally (DirectRunner) or on Apache Flink and Apache Spark clusters via Maven profiles.
 
 (Mercari Dataflow Template has been renamed Mercari Pipeline)
 
-See the [Document](docs/README.md) for usage
+See the [Document](docs/README.md) for usage, and [examples](examples/README.md) for ready-to-use configuration files for common use cases.
 
 ## Usage Example
 
-MD can be deployed as a [FlexTemplate](https://cloud.google.com/dataflow/docs/guides/templates/using-flex-templates) for use with [Cloud Dataflow](https://cloud.google.com/dataflow) Runner.
+Mercari Pipeline can be deployed as a [FlexTemplate](https://cloud.google.com/dataflow/docs/guides/templates/using-flex-templates) for use with [Cloud Dataflow](https://cloud.google.com/dataflow) Runner.
 Pipelines are assembled based on the defined configuration file and can be executed as Cloud Dataflow Jobs.
 
 Write the following yaml file and upload it to GCS (Suppose you upload it to gs://example/config.yaml).
@@ -51,7 +51,7 @@ gcloud dataflow flex-template run bigquery-to-spanner \
 
 The Dataflow job will be started, and you can check the execution status of the job in the console screen.
 
-<img src="https://raw.githubusercontent.com/mercari/DataflowTemplate/master/docs/images/bigquery-to-spanner.png">
+<img src="docs/images/bigquery-to-spanner.png">
 
 
 ## Deploy Template
@@ -170,7 +170,7 @@ For local execution, execute the following command to grant the necessary permis
 
 ```shell
 gcloud auth application-default login
-````
+```
 
 The following is an example of a locally executed command.
 The authentication file and config file are mounted for access by the container.
@@ -203,7 +203,9 @@ docker run ^
 
 ## Build Docker image for Pipeline API server
 
-You can build pipeline api server. This is useful when you want to check config content quickly.
+You can build the Pipeline server, an auxiliary tool for creating, debugging, and deploying pipelines.
+It provides a web UI and REST API to validate config files and launch jobs, as well as an MCP server and
+built-in AI agent that reference the bundled module documentation to help you design pipelines.
 
 ```sh
 # Create and Upload Docker image to GAR for pipeline api server
