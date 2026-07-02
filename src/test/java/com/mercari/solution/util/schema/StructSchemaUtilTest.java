@@ -693,6 +693,7 @@ public class StructSchemaUtilTest {
         Assertions.assertEquals(Arrays.asList(1L, 2L), StructSchemaUtil.getAsPrimitive(struct, Schema.FieldType.array(Schema.FieldType.INT64), "intArr"));
         Assertions.assertEquals(Arrays.asList(1.5F), StructSchemaUtil.getAsPrimitive(struct, Schema.FieldType.array(Schema.FieldType.FLOAT), "f32Arr"));
         Assertions.assertEquals(Arrays.asList(2.5D), StructSchemaUtil.getAsPrimitive(struct, Schema.FieldType.array(Schema.FieldType.DOUBLE), "f64Arr"));
+        Assertions.assertEquals(Arrays.asList(1000000L), StructSchemaUtil.getAsPrimitive(struct, Schema.FieldType.array(Schema.FieldType.DATETIME), "tsArr"));
         Assertions.assertEquals(Arrays.asList(10), StructSchemaUtil.getAsPrimitive(struct, Schema.FieldType.array(CalciteUtils.DATE), "dateArr"));
         // nested field
         Assertions.assertEquals("x", StructSchemaUtil.getAsPrimitive(struct, Schema.FieldType.STRING, "child.v"));
@@ -782,7 +783,7 @@ public class StructSchemaUtilTest {
                 StructSchemaUtil.convertPrimitive(CalciteUtils.DATE, 10));
         Assertions.assertEquals(
                 LocalTime.parse("12:34:56").toString(),
-                StructSchemaUtil.convertPrimitive(CalciteUtils.TIME, LocalTime.parse("12:34:56").toNanoOfDay()));
+                StructSchemaUtil.convertPrimitive(CalciteUtils.TIME, LocalTime.parse("12:34:56").toNanoOfDay() / 1000L));
         final Schema.FieldType enumType = Schema.FieldType.logicalType(EnumerationType.create("RED", "GREEN"));
         Assertions.assertEquals(
                 enumType.getLogicalType(EnumerationType.class).valueOf(1),
@@ -797,6 +798,10 @@ public class StructSchemaUtilTest {
         Assertions.assertEquals(
                 Arrays.asList(Date.parseDate("1970-01-11")),
                 StructSchemaUtil.convertPrimitive(Schema.FieldType.array(CalciteUtils.DATE), Arrays.asList(10)));
+        // TIME list case must produce the same representation as the scalar case (micros-of-day -> String)
+        Assertions.assertEquals(
+                Arrays.asList(LocalTime.parse("12:34:56").toString()),
+                StructSchemaUtil.convertPrimitive(Schema.FieldType.array(CalciteUtils.TIME), Arrays.asList(LocalTime.parse("12:34:56").toNanoOfDay() / 1000L)));
     }
 
     @Test
@@ -839,6 +844,36 @@ public class StructSchemaUtilTest {
         final Struct excluded = StructSchemaUtil.toBuilder(struct, Arrays.asList("str", "int"), Arrays.asList("int")).build();
         Assertions.assertEquals(1, excluded.getColumnCount());
         Assertions.assertEquals("12", excluded.getString("str"));
+    }
+
+    @Test
+    public void testToBuilderCopyWithNullsAndTypedValues() {
+        final Struct struct = Struct.newBuilder()
+                .set("json").to(Value.json("{\"k\":1}"))
+                .set("pgnum").to(Value.pgNumeric("1.23"))
+                .set("nullbool").to((Boolean) null)
+                .set("nullstr").to((String) null)
+                .set("nulljson").to(Value.json(null))
+                .set("nullbytes").to((ByteArray) null)
+                .set("nullint").to((Long) null)
+                .set("nullf32").to((Float) null)
+                .set("nullf64").to((Double) null)
+                .set("nullnum").to((BigDecimal) null)
+                .set("nullpgnum").to(Value.pgNumeric(null))
+                .set("nulldate").to((Date) null)
+                .set("nullts").to((Timestamp) null)
+                .set("nullintArr").toInt64Array((Iterable<Long>) null)
+                .set("nullstrArr").toStringArray(null)
+                .build();
+        final Struct copied = StructSchemaUtil.toBuilder(struct).build();
+        Assertions.assertEquals(struct.getType(), copied.getType());
+        Assertions.assertEquals(Value.json("{\"k\":1}"), copied.getValue("json"));
+        Assertions.assertEquals(Value.pgNumeric("1.23"), copied.getValue("pgnum"));
+        for(final Type.StructField field : copied.getType().getStructFields()) {
+            if(field.getName().startsWith("null")) {
+                Assertions.assertTrue(copied.isNull(field.getName()), "field: " + field.getName() + " should be null");
+            }
+        }
     }
 
     @Test
@@ -909,7 +944,9 @@ public class StructSchemaUtilTest {
                 Type.StructField.of("intAsInteger", Type.int64()),
                 Type.StructField.of("intAsLong", Type.int64()),
                 Type.StructField.of("f32", Type.float32()),
+                Type.StructField.of("f32FromDouble", Type.float32()),
                 Type.StructField.of("f64", Type.float64()),
+                Type.StructField.of("f64FromFloat", Type.float64()),
                 Type.StructField.of("num", Type.numeric()),
                 Type.StructField.of("date", Type.date()),
                 Type.StructField.of("ts", Type.timestamp()),
@@ -922,7 +959,9 @@ public class StructSchemaUtilTest {
         values.put("intAsInteger", 3);
         values.put("intAsLong", 4L);
         values.put("f32", 1.5F);
+        values.put("f32FromDouble", 2.5D);
         values.put("f64", 2.5D);
+        values.put("f64FromFloat", 1.5F);
         values.put("num", BigDecimal.ONE);
         values.put("date", Date.parseDate("2020-01-02"));
         values.put("ts", Timestamp.ofTimeMicroseconds(1000L));
@@ -935,7 +974,9 @@ public class StructSchemaUtilTest {
         Assertions.assertEquals(3L, struct.getLong("intAsInteger"));
         Assertions.assertEquals(4L, struct.getLong("intAsLong"));
         Assertions.assertEquals(1.5F, struct.getFloat("f32"), DELTA);
+        Assertions.assertEquals(2.5F, struct.getFloat("f32FromDouble"), DELTA);
         Assertions.assertEquals(2.5D, struct.getDouble("f64"), DELTA);
+        Assertions.assertEquals(1.5D, struct.getDouble("f64FromFloat"), DELTA);
         Assertions.assertEquals(BigDecimal.ONE, struct.getBigDecimal("num"));
         Assertions.assertEquals(Date.parseDate("2020-01-02"), struct.getDate("date"));
         Assertions.assertEquals(Timestamp.ofTimeMicroseconds(1000L), struct.getTimestamp("ts"));
@@ -1199,6 +1240,7 @@ public class StructSchemaUtilTest {
                 Type.StructField.of("id", Type.int64()),
                 Type.StructField.of("name", Type.string()),
                 Type.StructField.of("score", Type.float64()),
+                Type.StructField.of("rate", Type.float32()),
                 Type.StructField.of("active", Type.bool()),
                 Type.StructField.of("birth", Type.date()),
                 Type.StructField.of("created", Type.timestamp()),
@@ -1208,7 +1250,7 @@ public class StructSchemaUtilTest {
         final Mod insertMod = new Mod(
                 "{\"id\":1}",
                 null,
-                "{\"name\":\"a\",\"score\":1.5,\"active\":true,\"birth\":\"2020-01-02\",\"created\":\"2024-01-02T03:04:05Z\",\"tags\":[\"x\",\"y\"]}");
+                "{\"name\":\"a\",\"score\":1.5,\"rate\":2.5,\"active\":true,\"birth\":\"2020-01-02\",\"created\":\"2024-01-02T03:04:05Z\",\"tags\":[\"x\",\"y\"]}");
         final DataChangeRecord insertRecord = createDataChangeRecord(
                 "MyTable", ModType.INSERT, new ArrayList<>(), Arrays.asList(insertMod), "001");
         final List<Mutation> inserts = StructSchemaUtil.convertToMutation(type, insertRecord);
@@ -1219,6 +1261,7 @@ public class StructSchemaUtilTest {
         Assertions.assertEquals(Value.int64(1L), insertValues.get("id"));
         Assertions.assertEquals(Value.string("a"), insertValues.get("name"));
         Assertions.assertEquals(Value.float64(1.5D), insertValues.get("score"));
+        Assertions.assertEquals(Value.float32(2.5F), insertValues.get("rate"));
         Assertions.assertEquals(Value.bool(true), insertValues.get("active"));
         Assertions.assertEquals(Value.date(Date.parseDate("2020-01-02")), insertValues.get("birth"));
         Assertions.assertEquals(Value.timestamp(Timestamp.parseTimestamp("2024-01-02T03:04:05Z")), insertValues.get("created"));
@@ -1481,6 +1524,35 @@ public class StructSchemaUtilTest {
                 3000L, "3");
         Assertions.assertNull(StructSchemaUtil.accumulateChangeRecords(
                 tableSchema, snapshot, Arrays.asList(updateRecord, deleteRecord)));
+    }
+
+    @Test
+    public void testAccumulateChangeRecordsToMutationWithBytesArray() {
+        final org.apache.avro.Schema tableSchema = org.apache.avro.SchemaBuilder
+                .record("Tbl").fields()
+                .requiredLong("id")
+                .name("data").type().array().items().bytesType().noDefault()
+                .endRecord();
+        final org.apache.avro.Schema schema = StructSchemaUtil.createDataChangeRecordAvroSchema();
+        final org.apache.avro.Schema rowTypeSchema = schema.getField("rowType").schema().getElementType();
+        final org.apache.avro.Schema modSchema = schema.getField("mods").schema().getElementType();
+
+        final List<GenericRecord> rowType = Arrays.asList(
+                createRowTypeAvro(rowTypeSchema, "id", "INT64", true, 1L),
+                createRowTypeAvro(rowTypeSchema, "data", "ARRAY<BYTES(MAX)>", false, 2L));
+        final GenericRecord insertRecord = createChangeRecordAvro(
+                schema, "tbl", "INSERT", rowType,
+                Arrays.asList(createModAvro(modSchema, "{\"id\":1}", "{\"data\":[\"ab\",\"cd\"]}")),
+                1000L, "1");
+
+        final Mutation mutation = StructSchemaUtil.accumulateChangeRecords(
+                "tbl", tableSchema, null, Arrays.asList(insertRecord));
+        final Value dataValue = mutation.asMap().get("data");
+        Assertions.assertEquals(Type.Code.ARRAY, dataValue.getType().getCode());
+        Assertions.assertEquals(Type.Code.BYTES, dataValue.getType().getArrayElementType().getCode());
+        Assertions.assertEquals(
+                Arrays.asList(ByteArray.copyFrom("ab"), ByteArray.copyFrom("cd")),
+                dataValue.getBytesArray());
     }
 
     private Struct createTestStruct() {
