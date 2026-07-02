@@ -3,8 +3,8 @@ package com.mercari.solution.util.schema.converter;
 import com.google.api.services.bigquery.model.TableRow;
 import com.mercari.solution.TestDatum;
 import org.apache.avro.generic.GenericRecord;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
@@ -64,17 +64,17 @@ public class TableRowToAvroConverterTest {
     }
 
     private void testFlatField(final GenericRecord originalRecord, final GenericRecord record) {
-        Assert.assertEquals(originalRecord.get("booleanField"), record.get("booleanField"));
-        Assert.assertEquals(originalRecord.get("stringField"), record.get("stringField"));
-        Assert.assertEquals(originalRecord.get("bytesField"), record.get("bytesField"));
-        Assert.assertEquals(originalRecord.get("intField"), record.get("intField"));
-        Assert.assertEquals(originalRecord.get("longField"), record.get("longField"));
-        Assert.assertEquals(originalRecord.get("floatField"), record.get("floatField"));
-        Assert.assertEquals(originalRecord.get("doubleField"), record.get("doubleField"));
-        Assert.assertEquals(originalRecord.get("dateField"), record.get("dateField"));
-        Assert.assertEquals(originalRecord.get("timeField"), record.get("timeField"));
-        Assert.assertEquals(originalRecord.get("timestampField"), record.get("timestampField"));
-        Assert.assertEquals(originalRecord.get("decimalField"), record.get("decimalField"));
+        Assertions.assertEquals(originalRecord.get("booleanField"), record.get("booleanField"));
+        Assertions.assertEquals(originalRecord.get("stringField"), record.get("stringField"));
+        Assertions.assertEquals(originalRecord.get("bytesField"), record.get("bytesField"));
+        Assertions.assertEquals(originalRecord.get("intField"), record.get("intField"));
+        Assertions.assertEquals(originalRecord.get("longField"), record.get("longField"));
+        Assertions.assertEquals(originalRecord.get("floatField"), record.get("floatField"));
+        Assertions.assertEquals(originalRecord.get("doubleField"), record.get("doubleField"));
+        Assertions.assertEquals(originalRecord.get("dateField"), record.get("dateField"));
+        Assertions.assertEquals(originalRecord.get("timeField"), record.get("timeField"));
+        Assertions.assertEquals(originalRecord.get("timestampField"), record.get("timestampField"));
+        Assertions.assertEquals(originalRecord.get("decimalField"), record.get("decimalField"));
     }
 
 }

@@ -7,8 +7,8 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.TestDatum;
 import com.mercari.solution.util.schema.converter.EntityToJsonConverter;
 import org.joda.time.Instant;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
@@ -65,36 +65,36 @@ public class EntityToJsonConverterTest {
     }
 
     private void testFlatField(final JsonObject jsonObject) {
-        Assert.assertEquals(TestDatum.getBooleanFieldValue(), jsonObject.get("booleanField").getAsBoolean());
-        Assert.assertEquals(TestDatum.getStringFieldValue(), jsonObject.get("stringField").getAsString());
-        Assert.assertEquals(TestDatum.getBytesFieldValue(), new String(
+        Assertions.assertEquals(TestDatum.getBooleanFieldValue(), jsonObject.get("booleanField").getAsBoolean());
+        Assertions.assertEquals(TestDatum.getStringFieldValue(), jsonObject.get("stringField").getAsString());
+        Assertions.assertEquals(TestDatum.getBytesFieldValue(), new String(
                 Base64.getDecoder().decode(jsonObject.get("bytesField").getAsString()), StandardCharsets.UTF_8));
-        Assert.assertEquals(TestDatum.getLongFieldValue().longValue(), jsonObject.get("longField").getAsLong());
-        Assert.assertEquals(TestDatum.getDoubleFieldValue(), jsonObject.get("doubleField").getAsDouble(), DELTA);
-        Assert.assertEquals(TestDatum.getDateFieldValue().toEpochDay(), LocalDate.parse(jsonObject.get("dateField").getAsString()).toEpochDay());
-        Assert.assertEquals(TestDatum.getTimestampFieldValue().getMillis(), Instant.parse(jsonObject.get("timestampField").getAsString()).getMillis());
-        Assert.assertEquals(TestDatum.getDecimalFieldValue().toString(), jsonObject.get("decimalField").getAsString());
+        Assertions.assertEquals(TestDatum.getLongFieldValue().longValue(), jsonObject.get("longField").getAsLong());
+        Assertions.assertEquals(TestDatum.getDoubleFieldValue(), jsonObject.get("doubleField").getAsDouble(), DELTA);
+        Assertions.assertEquals(TestDatum.getDateFieldValue().toEpochDay(), LocalDate.parse(jsonObject.get("dateField").getAsString()).toEpochDay());
+        Assertions.assertEquals(TestDatum.getTimestampFieldValue().getMillis(), Instant.parse(jsonObject.get("timestampField").getAsString()).getMillis());
+        Assertions.assertEquals(TestDatum.getDecimalFieldValue().toString(), jsonObject.get("decimalField").getAsString());
         //
     }
 
     private void testFlatFieldNull(final JsonObject jsonObject) {
-        Assert.assertTrue(jsonObject.get("booleanField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("bytesField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("stringField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("longField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("doubleField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("dateField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("timestampField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("decimalField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("booleanField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("bytesField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("stringField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("longField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("doubleField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("dateField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("timestampField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("decimalField").isJsonNull());
 
-        Assert.assertTrue(jsonObject.get("booleanArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("bytesArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("stringArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("longArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("doubleArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("dateArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("timestampArrayField").isJsonNull());
-        Assert.assertTrue(jsonObject.get("decimalArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("booleanArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("bytesArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("stringArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("longArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("doubleArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("dateArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("timestampArrayField").isJsonNull());
+        Assertions.assertTrue(jsonObject.get("decimalArrayField").isJsonNull());
     }
 
 }

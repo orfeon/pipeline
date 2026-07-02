@@ -3,7 +3,7 @@ package com.mercari.solution.util.schema.converter;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import org.apache.avro.generic.GenericRecord;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 

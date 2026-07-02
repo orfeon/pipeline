@@ -2,8 +2,8 @@ package com.mercari.solution.util.pipeline.aggregation;
 
 import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.schemas.Schema;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -30,31 +30,31 @@ public class AccumulatorTest {
             final byte[] serialized = writer.toByteArray();
             try(ByteArrayInputStream is = new ByteArrayInputStream(serialized)) {
                 final Accumulator deserialized = coder.decode(is);
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.STRING, "stringField0"),
                         deserialized.get(Schema.FieldType.STRING, "stringField0"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.STRING, "stringField1"),
                         deserialized.get(Schema.FieldType.STRING, "stringField1"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.STRING, "stringField2"),
                         deserialized.get(Schema.FieldType.STRING, "stringField2"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.DOUBLE, "doubleField0"),
                         deserialized.get(Schema.FieldType.DOUBLE, "doubleField0"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.DOUBLE, "doubleField1"),
                         deserialized.get(Schema.FieldType.DOUBLE, "doubleField1"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.DOUBLE, "doubleField2"),
                         deserialized.get(Schema.FieldType.DOUBLE, "doubleField2"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.INT64, "longField0"),
                         deserialized.get(Schema.FieldType.INT64, "longField0"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.INT64, "longField1"),
                         deserialized.get(Schema.FieldType.INT64, "longField1"));
-                Assert.assertEquals(
+                Assertions.assertEquals(
                         accumulator.get(Schema.FieldType.INT64, "longField2"),
                         deserialized.get(Schema.FieldType.INT64, "longField2"));
             }

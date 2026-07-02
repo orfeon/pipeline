@@ -42,7 +42,8 @@
     <onnx.version>1.20.1-1.5.13</onnx.version>
 
     <slf4j.version>2.0.16</slf4j.version>
-    <junit.version>4.13.1</junit.version>
+    <junit5.version>5.13.4</junit5.version>
+    <junit4.version>4.13.2</junit4.version>
     <mockito.version>3.0.0</mockito.version>
 
     <maven-jib-plugin.version>3.5.1</maven-jib-plugin.version>
@@ -50,6 +51,7 @@
     <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
+    <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
 
     <jetty.version>12.1.10</jetty.version>
     <mcp.version>2.0.0</mcp.version>
@@ -96,17 +98,39 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>${maven-surefire-plugin.version}</version>
         <configuration>
-          <parallel>all</parallel>
-          <threadCount>4</threadCount>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
+          <properties>
+            <!-- JUnit 5 parallel execution (equivalent of the former JUnit4 parallel=all/threadCount=4) -->
+            <configurationParameters>
+              junit.jupiter.execution.parallel.enabled = true
+              junit.jupiter.execution.parallel.mode.default = concurrent
+              junit.jupiter.execution.parallel.config.strategy = fixed
+              junit.jupiter.execution.parallel.config.fixed.parallelism = 4
+            </configurationParameters>
+          </properties>
         </configuration>
-        <dependencies>
-          <dependency>
-            <groupId>org.apache.maven.surefire</groupId>
-            <artifactId>surefire-junit47</artifactId>
-            <version>${maven-surefire-plugin.version}</version>
-          </dependency>
-        </dependencies>
+      </plugin>
+
+      <!-- Code coverage: HTML/XML/CSV report at target/site/jacoco/ after `mvn test` -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco-maven-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
 
       <!-- Ensure that the Maven jar plugin runs before the Maven
@@ -781,9 +805,17 @@
 
     <!-- Test -->
     <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit5.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- JUnit4 must remain on the test classpath: Beam's TestPipeline implements a JUnit4 TestRule -->
+    <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
-      <version>${junit.version}</version>
+      <version>${junit4.version}</version>
+      <scope>test</scope>
     </dependency>
 
     <!-- The DirectRunner is needed for unit tests. -->

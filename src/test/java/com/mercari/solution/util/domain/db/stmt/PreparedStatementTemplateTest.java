@@ -1,8 +1,8 @@
 package com.mercari.solution.util.domain.db.stmt;
 
 import org.apache.commons.lang3.SerializationUtils;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
@@ -20,7 +20,7 @@ public class PreparedStatementTemplateTest {
         final PreparedStatementTemplate original = builder.build();
         final PreparedStatementTemplate copied = SerializationUtils.clone(original);
 
-        Assert.assertEquals(original, copied);
+        Assertions.assertEquals(original, copied);
     }
 
     @Test
@@ -36,12 +36,12 @@ public class PreparedStatementTemplateTest {
         final PreparedStatementTemplate template = builder.build();
         final List<List<Integer>> mappings = template.getPlaceholderMappings().getMappings();
 
-        Assert.assertEquals("SELECT ?, ?, ?", template.getStatementString());
+        Assertions.assertEquals("SELECT ?, ?, ?", template.getStatementString());
 
-        Assert.assertEquals(3 + 1, mappings.size());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertEquals(3 + 1, mappings.size());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
     }
 
     @Test
@@ -63,12 +63,12 @@ public class PreparedStatementTemplateTest {
         final PreparedStatementTemplate template = builder.build();
         final List<List<Integer>> mappings = template.getPlaceholderMappings().getMappings();
 
-        Assert.assertEquals("SELECT ?, ?, ?, ?, ?, ?", template.getStatementString());
+        Assertions.assertEquals("SELECT ?, ?, ?, ?, ?, ?", template.getStatementString());
 
-        Assert.assertEquals(3 + 1, mappings.size());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2, 4}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3, 5, 6}, toIntArray(mappings.get(3)));
+        Assertions.assertEquals(3 + 1, mappings.size());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2, 4}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3, 5, 6}, toIntArray(mappings.get(3)));
     }
 
     @Test
@@ -86,12 +86,12 @@ public class PreparedStatementTemplateTest {
         final PreparedStatementTemplate template = builder.build();
         final List<List<Integer>> mappings = template.getPlaceholderMappings().getMappings();
 
-        Assert.assertEquals("SELECT ?, ?, ?, ?", template.getStatementString());
+        Assertions.assertEquals("SELECT ?, ?, ?, ?", template.getStatementString());
 
-        Assert.assertEquals(4 + 1, mappings.size());
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(4 + 1, mappings.size());
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 }

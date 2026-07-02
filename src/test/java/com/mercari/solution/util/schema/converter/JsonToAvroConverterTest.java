@@ -6,8 +6,8 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.TestDatum;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import org.apache.avro.generic.GenericRecord;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -45,38 +45,38 @@ public class JsonToAvroConverterTest {
         final String json = AvroToJsonConverter.convert(record);
 
         final JsonObject jsonObject = new Gson().fromJson(json, JsonObject.class);
-        Assert.assertTrue(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
+        Assertions.assertTrue(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
 
         // Check existing field
         jsonObject.remove("stringField");
-        Assert.assertTrue(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
+        Assertions.assertTrue(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
         jsonObject.remove("stringArrayField");
-        Assert.assertTrue(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
+        Assertions.assertTrue(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
 
         // Check additional field
         jsonObject.addProperty("newStringField", "stringValue");
-        Assert.assertFalse(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
+        Assertions.assertFalse(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
         jsonObject.remove("newStringField");
         final JsonArray jsonArray = new JsonArray();
         jsonObject.add("newArrayField", jsonArray);
-        Assert.assertFalse(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
+        Assertions.assertFalse(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
         jsonArray.add("stringValue");
         jsonObject.add("newArrayField", jsonArray);
-        Assert.assertFalse(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
+        Assertions.assertFalse(JsonToAvroConverter.validateSchema(record.getSchema(), jsonObject));
     }
 
     private void testFlatField(final GenericRecord record) {
-        Assert.assertEquals(TestDatum.getBooleanFieldValue(), record.get("booleanField"));
-        Assert.assertEquals(TestDatum.getStringFieldValue(), record.get("stringField"));
-        Assert.assertEquals(TestDatum.getBytesFieldValue(), new String(Base64.getDecoder().decode(((ByteBuffer)record.get("bytesField")).array()), StandardCharsets.UTF_8));
-        Assert.assertEquals(TestDatum.getIntFieldValue(), record.get("intField"));
-        Assert.assertEquals(TestDatum.getLongFieldValue(), record.get("longField"));
-        Assert.assertEquals(TestDatum.getFloatFieldValue(), record.get("floatField"));
-        Assert.assertEquals(TestDatum.getDoubleFieldValue(), record.get("doubleField"));
-        Assert.assertEquals(TestDatum.getDateFieldValue(), LocalDate.ofEpochDay((int)record.get("dateField")));
-        Assert.assertEquals(TestDatum.getTimestampFieldValue().getMillis(), (long)record.get("timestampField")/1000);
+        Assertions.assertEquals(TestDatum.getBooleanFieldValue(), record.get("booleanField"));
+        Assertions.assertEquals(TestDatum.getStringFieldValue(), record.get("stringField"));
+        Assertions.assertEquals(TestDatum.getBytesFieldValue(), new String(Base64.getDecoder().decode(((ByteBuffer)record.get("bytesField")).array()), StandardCharsets.UTF_8));
+        Assertions.assertEquals(TestDatum.getIntFieldValue(), record.get("intField"));
+        Assertions.assertEquals(TestDatum.getLongFieldValue(), record.get("longField"));
+        Assertions.assertEquals(TestDatum.getFloatFieldValue(), record.get("floatField"));
+        Assertions.assertEquals(TestDatum.getDoubleFieldValue(), record.get("doubleField"));
+        Assertions.assertEquals(TestDatum.getDateFieldValue(), LocalDate.ofEpochDay((int)record.get("dateField")));
+        Assertions.assertEquals(TestDatum.getTimestampFieldValue().getMillis(), (long)record.get("timestampField")/1000);
         int scale = AvroSchemaUtil.getLogicalTypeDecimal(record.getSchema().getField("decimalField").schema()).getScale();
-        Assert.assertEquals(TestDatum.getDecimalFieldValue(), BigDecimal.valueOf(new BigInteger(((ByteBuffer)record.get("decimalField")).array()).longValue(), scale));
+        Assertions.assertEquals(TestDatum.getDecimalFieldValue(), BigDecimal.valueOf(new BigInteger(((ByteBuffer)record.get("decimalField")).array()).longValue(), scale));
         // TODO array check
     }
 

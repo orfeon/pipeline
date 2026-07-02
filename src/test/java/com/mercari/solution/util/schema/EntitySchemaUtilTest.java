@@ -7,8 +7,8 @@ import com.google.protobuf.util.Timestamps;
 import com.mercari.solution.TestDatum;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.Row;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -35,41 +35,41 @@ public class EntitySchemaUtilTest {
 
         // entity test
         final Entity selectedEntity = EntitySchemaUtil.toBuilder(schema, entity).build();
-        Assert.assertEquals(5, selectedEntity.getPropertiesCount());
-        Assert.assertEquals(TestDatum.getStringFieldValue(), selectedEntity.getPropertiesOrThrow("stringField").getStringValue());
-        Assert.assertEquals(TestDatum.getIntFieldValue().longValue(), selectedEntity.getPropertiesOrThrow("intField").getIntegerValue());
-        Assert.assertEquals(TestDatum.getLongFieldValue().longValue(), selectedEntity.getPropertiesOrThrow("longField").getIntegerValue());
+        Assertions.assertEquals(5, selectedEntity.getPropertiesCount());
+        Assertions.assertEquals(TestDatum.getStringFieldValue(), selectedEntity.getPropertiesOrThrow("stringField").getStringValue());
+        Assertions.assertEquals(TestDatum.getIntFieldValue().longValue(), selectedEntity.getPropertiesOrThrow("intField").getIntegerValue());
+        Assertions.assertEquals(TestDatum.getLongFieldValue().longValue(), selectedEntity.getPropertiesOrThrow("longField").getIntegerValue());
 
         final Entity selectedEntityChild = selectedEntity.getPropertiesOrThrow("recordField").getEntityValue();
-        Assert.assertEquals(5, selectedEntityChild.getPropertiesCount());
-        Assert.assertEquals(TestDatum.getStringFieldValue(), selectedEntityChild.getPropertiesOrThrow("stringField").getStringValue());
-        Assert.assertEquals(TestDatum.getDoubleFieldValue().doubleValue(), selectedEntityChild.getPropertiesOrThrow("doubleField").getDoubleValue(), DELTA);
-        Assert.assertEquals(TestDatum.getBooleanFieldValue(), selectedEntityChild.getPropertiesOrThrow("booleanField").getBooleanValue());
+        Assertions.assertEquals(5, selectedEntityChild.getPropertiesCount());
+        Assertions.assertEquals(TestDatum.getStringFieldValue(), selectedEntityChild.getPropertiesOrThrow("stringField").getStringValue());
+        Assertions.assertEquals(TestDatum.getDoubleFieldValue().doubleValue(), selectedEntityChild.getPropertiesOrThrow("doubleField").getDoubleValue(), DELTA);
+        Assertions.assertEquals(TestDatum.getBooleanFieldValue(), selectedEntityChild.getPropertiesOrThrow("booleanField").getBooleanValue());
 
         final Entity selectedEntityGrandchild = selectedEntityChild.getPropertiesOrThrow("recordField").getEntityValue();
-        Assert.assertEquals(2, selectedEntityGrandchild.getPropertiesCount());
-        Assert.assertEquals(TestDatum.getIntFieldValue().longValue(), selectedEntityGrandchild.getPropertiesOrThrow("intField").getIntegerValue());
-        Assert.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), selectedEntityGrandchild.getPropertiesOrThrow("floatField").getDoubleValue(), DELTA);
+        Assertions.assertEquals(2, selectedEntityGrandchild.getPropertiesCount());
+        Assertions.assertEquals(TestDatum.getIntFieldValue().longValue(), selectedEntityGrandchild.getPropertiesOrThrow("intField").getIntegerValue());
+        Assertions.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), selectedEntityGrandchild.getPropertiesOrThrow("floatField").getDoubleValue(), DELTA);
 
-        Assert.assertEquals(2, selectedEntity.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
+        Assertions.assertEquals(2, selectedEntity.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
         for(final Value childValue : selectedEntity.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesList()) {
             final Entity child = childValue.getEntityValue();
-            Assert.assertEquals(4, child.getPropertiesCount());
-            Assert.assertEquals(TestDatum.getStringFieldValue(), child.getPropertiesOrThrow("stringField").getStringValue());
-            Assert.assertEquals(TestDatum.getTimestampFieldValue().getMillis(),
+            Assertions.assertEquals(4, child.getPropertiesCount());
+            Assertions.assertEquals(TestDatum.getStringFieldValue(), child.getPropertiesOrThrow("stringField").getStringValue());
+            Assertions.assertEquals(TestDatum.getTimestampFieldValue().getMillis(),
                     Timestamps.toMillis(child.getPropertiesOrThrow("timestampField").getTimestampValue()));
 
-            Assert.assertEquals(2, child.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
+            Assertions.assertEquals(2, child.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
             for(final Value grandchilValue : child.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesList()) {
                 final Entity grandchild = grandchilValue.getEntityValue();
-                Assert.assertEquals(2, grandchild.getPropertiesCount());
-                Assert.assertEquals(TestDatum.getIntFieldValue().longValue(), grandchild.getPropertiesOrThrow("intField").getIntegerValue());
-                Assert.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), grandchild.getPropertiesOrThrow("floatField").getDoubleValue(), DELTA);
+                Assertions.assertEquals(2, grandchild.getPropertiesCount());
+                Assertions.assertEquals(TestDatum.getIntFieldValue().longValue(), grandchild.getPropertiesOrThrow("intField").getIntegerValue());
+                Assertions.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), grandchild.getPropertiesOrThrow("floatField").getDoubleValue(), DELTA);
             }
 
             final Entity grandchild = child.getPropertiesOrThrow("recordField").getEntityValue();
-            Assert.assertEquals(TestDatum.getIntFieldValue().longValue(), grandchild.getPropertiesOrThrow("intField").getIntegerValue());
-            Assert.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), grandchild.getPropertiesOrThrow("floatField").getDoubleValue(), DELTA);
+            Assertions.assertEquals(TestDatum.getIntFieldValue().longValue(), grandchild.getPropertiesOrThrow("intField").getIntegerValue());
+            Assertions.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), grandchild.getPropertiesOrThrow("floatField").getDoubleValue(), DELTA);
         }
 
         // null fields row test
@@ -81,42 +81,42 @@ public class EntitySchemaUtilTest {
 
         final Entity entityNull = TestDatum.generateEntityNull();
         final Entity selectedEntityNull = EntitySchemaUtil.toBuilder(schemaNull, entityNull).build();
-        Assert.assertEquals(7, selectedEntityNull.getPropertiesCount());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("stringField").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("intField").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("longField").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("recordFieldNull").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("recordArrayFieldNull").getNullValue());
+        Assertions.assertEquals(7, selectedEntityNull.getPropertiesCount());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("stringField").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("intField").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("longField").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("recordFieldNull").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityNull.getPropertiesOrThrow("recordArrayFieldNull").getNullValue());
 
         final Entity selectedEntityChildNull = selectedEntityNull.getPropertiesOrThrow("recordField").getEntityValue();
-        Assert.assertEquals(5, selectedEntityChildNull.getPropertiesCount());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityChildNull.getPropertiesOrThrow("stringField").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityChildNull.getPropertiesOrThrow("doubleField").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityChildNull.getPropertiesOrThrow("booleanField").getNullValue());
+        Assertions.assertEquals(5, selectedEntityChildNull.getPropertiesCount());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityChildNull.getPropertiesOrThrow("stringField").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityChildNull.getPropertiesOrThrow("doubleField").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityChildNull.getPropertiesOrThrow("booleanField").getNullValue());
 
         final Entity selectedEntityGrandchildNull = selectedEntityChildNull.getPropertiesOrThrow("recordField").getEntityValue();
-        Assert.assertEquals(2, selectedEntityGrandchildNull.getPropertiesCount());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityGrandchildNull.getPropertiesOrThrow("intField").getNullValue());
-        Assert.assertEquals(NullValue.NULL_VALUE, selectedEntityGrandchildNull.getPropertiesOrThrow("floatField").getNullValue());
+        Assertions.assertEquals(2, selectedEntityGrandchildNull.getPropertiesCount());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityGrandchildNull.getPropertiesOrThrow("intField").getNullValue());
+        Assertions.assertEquals(NullValue.NULL_VALUE, selectedEntityGrandchildNull.getPropertiesOrThrow("floatField").getNullValue());
 
-        Assert.assertEquals(2, selectedEntityNull.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
+        Assertions.assertEquals(2, selectedEntityNull.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
         for(final Value childValue : selectedEntityNull.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesList()) {
             final Entity child = childValue.getEntityValue();
-            Assert.assertEquals(4, child.getPropertiesCount());
-            Assert.assertEquals(NullValue.NULL_VALUE, child.getPropertiesOrThrow("stringField").getNullValue());
-            Assert.assertEquals(NullValue.NULL_VALUE, child.getPropertiesOrThrow("timestampField").getNullValue());
+            Assertions.assertEquals(4, child.getPropertiesCount());
+            Assertions.assertEquals(NullValue.NULL_VALUE, child.getPropertiesOrThrow("stringField").getNullValue());
+            Assertions.assertEquals(NullValue.NULL_VALUE, child.getPropertiesOrThrow("timestampField").getNullValue());
 
-            Assert.assertEquals(2, child.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
+            Assertions.assertEquals(2, child.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesCount());
             for(final Value grandchildValue : child.getPropertiesOrThrow("recordArrayField").getArrayValue().getValuesList()) {
                 final Entity grandchild = grandchildValue.getEntityValue();
-                Assert.assertEquals(2, grandchild.getPropertiesCount());
-                Assert.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("intField").getNullValue());
-                Assert.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("floatField").getNullValue());
+                Assertions.assertEquals(2, grandchild.getPropertiesCount());
+                Assertions.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("intField").getNullValue());
+                Assertions.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("floatField").getNullValue());
             }
 
             final Entity grandchild = child.getPropertiesOrThrow("recordField").getEntityValue();
-            Assert.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("intField").getNullValue());
-            Assert.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("floatField").getNullValue());
+            Assertions.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("intField").getNullValue());
+            Assertions.assertEquals(NullValue.NULL_VALUE, grandchild.getPropertiesOrThrow("floatField").getNullValue());
         }
 
     }

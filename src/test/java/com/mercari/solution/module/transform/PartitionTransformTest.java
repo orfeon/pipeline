@@ -6,9 +6,8 @@ import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -16,8 +15,7 @@ public class PartitionTransformTest {
 
     private static final double DELTA = 1e-15;
 
-    @Rule
-    public final transient TestPipeline pipeline = TestPipeline.create();
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
     public void test1() throws Exception {
@@ -78,10 +76,10 @@ public class PartitionTransformTest {
         PAssert.that(output1.getCollection()).satisfies(elements -> {
             int count = 0;
             for (final MElement element : elements) {
-                Assert.assertTrue((long)element.getPrimitiveValue("value") > 0 && (long)element.getPrimitiveValue("value") < 4);
+                Assertions.assertTrue((long)element.getPrimitiveValue("value") > 0 && (long)element.getPrimitiveValue("value") < 4);
                 count++;
             }
-            Assert.assertEquals(5, count);
+            Assertions.assertEquals(5, count);
             return null;
         });
 
@@ -89,10 +87,10 @@ public class PartitionTransformTest {
         PAssert.that(output2.getCollection()).satisfies(elements -> {
             int count = 0;
             for (final MElement element : elements) {
-                Assert.assertTrue((long)element.getPrimitiveValue("value") > 3 && (long)element.getPrimitiveValue("value") < 7);
+                Assertions.assertTrue((long)element.getPrimitiveValue("value") > 3 && (long)element.getPrimitiveValue("value") < 7);
                 count++;
             }
-            Assert.assertEquals(2, count);
+            Assertions.assertEquals(2, count);
             return null;
         });
 

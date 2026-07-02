@@ -10,8 +10,8 @@ import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.values.Row;
 import org.joda.time.Instant;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -62,27 +62,27 @@ public class EntityToRowConverterTest {
 
         final Row convertedRow = EntityToRowConverter.convert(schemaWithKey, entity);
 
-        Assert.assertEquals(true, convertedRow.getBoolean("booleanField"));
-        Assert.assertEquals("str", convertedRow.getString("stringField"));
-        Assert.assertEquals(new String(bytes), new String(convertedRow.getBytes("bytesField")));
-        Assert.assertEquals(1, convertedRow.getInt32("intField").intValue());
-        Assert.assertEquals(1L, convertedRow.getInt64("longField").longValue());
-        Assert.assertEquals(1F, convertedRow.getFloat("floatField"), DELTA);
-        Assert.assertEquals(1D, convertedRow.getDouble("doubleField"), DELTA);
-        Assert.assertEquals(Instant.parse("2023-04-20T00:00:00Z"), convertedRow.getDateTime("timestampField").toInstant());
-        Assert.assertEquals(LocalDate.of(2021,12,1), convertedRow.getLogicalTypeValue("dateField", LocalDate.class));
-        Assert.assertEquals(LocalTime.of(18, 51,32, 123000000), convertedRow.getLogicalTypeValue("timeField", LocalTime.class));
+        Assertions.assertEquals(true, convertedRow.getBoolean("booleanField"));
+        Assertions.assertEquals("str", convertedRow.getString("stringField"));
+        Assertions.assertEquals(new String(bytes), new String(convertedRow.getBytes("bytesField")));
+        Assertions.assertEquals(1, convertedRow.getInt32("intField").intValue());
+        Assertions.assertEquals(1L, convertedRow.getInt64("longField").longValue());
+        Assertions.assertEquals(1F, convertedRow.getFloat("floatField"), DELTA);
+        Assertions.assertEquals(1D, convertedRow.getDouble("doubleField"), DELTA);
+        Assertions.assertEquals(Instant.parse("2023-04-20T00:00:00Z"), convertedRow.getDateTime("timestampField").toInstant());
+        Assertions.assertEquals(LocalDate.of(2021,12,1), convertedRow.getLogicalTypeValue("dateField", LocalDate.class));
+        Assertions.assertEquals(LocalTime.of(18, 51,32, 123000000), convertedRow.getLogicalTypeValue("timeField", LocalTime.class));
 
         final BigDecimal decimal = convertedRow.getDecimal("decimalField");
-        Assert.assertEquals(1234.56789D, decimal.doubleValue(), DELTA);
+        Assertions.assertEquals(1234.56789D, decimal.doubleValue(), DELTA);
 
         final Row keyRow = convertedRow.getRow("__key__");
-        Assert.assertEquals("", keyRow.getString("namespace"));
-        Assert.assertEquals("", keyRow.getString("app"));
-        Assert.assertEquals("\"MyKind\", \"mykey\"", keyRow.getString("path"));
-        Assert.assertEquals("MyKind", keyRow.getString("kind"));
-        Assert.assertEquals("mykey", keyRow.getString("name"));
-        Assert.assertNull(keyRow.getInt64("id"));
+        Assertions.assertEquals("", keyRow.getString("namespace"));
+        Assertions.assertEquals("", keyRow.getString("app"));
+        Assertions.assertEquals("\"MyKind\", \"mykey\"", keyRow.getString("path"));
+        Assertions.assertEquals("MyKind", keyRow.getString("kind"));
+        Assertions.assertEquals("mykey", keyRow.getString("name"));
+        Assertions.assertNull(keyRow.getInt64("id"));
     }
 
 }

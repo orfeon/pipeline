@@ -9,8 +9,8 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.StructToMapConverter;
 import org.joda.time.Instant;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
 import java.util.Arrays;
@@ -39,25 +39,25 @@ public class FilterTest {
                 .withString("stringField", "stringValue")
                 .withInt64("longField", 100L)
                 .build();
-        Assert.assertTrue(Filter.filter(node1, schema, element1));
+        Assertions.assertTrue(Filter.filter(node1, schema, element1));
 
         element1 = MElement.builder()
                 .withString("stringField", "stringValue")
                 .withInt64("longField", 99L)
                 .build();
-        Assert.assertFalse(Filter.filter(node1, schema, element1));
+        Assertions.assertFalse(Filter.filter(node1, schema, element1));
 
         element1 = MElement.builder()
                 .withString("stringField", "stringValue_")
                 .withInt64("longField", 99L)
                 .build();
-        Assert.assertFalse(Filter.filter(node1, schema, element1));
+        Assertions.assertFalse(Filter.filter(node1, schema, element1));
 
         element1 = MElement.builder()
                 .withString("stringField", "stringValue_")
                 .withInt64("longField", 100L)
                 .build();
-        Assert.assertFalse(Filter.filter(node1, schema, element1));
+        Assertions.assertFalse(Filter.filter(node1, schema, element1));
 
     }
 
@@ -70,39 +70,39 @@ public class FilterTest {
         leaf1.setValue(new Gson().fromJson("1", JsonElement.class));
 
         leaf1.setOp(Filter.Op.EQUAL);
-        Assert.assertTrue(Filter.is(1, leaf1));
+        Assertions.assertTrue(Filter.is(1, leaf1));
         leaf1.setOp(Filter.Op.NOT_EQUAL);
-        Assert.assertFalse(Filter.is(1, leaf1));
+        Assertions.assertFalse(Filter.is(1, leaf1));
         leaf1.setOp(Filter.Op.NOT_EQUAL);
-        Assert.assertFalse(Filter.is(null, leaf1));
+        Assertions.assertFalse(Filter.is(null, leaf1));
 
         leaf1.setOp(Filter.Op.GREATER);
-        Assert.assertFalse(Filter.is(1, leaf1));
+        Assertions.assertFalse(Filter.is(1, leaf1));
         leaf1.setOp(Filter.Op.GREATER_OR_EQUAL);
-        Assert.assertTrue(Filter.is(1, leaf1));
+        Assertions.assertTrue(Filter.is(1, leaf1));
         leaf1.setOp(Filter.Op.GREATER);
-        Assert.assertTrue(Filter.is(10, leaf1));
+        Assertions.assertTrue(Filter.is(10, leaf1));
         leaf1.setOp(Filter.Op.GREATER);
-        Assert.assertTrue(Filter.is(12.312, leaf1));
+        Assertions.assertTrue(Filter.is(12.312, leaf1));
         leaf1.setOp(Filter.Op.GREATER_OR_EQUAL);
-        Assert.assertTrue(Filter.is(2212310.12221, leaf1));
+        Assertions.assertTrue(Filter.is(2212310.12221, leaf1));
         leaf1.setOp(Filter.Op.GREATER);
-        Assert.assertFalse(Filter.is(-10, leaf1));
+        Assertions.assertFalse(Filter.is(-10, leaf1));
         leaf1.setOp(Filter.Op.GREATER_OR_EQUAL);
-        Assert.assertFalse(Filter.is(-10, leaf1));
+        Assertions.assertFalse(Filter.is(-10, leaf1));
 
         leaf1.setOp(Filter.Op.LESSER);
-        Assert.assertFalse(Filter.is(1, leaf1));
+        Assertions.assertFalse(Filter.is(1, leaf1));
         leaf1.setOp(Filter.Op.LESSER_OR_EQUAL);
-        Assert.assertTrue(Filter.is(1, leaf1));
+        Assertions.assertTrue(Filter.is(1, leaf1));
         leaf1.setOp(Filter.Op.LESSER);
-        Assert.assertFalse(Filter.is(10, leaf1));
+        Assertions.assertFalse(Filter.is(10, leaf1));
         leaf1.setOp(Filter.Op.LESSER_OR_EQUAL);
-        Assert.assertFalse(Filter.is(10, leaf1));
+        Assertions.assertFalse(Filter.is(10, leaf1));
         leaf1.setOp(Filter.Op.LESSER);
-        Assert.assertTrue(Filter.is(-10, leaf1));
+        Assertions.assertTrue(Filter.is(-10, leaf1));
         leaf1.setOp(Filter.Op.LESSER_OR_EQUAL);
-        Assert.assertTrue(Filter.is(-10, leaf1));
+        Assertions.assertTrue(Filter.is(-10, leaf1));
 
         // Number in, notin
         var leaf2 = new Filter.ConditionLeaf();
@@ -110,18 +110,18 @@ public class FilterTest {
         leaf2.setValue(new Gson().fromJson("[1,2,3]", JsonArray.class));
 
         leaf2.setOp(Filter.Op.IN);
-        Assert.assertTrue(Filter.is(1, leaf2));
-        Assert.assertTrue(Filter.is(2, leaf2));
-        Assert.assertTrue(Filter.is(3, leaf2));
-        Assert.assertFalse(Filter.is(4, leaf2));
-        Assert.assertFalse(Filter.is(-3, leaf2));
-        Assert.assertFalse(Filter.is(-4.12, leaf2));
+        Assertions.assertTrue(Filter.is(1, leaf2));
+        Assertions.assertTrue(Filter.is(2, leaf2));
+        Assertions.assertTrue(Filter.is(3, leaf2));
+        Assertions.assertFalse(Filter.is(4, leaf2));
+        Assertions.assertFalse(Filter.is(-3, leaf2));
+        Assertions.assertFalse(Filter.is(-4.12, leaf2));
 
         leaf2.setOp(Filter.Op.NOT_IN);
-        Assert.assertFalse(Filter.is(1, leaf2));
-        Assert.assertFalse(Filter.is(2, leaf2));
-        Assert.assertFalse(Filter.is(3, leaf2));
-        Assert.assertTrue(Filter.is(-100, leaf2));
+        Assertions.assertFalse(Filter.is(1, leaf2));
+        Assertions.assertFalse(Filter.is(2, leaf2));
+        Assertions.assertFalse(Filter.is(3, leaf2));
+        Assertions.assertTrue(Filter.is(-100, leaf2));
 
         // String
         var leaf3 = new Filter.ConditionLeaf();
@@ -129,23 +129,23 @@ public class FilterTest {
         leaf3.setValue(new Gson().fromJson("a", JsonElement.class));
 
         leaf3.setOp(Filter.Op.EQUAL);
-        Assert.assertTrue(Filter.is("a", leaf3));
-        Assert.assertFalse(Filter.is("b", leaf3));
+        Assertions.assertTrue(Filter.is("a", leaf3));
+        Assertions.assertFalse(Filter.is("b", leaf3));
         leaf3.setOp(Filter.Op.NOT_EQUAL);
-        Assert.assertFalse(Filter.is("a", leaf3));
-        Assert.assertTrue(Filter.is("b", leaf3));
+        Assertions.assertFalse(Filter.is("a", leaf3));
+        Assertions.assertTrue(Filter.is("b", leaf3));
         leaf3.setOp(Filter.Op.GREATER);
-        Assert.assertFalse(Filter.is("a", leaf3));
-        Assert.assertTrue(Filter.is("b", leaf3));
+        Assertions.assertFalse(Filter.is("a", leaf3));
+        Assertions.assertTrue(Filter.is("b", leaf3));
         leaf3.setOp(Filter.Op.GREATER_OR_EQUAL);
-        Assert.assertTrue(Filter.is("a", leaf3));
-        Assert.assertTrue(Filter.is("b", leaf3));
+        Assertions.assertTrue(Filter.is("a", leaf3));
+        Assertions.assertTrue(Filter.is("b", leaf3));
         leaf3.setOp(Filter.Op.LESSER);
-        Assert.assertFalse(Filter.is("a", leaf3));
-        Assert.assertFalse(Filter.is("b", leaf3));
+        Assertions.assertFalse(Filter.is("a", leaf3));
+        Assertions.assertFalse(Filter.is("b", leaf3));
         leaf3.setOp(Filter.Op.LESSER_OR_EQUAL);
-        Assert.assertTrue(Filter.is("a", leaf3));
-        Assert.assertFalse(Filter.is("b", leaf3));
+        Assertions.assertTrue(Filter.is("a", leaf3));
+        Assertions.assertFalse(Filter.is("b", leaf3));
 
         // String in, notin
         var leaf4 = new Filter.ConditionLeaf();
@@ -153,18 +153,18 @@ public class FilterTest {
         leaf4.setValue(new Gson().fromJson("['a','b','c']", JsonArray.class));
 
         leaf4.setOp(Filter.Op.IN);
-        Assert.assertTrue(Filter.is("a", leaf4));
-        Assert.assertTrue(Filter.is("b", leaf4));
-        Assert.assertTrue(Filter.is("c", leaf4));
-        Assert.assertFalse(Filter.is("d", leaf4));
-        Assert.assertFalse(Filter.is("dsafa", leaf4));
-        Assert.assertFalse(Filter.is("A", leaf4));
+        Assertions.assertTrue(Filter.is("a", leaf4));
+        Assertions.assertTrue(Filter.is("b", leaf4));
+        Assertions.assertTrue(Filter.is("c", leaf4));
+        Assertions.assertFalse(Filter.is("d", leaf4));
+        Assertions.assertFalse(Filter.is("dsafa", leaf4));
+        Assertions.assertFalse(Filter.is("A", leaf4));
 
         leaf4.setOp(Filter.Op.NOT_IN);
-        Assert.assertFalse(Filter.is("a", leaf4));
-        Assert.assertFalse(Filter.is("b", leaf4));
-        Assert.assertFalse(Filter.is("c", leaf4));
-        Assert.assertTrue(Filter.is("dfa", leaf4));
+        Assertions.assertFalse(Filter.is("a", leaf4));
+        Assertions.assertFalse(Filter.is("b", leaf4));
+        Assertions.assertFalse(Filter.is("c", leaf4));
+        Assertions.assertTrue(Filter.is("dfa", leaf4));
 
         // Null
         var leaf5 = new Filter.ConditionLeaf();
@@ -172,11 +172,11 @@ public class FilterTest {
         leaf5.setValue(new Gson().fromJson("null", JsonElement.class));
 
         leaf5.setOp(Filter.Op.EQUAL);
-        Assert.assertTrue(Filter.is(null, leaf5));
-        Assert.assertFalse(Filter.is("b", leaf5));
+        Assertions.assertTrue(Filter.is(null, leaf5));
+        Assertions.assertFalse(Filter.is("b", leaf5));
         leaf5.setOp(Filter.Op.NOT_EQUAL);
-        Assert.assertFalse(Filter.is(null, leaf5));
-        Assert.assertTrue(Filter.is("b", leaf5));
+        Assertions.assertFalse(Filter.is(null, leaf5));
+        Assertions.assertTrue(Filter.is("b", leaf5));
 
         // Date
         var leaf6 = new Filter.ConditionLeaf();
@@ -184,29 +184,29 @@ public class FilterTest {
         leaf6.setValue(new Gson().fromJson("2021-08-21", JsonElement.class));
 
         leaf6.setOp(Filter.Op.EQUAL);
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
         leaf6.setOp(Filter.Op.NOT_EQUAL);
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
         leaf6.setOp(Filter.Op.GREATER);
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
         leaf6.setOp(Filter.Op.GREATER_OR_EQUAL);
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
         leaf6.setOp(Filter.Op.LESSER);
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
         leaf6.setOp(Filter.Op.LESSER_OR_EQUAL);
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
-        Assert.assertTrue(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
-        Assert.assertFalse(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 20), leaf6));
+        Assertions.assertTrue(Filter.is(LocalDate.of(2021, 8, 21), leaf6));
+        Assertions.assertFalse(Filter.is(LocalDate.of(2021, 8, 22), leaf6));
 
         // Timestamp
         var leaf7 = new Filter.ConditionLeaf();
@@ -214,29 +214,29 @@ public class FilterTest {
         leaf7.setValue(new Gson().fromJson("\"2021-08-21T10:30:45Z\"", JsonElement.class));
 
         leaf7.setOp(Filter.Op.EQUAL);
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
         leaf7.setOp(Filter.Op.NOT_EQUAL);
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
         leaf7.setOp(Filter.Op.GREATER);
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
         leaf7.setOp(Filter.Op.GREATER_OR_EQUAL);
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
         leaf7.setOp(Filter.Op.LESSER);
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
         leaf7.setOp(Filter.Op.LESSER_OR_EQUAL);
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
-        Assert.assertTrue(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
-        Assert.assertFalse(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-20T10:30:45Z"), leaf7));
+        Assertions.assertTrue(Filter.is(Instant.parse("2021-08-21T10:30:45Z"), leaf7));
+        Assertions.assertFalse(Filter.is(Instant.parse("2021-08-22T10:30:45Z"), leaf7));
 
     }
 
@@ -266,25 +266,25 @@ public class FilterTest {
                 .set("field1").to("a")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("a")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(1)
                 .build();
-        Assert.assertFalse(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node1, schema, MElement.of(struct, Instant.now())));
 
         // OR
         var node2 = new Filter.ConditionNode();
@@ -295,25 +295,25 @@ public class FilterTest {
                 .set("field1").to("a")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("a")
                 .set("field2").to(2)
                 .build();
-        Assert.assertTrue(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node2, schema, MElement.of(struct, Instant.now())));
 
         // NEST AND(AND,OR)
         var node3 = new Filter.ConditionNode();
@@ -324,25 +324,25 @@ public class FilterTest {
                 .set("field1").to("a")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("a")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(1)
                 .build();
-        Assert.assertFalse(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node3, schema, MElement.of(struct, Instant.now())));
 
         // NEST OR(AND,OR)
         var node4 = new Filter.ConditionNode();
@@ -353,25 +353,25 @@ public class FilterTest {
                 .set("field1").to("a")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("a")
                 .set("field2").to(2)
                 .build();
-        Assert.assertTrue(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node4, schema, MElement.of(struct, Instant.now())));
 
         // NEST OR(AND,OR) with Leaves
         var leaf3 = new Filter.ConditionLeaf();
@@ -388,25 +388,25 @@ public class FilterTest {
                 .set("field1").to("a")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("a")
                 .set("field2").to(2)
                 .build();
-        Assert.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(1)
                 .build();
-        Assert.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(2)
                 .build();
-        Assert.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(node5, schema, MElement.of(struct, Instant.now())));
 
         // NEST AND(AND,OR) with Leaves
         var node6 = new Filter.ConditionNode();
@@ -418,25 +418,25 @@ public class FilterTest {
                 .set("field1").to("a")
                 .set("field2").to(1)
                 .build();
-        Assert.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("a")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(1)
                 .build();
-        Assert.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to("b")
                 .set("field2").to(2)
                 .build();
-        Assert.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(node6, schema, MElement.of(struct, Instant.now())));
     }
 
     @Test
@@ -467,21 +467,21 @@ public class FilterTest {
                 .set("field2").to(2L)
                 .set("field3").to(3L)
                 .build();
-        Assert.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to(2)
                 .set("field2").to(2)
                 .set("field3").to(3)
                 .build();
-        Assert.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to(2)
                 .set("field2").to(2)
                 .set("field3").to(4)
                 .build();
-        Assert.assertFalse(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
 
 
         // Simple case
@@ -497,21 +497,21 @@ public class FilterTest {
                 .set("field2").to(2)
                 .set("field3").to(3)
                 .build();
-        Assert.assertTrue(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to(2)
                 .set("field2").to(2)
                 .set("field3").to(3)
                 .build();
-        Assert.assertFalse(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct, Instant.now())));
 
         struct = Struct.newBuilder()
                 .set("field1").to(2)
                 .set("field2").to(2)
                 .set("field3").to(4)
                 .build();
-        Assert.assertFalse(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct, Instant.now())));
     }
 
     @Test
@@ -543,8 +543,8 @@ public class FilterTest {
                 .set("field3").to(3)
                 .build();
         Map<String,Object> values = StructToMapConverter.convert(struct);
-        Assert.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
-        Assert.assertTrue(Filter.filter(Filter.parse(filter1), values));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter1), values));
 
         struct = Struct.newBuilder()
                 .set("field1").to(2)
@@ -552,8 +552,8 @@ public class FilterTest {
                 .set("field3").to(3)
                 .build();
         values = StructToMapConverter.convert(struct);
-        Assert.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
-        Assert.assertTrue(Filter.filter(Filter.parse(filter1), values));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter1), values));
 
         struct = Struct.newBuilder()
                 .set("field1").to(2)
@@ -561,8 +561,8 @@ public class FilterTest {
                 .set("field3").to(4)
                 .build();
         values = StructToMapConverter.convert(struct);
-        Assert.assertFalse(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
-        Assert.assertFalse(Filter.filter(Filter.parse(filter1), values));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter1), schema, MElement.of(struct, Instant.now())));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter1), values));
 
         final String filter2String =
                 "{ \"key\": \"field1\", \"op\": \"=\", \"value\": 1 }";
@@ -574,8 +574,8 @@ public class FilterTest {
                 .set("field3").to(3)
                 .build();
         values = StructToMapConverter.convert(struct2);
-        Assert.assertTrue(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct2, Instant.now())));
-        Assert.assertTrue(Filter.filter(Filter.parse(filter2), values));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct2, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter2), values));
 
         struct2 = Struct.newBuilder()
                 .set("field1").to(2)
@@ -583,8 +583,8 @@ public class FilterTest {
                 .set("field3").to(1)
                 .build();
         values = StructToMapConverter.convert(struct2);
-        Assert.assertFalse(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct2, Instant.now())));
-        Assert.assertFalse(Filter.filter(Filter.parse(filter2), values));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter2), schema, MElement.of(struct2, Instant.now())));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter2), values));
 
 
         final String filter3String =
@@ -597,8 +597,8 @@ public class FilterTest {
                 .set("field3").to(3)
                 .build();
         values = StructToMapConverter.convert(struct3);
-        Assert.assertFalse(Filter.filter(Filter.parse(filter3), schema, MElement.of(struct3, Instant.now())));
-        Assert.assertFalse(Filter.filter(Filter.parse(filter3), values));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter3), schema, MElement.of(struct3, Instant.now())));
+        Assertions.assertFalse(Filter.filter(Filter.parse(filter3), values));
 
         struct3 = Struct.newBuilder()
                 .set("field1").to(2)
@@ -606,8 +606,8 @@ public class FilterTest {
                 .set("field3").to(1)
                 .build();
         values = StructToMapConverter.convert(struct3);
-        Assert.assertTrue(Filter.filter(Filter.parse(filter3), schema, MElement.of(struct3, Instant.now())));
-        Assert.assertTrue(Filter.filter(Filter.parse(filter3), values));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter3), schema, MElement.of(struct3, Instant.now())));
+        Assertions.assertTrue(Filter.filter(Filter.parse(filter3), values));
 
         {
             schema = Schema.builder()
@@ -624,8 +624,8 @@ public class FilterTest {
                     .set("field2").to(com.google.cloud.Date.parseDate("2022-12-31"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
 
             schema = Schema.builder()
                     .withField("field1", Schema.FieldType.TIMESTAMP)
@@ -637,8 +637,8 @@ public class FilterTest {
                     .set("field2").to(com.google.cloud.Timestamp.parseTimestamp("2023-12-31T23:59:59.999Z"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), values));
         }
 
         {
@@ -656,16 +656,16 @@ public class FilterTest {
                     .set("field2").to(com.google.cloud.Timestamp.parseTimestamp("2024-01-01T00:00:00.000Z"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
 
             struct = Struct.newBuilder()
                     .set("field1").to(com.google.cloud.Timestamp.parseTimestamp("2024-01-01T23:59:59.999Z"))
                     .set("field2").to(com.google.cloud.Timestamp.parseTimestamp("2023-12-31T23:59:59.999Z"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), values));
         }
 
         {
@@ -683,24 +683,24 @@ public class FilterTest {
                     .set("field2").to(com.google.cloud.Timestamp.parseTimestamp("2022-12-31T23:59:59.999Z"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
 
             struct = Struct.newBuilder()
                     .set("field1").to(com.google.cloud.Timestamp.parseTimestamp("2024-01-01T23:59:59.998Z"))
                     .set("field2").to(com.google.cloud.Timestamp.parseTimestamp("2022-12-31T23:59:59.999Z"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
 
             struct = Struct.newBuilder()
                     .set("field1").to(com.google.cloud.Timestamp.parseTimestamp("2024-01-01T23:59:59.999Z"))
                     .set("field2").to(com.google.cloud.Timestamp.parseTimestamp("2022-12-31T23:59:59.999Z"))
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), values));
         }
 
         {
@@ -716,15 +716,15 @@ public class FilterTest {
                     .set("field1").to((Long) null)
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
 
             struct = Struct.newBuilder()
                     .set("field1").to(-10D)
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), values));
         }
 
         {
@@ -740,8 +740,8 @@ public class FilterTest {
                     .set("field1").to((Long) null)
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertFalse(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertFalse(Filter.filter(Filter.parse(filter), values));
 
             schema = Schema.builder()
                     .withField("field1", Schema.FieldType.FLOAT64.withNullable(true))
@@ -751,8 +751,8 @@ public class FilterTest {
                     .set("field1").to(10D)
                     .build();
             values = StructToMapConverter.convert(struct);
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
         }
 
         {
@@ -774,8 +774,8 @@ public class FilterTest {
                     .build();
             values = StructToMapConverter.convert(struct);
             System.out.println(Filter.parse(filter));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
-            Assert.assertTrue(Filter.filter(Filter.parse(filter), values));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), schema, MElement.of(struct, Instant.now())));
+            Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
         }
 
     }
@@ -808,7 +808,7 @@ public class FilterTest {
         final Schema schema = Schema.parse(schemaString);
         final Filter.ConditionNode node = Filter.parse(filterString);
         var r = node.validate(schema.getFields());
-        Assert.assertTrue(r.isEmpty());
+        Assertions.assertTrue(r.isEmpty());
     }
 
 }

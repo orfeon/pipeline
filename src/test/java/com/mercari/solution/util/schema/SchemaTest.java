@@ -2,7 +2,7 @@ package com.mercari.solution.util.schema;
 
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class SchemaTest {
 

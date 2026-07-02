@@ -1,7 +1,7 @@
 package com.mercari.solution.util.coder;
 
 import org.apache.beam.sdk.coders.Coder;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;

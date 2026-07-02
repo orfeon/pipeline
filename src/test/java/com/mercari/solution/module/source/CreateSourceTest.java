@@ -6,9 +6,8 @@ import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -16,8 +15,7 @@ public class CreateSourceTest {
 
     private static final double DELTA = 1e-15;
 
-    @Rule
-    public final transient TestPipeline pipeline = TestPipeline.create();
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
     public void testCreateRange() throws Exception {
@@ -52,8 +50,8 @@ public class CreateSourceTest {
         final Schema outputSchema = output.getSchema();
         for(final Schema.Field field : outputSchema.getFields()) {
             switch (field.getName()) {
-                case "a", "b" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.int64);
-                case "c" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.string);
+                case "a", "b" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.int64);
+                case "c" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.string);
             }
         }
 
@@ -62,10 +60,10 @@ public class CreateSourceTest {
             for (final MElement row : rows) {
                 final Long a = row.getAsLong("a");
                 final Long b = row.getAsLong("b");
-                Assert.assertEquals(a % 10, b, DELTA);
+                Assertions.assertEquals(a % 10, b, DELTA);
                 count++;
             }
-            Assert.assertEquals(100, count);
+            Assertions.assertEquals(100, count);
             return null;
         });
 
@@ -111,16 +109,16 @@ public class CreateSourceTest {
 
         // Assert output schema
         final Schema outputSchema = output.getSchema();
-        //Assert.assertEquals(12, outputSchema.countFields());
+        //Assertions.assertEquals(12, outputSchema.countFields());
         for(final Schema.Field field : outputSchema.getFields()) {
             switch (field.getName()) {
-                case "stringField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.string);
-                case "intField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.int32);
-                case "longField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.int64);
-                case "floatField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.float32);
-                case "doubleField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.float64);
-                case "boolField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.bool);
-                case "timestampField" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.timestamp);
+                case "stringField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.string);
+                case "intField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.int32);
+                case "longField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.int64);
+                case "floatField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.float32);
+                case "doubleField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.float64);
+                case "boolField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.bool);
+                case "timestampField" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.timestamp);
             }
         }
 
@@ -129,27 +127,27 @@ public class CreateSourceTest {
             for (final MElement row : rows) {
                 switch (row.getPrimitiveValue("stringField").toString()) {
                     case "a" -> {
-                        Assert.assertEquals(true, row.getPrimitiveValue("boolField"));
-                        Assert.assertEquals(1, row.getPrimitiveValue("intField"));
-                        Assert.assertEquals(0.15F, row.getPrimitiveValue("floatField"));
-                        Assert.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-10T00:00:00.000Z"), row.getPrimitiveValue("timestampField"));
+                        Assertions.assertEquals(true, row.getPrimitiveValue("boolField"));
+                        Assertions.assertEquals(1, row.getPrimitiveValue("intField"));
+                        Assertions.assertEquals(0.15F, row.getPrimitiveValue("floatField"));
+                        Assertions.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-10T00:00:00.000Z"), row.getPrimitiveValue("timestampField"));
                     }
                     case "b" -> {
-                        Assert.assertEquals(false, row.getPrimitiveValue("boolField"));
-                        Assert.assertEquals(2, row.getPrimitiveValue("intField"));
-                        Assert.assertEquals(1.15F, row.getPrimitiveValue("floatField"));
-                        Assert.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-20T00:00:00.000Z"), row.getPrimitiveValue("timestampField"));
+                        Assertions.assertEquals(false, row.getPrimitiveValue("boolField"));
+                        Assertions.assertEquals(2, row.getPrimitiveValue("intField"));
+                        Assertions.assertEquals(1.15F, row.getPrimitiveValue("floatField"));
+                        Assertions.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-20T00:00:00.000Z"), row.getPrimitiveValue("timestampField"));
                     }
                     case "c" -> {
-                        Assert.assertEquals(true, row.getPrimitiveValue("boolField"));
-                        Assert.assertEquals(3, row.getPrimitiveValue("intField"));
-                        Assert.assertEquals(2.15F, row.getPrimitiveValue("floatField"));
-                        Assert.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-30T00:00:00.000Z"), row.getPrimitiveValue("timestampField"));
+                        Assertions.assertEquals(true, row.getPrimitiveValue("boolField"));
+                        Assertions.assertEquals(3, row.getPrimitiveValue("intField"));
+                        Assertions.assertEquals(2.15F, row.getPrimitiveValue("floatField"));
+                        Assertions.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-30T00:00:00.000Z"), row.getPrimitiveValue("timestampField"));
                     }
                 }
                 count++;
             }
-            Assert.assertEquals(3, count);
+            Assertions.assertEquals(3, count);
             return null;
         });
 

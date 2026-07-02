@@ -5,8 +5,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import org.joda.time.Instant;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.List;
@@ -90,34 +90,34 @@ public class SelectFunctionTest {
         final List<SelectFunction> selectFunctions = SelectFunction.of(array, inputFields);
 
         final Schema outputSchema = SelectFunction.createSchema(selectFunctions, "structEachField");
-        Assert.assertTrue(outputSchema.hasField("longField"));
-        Assert.assertTrue(outputSchema.hasField("renameIntField"));
-        Assert.assertTrue(outputSchema.hasField("constantStringField"));
-        Assert.assertTrue(outputSchema.hasField("expressionField"));
-        Assert.assertTrue(outputSchema.hasField("hashField"));
-        Assert.assertTrue(outputSchema.hasField("hashArrayField"));
-        Assert.assertTrue(outputSchema.hasField("currentTimestampField"));
-        Assert.assertTrue(outputSchema.hasField("eventTimestampField"));
-        Assert.assertTrue(outputSchema.hasField("concatField"));
-        Assert.assertTrue(outputSchema.hasField("structField"));
-        Assert.assertTrue(outputSchema.hasField("jsonField"));
-        Assert.assertTrue(outputSchema.hasField("intField"));
-        Assert.assertTrue(outputSchema.hasField("bytesEncodedLongField"));
-        Assert.assertTrue(outputSchema.hasField("bytesDecodedLongField"));
-        Assert.assertEquals(Schema.Type.int64, outputSchema.getField("longField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.int32, outputSchema.getField("renameIntField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.string, outputSchema.getField("constantStringField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.float64, outputSchema.getField("expressionField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.string, outputSchema.getField("hashField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.string, outputSchema.getField("hashArrayField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.timestamp, outputSchema.getField("currentTimestampField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.timestamp, outputSchema.getField("eventTimestampField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.string, outputSchema.getField("concatField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.array, outputSchema.getField("structField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.string, outputSchema.getField("jsonField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.int32, outputSchema.getField("intField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.bytes, outputSchema.getField("bytesEncodedLongField").getFieldType().getType());
-        Assert.assertEquals(Schema.Type.int64, outputSchema.getField("bytesDecodedLongField").getFieldType().getType());
+        Assertions.assertTrue(outputSchema.hasField("longField"));
+        Assertions.assertTrue(outputSchema.hasField("renameIntField"));
+        Assertions.assertTrue(outputSchema.hasField("constantStringField"));
+        Assertions.assertTrue(outputSchema.hasField("expressionField"));
+        Assertions.assertTrue(outputSchema.hasField("hashField"));
+        Assertions.assertTrue(outputSchema.hasField("hashArrayField"));
+        Assertions.assertTrue(outputSchema.hasField("currentTimestampField"));
+        Assertions.assertTrue(outputSchema.hasField("eventTimestampField"));
+        Assertions.assertTrue(outputSchema.hasField("concatField"));
+        Assertions.assertTrue(outputSchema.hasField("structField"));
+        Assertions.assertTrue(outputSchema.hasField("jsonField"));
+        Assertions.assertTrue(outputSchema.hasField("intField"));
+        Assertions.assertTrue(outputSchema.hasField("bytesEncodedLongField"));
+        Assertions.assertTrue(outputSchema.hasField("bytesDecodedLongField"));
+        Assertions.assertEquals(Schema.Type.int64, outputSchema.getField("longField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int32, outputSchema.getField("renameIntField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("constantStringField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, outputSchema.getField("expressionField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("hashField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("hashArrayField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.timestamp, outputSchema.getField("currentTimestampField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.timestamp, outputSchema.getField("eventTimestampField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("concatField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.array, outputSchema.getField("structField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("jsonField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int32, outputSchema.getField("intField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.bytes, outputSchema.getField("bytesEncodedLongField").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, outputSchema.getField("bytesDecodedLongField").getFieldType().getType());
 
         //
         for(final SelectFunction selectFunction : selectFunctions) {
@@ -146,23 +146,23 @@ public class SelectFunctionTest {
         final Instant eventTimestamp = Instant.parse("2024-01-01T00:00:00Z");
 
         Map<String,Object> results = SelectFunction.apply(selectFunctions, values, eventTimestamp);
-        Assert.assertEquals(10L, results.get("longField"));
-        Assert.assertEquals(32, results.get("renameIntField"));
-        Assert.assertEquals("constantStringValue", results.get("constantStringField"));
-        Assert.assertEquals(32.32, results.get("expressionField"));
-        //Assert.assertEquals("dbcc96aec884f7d5057672df21e7446c1415ca7669fdabac78e49f4d852d5a0a", results.get("hashField"));
-        //Assert.assertEquals("e6c8c04775d64362367b36c61dc00615eabd1c00887fec05ceae4e5ab9cd215b", results.get("hashArrayField"));
-        Assert.assertNotNull(results.get("currentTimestampField"));
-        Assert.assertEquals(eventTimestamp.getMillis() * 1000L, results.get("eventTimestampField"));
-        Assert.assertEquals("stringValue 32 10", results.get("concatField"));
-        Assert.assertEquals(100, results.get("intField"));
+        Assertions.assertEquals(10L, results.get("longField"));
+        Assertions.assertEquals(32, results.get("renameIntField"));
+        Assertions.assertEquals("constantStringValue", results.get("constantStringField"));
+        Assertions.assertEquals(32.32, results.get("expressionField"));
+        //Assertions.assertEquals("dbcc96aec884f7d5057672df21e7446c1415ca7669fdabac78e49f4d852d5a0a", results.get("hashField"));
+        //Assertions.assertEquals("e6c8c04775d64362367b36c61dc00615eabd1c00887fec05ceae4e5ab9cd215b", results.get("hashArrayField"));
+        Assertions.assertNotNull(results.get("currentTimestampField"));
+        Assertions.assertEquals(eventTimestamp.getMillis() * 1000L, results.get("eventTimestampField"));
+        Assertions.assertEquals("stringValue 32 10", results.get("concatField"));
+        Assertions.assertEquals(100, results.get("intField"));
 
         final JsonObject jsonObject = new Gson().fromJson((String)results.get("jsonField"), JsonObject.class);
-        Assert.assertEquals("stringValue", jsonObject.get("stringFieldA").getAsString());
+        Assertions.assertEquals("stringValue", jsonObject.get("stringFieldA").getAsString());
         final JsonObject nestedJsonObject = jsonObject.get("nestedStructField").getAsJsonObject();
-        Assert.assertEquals("2024-08-30T00:00:00Z", nestedJsonObject.get("timestampField").getAsString());
-        Assert.assertEquals("b", nestedJsonObject.get("enumField").getAsString());
-        Assert.assertEquals(10L, results.get("bytesDecodedLongField"));
+        Assertions.assertEquals("2024-08-30T00:00:00Z", nestedJsonObject.get("timestampField").getAsString());
+        Assertions.assertEquals("b", nestedJsonObject.get("enumField").getAsString());
+        Assertions.assertEquals(10L, results.get("bytesDecodedLongField"));
     }
 
 }

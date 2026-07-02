@@ -5,8 +5,8 @@ import com.google.protobuf.ByteString;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -45,17 +45,17 @@ public class BigtableSchemaUtilTest {
         final Parameters parameters = new GsonBuilder().create().fromJson(config, Parameters.class);
         parameters.columns.forEach(BigtableSchemaUtil.ColumnFamilyProperties::setupSource);
         final Schema schema = BigtableSchemaUtil.createSchema(parameters.columns);
-        Assert.assertTrue(schema.hasField("field1"));
-        Assert.assertEquals(Schema.Type.element, schema.getField("field1").getFieldType().getType());
+        Assertions.assertTrue(schema.hasField("field1"));
+        Assertions.assertEquals(Schema.Type.element, schema.getField("field1").getFieldType().getType());
         final Schema childSchema = schema.getField("field1").getFieldType().getElementSchema();
-        Assert.assertTrue(childSchema.hasField("childField1"));
+        Assertions.assertTrue(childSchema.hasField("childField1"));
     }
 
     @Test
     public void testByteStringBytes() {
         ByteString byteString = BigtableSchemaUtil.toByteString("abc");
         Object value = BigtableSchemaUtil.toPrimitiveValueFromBytes(Schema.FieldType.STRING, byteString);
-        Assert.assertEquals("abc", value);
+        Assertions.assertEquals("abc", value);
     }
 
     // remove hadoop serialize format
@@ -97,18 +97,18 @@ public class BigtableSchemaUtilTest {
 
         final ByteString byteString = BigtableSchemaUtil.toByteStringHadoop(element.asPrimitiveMap());
         final Map<String, Object> values = (Map<String, Object>) BigtableSchemaUtil.toPrimitiveValueFromWritable(Schema.FieldType.element(schema), byteString);
-        Assert.assertEquals("stringValue", values.get("stringField"));
-        Assert.assertEquals(10, values.get("intField"));
-        Assert.assertEquals(10L, values.get("longField"));
-        Assert.assertEquals(10.10F, values.get("floatField"));
-        Assert.assertEquals(10.10D, values.get("doubleField"));
-        Assert.assertEquals(DateTimeUtil.toEpochMicroSecond(Instant.parse("2024-11-01T00:00:00Z")), values.get("timestampField"));
-        Assert.assertEquals(Long.valueOf(LocalDate.of(2024,10,10).toEpochDay()).intValue(), values.get("dateField"));
-        Assert.assertEquals(List.of("a","b","c"), values.get("stringArrayField"));
+        Assertions.assertEquals("stringValue", values.get("stringField"));
+        Assertions.assertEquals(10, values.get("intField"));
+        Assertions.assertEquals(10L, values.get("longField"));
+        Assertions.assertEquals(10.10F, values.get("floatField"));
+        Assertions.assertEquals(10.10D, values.get("doubleField"));
+        Assertions.assertEquals(DateTimeUtil.toEpochMicroSecond(Instant.parse("2024-11-01T00:00:00Z")), values.get("timestampField"));
+        Assertions.assertEquals(Long.valueOf(LocalDate.of(2024,10,10).toEpochDay()).intValue(), values.get("dateField"));
+        Assertions.assertEquals(List.of("a","b","c"), values.get("stringArrayField"));
         final Map<String, Object> child = (Map<String, Object>) values.get("elementField");
-        Assert.assertEquals("childStringValue", child.get("stringField"));
-        Assert.assertEquals(10L, child.get("longField"));
-        Assert.assertEquals(List.of("A", "B", "C"), child.get("stringArrayField"));
+        Assertions.assertEquals("childStringValue", child.get("stringField"));
+        Assertions.assertEquals(10L, child.get("longField"));
+        Assertions.assertEquals(List.of("A", "B", "C"), child.get("stringArrayField"));
     }
      */
 

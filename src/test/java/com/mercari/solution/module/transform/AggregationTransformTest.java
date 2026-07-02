@@ -5,8 +5,7 @@ import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -14,8 +13,7 @@ public class AggregationTransformTest {
 
     private static final double DELTA = 1e-15;
 
-    @Rule
-    public final transient TestPipeline pipeline = TestPipeline.create();
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
     public void testAggregateGroupFields() throws Exception {
@@ -146,15 +144,15 @@ public class AggregationTransformTest {
         // Assert output schema
         final com.mercari.solution.module.Schema outputSchema = output.getSchema();
         System.out.println(outputSchema);
-        //Assert.assertEquals(12, outputSchema.countFields());
+        //Assertions.assertEquals(12, outputSchema.countFields());
         for(final com.mercari.solution.module.Schema.Field field : outputSchema.getFields()) {
             /*
             switch (field.getName()) {
-                case "count1", "count2" -> Assert.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
-                case "sum1", "sum2" -> Assert.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
-                case "max1", "max2" -> Assert.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
-                case "min1", "min2" -> Assert.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
-                case "first1", "first2" -> Assert.assertEquals(field.getFieldType().getType(), Schema.Type.int64);
+                case "count1", "count2" -> Assertions.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
+                case "sum1", "sum2" -> Assertions.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
+                case "max1", "max2" -> Assertions.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
+                case "min1", "min2" -> Assertions.assertEquals(field.getFieldType().getType(), com.mercari.solution.module.Schema.Type.int64);
+                case "first1", "first2" -> Assertions.assertEquals(field.getFieldType().getType(), Schema.Type.int64);
             }
 
              */
@@ -167,7 +165,7 @@ public class AggregationTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 

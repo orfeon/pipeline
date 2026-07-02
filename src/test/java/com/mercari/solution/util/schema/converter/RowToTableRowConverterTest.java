@@ -4,8 +4,8 @@ import com.google.api.services.bigquery.model.TableRow;
 import com.mercari.solution.TestDatum;
 import org.apache.beam.sdk.values.Row;
 import org.joda.time.Instant;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
@@ -41,18 +41,18 @@ public class RowToTableRowConverterTest {
     }
 
     private void testFlatField(final TableRow tableRow) {
-        Assert.assertEquals(TestDatum.getBooleanFieldValue(), tableRow.get("booleanField"));
-        Assert.assertEquals(TestDatum.getStringFieldValue(), tableRow.get("stringField"));
-        Assert.assertEquals(TestDatum.getBytesFieldValue(), new String(
+        Assertions.assertEquals(TestDatum.getBooleanFieldValue(), tableRow.get("booleanField"));
+        Assertions.assertEquals(TestDatum.getStringFieldValue(), tableRow.get("stringField"));
+        Assertions.assertEquals(TestDatum.getBytesFieldValue(), new String(
                 Base64.getDecoder().decode(tableRow.get("bytesField").toString()), StandardCharsets.UTF_8));
-        Assert.assertEquals(TestDatum.getIntFieldValue().longValue(), tableRow.get("intField"));
-        Assert.assertEquals(TestDatum.getLongFieldValue().longValue(), tableRow.get("longField"));
-        Assert.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), (Double)tableRow.get("floatField"), DELTA);
-        Assert.assertEquals(TestDatum.getDoubleFieldValue(), (Double)tableRow.get("doubleField"), DELTA);
-        Assert.assertEquals(TestDatum.getDateFieldValue().toEpochDay(), LocalDate.parse(tableRow.get("dateField").toString()).toEpochDay());
-        Assert.assertEquals(TestDatum.getTimeFieldValue().toSecondOfDay(), LocalTime.parse(tableRow.get("timeField").toString()).toSecondOfDay());
-        Assert.assertEquals(TestDatum.getTimestampFieldValue().getMillis(), Instant.parse(tableRow.get("timestampField").toString() + "Z").getMillis());
-        Assert.assertEquals(TestDatum.getDecimalFieldValue().toString(), tableRow.get("decimalField"));
+        Assertions.assertEquals(TestDatum.getIntFieldValue().longValue(), tableRow.get("intField"));
+        Assertions.assertEquals(TestDatum.getLongFieldValue().longValue(), tableRow.get("longField"));
+        Assertions.assertEquals(TestDatum.getFloatFieldValue().doubleValue(), (Double)tableRow.get("floatField"), DELTA);
+        Assertions.assertEquals(TestDatum.getDoubleFieldValue(), (Double)tableRow.get("doubleField"), DELTA);
+        Assertions.assertEquals(TestDatum.getDateFieldValue().toEpochDay(), LocalDate.parse(tableRow.get("dateField").toString()).toEpochDay());
+        Assertions.assertEquals(TestDatum.getTimeFieldValue().toSecondOfDay(), LocalTime.parse(tableRow.get("timeField").toString()).toSecondOfDay());
+        Assertions.assertEquals(TestDatum.getTimestampFieldValue().getMillis(), Instant.parse(tableRow.get("timestampField").toString() + "Z").getMillis());
+        Assertions.assertEquals(TestDatum.getDecimalFieldValue().toString(), tableRow.get("decimalField"));
     }
 
 }

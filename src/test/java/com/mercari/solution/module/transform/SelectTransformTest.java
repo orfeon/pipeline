@@ -6,16 +6,14 @@ import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Map;
 
 public class SelectTransformTest {
 
-    @Rule
-    public final transient TestPipeline pipeline = TestPipeline.create();
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
     public void testStatelessSelect() throws IOException {
@@ -94,7 +92,7 @@ public class SelectTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 
@@ -224,7 +222,7 @@ public class SelectTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 

@@ -5,7 +5,7 @@ import com.google.protobuf.DynamicMessage;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.ResourceUtil;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
