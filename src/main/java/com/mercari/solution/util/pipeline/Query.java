@@ -137,7 +137,7 @@ public class Query implements Serializable {
 
     public List<MElement> execute(final Map<String, List<MElement>> inputs, final Instant timestamp) {
         for(final Map.Entry<String, List<MElement>> entry : inputs.entrySet()) {
-            if(inputs.containsKey(entry.getKey())) {
+            if(elements.containsKey(entry.getKey())) {
                 elements.get(entry.getKey()).clear();
                 elements.get(entry.getKey()).addAll(entry.getValue());
             }

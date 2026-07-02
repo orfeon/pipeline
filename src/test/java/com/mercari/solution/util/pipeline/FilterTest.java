@@ -8,13 +8,18 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.StructToMapConverter;
+import org.apache.avro.util.Utf8;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Set;
 
 
 public class FilterTest {
@@ -778,6 +783,243 @@ public class FilterTest {
             Assertions.assertTrue(Filter.filter(Filter.parse(filter), values));
         }
 
+    }
+
+    @Test
+    public void testOpOf() {
+        Assertions.assertEquals(Filter.Op.EQUAL, Filter.Op.of("="));
+        Assertions.assertEquals(Filter.Op.NOT_EQUAL, Filter.Op.of("!="));
+        Assertions.assertEquals(Filter.Op.GREATER, Filter.Op.of(">"));
+        Assertions.assertEquals(Filter.Op.GREATER_OR_EQUAL, Filter.Op.of(">="));
+        Assertions.assertEquals(Filter.Op.LESSER, Filter.Op.of("<"));
+        Assertions.assertEquals(Filter.Op.LESSER_OR_EQUAL, Filter.Op.of("<="));
+        Assertions.assertEquals(Filter.Op.IN, Filter.Op.of("in"));
+        Assertions.assertEquals(Filter.Op.NOT_IN, Filter.Op.of("not in"));
+        Assertions.assertEquals(Filter.Op.MATCH, Filter.Op.of("match"));
+        // case insensitive and trimmed
+        Assertions.assertEquals(Filter.Op.IN, Filter.Op.of(" IN "));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Filter.Op.of("=="));
+    }
+
+    @Test
+    public void testFilterLifecycle() {
+        // null filter always matches
+        final Filter nullFilter = Filter.of((String) null);
+        nullFilter.setup();
+        final MElement element = MElement.builder()
+                .withString("stringField", "a")
+                .build();
+        Assertions.assertTrue(nullFilter.filter(element));
+        Assertions.assertTrue(nullFilter.toJson().isJsonNull());
+
+        final Filter filter = Filter.of(new Gson().fromJson("""
+                [ { "key": "stringField", "op": "=", "value": "a" } ]
+                """, JsonElement.class));
+        filter.setup();
+        Assertions.assertTrue(filter.filter(element));
+        Assertions.assertTrue(filter.toJson().isJsonArray());
+
+        final MElement notMatched = MElement.builder()
+                .withString("stringField", "b")
+                .build();
+        Assertions.assertFalse(filter.filter(notMatched));
+
+        // filter with field list
+        final Schema schema = Schema.builder()
+                .withField("stringField", Schema.FieldType.STRING)
+                .build();
+        Assertions.assertTrue(filter.filter(schema.getFields(), element));
+        Assertions.assertFalse(filter.filter(schema.getFields(), notMatched));
+    }
+
+    @Test
+    public void testParseErrors() {
+        // primitive json
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("1", JsonElement.class)));
+        // array containing and/or object
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("""
+                        [ { "or": [ { "key": "a", "op": "=", "value": 1 } ] } ]
+                        """, JsonElement.class)));
+        // array containing non object
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("[1]", JsonElement.class)));
+        // both and / or at top level
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("""
+                        { "and": [ { "key": "a", "op": "=", "value": 1 } ], "or": [ { "key": "a", "op": "=", "value": 1 } ] }
+                        """, JsonObject.class)));
+        // and parameter is not array
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("""
+                        { "and": { "key": "a", "op": "=", "value": 1 } }
+                        """, JsonObject.class)));
+        // leaf without key/op/value
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("""
+                        [ { "key": "a", "op": "=" } ]
+                        """, JsonElement.class)));
+        // expression must be string
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.parse(new Gson().fromJson("""
+                        [ { "expression": true, "op": "=", "value": 1 } ]
+                        """, JsonElement.class)));
+
+        // null json produces a TRUE type node
+        Assertions.assertEquals(Filter.Type.TRUE, Filter.parse((JsonElement) null).getType());
+    }
+
+    @Test
+    public void testLeafInErrorAndMatch() {
+        // in op requires array value
+        final var inLeaf = new Filter.ConditionLeaf();
+        inLeaf.setKey("");
+        inLeaf.setOp(Filter.Op.IN);
+        inLeaf.setValue(new Gson().fromJson("1", JsonElement.class));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> Filter.is(1, inLeaf));
+
+        // match op via parse
+        final Filter.ConditionNode node = Filter.parse("""
+                [ { "key": "stringField", "op": "match", "value": "^ab.*z$" } ]
+                """);
+        final Map<String, Object> matched = Map.of("stringField", "abcz");
+        final Map<String, Object> notMatched = Map.of("stringField", "abc");
+        Assertions.assertTrue(Filter.filter(node, matched));
+        Assertions.assertFalse(Filter.filter(node, notMatched));
+    }
+
+    @Test
+    public void testLeafCompareValueTypes() {
+        final var leaf = new Filter.ConditionLeaf();
+        leaf.setKey("");
+        leaf.setValue(new Gson().fromJson("1", JsonElement.class));
+        leaf.setOp(Filter.Op.EQUAL);
+
+        Assertions.assertTrue(Filter.is((byte) 1, leaf));
+        Assertions.assertTrue(Filter.is((short) 1, leaf));
+        Assertions.assertTrue(Filter.is(1L, leaf));
+        Assertions.assertTrue(Filter.is(1F, leaf));
+        Assertions.assertTrue(Filter.is(1D, leaf));
+        Assertions.assertTrue(Filter.is(BigInteger.ONE, leaf));
+        Assertions.assertTrue(Filter.is(BigDecimal.ONE, leaf));
+        Assertions.assertFalse(Filter.is((byte) 2, leaf));
+        Assertions.assertFalse(Filter.is(BigInteger.TWO, leaf));
+
+        // NaN and Infinity never match any comparison
+        Assertions.assertFalse(Filter.is(Double.NaN, leaf));
+        Assertions.assertFalse(Filter.is(Float.NaN, leaf));
+        Assertions.assertFalse(Filter.is(Double.POSITIVE_INFINITY, leaf));
+        Assertions.assertFalse(Filter.is(Float.NEGATIVE_INFINITY, leaf));
+
+        // TRUE / FALSE ops
+        leaf.setOp(Filter.Op.TRUE);
+        Assertions.assertTrue(Filter.is(1, leaf));
+        leaf.setOp(Filter.Op.FALSE);
+        Assertions.assertFalse(Filter.is(1, leaf));
+
+        // boolean
+        final var boolLeaf = new Filter.ConditionLeaf();
+        boolLeaf.setKey("");
+        boolLeaf.setValue(new Gson().fromJson("true", JsonElement.class));
+        boolLeaf.setOp(Filter.Op.EQUAL);
+        Assertions.assertTrue(Filter.is(true, boolLeaf));
+        Assertions.assertFalse(Filter.is(false, boolLeaf));
+
+        // Utf8
+        final var stringLeaf = new Filter.ConditionLeaf();
+        stringLeaf.setKey("");
+        stringLeaf.setValue(new Gson().fromJson("\"a\"", JsonElement.class));
+        stringLeaf.setOp(Filter.Op.EQUAL);
+        Assertions.assertTrue(Filter.is(new Utf8("a"), stringLeaf));
+        Assertions.assertFalse(Filter.is(new Utf8("b"), stringLeaf));
+
+        // LocalTime
+        final var timeLeaf = new Filter.ConditionLeaf();
+        timeLeaf.setKey("");
+        timeLeaf.setValue(new Gson().fromJson("\"10:30:00\"", JsonElement.class));
+        timeLeaf.setOp(Filter.Op.LESSER);
+        Assertions.assertTrue(Filter.is(LocalTime.of(10, 0, 0), timeLeaf));
+        Assertions.assertFalse(Filter.is(LocalTime.of(11, 0, 0), timeLeaf));
+
+        // java.time.Instant
+        final var instantLeaf = new Filter.ConditionLeaf();
+        instantLeaf.setKey("");
+        instantLeaf.setValue(new Gson().fromJson("\"2021-08-21T10:30:45Z\"", JsonElement.class));
+        instantLeaf.setOp(Filter.Op.EQUAL);
+        Assertions.assertTrue(Filter.is(java.time.Instant.parse("2021-08-21T10:30:45Z"), instantLeaf));
+        Assertions.assertFalse(Filter.is(java.time.Instant.parse("2021-08-22T10:30:45Z"), instantLeaf));
+    }
+
+    @Test
+    public void testExpressionVariableMissing() {
+        final Filter.ConditionNode node = Filter.parse("""
+                [ { "expression": "field1 + field2", "op": ">", "value": 1 } ]
+                """);
+        Assertions.assertEquals(Set.of("field1", "field2"), node.getRequiredVariables());
+        // missing expression variable throws
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Filter.filter(node, Map.of("field1", 1L)));
+        Assertions.assertTrue(Filter.filter(node, Map.of("field1", 1L, "field2", 1L)));
+    }
+
+    @Test
+    public void testEmptyConditionNode() {
+        // node without leaves and nodes never matches
+        final var node = new Filter.ConditionNode();
+        node.setType(Filter.Type.AND);
+        Assertions.assertFalse(Filter.filter(node, Map.of("field1", 1L)));
+
+        // null condition always matches
+        Assertions.assertTrue(Filter.filter((Filter.ConditionNode) null, Map.of("field1", 1L)));
+    }
+
+    @Test
+    public void testConditionNodeToString() {
+        final Filter.ConditionNode node = Filter.parse("""
+                { "or": [
+                  { "key": "field1", "op": "=", "value": 1 },
+                  { "and": [
+                    { "key": "field2", "op": ">", "value": 2 }
+                  ] }
+                ] }
+                """);
+        final String text = node.toString();
+        Assertions.assertTrue(text.contains("OR"));
+        Assertions.assertTrue(text.contains("field1"));
+        Assertions.assertTrue(text.contains("field2"));
+        Assertions.assertEquals(Set.of("field1", "field2"), node.getRequiredVariables());
+    }
+
+    @Test
+    public void testGetFieldNames() {
+        final Schema schema = Schema.parse("""
+                {
+                  "fields": [
+                    { "name": "field1", "type": "string" },
+                    { "name": "field2", "type": "struct", "fields": [
+                      { "name": "child", "type": "string" }
+                    ] }
+                  ]
+                }
+                """);
+        final Set<String> names1 = Filter.ConditionNode.getFieldNames(null, schema.getField("field1"));
+        Assertions.assertEquals(Set.of("field1"), names1);
+        final Set<String> names2 = Filter.ConditionNode.getFieldNames(null, schema.getField("field2"));
+        Assertions.assertEquals(Set.of("field2", "field2.child"), names2);
+    }
+
+    @Test
+    public void testValidateError() {
+        final Schema schema = Schema.builder()
+                .withField("field1", Schema.FieldType.STRING)
+                .build();
+        final Filter.ConditionNode node = Filter.parse("""
+                [ { "key": "missingField", "op": "=", "value": "a" } ]
+                """);
+        final var errorMessages = node.validate(schema.getFields());
+        Assertions.assertEquals(1, errorMessages.size());
+        Assertions.assertTrue(errorMessages.get(0).contains("missingField"));
     }
 
     @Test
