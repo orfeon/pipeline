@@ -102,7 +102,7 @@ public class CompareTransform extends Transform {
             }
             final List<Map<String,Object>> valuesList = unionValues.stream().map(MElement::asPrimitiveMap).toList();
 
-            final List<MElement> differences = new ArrayList<>();
+            final List<Map<String, Object>> differences = new ArrayList<>();
 
             for(final Schema.Field field : inputSchema.getFields()) {
                 final long count = valuesList.stream()
@@ -118,10 +118,9 @@ public class CompareTransform extends Transform {
                         differenceValues.put(inputName, value);
                     }
 
-                    final MElement difference = MElement.builder()
-                            .withPrimitiveValue("field", field.getName())
-                            .withPrimitiveValue("values", differenceValues)
-                            .build();
+                    final Map<String, Object> difference = new HashMap<>();
+                    difference.put("field", field.getName());
+                    difference.put("values", differenceValues);
                     differences.add(difference);
                 }
             }
@@ -146,7 +145,7 @@ public class CompareTransform extends Transform {
         return Schema.builder()
                 .withField("table", Schema.FieldType.STRING)
                 .withField("keys", Schema.FieldType.STRING)
-                .withField("missingInputs", Schema.FieldType.STRING)
+                .withField("missingInputs", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("duplicatedInputs", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("differences", Schema.FieldType.array(
                         Schema.FieldType.element(Schema.builder()
