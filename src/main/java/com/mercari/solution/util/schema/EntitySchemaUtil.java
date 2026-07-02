@@ -29,6 +29,7 @@ public class EntitySchemaUtil {
                 .filter(entry -> entry.getKey().equals(fieldName))
                 .map(Map.Entry::getValue)
                 .map(EntitySchemaUtil::getValue)
+                .filter(Objects::nonNull)
                 .findAny()
                 .orElse(null);
     }
@@ -39,13 +40,14 @@ public class EntitySchemaUtil {
                 .map(Map.Entry::getValue)
                 .map(EntitySchemaUtil::getValue)
                 .map(v -> v == null ? null : v.toString())
+                .filter(Objects::nonNull)
                 .findAny()
                 .orElse(null);
     }
 
     public static Object getKeyFieldValue(final Entity entity, String fieldName) {
         final Key.PathElement pe = entity.getKey().getPath(entity.getKey().getPathCount()-1);
-        return pe.getName() == null ? pe.getId() : pe.getName();
+        return pe.getName().isEmpty() ? pe.getId() : pe.getName();
     }
 
     public static Object getValue(final Entity entity, final String fieldName) {
@@ -241,7 +243,7 @@ public class EntitySchemaUtil {
         return switch (value.getValueTypeCase()) {
             case BOOLEAN_VALUE -> BigtableSchemaUtil.toByteString(value.getBooleanValue());
             case STRING_VALUE -> BigtableSchemaUtil.toByteString(value.getStringValue());
-            case BLOB_VALUE -> BigtableSchemaUtil.toByteString(value.getBlobValue().asReadOnlyByteBuffer());
+            case BLOB_VALUE -> BigtableSchemaUtil.toByteString(value.getBlobValue());
             case INTEGER_VALUE -> BigtableSchemaUtil.toByteString(value.getIntegerValue());
             case DOUBLE_VALUE -> BigtableSchemaUtil.toByteString(value.getDoubleValue());
             case TIMESTAMP_VALUE -> BigtableSchemaUtil.toByteString(Timestamps.toMicros(value.getTimestampValue()));
@@ -523,7 +525,7 @@ public class EntitySchemaUtil {
                 if (RowSchemaUtil.isLogicalTypeDate(fieldType)) {
                     return LocalDate.ofEpochDay((Integer) primitiveValue).toString();
                 } else if (RowSchemaUtil.isLogicalTypeTime(fieldType)) {
-                    return LocalTime.ofNanoOfDay((Long) primitiveValue).toString();
+                    return LocalTime.ofNanoOfDay((Long) primitiveValue * 1000L).toString();
                 } else if (RowSchemaUtil.isLogicalTypeEnum(fieldType)) {
                     final int index = (Integer) primitiveValue;
                     return fieldType.getLogicalType(EnumerationType.class).valueOf(index);
@@ -545,15 +547,15 @@ public class EntitySchemaUtil {
                     case LOGICAL_TYPE -> {
                         if (RowSchemaUtil.isLogicalTypeDate(fieldType.getCollectionElementType())) {
                             return ((List<Integer>) primitiveValue).stream()
-                                    .map(Object::toString)
+                                    .map(days -> LocalDate.ofEpochDay(days).toString())
                                     .collect(Collectors.toList());
                         } else if (RowSchemaUtil.isLogicalTypeTime(fieldType.getCollectionElementType())) {
                             return ((List<Long>) primitiveValue).stream()
-                                    .map(Object::toString)
+                                    .map(micros -> LocalTime.ofNanoOfDay(micros * 1000L).toString())
                                     .collect(Collectors.toList());
                         } else if (RowSchemaUtil.isLogicalTypeEnum(fieldType.getCollectionElementType())) {
                             return ((List<Integer>) primitiveValue).stream()
-                                    .map(index -> fieldType.getLogicalType(EnumerationType.class).valueOf(index))
+                                    .map(index -> fieldType.getCollectionElementType().getLogicalType(EnumerationType.class).valueOf(index))
                                     .collect(Collectors.toList());
                         } else {
                             throw new IllegalStateException();
@@ -980,7 +982,7 @@ public class EntitySchemaUtil {
     private static String toStringKey(Key key) {
         final List<String> names = new ArrayList<>();
         for(final Key.PathElement path : key.getPathList()) {
-            if(path.getName() == null) {
+            if(path.getName().isEmpty()) {
                 names.add(path.getKind() + "," + path.getId());
             } else {
                 names.add(path.getKind() + "," + path.getName());

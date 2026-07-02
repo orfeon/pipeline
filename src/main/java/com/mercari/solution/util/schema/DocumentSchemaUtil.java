@@ -159,6 +159,7 @@ public class DocumentSchemaUtil {
         final Value value = document.getFieldsOrThrow(fieldName);
         switch(value.getValueTypeCase()) {
             case REFERENCE_VALUE:
+                return value.getReferenceValue();
             case STRING_VALUE:
                 return value.getStringValue();
             case BYTES_VALUE:
@@ -238,6 +239,9 @@ public class DocumentSchemaUtil {
 
     public static BigDecimal getAsBigDecimal(final Document document, final String fieldName) {
         final Value value = document.getFieldsOrDefault(fieldName, null);
+        if(value == null) {
+            return null;
+        }
         switch (value.getValueTypeCase()) {
             case BOOLEAN_VALUE -> {
                 return BigDecimal.valueOf(value.getBooleanValue() ? 1D : 0D);
@@ -633,7 +637,7 @@ public class DocumentSchemaUtil {
                 if (RowSchemaUtil.isLogicalTypeDate(fieldType)) {
                     yield LocalDate.ofEpochDay((Integer) primitiveValue).toString();
                 } else if (RowSchemaUtil.isLogicalTypeTime(fieldType)) {
-                    yield LocalTime.ofNanoOfDay((Long) primitiveValue).toString();
+                    yield LocalTime.ofNanoOfDay((Long) primitiveValue * 1000L).toString();
                 } else if (RowSchemaUtil.isLogicalTypeEnum(fieldType)) {
                     final int index = (Integer) primitiveValue;
                     yield fieldType.getLogicalType(EnumerationType.class).valueOf(index);
@@ -649,15 +653,15 @@ public class DocumentSchemaUtil {
                 case LOGICAL_TYPE -> {
                     if (RowSchemaUtil.isLogicalTypeDate(fieldType.getCollectionElementType())) {
                         yield ((List<Integer>) primitiveValue).stream()
-                                .map(Object::toString)
+                                .map(days -> LocalDate.ofEpochDay(days).toString())
                                 .collect(Collectors.toList());
                     } else if (RowSchemaUtil.isLogicalTypeTime(fieldType.getCollectionElementType())) {
                         yield ((List<Long>) primitiveValue).stream()
-                                .map(Object::toString)
+                                .map(micros -> LocalTime.ofNanoOfDay(micros * 1000L).toString())
                                 .collect(Collectors.toList());
                     } else if (RowSchemaUtil.isLogicalTypeEnum(fieldType.getCollectionElementType())) {
                         yield ((List<Integer>) primitiveValue).stream()
-                                .map(index -> fieldType.getLogicalType(EnumerationType.class).valueOf(index))
+                                .map(index -> fieldType.getCollectionElementType().getLogicalType(EnumerationType.class).valueOf(index))
                                 .collect(Collectors.toList());
                     } else {
                         throw new IllegalStateException();
@@ -768,7 +772,7 @@ public class DocumentSchemaUtil {
             case ROW -> {
                 final Map<String, Value> childValues = new HashMap<>();
                 final Map<String, Object> child = (Map<String, Object>) object;
-                final Schema childSchema = fieldType.getCollectionElementType().getRowSchema();
+                final Schema childSchema = fieldType.getRowSchema();
                 for(final Map.Entry<String, Object> entry : child.entrySet()) {
                     final Schema.FieldType childFieldType = childSchema.getField(entry.getKey()).getType();
                     final Value fieldValue = toValue(childFieldType, entry.getValue());
