@@ -585,6 +585,7 @@ public class RowSchemaUtilTest {
         Assertions.assertEquals(Map.of("a", 1L, "b", 2L), RowSchemaUtil.getValue(row, "mapField"));
         Assertions.assertEquals(createChildRow(), RowSchemaUtil.getValue(row, "rowField"));
         Assertions.assertEquals(Arrays.asList(1, 2, 3), RowSchemaUtil.getValue(row, "intArrayField"));
+        Assertions.assertEquals(List.of(TEST_TIMESTAMP), RowSchemaUtil.getValue(row, "datetimeArrayField"));
         Assertions.assertNull(RowSchemaUtil.getValue(row, "nullableStringField"));
         Assertions.assertNull(RowSchemaUtil.getValue(row, "notExistsField"));
         Assertions.assertNull(RowSchemaUtil.getValue(null, "stringField"));
@@ -668,6 +669,8 @@ public class RowSchemaUtilTest {
         Assertions.assertEquals(Instant.ofEpochMilli(-2L), RowSchemaUtil.getTimestamp(row, "doubleField", defaultTimestamp));
         Assertions.assertEquals(defaultTimestamp, RowSchemaUtil.getTimestamp(row, "booleanField", defaultTimestamp));
         Assertions.assertEquals(defaultTimestamp, RowSchemaUtil.getTimestamp(row, "nullableStringField", defaultTimestamp));
+        Assertions.assertEquals(Instant.parse("2021-03-02T00:00:00Z"), RowSchemaUtil.getTimestamp(row, "dateField", defaultTimestamp));
+        Assertions.assertEquals(defaultTimestamp, RowSchemaUtil.getTimestamp(row, "notExistsField", defaultTimestamp));
         Assertions.assertEquals(TEST_TIMESTAMP, RowSchemaUtil.getAsInstant(row, "datetimeField"));
     }
 
@@ -727,6 +730,8 @@ public class RowSchemaUtilTest {
         Assertions.assertEquals(1234567890123L, RowSchemaUtil.getAsStandard(row, "int64Field"));
         Assertions.assertEquals(TEST_DATE, RowSchemaUtil.getAsStandard(row, "dateField"));
         Assertions.assertEquals(TEST_TIME, RowSchemaUtil.getAsStandard(row, "timeField"));
+        Assertions.assertEquals(java.time.Instant.parse("2021-03-02T01:02:03Z"), RowSchemaUtil.getAsStandard(row, "datetimeField"));
+        Assertions.assertEquals("b", RowSchemaUtil.getAsStandard(row, "enumField"));
         Assertions.assertEquals(Arrays.asList(1, 2, 3), RowSchemaUtil.getAsStandard(row, "intArrayField"));
         Assertions.assertNull(RowSchemaUtil.getAsStandard(row, "nullableStringField"));
         Assertions.assertNull(RowSchemaUtil.getAsStandard(row, "notExistsField"));
@@ -757,6 +762,10 @@ public class RowSchemaUtilTest {
         Assertions.assertEquals(TEST_TIME, RowSchemaUtil.getAsStandard(timeType, (Object) "15:24:01"));
         Assertions.assertEquals(TEST_TIME, RowSchemaUtil.getAsStandard(timeType, TEST_TIME.toNanoOfDay() / 1000L));
 
+        final Schema.FieldType enumType = Schema.FieldType.logicalType(EnumerationType.create("a", "b", "c"));
+        Assertions.assertEquals("b", RowSchemaUtil.getAsStandard(enumType, 1));
+        Assertions.assertEquals("b", RowSchemaUtil.getAsStandard(enumType, (Object) "b"));
+
         Assertions.assertEquals(java.time.Instant.parse("2021-03-02T01:02:03Z"),
                 RowSchemaUtil.getAsStandard(Schema.FieldType.DATETIME, (Object) "2021-03-02T01:02:03Z"));
         Assertions.assertEquals(java.time.Instant.parse("2021-03-02T01:02:03Z"),
@@ -776,6 +785,7 @@ public class RowSchemaUtilTest {
         Assertions.assertEquals(List.of(1.5F, 2.5F), RowSchemaUtil.getAsFloatList(row, "doubleArrayField"));
         Assertions.assertTrue(RowSchemaUtil.getAsFloatList(row, "nullableArrayField").isEmpty());
         Assertions.assertTrue(RowSchemaUtil.getAsFloatList(row, "stringField").isEmpty());
+        Assertions.assertTrue(RowSchemaUtil.getAsFloatList(row, "notExistsField").isEmpty());
     }
 
     @Test
@@ -828,6 +838,11 @@ public class RowSchemaUtilTest {
                 Schema.FieldType.array(dateType), List.of((int) TEST_DATE.toEpochDay())));
         Assertions.assertEquals(List.of(TEST_TIME), RowSchemaUtil.convertPrimitive(
                 Schema.FieldType.array(timeType), List.of(TEST_TIME.toNanoOfDay() / 1000L)));
+        final List<EnumerationType.Value> enumValues = (List<EnumerationType.Value>) RowSchemaUtil.convertPrimitive(
+                Schema.FieldType.array(enumType), Arrays.asList(0, 2));
+        Assertions.assertEquals(
+                Arrays.asList(0, 2),
+                enumValues.stream().map(EnumerationType.Value::getValue).collect(Collectors.toList()));
         final List<Row> childRows = (List<Row>) RowSchemaUtil.convertPrimitive(
                 Schema.FieldType.array(Schema.FieldType.row(CHILD_SCHEMA)), List.of(Map.of("cs", "c", "ci", 7)));
         Assertions.assertEquals(1, childRows.size());

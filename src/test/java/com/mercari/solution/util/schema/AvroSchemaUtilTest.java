@@ -632,6 +632,7 @@ public class AvroSchemaUtilTest {
         Assertions.assertEquals("stringValue", AvroSchemaUtil.getAsStandard(record, "stringField"));
         Assertions.assertEquals(42, AvroSchemaUtil.getAsStandard(record, "intField"));
         Assertions.assertEquals(1234567890123L, AvroSchemaUtil.getAsStandard(record, "longField"));
+        Assertions.assertEquals("b", AvroSchemaUtil.getAsStandard(record, "enumField"));
         Assertions.assertEquals(TEST_DATE, AvroSchemaUtil.getAsStandard(record, "dateField"));
         Assertions.assertEquals(TEST_TIME, AvroSchemaUtil.getAsStandard(record, "timeMillisField"));
         Assertions.assertEquals(TEST_TIME, AvroSchemaUtil.getAsStandard(record, "timeMicrosField"));
@@ -697,6 +698,8 @@ public class AvroSchemaUtilTest {
                 AvroSchemaUtil.getAsPrimitive(record, org.apache.beam.sdk.schemas.Schema.FieldType.logicalType(CalciteUtils.DATE.getLogicalType()), "dateField"));
         Assertions.assertEquals(TEST_TIME.toNanoOfDay() / 1000L,
                 AvroSchemaUtil.getAsPrimitive(record, org.apache.beam.sdk.schemas.Schema.FieldType.logicalType(CalciteUtils.TIME.getLogicalType()), "timeMicrosField"));
+        Assertions.assertEquals(TEST_TIME.toNanoOfDay() / 1000L,
+                AvroSchemaUtil.getAsPrimitive(record, org.apache.beam.sdk.schemas.Schema.FieldType.logicalType(CalciteUtils.TIME.getLogicalType()), "timeMillisField"));
         Assertions.assertEquals("stringValue",
                 AvroSchemaUtil.getAsPrimitive(record, org.apache.beam.sdk.schemas.Schema.FieldType.STRING, "stringField"));
         Assertions.assertEquals(1234567890123L,
@@ -749,6 +752,12 @@ public class AvroSchemaUtilTest {
 
         final EnumerationType.Value enumValue = (EnumerationType.Value) AvroSchemaUtil.convertPrimitive(enumType, 2);
         Assertions.assertEquals(2, enumValue.getValue());
+
+        final List<EnumerationType.Value> enumValues = (List<EnumerationType.Value>) AvroSchemaUtil.convertPrimitive(
+                org.apache.beam.sdk.schemas.Schema.FieldType.array(enumType), Arrays.asList(1, 2));
+        Assertions.assertEquals(2, enumValues.size());
+        Assertions.assertEquals(1, enumValues.get(0).getValue());
+        Assertions.assertEquals(2, enumValues.get(1).getValue());
 
         Assertions.assertEquals(List.of(1L, 2L), AvroSchemaUtil.convertPrimitive(
                 org.apache.beam.sdk.schemas.Schema.FieldType.array(org.apache.beam.sdk.schemas.Schema.FieldType.DATETIME), Arrays.asList(1L, 2L)));

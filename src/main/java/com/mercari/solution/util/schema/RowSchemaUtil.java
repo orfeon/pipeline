@@ -17,6 +17,7 @@ import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Instant;
 import org.joda.time.ReadableDateTime;
+import org.joda.time.ReadableInstant;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -514,7 +515,7 @@ public class RowSchemaUtil {
                                 final Schema.FieldType arrayType = field.getType().getCollectionElementType();
                                 switch (arrayType.getTypeName()) {
                                     case DATETIME:
-                                        return ((ReadableDateTime)v).toInstant();
+                                        return ((ReadableInstant)v).toInstant();
                                     case LOGICAL_TYPE:
                                         if(isLogicalTypeEnum(field.getType().getCollectionElementType())) {
                                             final EnumerationType.Value ev = (EnumerationType.Value)v;
@@ -704,13 +705,10 @@ public class RowSchemaUtil {
     }
 
     public static Instant getTimestamp(final Row row, final String fieldName, final Instant defaultTimestamp) {
-        final Schema.Field field = row.getSchema().getField(fieldName);
-        if(field == null) {
-            return defaultTimestamp;
-        }
         if(!row.getSchema().hasField(fieldName)) {
             return defaultTimestamp;
         }
+        final Schema.Field field = row.getSchema().getField(fieldName);
         final Object value = row.getValue(fieldName);
         if(value == null) {
             return defaultTimestamp;
@@ -719,7 +717,9 @@ public class RowSchemaUtil {
             case DATETIME -> (Instant) value;
             case LOGICAL_TYPE -> {
                 if(RowSchemaUtil.isLogicalTypeDate(field.getType())) {
-                    yield (Instant) value;
+                    final LocalDate localDate = (LocalDate) value;
+                    yield new DateTime(localDate.getYear(), localDate.getMonthValue(), localDate.getDayOfMonth(),
+                            0, 0, DateTimeZone.UTC).toInstant();
                 } else if(RowSchemaUtil.isLogicalTypeTimestamp(field.getType())) {
                     yield (Instant) value;
                 }
@@ -978,8 +978,9 @@ public class RowSchemaUtil {
                 } else if (isLogicalTypeEnum(fieldType)) {
                     final EnumerationType enumerationType = fieldType.getLogicalType(EnumerationType.class);
                     yield switch (value) {
-                        case Number n -> enumerationType.valueOf(n.intValue()).toString();
-                        case String s -> enumerationType.valueOf(s).toString();
+                        case EnumerationType.Value v -> enumerationType.toString(v);
+                        case Number n -> enumerationType.toString(enumerationType.valueOf(n.intValue()));
+                        case String s -> enumerationType.toString(enumerationType.valueOf(s));
                         default -> throw new IllegalArgumentException();
                     };
                 } else {
@@ -987,6 +988,7 @@ public class RowSchemaUtil {
                 }
             }
             case DATETIME -> switch (value) {
+                case ReadableInstant instant -> java.time.Instant.ofEpochMilli(instant.getMillis());
                 case Number n -> DateTimeUtil.toInstant(n.longValue());
                 case String s -> DateTimeUtil.toInstant(s);
                 default -> throw new IllegalArgumentException();
@@ -1017,13 +1019,10 @@ public class RowSchemaUtil {
     }
 
     public static List<Float> getAsFloatList(final Row row, final String fieldName) {
-        final Schema.Field field = row.getSchema().getField(fieldName);
-        if(field == null) {
-            return new ArrayList<>();
-        }
         if(!row.getSchema().hasField(fieldName)) {
             return new ArrayList<>();
         }
+        final Schema.Field field = row.getSchema().getField(fieldName);
         if(!field.getType().getTypeName().equals(Schema.TypeName.ARRAY)) {
             return new ArrayList<>();
         }
@@ -1191,7 +1190,7 @@ public class RowSchemaUtil {
                                     .collect(Collectors.toList());
                         } else if (RowSchemaUtil.isLogicalTypeEnum(fieldType.getCollectionElementType())) {
                             yield ((List<Integer>) primitiveValue).stream()
-                                    .map(index -> fieldType.getLogicalType(EnumerationType.class).valueOf(index))
+                                    .map(index -> fieldType.getCollectionElementType().getLogicalType(EnumerationType.class).valueOf(index))
                                     .collect(Collectors.toList());
                         } else {
                             throw new IllegalStateException();

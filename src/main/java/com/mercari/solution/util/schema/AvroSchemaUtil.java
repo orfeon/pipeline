@@ -1196,6 +1196,7 @@ public class AvroSchemaUtil {
             case ENUM -> switch (value) {
                 case Utf8 utf8 -> utf8.toString();
                 case String s -> s;
+                case GenericEnumSymbol<?> symbol -> symbol.toString();
                 default -> throw new IllegalArgumentException("Could not convert enum value: " + value);
             };
             case INT -> {
@@ -1353,7 +1354,7 @@ public class AvroSchemaUtil {
                     }
                 } else if (RowSchemaUtil.isLogicalTypeTime(fieldType)) {
                     if (LogicalTypes.timeMillis().equals(fieldSchema.getLogicalType())) {
-                        return (Long) value * 1000L;
+                        return (Integer) value * 1000L;
                     } else if (LogicalTypes.timeMicros().equals(fieldSchema.getLogicalType())) {
                         return value;
                     }
@@ -1661,7 +1662,7 @@ public class AvroSchemaUtil {
                                 .collect(Collectors.toList());
                     } else if (RowSchemaUtil.isLogicalTypeEnum(fieldType.getCollectionElementType())) {
                         yield ((List<Integer>) primitiveValue).stream()
-                                .map(index -> fieldType.getLogicalType(EnumerationType.class).valueOf(index))
+                                .map(index -> fieldType.getCollectionElementType().getLogicalType(EnumerationType.class).valueOf(index))
                                 .collect(Collectors.toList());
                     } else {
                         throw new IllegalStateException();
