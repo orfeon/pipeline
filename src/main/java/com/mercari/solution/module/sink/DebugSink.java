@@ -55,7 +55,14 @@ public class DebugSink extends Sink {
             MErrorHandler errorHandler) {
 
         if(MPipeline.Runner.direct.equals(getRunner())) {
-            return expandLocal(inputs, errorHandler);
+            final String workDirPath = inputs.getPipeline().getOptions().as(MPipeline.MPipelineServerOptions.class).getWorkDir();
+            if(workDirPath != null) {
+                return expandLocal(inputs, workDirPath, errorHandler);
+            }
+            // Fall through to the log output below.
+            // (Returning an empty tuple without applying any transform would leave the module as an
+            //  empty composite node, which never completes on DirectRunner and hangs the pipeline)
+            LOG.warn("workDir is empty. debug sink outputs inputs to logs");
         }
 
         final Parameters parameters = getParameters(Parameters.class);
@@ -78,14 +85,8 @@ public class DebugSink extends Sink {
 
     private MCollectionTuple expandLocal(
             final MCollectionTuple inputs,
+            final String workDirPath,
             MErrorHandler errorHandler) {
-
-        final String workDirPath = inputs.getPipeline().getOptions().as(MPipeline.MPipelineServerOptions.class).getWorkDir();
-        if(workDirPath == null) {
-            LOG.error("workDir is empty");
-            return MCollectionTuple
-                    .done(PDone.in(inputs.getPipeline()));
-        }
 
         final PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()

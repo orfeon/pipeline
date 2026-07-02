@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 
@@ -71,9 +72,16 @@ public class BeamSQLTransform extends Transform {
                 LOG.info("sql parameter is base64 encoded");
                 query = new String(Base64.getDecoder().decode(sql), StandardCharsets.UTF_8);
             } else {
-                if(Files.exists(Paths.get(sql)) && !Files.isDirectory(Paths.get(sql))) {
+                // Query text is not a valid file path on some platforms (e.g. newlines or ':' on Windows)
+                Path path;
+                try {
+                    path = Paths.get(sql);
+                } catch (final Throwable e) {
+                    path = null;
+                }
+                if(path != null && Files.exists(path) && !Files.isDirectory(path)) {
                     try {
-                        final String rawQuery = Files.readString(Paths.get(sql), StandardCharsets.UTF_8);
+                        final String rawQuery = Files.readString(path, StandardCharsets.UTF_8);
                         query = TemplateUtil.executeStrictTemplate(rawQuery, templateArgs);
                     } catch (IOException e) {
                         query = sql;
