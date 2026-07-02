@@ -510,9 +510,10 @@ public class DocumentSchemaUtil {
                         default -> throw new IllegalStateException();
                     };
                 } else if (RowSchemaUtil.isLogicalTypeTime(fieldType)) {
+                    // TIME primitive representation is micros-of-day (Long)
                     return switch (value.getValueTypeCase()) {
-                        case STRING_VALUE -> Long.valueOf(DateTimeUtil.toLocalTime(value.getStringValue()).toSecondOfDay()).intValue();
-                        case INTEGER_VALUE -> Long.valueOf(value.getIntegerValue()).intValue();
+                        case STRING_VALUE -> DateTimeUtil.toLocalTime(value.getStringValue()).toNanoOfDay() / 1000L;
+                        case INTEGER_VALUE -> value.getIntegerValue();
                         case NULL_VALUE, VALUETYPE_NOT_SET -> null;
                         default -> throw new IllegalStateException();
                     };

@@ -341,7 +341,8 @@ public class DocumentSchemaUtilTest {
         final Schema.FieldType dateType = Schema.FieldType.logicalType(CalciteUtils.DATE.getLogicalType());
         Assertions.assertEquals((int) TEST_DATE.toEpochDay(), DocumentSchemaUtil.getAsPrimitive(document, dateType, "dateField"));
         final Schema.FieldType timeType = Schema.FieldType.logicalType(CalciteUtils.TIME.getLogicalType());
-        Assertions.assertEquals(TEST_TIME.toSecondOfDay(), DocumentSchemaUtil.getAsPrimitive(document, timeType, "timeField"));
+        // TIME primitive representation is micros-of-day (Long), consistent with the (fieldType, Object) overload
+        Assertions.assertEquals(TEST_TIME.toNanoOfDay() / 1000L, DocumentSchemaUtil.getAsPrimitive(document, timeType, "timeField"));
         final Schema.FieldType enumType = Schema.FieldType.logicalType(EnumerationType.create("a", "b", "c"));
         Assertions.assertEquals("b", DocumentSchemaUtil.getAsPrimitive(document, enumType, "enumField"));
 
