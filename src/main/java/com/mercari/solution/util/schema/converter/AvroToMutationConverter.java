@@ -542,7 +542,7 @@ public class AvroToMutationConverter {
                 if(LogicalTypes.date().equals(fieldSchema.getLogicalType())) {
                     yield Value.date(isNull ? null : convertEpochDaysToDate(intValue));
                 } else if(LogicalTypes.timeMillis().equals(fieldSchema.getLogicalType())) {
-                    yield Value.string(isNull ? null : LocalTime.ofNanoOfDay(((intValue) * 1000 * 1000)).format(DateTimeFormatter.ISO_LOCAL_TIME));
+                    yield Value.string(isNull ? null : LocalTime.ofNanoOfDay(intValue.longValue() * 1000L * 1000L).format(DateTimeFormatter.ISO_LOCAL_TIME));
                 } else {
                     yield Value.int64(isNull ? null : ((Integer) object).longValue());
                 }
@@ -626,7 +626,7 @@ public class AvroToMutationConverter {
                             yield Value.stringArray(isNull ? new ArrayList<>() : ((List<Integer>)object)
                                     .stream()
                                     .filter(Objects::nonNull)
-                                    .map(i -> LocalTime.ofNanoOfDay(((i) * 1000 * 1000)).format(DateTimeFormatter.ISO_LOCAL_TIME))
+                                    .map(i -> LocalTime.ofNanoOfDay(i.longValue() * 1000L * 1000L).format(DateTimeFormatter.ISO_LOCAL_TIME))
                                     .collect(Collectors.toList()));
                         } else {
                             yield Value.int64Array(isNull ? new ArrayList<>() : ((List<Integer>)object)

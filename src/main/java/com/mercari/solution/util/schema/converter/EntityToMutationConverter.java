@@ -52,7 +52,7 @@ public class EntityToMutationConverter {
         final Mutation.WriteBuilder builder = StructSchemaUtil.createMutationWriteBuilder(table, mutationOp);
 
         final Key.PathElement pe = entity.getKey().getPath(entity.getKey().getPathCount()-1);
-        if(pe.getName() == null) {
+        if(pe.getName() != null && !pe.getName().isEmpty()) {
             builder.set("__key__").to(pe.getName());
         } else {
             builder.set("__key__").to(pe.getId());
