@@ -168,6 +168,20 @@ self-contained (parameters, examples) — the agent reads one file per module.
 - `docs/deploy/`, `docs/exec/`, `docs/README.md` — deploy/execute guides.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).
 
+## Testing Conventions
+
+- **JUnit 5 (Jupiter)** — `org.junit.jupiter.api.Test` / `Assertions`. JUnit4 stays on the test classpath
+  only because Beam's `TestPipeline` implements a JUnit4 `TestRule`; do not write new JUnit4 tests.
+- `TestPipeline` is used standalone (no `@Rule`):
+  `private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);`
+- Module tests are config-driven e2e: `Config.load(json)` → `MPipeline.apply(pipeline, config)` →
+  `PAssert` → `pipeline.run()` (see `FilterTransformTest`).
+- Tests run in parallel (4 threads) via JUnit Platform config in the surefire plugin.
+- Coverage: JaCoCo runs with `mvn test`; report at `target/site/jacoco/index.html` (CSV/XML alongside).
+- Parameters that accept "text or local file path" must guard `Paths.get(text)` with try/catch —
+  Windows throws `InvalidPathException` for strings with `\n`/`:` (see `Config.load`,
+  `BeamSQLTransform.loadQuery`).
+
 ## Key Dependencies
 
 - Java 21

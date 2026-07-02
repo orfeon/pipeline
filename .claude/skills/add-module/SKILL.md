@@ -73,10 +73,11 @@ Shared conventions (all types):
 
 ## Step 3 — Test
 
-Add `src/test/java/com/mercari/solution/module/<type>/<PascalName><Base>Test.java`. The established
-pattern (see `FilterTransformTest`, `CreateSourceTest`) is a **config-driven end-to-end test**:
+Add `src/test/java/com/mercari/solution/module/<type>/<PascalName><Base>Test.java`. Tests are JUnit 5
+(`org.junit.jupiter.api.Test` / `Assertions` — no JUnit4). The established pattern (see
+`FilterTransformTest`, `CreateSourceTest`) is a **config-driven end-to-end test**:
 
-1. `@Rule TestPipeline pipeline = TestPipeline.create();`
+1. `private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);`
 2. Write a config JSON text block using the `create` source to generate input elements, wiring your module
    in `transforms:`/`sinks:` (or directly in `sources:`).
 3. `Config config = Config.load(configJson);` then `Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);`
@@ -104,6 +105,10 @@ User-facing docs are read by the bundled AI agent from the classpath — this is
 - Doc file name exactly matches the registered name (lowercase).
 
 ## Pitfalls
+
+- `expand()` must apply at least one transform that consumes its inputs. Returning an empty tuple
+  (`MCollectionTuple.done(...)`) without applying anything leaves an empty composite node, which
+  **never completes on DirectRunner and hangs the pipeline** (see DebugSink's workDir fallback).
 
 - The annotation is the **nested** one (`@Source.Module` / `@Transform.Module` / `@Sink.Module`) — there is
   no shared top-level `@Module`.
