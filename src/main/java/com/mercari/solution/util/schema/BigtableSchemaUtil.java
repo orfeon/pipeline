@@ -964,6 +964,15 @@ public class BigtableSchemaUtil {
         };
     }
 
+    // ByteBuffer.array() fails for read-only or direct buffers (e.g. ByteString.asReadOnlyByteBuffer())
+    private static byte[] toBytes(final ByteBuffer byteBuffer) {
+        final ByteBuffer duplicated = byteBuffer.duplicate();
+        duplicated.rewind();
+        final byte[] bytes = new byte[duplicated.remaining()];
+        duplicated.get(bytes);
+        return bytes;
+    }
+
     public static ByteString toByteString(final Object primitiveValue) {
         if(primitiveValue == null) {
             return ByteString.copyFrom(new byte[0]);
@@ -972,7 +981,7 @@ public class BigtableSchemaUtil {
             case Boolean b -> Bytes.toBytes(b);
             case String s -> Bytes.toBytes(s);
             case byte[] bs -> bs;
-            case ByteBuffer bb -> bb.array();
+            case ByteBuffer bb -> toBytes(bb);
             case ByteString bs -> bs.toByteArray();
             case ByteArray ba -> ba.toByteArray();
             case BigDecimal bd -> Bytes.toBytes(bd);
@@ -994,7 +1003,7 @@ public class BigtableSchemaUtil {
             case String s -> s;
             case Utf8 u -> u.toString();
             case byte[] bs -> Base64.getEncoder().encodeToString(bs);
-            case ByteBuffer bb -> Base64.getEncoder().encodeToString(bb.array());
+            case ByteBuffer bb -> Base64.getEncoder().encodeToString(toBytes(bb));
             case ByteString bs -> Base64.getEncoder().encodeToString(bs.toByteArray());
             case ByteArray ba -> Base64.getEncoder().encodeToString(ba.toByteArray());
             default -> primitiveValue.toString();
@@ -1012,7 +1021,7 @@ public class BigtableSchemaUtil {
             case String s -> Bytes.toBytes(s);
             case Utf8 u -> Bytes.toBytes(u.toString());
             case byte[] bs -> bs;
-            case ByteBuffer bb -> bb.array();
+            case ByteBuffer bb -> toBytes(bb);
             case ByteString bs -> bs.toByteArray();
             case ByteArray ba -> ba.toByteArray();
             case BigDecimal bd -> Bytes.toBytes(bd);
@@ -1050,7 +1059,7 @@ public class BigtableSchemaUtil {
             case int16 -> switch (primitiveValue) {
                 case String s -> Short.parseShort(s);
                 case Utf8 u -> Short.parseShort(u.toString());
-                case Boolean b -> b ? 1 : 0;
+                case Boolean b -> b ? (short) 1 : (short) 0;
                 case Number n -> n.shortValue();
                 default -> null;
             };
@@ -1163,7 +1172,7 @@ public class BigtableSchemaUtil {
         return switch (writable) {
             case BooleanWritable b -> b.get();
             case Text t -> t.toString();
-            case BytesWritable b -> b.getBytes();
+            case BytesWritable b -> b.copyBytes();
             case ShortWritable s -> s.get();
             case VIntWritable i -> i.get();
             case VLongWritable l -> l.get();
@@ -1260,7 +1269,7 @@ public class BigtableSchemaUtil {
             case Boolean b -> new BooleanWritable(b);
             case String s -> new Text(s);
             case byte[] bs -> new BytesWritable(bs);
-            case ByteBuffer bb -> new BytesWritable(bb.array());
+            case ByteBuffer bb -> new BytesWritable(toBytes(bb));
             case ByteString bs -> new BytesWritable(bs.toByteArray());
             case ByteArray ba -> new BytesWritable(ba.toByteArray());
             case BigDecimal bd -> new BytesWritable(bd.toBigInteger().toByteArray());
@@ -1339,7 +1348,7 @@ public class BigtableSchemaUtil {
             super(VLongWritable.class);
         }
         public LongArrayWritable(final Writable[] array) {
-            super(VLongWritable.class);
+            super(VLongWritable.class, array);
         }
     }
 
