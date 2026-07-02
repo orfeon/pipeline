@@ -109,7 +109,8 @@ public class RowToMutationConverterTest {
         Assertions.assertEquals(Value.int64(16L), map.get("int16Field"));
         Assertions.assertEquals(Value.int64(32L), map.get("int32Field"));
         Assertions.assertEquals(Value.int64(64L), map.get("int64Field"));
-        Assertions.assertEquals(Value.float32(1.5f), map.get("floatField"));
+        // FLOAT is written as float64, matching convertFieldType (Type.float64) and the array path
+        Assertions.assertEquals(Value.float64(1.5d), map.get("floatField"));
         Assertions.assertEquals(Value.float64(2.5d), map.get("doubleField"));
         Assertions.assertEquals(Value.numeric(new BigDecimal("123.45")), map.get("decimalField"));
         Assertions.assertEquals(Value.timestamp(Timestamp.parseTimestamp("2024-03-01T12:00:00Z")), map.get("datetimeField"));

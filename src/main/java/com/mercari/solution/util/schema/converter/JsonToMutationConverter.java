@@ -160,17 +160,18 @@ public class JsonToMutationConverter {
                         yield Value.bytesArray(values);
                     }
                     case FLOAT -> {
+                        // FLOAT arrays are written as float64Array, matching the scalar FLOAT case
                         if (isNull) {
-                            yield Value.float32Array(new ArrayList<>());
+                            yield Value.float64Array(new ArrayList<>());
                         }
-                        final List<Float> values = new ArrayList<>();
+                        final List<Double> values = new ArrayList<>();
                         for (final JsonElement element : jsonArray) {
                             if (element == null || element.isJsonNull()) {
                                 continue;
                             }
-                            values.add(element.getAsFloat());
+                            values.add(Double.valueOf(element.getAsFloat()));
                         }
-                        yield Value.float32Array(values);
+                        yield Value.float64Array(values);
                     }
                     case DOUBLE -> {
                         if (isNull) {

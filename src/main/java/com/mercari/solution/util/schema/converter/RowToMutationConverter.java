@@ -111,8 +111,9 @@ public class RowToMutationConverter {
                     builder.set(fieldName).to(longValue);
                     break;
                 case FLOAT:
+                    // FLOAT columns are declared as float64 by convertFieldType; write float64 values to match
                     final Float floatValue = hide ? (nullableField ? null : 0F) : (isNullField ? null : row.getFloat(fieldName));
-                    builder.set(fieldName).to(floatValue);
+                    builder.set(fieldName).to(floatValue == null ? null : Double.valueOf(floatValue.doubleValue()));
                     break;
                 case DOUBLE:
                     final Double doubleValue = hide ? (nullableField ? null : 0D) : (isNullField ? null : row.getDouble(fieldName));
