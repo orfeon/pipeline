@@ -51,6 +51,41 @@ public class LocalH2SinkTest {
     }
 
     @Test
+    public void testValidationWithoutParameters() throws Exception {
+        // Omitting the parameters block must surface the module's own validation errors, not an NPE
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0],
+                        "select": [
+                          { "name": "sequence" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "h2",
+                      "module": "localH2",
+                      "inputs": ["create"]
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(
+                IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("output must not be null"), "unexpected message: " + e.getMessage());
+    }
+
+    @Test
     public void testValidationMissingOutput() throws Exception {
         final String configJson = """
                 {

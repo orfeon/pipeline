@@ -116,7 +116,8 @@ public abstract class Module<T extends PInput> extends PTransform<T, MCollection
         this.module = config.getModule();
         this.jobName = options.getJobName();
         this.description = config.getDescription();
-        this.parametersText = config.getParameters().toString();
+        // Missing parameters block behaves as empty so each module's own validation reports precise errors
+        this.parametersText = config.getParameters() == null ? "{}" : config.getParameters().toString();
 
         this.tags = Optional.ofNullable(config.getTags()).orElseGet(HashSet::new);
         this.waits = new ArrayList<>();

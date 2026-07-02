@@ -19,6 +19,37 @@ public class ReshuffleTransformTest {
     private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
+    public void testReshuffleWithoutParameters() throws Exception {
+        // Omitting the parameters block entirely must behave as empty parameters, not throw NPE
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "reshuffleNoParamsCreate",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [1, 2]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "reshuffle",
+                      "module": "reshuffle",
+                      "inputs": ["reshuffleNoParamsCreate"]
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        Assertions.assertNotNull(outputs.get("reshuffle"));
+        pipeline.run();
+    }
+
+    @Test
     public void testReshuffleSingleInput() throws Exception {
 
         final String configJson = """
