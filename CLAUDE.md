@@ -185,6 +185,11 @@ self-contained (parameters, examples) — the agent reads one file per module.
 - Parameters that accept "text or local file path" must guard `Paths.get(text)` with try/catch —
   Windows throws `InvalidPathException` for strings with `\n`/`:` (see `Config.load`,
   `BeamSQLTransform.loadQuery`).
+- Known constraint: Struct-backed `MElement`s (Spanner reads) are encoded with `SerializableCoder`,
+  and reading a `Struct` mutates its lazily-decoded internal state, so re-encoding differs.
+  DirectRunner's `enforceImmutability` check false-positives on them — integration tests reading
+  from Spanner disable it (`DirectOptions.setEnforceImmutability(false)`); a proper Struct coder
+  is the long-term fix.
 
 ## Key Dependencies
 

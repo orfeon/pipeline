@@ -110,6 +110,12 @@ Conversions between representations live in `util/schema/converter/` (Avro ↔ R
 Document ↔ Proto ↔ JSON). When adding a module, prefer emitting `MElement` with a proper `Schema` rather than
 a raw backing type so downstream modules and schema inference keep working.
 
+Known constraint: Struct-backed `MElement`s (Spanner reads) rely on `SerializableCoder`, and reading a
+Spanner `Struct` mutates its lazily-decoded internal state, so re-encoding the same element produces
+different bytes. DirectRunner's `enforceImmutability` check false-positives on such elements (tests disable
+it via `DirectOptions.setEnforceImmutability(false)`); replacing this with a dedicated Struct coder is the
+long-term fix.
+
 ## 5. Error handling
 
 - `MErrorHandler` — created per pipeline (`createPipelineErrorHandler`) and passed into every module; collects
