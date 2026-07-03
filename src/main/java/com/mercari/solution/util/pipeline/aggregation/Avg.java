@@ -170,7 +170,7 @@ public class Avg implements AggregateFunction {
         final Double avgNext = AggregateFunction.avg(prevAvg, prevWeight, inputValue, inputWeight);
         accumulator.put(name, avgNext);
         if(inputValue != null) {
-            accumulator.put(weightKeyName, prevWeight + inputWeight);
+            accumulator.put(weightKeyName, prevWeight + Optional.ofNullable(inputWeight).orElse(0D));
         } else {
             accumulator.put(weightKeyName, prevWeight);
         }

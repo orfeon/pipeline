@@ -248,7 +248,18 @@ public class Std implements AggregateFunction {
 
         final Double baseVar = Optional.ofNullable(base.getAsDouble(name)).orElse(0D);
         final Double inputVar = Optional.ofNullable(input.getAsDouble(name)).orElse(0D);
-        base.put(name, baseVar + inputVar);
+
+        // between-group variance term (Chan et al. parallel merge)
+        final double w1 = Optional.ofNullable(baseWeight).orElse(0D);
+        final double w2 = Optional.ofNullable(inputWeight).orElse(0D);
+        final double correction;
+        if(w1 > 0 && w2 > 0 && baseAvg != null && inputAvg != null) {
+            final double delta = inputAvg - baseAvg;
+            correction = delta * delta * (w1 * w2 / (w1 + w2));
+        } else {
+            correction = 0D;
+        }
+        base.put(name, baseVar + inputVar + correction);
 
         return base;
     }
@@ -288,7 +299,7 @@ public class Std implements AggregateFunction {
         double deltaPrev = inputValue - Optional.ofNullable(prevAvg).orElse(0D);
         double deltaNext = inputValue - Optional.ofNullable(nextAvg).orElse(0D);
         final Double prevVar = Optional.ofNullable(accumulator.getAsDouble(name)).orElse(0D);
-        final Double nextVar = prevVar + (deltaPrev * deltaNext);
+        final Double nextVar = prevVar + (Optional.ofNullable(inputWeight).orElse(0D) * deltaPrev * deltaNext);
 
         accumulator.put(name, nextVar);
 
