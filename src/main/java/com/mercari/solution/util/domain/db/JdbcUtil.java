@@ -604,7 +604,17 @@ public class JdbcUtil {
                         yield "BIGINT";
                     }
                 }
-                default -> "BIGINT";
+                default -> {
+                    if (LogicalTypes.timestampMillis().equals(avroSchema.getLogicalType())) {
+                        yield "TIMESTAMP";
+                    } else if (LogicalTypes.timestampMicros().equals(avroSchema.getLogicalType())) {
+                        yield "TIMESTAMP";
+                    } else if (LogicalTypes.timeMicros().equals(avroSchema.getLogicalType())) {
+                        yield "TIME";
+                    } else {
+                        yield "BIGINT";
+                    }
+                }
 
             };
             case FLOAT -> "REAL";
