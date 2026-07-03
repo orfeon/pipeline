@@ -338,4 +338,108 @@ public class QueryTransformTest {
         }
     }
 
+    @Test
+    public void testJdbcLateralLookupJoin() throws Exception {
+        final String url = "jdbc:h2:mem:querytransformlateraltest;DB_CLOSE_DELAY=-1";
+        // Keep the named in-memory database alive for the duration of the test.
+        try (final java.sql.Connection connection =
+                     java.sql.DriverManager.getConnection(url, "sa", "")) {
+            try (final java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS EVENTS (
+                          USER_ID VARCHAR(16) NOT NULL,
+                          SEQ BIGINT NOT NULL,
+                          AMOUNT BIGINT,
+                          PRIMARY KEY (USER_ID, SEQ)
+                        )""");
+                statement.execute("DELETE FROM EVENTS");
+                statement.execute("""
+                        INSERT INTO EVENTS VALUES
+                          ('u1', 1, 10), ('u1', 2, 20), ('u1', 3, 30),
+                          ('u2', 1, 5)""");
+            }
+
+            // The correlated LATERAL block: the key + range correlations become
+            // the batched fetch; COUNT/SUM run per key inside the DoFn. This
+            // exercises the full module path: Gson config parsing, Query2
+            // serialization into the DoFn, and worker-side setup of the lateral
+            // inner-plan evaluator.
+            final String configJson = """
+                    {
+                      "sources": [
+                        {
+                          "name": "users",
+                          "module": "create",
+                          "parameters": {
+                            "type": "element",
+                            "elements": [
+                              { "userId": "u1", "maxSeq": 2 },
+                              { "userId": "u2", "maxSeq": 9 },
+                              { "userId": "u9", "maxSeq": 9 }
+                            ]
+                          },
+                          "schema": {
+                            "fields": [
+                              { "name": "userId", "type": "string" },
+                              { "name": "maxSeq", "type": "int64" }
+                            ]
+                          }
+                        }
+                      ],
+                      "transforms": [
+                        {
+                          "name": "query",
+                          "module": "query",
+                          "inputs": ["users"],
+                          "parameters": {
+                            "sql": "SELECT i.userId AS userId, s.cnt AS cnt, s.total AS total FROM INPUT AS i JOIN LATERAL (SELECT COUNT(*) AS cnt, SUM(e.AMOUNT) AS total FROM db.EVENTS AS e WHERE e.USER_ID = i.userId AND e.SEQ >= 1 AND e.SEQ <= i.maxSeq) AS s ON TRUE",
+                            "sources": [
+                              {
+                                "name": "db",
+                                "type": "jdbc",
+                                "driver": "org.h2.Driver",
+                                "url": "%s",
+                                "user": "sa",
+                                "password": "",
+                                "tables": [
+                                  { "name": "EVENTS" }
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                    """.formatted(url);
+
+            final Config config = Config.load(configJson);
+            final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+            final MCollection output = outputs.get("query");
+            Assertions.assertNotNull(output);
+            Assertions.assertNotNull(output.getSchema().getField("cnt"));
+            Assertions.assertNotNull(output.getSchema().getField("total"));
+
+            PAssert.that(output.getCollection()).satisfies(elements -> {
+                final Map<String, MElement> byUser = new HashMap<>();
+                for(final MElement element : elements) {
+                    byUser.put(element.getAsString("userId"), element);
+                }
+                Assertions.assertEquals(3, byUser.size());
+                // u1: seq 1..2 → 2 rows, 10+20
+                Assertions.assertEquals(2L, byUser.get("u1").getAsLong("cnt"));
+                Assertions.assertEquals(30L, byUser.get("u1").getAsLong("total"));
+                // u2: seq 1..9 → 1 row, 5
+                Assertions.assertEquals(1L, byUser.get("u2").getAsLong("cnt"));
+                Assertions.assertEquals(5L, byUser.get("u2").getAsLong("total"));
+                // u9: no match → the aggregate over the empty set keeps the row
+                Assertions.assertEquals(0L, byUser.get("u9").getAsLong("cnt"));
+                Assertions.assertNull(byUser.get("u9").getPrimitiveValue("total"));
+                return null;
+            });
+
+            pipeline.run();
+        }
+    }
+
 }
