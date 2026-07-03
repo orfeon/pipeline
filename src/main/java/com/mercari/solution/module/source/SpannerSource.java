@@ -542,7 +542,7 @@ public class SpannerSource extends Source {
                     .withRpcPriority(parameters.priority);
 
             if(parameters.emulator) {
-                config = config.withEmulatorHost(ValueProvider.StaticValueProvider.of(SpannerUtil.SPANNER_HOST_EMULATOR));
+                config = config.withEmulatorHost(ValueProvider.StaticValueProvider.of(SpannerUtil.getEmulatorHost()));
             }
 
             final SpannerIO.Read read = SpannerIO.read()

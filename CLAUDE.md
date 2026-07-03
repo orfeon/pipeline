@@ -178,6 +178,9 @@ self-contained (parameters, examples) — the agent reads one file per module.
   `PAssert` → `pipeline.run()` (see `FilterTransformTest`).
 - Tests run in parallel (4 threads) via JUnit Platform config in the surefire plugin.
 - Coverage: JaCoCo runs with `mvn test`; report at `target/site/jacoco/index.html` (CSV/XML alongside).
+- Integration tests (`*IT.java`, Testcontainers emulators, requires Docker) are skipped by default:
+  `mvn verify -DskipITs=false -Djib.skip=true` (single class: add `-Dit.test=SpannerIT`).
+  Do NOT add a Maven profile for them — activating any profile deactivates the default dataflow profile.
 - CI: `.github/workflows/test.yml` runs `mvn test` on push/PR (JDK 21) and publishes the coverage summary/report.
 - Parameters that accept "text or local file path" must guard `Paths.get(text)` with try/catch —
   Windows throws `InvalidPathException` for strings with `\n`/`:` (see `Config.load`,

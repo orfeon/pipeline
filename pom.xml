@@ -53,6 +53,11 @@
     <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
     <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
     <testcontainers.version>1.20.4</testcontainers.version>
+    <!-- Emulator-based integration tests (*IT.java, requires Docker) are skipped by default.
+         Run with: mvn verify -DskipITs=false -Djib.skip=true
+         (A profile is deliberately NOT used here: activating any profile in this pom
+          would deactivate the activeByDefault dataflow profile.) -->
+    <skipITs>true</skipITs>
 
     <jetty.version>12.1.10</jetty.version>
     <mcp.version>2.0.0</mcp.version>
@@ -110,6 +115,25 @@
             </configurationParameters>
           </properties>
         </configuration>
+      </plugin>
+
+      <!-- Emulator-based integration tests (*IT.java). Skipped by default via the skipITs
+           property; run with: mvn verify -DskipITs=false -Djib.skip=true -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <version>${maven-surefire-plugin.version}</version>
+        <configuration>
+          <redirectTestOutputToFile>true</redirectTestOutputToFile>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
 
       <!-- Code coverage: HTML/XML/CSV report at target/site/jacoco/ after `mvn test` -->
@@ -485,39 +509,6 @@
           <version>${onnxruntime.version}</version>
         </dependency>
       </dependencies>
-    </profile>
-
-    <!-- Emulator-based integration tests (requires Docker).
-         Activated by property so the activeByDefault dataflow profile stays on:
-           mvn verify -Dit                      (all *IT.java)
-           mvn verify -Dit -Dit.test=SpannerIT  (single class)  -->
-    <profile>
-      <id>integration-test</id>
-      <activation>
-        <property>
-          <name>it</name>
-        </property>
-      </activation>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-failsafe-plugin</artifactId>
-            <version>${maven-surefire-plugin.version}</version>
-            <configuration>
-              <redirectTestOutputToFile>true</redirectTestOutputToFile>
-            </configuration>
-            <executions>
-              <execution>
-                <goals>
-                  <goal>integration-test</goal>
-                  <goal>verify</goal>
-                </goals>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
     </profile>
 
   </profiles>
