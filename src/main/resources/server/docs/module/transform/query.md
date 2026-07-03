@@ -29,6 +29,25 @@ A join between the input and a lookup table is executed as a key-driven read whe
 
 The right-hand side of each condition may be any expression over input columns **or a literal** (so a REST endpoint or header can be fixed in SQL). `INNER` and `LEFT` joins are supported. Key values are batched and deduplicated across the join, and one backend request is issued per batch (JDBC: one OR-of-tuples query; Spanner: one `read(KeySet)`; Bigtable: one multi-range `readRows`; REST: one HTTP call per **distinct** key tuple).
 
+### Correlated LATERAL blocks (per-key aggregation / top-N)
+
+The rows fetched for one key can be processed as a set *inside* the join, by writing the lookup as a correlated `LATERAL` subquery. The correlated conditions must satisfy the same key contract (they become the fetch); **everything else in the block — aggregation, `HAVING`, `DISTINCT`, uncorrelated filters, `ORDER BY` / `LIMIT` — is evaluated over the fetched per-key row set in memory, inside the DoFn** (compiled once per worker, never a shuffle):
+
+```sql
+SELECT i.userId, s.cnt, s.total
+FROM INPUT AS i
+JOIN LATERAL (
+  SELECT COUNT(*) AS cnt, SUM(e.amount) AS total
+  FROM db.EVENTS AS e
+  WHERE e.USER_ID = i.userId          -- key correlation → the fetch
+    AND e.SEQ >= i.since AND e.SEQ <= i.until   -- range correlation → bounds the fetch
+) AS s ON TRUE
+```
+
+- An aggregating block folds each key's set into one row (`COUNT(*) = 0` for a key that matches nothing, so the input row survives even with `JOIN`); a non-aggregating block fans out. `LEFT JOIN LATERAL ... ON TRUE` keeps the input row when the block yields no rows.
+- `ORDER BY` / `LIMIT` inside the block give per-input top-N.
+- Restrictions: the block must be a single `SELECT` over **one** lookup table; correlated conditions must sit in the `WHERE` directly over that table and fit the key contract (correlations in the select list or against non-key columns are not supported); the plain lookup-join is exactly the degenerate case with an identity block.
+
 Any other use of a lookup table — a standalone scan (`FROM db.table` without the key-join), a non-key join condition — fails at execution with an explanatory error; there is no silent fallback to a full scan.
 
 ## Limitations
@@ -243,6 +262,41 @@ transforms:
           password: secret
           tables:
             - name: ITEMS
+```
+
+### Per-key aggregation with a correlated LATERAL block
+
+The correlated conditions become the key-driven fetch (prefix equality + a range
+bounded by input columns); the aggregation runs over each key's fetched rows
+inside the DoFn. `ORDER BY`/`LIMIT` in the block would give per-input top-N the
+same way.
+
+```yaml
+transforms:
+  - name: stats
+    module: query
+    inputs: [users]
+    parameters:
+      sql: |
+        SELECT
+          i.userId AS userId,
+          s.purchases AS purchases,
+          s.total AS total
+        FROM
+          INPUT AS i
+        JOIN LATERAL (
+          SELECT COUNT(*) AS purchases, SUM(h.amount) AS total
+          FROM db.UserHistory AS h
+          WHERE h.UserId = i.userId
+            AND h.PurchasedAt >= i.since AND h.PurchasedAt <= i.until
+        ) AS s ON TRUE
+      sources:
+        - name: db
+          type: jdbc
+          driver: org.postgresql.Driver
+          url: jdbc:postgresql://localhost:5432/shop
+          tables:
+            - name: UserHistory
 ```
 
 ### Fan-out from Spanner history rows and fold per element

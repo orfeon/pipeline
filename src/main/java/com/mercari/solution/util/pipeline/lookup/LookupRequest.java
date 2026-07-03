@@ -68,4 +68,25 @@ public final class LookupRequest {
     public boolean upperInclusive() {
         return upperInclusive;
     }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof LookupRequest other)) {
+            return false;
+        }
+        return range == other.range
+                && lowerInclusive == other.lowerInclusive
+                && upperInclusive == other.upperInclusive
+                && prefix.equals(other.prefix)
+                && java.util.Objects.equals(lower, other.lower)
+                && java.util.Objects.equals(upper, other.upper);
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(prefix, lower, upper, lowerInclusive, upperInclusive, range);
+    }
 }

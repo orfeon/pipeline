@@ -4,20 +4,39 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.pipeline.lookup.LookupJoinRule;
+import com.mercari.solution.util.pipeline.lookup.LookupLateralJoin;
+import com.mercari.solution.util.pipeline.lookup.LookupLateralJoinRule;
+import com.mercari.solution.util.pipeline.lookup.LookupLateralRuntime;
 import com.mercari.solution.util.pipeline.lookup.LookupSchema;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
 import com.mercari.solution.util.schema.CalciteSchemaUtil;
 
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.DataContext;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.CalciteConnectionConfig;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.CalciteConnectionConfigImpl;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.CalciteConnectionProperty;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.Lex;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.CalciteSchema;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.Enumerable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.linq4j.Linq4j;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.ConventionTraitDef;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptCluster;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptPlanner;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptRule;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptTable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptUtil;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.hep.HepProgramBuilder;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.volcano.VolcanoPlanner;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.prepare.CalciteCatalogReader;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelCollationTraitDef;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelRoot;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexBuilder;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.Hook;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.ScannableTable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaPlus;
@@ -27,10 +46,14 @@ import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.Abs
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.impl.AbstractTable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlParser;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.FrameworkConfig;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.util.SqlOperatorTables;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlValidator;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.validate.SqlValidatorUtil;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql2rel.SqlToRelConverter;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql2rel.StandardConvertletTable;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.Frameworks;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.Planner;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.RelRunners;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -45,6 +68,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.function.Consumer;
 
 /**
@@ -97,9 +121,9 @@ public class Query2 implements Serializable {
     private final List<LookupSource> sources;
     private final Schema outputSchema;
 
-    private transient Planner planner;
     private transient PreparedStatement statement;
     private transient Map<String, List<MElement>> elements;
+    private transient List<LookupLateralRuntime> lateralRuntimes;
 
     private Query2(
             final Map<String, Schema> inputSchemas,
@@ -184,11 +208,11 @@ public class Query2 implements Serializable {
 
     /** Plans the SQL (with sources set up) and reads the result schema, without executing. */
     private Schema deriveOutputSchema() {
+        final List<LookupLateralRuntime> runtimes = new ArrayList<>();
         try {
             setupSources();
             final Map<String, List<MElement>> buffers = createBuffers();
-            try (final Planner p = createPlanner(buffers);
-                 final PreparedStatement s = prepare(p, sql)) {
+            try (final PreparedStatement s = prepare(createRootSchema(buffers), runtimes)) {
                 return CalciteSchemaUtil.convertSchema(s.getMetaData());
             }
         } catch (final RuntimeException e) {
@@ -196,6 +220,7 @@ public class Query2 implements Serializable {
         } catch (final Throwable e) {
             throw new IllegalArgumentException("failed to plan sql: " + sql, e);
         } finally {
+            closeLateralRuntimes(runtimes);
             closeSources();
         }
     }
@@ -204,16 +229,18 @@ public class Query2 implements Serializable {
     public void setup() {
         setupSources();
         this.elements = createBuffers();
-        this.planner = createPlanner(this.elements);
+        this.lateralRuntimes = new ArrayList<>();
         try {
-            this.statement = prepare(this.planner, sql);
+            this.statement = prepare(createRootSchema(this.elements), this.lateralRuntimes);
         } catch (final Throwable e) {
+            closeLateralRuntimes(this.lateralRuntimes);
+            this.lateralRuntimes = null;
             closeSources();
             throw new IllegalArgumentException("failed to prepare query: " + sql, e);
         }
     }
 
-    /** Releases the statement, planner and source clients. Call from {@code DoFn @Teardown}. */
+    /** Releases the statement, lateral evaluators and source clients. Call from {@code DoFn @Teardown}. */
     public void teardown() {
         try {
             if (this.statement != null && !this.statement.isClosed()) {
@@ -224,16 +251,22 @@ public class Query2 implements Serializable {
         } finally {
             this.statement = null;
         }
-        try {
-            if (this.planner != null) {
-                this.planner.close();
-            }
-        } catch (final Throwable e) {
-            LOG.error("failed to close planner for sql: {}", sql, e);
-        } finally {
-            this.planner = null;
+        if (this.lateralRuntimes != null) {
+            closeLateralRuntimes(this.lateralRuntimes);
+            this.lateralRuntimes = null;
         }
         closeSources();
+    }
+
+    private static void closeLateralRuntimes(final List<LookupLateralRuntime> runtimes) {
+        for (final LookupLateralRuntime runtime : runtimes) {
+            try {
+                runtime.close();
+            } catch (final Throwable e) {
+                LOG.error("failed to close lateral runtime", e);
+            }
+        }
+        runtimes.clear();
     }
 
     public List<MElement> execute(final MElement input, final Instant timestamp) {
@@ -300,48 +333,96 @@ public class Query2 implements Serializable {
         return buffers;
     }
 
-    private Planner createPlanner(final Map<String, List<MElement>> buffers) {
+    private SchemaPlus createRootSchema(final Map<String, List<MElement>> buffers) {
         final SchemaPlus rootSchema = Frameworks.createRootSchema(true);
-        final SchemaPlus defaultSchema =
-                rootSchema.add("DefaultSchema", new InputSchema(inputSchemas, buffers));
+        rootSchema.add("DefaultSchema", new InputSchema(inputSchemas, buffers));
         for (final LookupSource source : sources) {
             rootSchema.add(source.getName(), LookupSchema.of(source));
         }
+        return rootSchema;
+    }
+
+    /**
+     * Parses, validates, converts and prepares the SQL.
+     *
+     * <p>The SQL→rel front-end is hand-assembled (rather than the Frameworks
+     * {@code Planner}) so that <b>no decorrelation runs before our rules</b>:
+     * {@code PlannerImpl.rel} unconditionally decorrelates, which rewrites
+     * correlated LATERAL blocks over lookup tables into shapes that can no
+     * longer be answered by key-driven reads (value-generator joins that scan
+     * the external table). Here {@link LookupLateralJoinRule} claims those
+     * {@code Correlate}s first, in a Hep pre-pass; any remaining correlations
+     * (e.g. {@code UNNEST} over input arrays) are decorrelated later by the
+     * runner's standard program, as before.
+     *
+     * <p>The plain lookup-join rules of every registered source are installed
+     * both on the rel cluster's planner and via the thread-local
+     * {@code Hook.PLANNER} (covering whichever planner the runner uses),
+     * keeping concurrent instances isolated.
+     */
+    private PreparedStatement prepare(final SchemaPlus rootSchema,
+            final List<LookupLateralRuntime> runtimes) throws Exception {
+
+        final RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
+
+        final Properties properties = new Properties();
+        properties.setProperty(CalciteConnectionProperty.CASE_SENSITIVE.camelName(), "false");
+        final CalciteConnectionConfig connectionConfig = new CalciteConnectionConfigImpl(properties);
+        final CalciteCatalogReader catalogReader = new CalciteCatalogReader(
+                CalciteSchema.from(rootSchema), List.of("DefaultSchema"),
+                typeFactory, connectionConfig);
+
+        final SqlValidator validator = SqlValidatorUtil.newValidator(
+                SqlOperatorTables.chain(SqlStdOperatorTable.instance(), catalogReader),
+                catalogReader, typeFactory,
+                SqlValidator.Config.DEFAULT.withIdentifierExpansion(true));
+
         final SqlParser.Config parserConfig = SqlParser.configBuilder()
                 .setCaseSensitive(false)
                 .setLex(Lex.BIG_QUERY)
                 .build();
-        final FrameworkConfig config = Frameworks.newConfigBuilder()
-                .parserConfig(parserConfig)
-                .defaultSchema(defaultSchema)
-                .build();
-        return Frameworks.getPlanner(config);
-    }
+        final SqlNode parsed = SqlParser.create(sql, parserConfig).parseStmt();
+        final SqlNode validated = validator.validate(parsed);
 
-    /**
-     * Parses, validates and prepares the SQL. The lookup-join rules of every
-     * registered source are installed both on the rel cluster's planner and via
-     * the thread-local {@code Hook.PLANNER} (covering whichever planner the
-     * runner uses), keeping concurrent instances isolated.
-     */
-    private PreparedStatement prepare(final Planner p, final String sql) throws Exception {
-        final SqlNode parsed = p.parse(sql);
-        final SqlNode validated = p.validate(parsed);
-        final RelNode relNode = p.rel(validated).project();
+        final VolcanoPlanner volcano = new VolcanoPlanner();
+        volcano.addRelTraitDef(ConventionTraitDef.INSTANCE);
+        volcano.addRelTraitDef(RelCollationTraitDef.INSTANCE);
+        RelOptUtil.registerDefaultRules(volcano, false, false);
+        final RelOptCluster cluster = RelOptCluster.create(volcano, new RexBuilder(typeFactory));
+
+        final SqlToRelConverter converter = new SqlToRelConverter(
+                noopViewExpander(), validator, catalogReader, cluster,
+                StandardConvertletTable.INSTANCE,
+                SqlToRelConverter.config().withTrimUnusedFields(false).withExpand(false));
+        RelRoot root = converter.convertQuery(validated, false, true);
+        root = root.withRel(converter.flattenTypes(root.rel, true));
+        RelNode relNode = root.project();
 
         if (LOG.isDebugEnabled()) {
             LOG.debug("query plan for sql: {}\n{}", sql,
                     RelOptUtil.toString(relNode, SqlExplainLevel.EXPPLAN_ATTRIBUTES));
         }
 
+        if (sources.isEmpty()) {
+            return RelRunners.run(relNode);
+        }
+
+        // Hep pre-pass: claim correlated LATERAL blocks over lookup tables
+        // before any decorrelation can rewrite them.
+        final HepProgramBuilder hepProgram = new HepProgramBuilder();
+        for (final LookupSource source : sources) {
+            hepProgram.addRuleInstance(new LookupLateralJoinRule(source, runtimes));
+        }
+        final HepPlanner hepPlanner = new HepPlanner(hepProgram.build());
+        hepPlanner.setRoot(relNode);
+        relNode = hepPlanner.findBestExp();
+
         final List<RelOptRule> rules = new ArrayList<>();
         for (final LookupSource source : sources) {
             rules.add(new LookupJoinRule(source, false));
             rules.add(new LookupJoinRule(source, true));
         }
-        if (rules.isEmpty()) {
-            return RelRunners.run(relNode);
-        }
+        rules.add(LookupLateralJoin.CONVERTER_RULE);
         for (final RelOptRule rule : rules) {
             relNode.getCluster().getPlanner().addRule(rule);
         }
@@ -353,6 +434,12 @@ public class Query2 implements Serializable {
         try (Hook.Closeable ignored = Hook.PLANNER.addThread(registrar)) {
             return RelRunners.run(relNode);
         }
+    }
+
+    private static RelOptTable.ViewExpander noopViewExpander() {
+        return (rowType, queryString, schemaPath, viewPath) -> {
+            throw new UnsupportedOperationException("views are not supported");
+        };
     }
 
     /** Calcite schema holding the mutable in-memory input tables. */
