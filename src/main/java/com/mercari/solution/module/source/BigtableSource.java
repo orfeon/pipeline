@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 
 @Source.Module(name="bigtable")
@@ -59,6 +60,8 @@ public class BigtableSource extends Source {
         // performance tuning
         private String appProfileId;
         private Integer maxBufferElementCount;
+
+        private String emulatorHost;
 
 
         private void validate(final Mode mode) {
@@ -303,6 +306,13 @@ public class BigtableSource extends Source {
         if(parameters.filter != null && !parameters.filter.isJsonNull()) {
             final RowFilter rowFilter = BigtableUtil.createRowFilter(parameters.filter);
             read = read.withRowFilter(rowFilter);
+        }
+
+        final String emulatorHost = Optional
+                .ofNullable(parameters.emulatorHost)
+                .orElseGet(BigtableUtil::getEmulatorHost);
+        if(emulatorHost != null) {
+            read = read.withEmulator(emulatorHost);
         }
 
         return read;

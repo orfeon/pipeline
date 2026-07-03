@@ -5,6 +5,7 @@ import com.google.protobuf.ByteString;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
+import com.mercari.solution.util.cloud.google.BigtableUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.*;
 import freemarker.template.Template;
@@ -251,8 +252,11 @@ public class BigtableSink extends Sink {
         if(parameters.attemptTimeoutSecond != null) {
             write = write.withAttemptTimeout(Duration.standardSeconds(parameters.attemptTimeoutSecond));
         }
-        if(parameters.emulatorHost != null) {
-            write = write.withEmulator(parameters.emulatorHost);
+        final String emulatorHost = Optional
+                .ofNullable(parameters.emulatorHost)
+                .orElseGet(BigtableUtil::getEmulatorHost);
+        if(emulatorHost != null) {
+            write = write.withEmulator(emulatorHost);
         }
 
         errorHandler.apply(write);
