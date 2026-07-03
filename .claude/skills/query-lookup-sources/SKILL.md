@@ -154,10 +154,19 @@ and why it's wired the way it is:
   volcano `ConverterRule` to enumerable (`LookupLateralJoin.CONVERTER_RULE`);
   an enumerable rel with a logical child won't plan.
 - The matched block must be a single Project/Filter/Aggregate/Sort chain over
-  **one** lookup scan; correlated conjuncts sit in filters directly over the
-  scan and must fit the key contract (they become the fetch and are stripped);
-  everything else stays. Residual correlations (non-key input columns in the
-  block's WHERE/SELECT) are **not supported** — the rule declines.
+  **one** lookup scan (derived-table nesting inside the block flattens into
+  that chain and is fine); correlated conjuncts sit in filters directly over
+  the scan and must fit the key contract (they become the fetch and are
+  stripped); everything else stays. Residual correlations (non-key input
+  columns in the block's WHERE/SELECT) are **not supported** — the rule
+  declines.
+- Multiple LATERAL blocks per FROM work, but **each block may correlate to a
+  single source alias** — `SqlToRelConverter.getCorrelationUse` asserts "All
+  correlation variables should resolve to the same namespace" when one block
+  references two aliases (e.g. `i` and `s1`). This fails at conversion, before
+  our rule. Chain instead: wrap the earlier join in a derived table and
+  correlate the later block to that alias (test:
+  `testChainedLateralViaDerivedTable`).
 - The stripped block travels as **SQL text** (`RelToSqlConverter`, all
   identifiers double-quoted) and is compiled once per worker by
   `LookupLateralRuntime` against a mutable buffer table registered under the

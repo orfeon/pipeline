@@ -288,8 +288,15 @@ public class JdbcLookupSource extends LookupSource {
             final DatabaseMetaData databaseMeta = connection.getMetaData();
             final String quoteString = databaseMeta.getIdentifierQuoteString();
             this.quote = quoteString == null || quoteString.isBlank() ? "\"" : quoteString.trim();
+            // Restrict metadata lookups to the connection's own catalog/schema:
+            // an unqualified table name would otherwise match same-named tables
+            // in other schemas too (e.g. H2's INFORMATION_SCHEMA.USERS), merging
+            // foreign columns into the derived schema.
+            final String catalog = connection.getCatalog();
+            final String defaultSchema = connection.getSchema();
             for (final TableConfig table : tables) {
-                derived.put(table.name(), readTableMeta(databaseMeta, table));
+                derived.put(table.name(),
+                        readTableMeta(databaseMeta, table, catalog, defaultSchema));
             }
         } catch (SQLException e) {
             throw new IllegalStateException(
@@ -298,16 +305,16 @@ public class JdbcLookupSource extends LookupSource {
         this.meta = derived;
     }
 
-    private static TableMeta readTableMeta(DatabaseMetaData databaseMeta, TableConfig table)
-            throws SQLException {
+    private static TableMeta readTableMeta(DatabaseMetaData databaseMeta, TableConfig table,
+            String catalog, String defaultSchema) throws SQLException {
         final String physical = table.table();
         final int dot = physical.indexOf('.');
-        final String schemaPattern = dot < 0 ? null : physical.substring(0, dot);
+        final String schemaPattern = dot < 0 ? defaultSchema : physical.substring(0, dot);
         final String tableName = dot < 0 ? physical : physical.substring(dot + 1);
 
         final Schema.Builder schemaBuilder = Schema.builder();
         int columnCount = 0;
-        try (ResultSet rs = databaseMeta.getColumns(null, schemaPattern, tableName, null)) {
+        try (ResultSet rs = databaseMeta.getColumns(catalog, schemaPattern, tableName, null)) {
             while (rs.next()) {
                 schemaBuilder.withField(rs.getString("COLUMN_NAME"),
                         toFieldType(rs.getInt("DATA_TYPE")));
@@ -318,13 +325,14 @@ public class JdbcLookupSource extends LookupSource {
             throw new IllegalStateException("JDBC table not found for lookup: " + physical);
         }
 
-        final List<String> primaryKey = primaryKey(databaseMeta, schemaPattern, tableName);
+        final List<String> primaryKey =
+                primaryKey(databaseMeta, catalog, schemaPattern, tableName);
         final List<LookupKey> candidates = new ArrayList<>();
         if (!primaryKey.isEmpty()) {
             candidates.add(LookupKey.primaryKey(primaryKey));
         }
         for (final Map.Entry<String, List<String>> index
-                : uniqueIndexes(databaseMeta, schemaPattern, tableName).entrySet()) {
+                : uniqueIndexes(databaseMeta, catalog, schemaPattern, tableName).entrySet()) {
             if (!index.getValue().equals(primaryKey)) { // skip the index backing the PK
                 candidates.add(LookupKey.index(index.getKey(), index.getValue()));
             }
@@ -332,12 +340,12 @@ public class JdbcLookupSource extends LookupSource {
         return new TableMeta(physical, schemaBuilder.build(), candidates);
     }
 
-    private static List<String> primaryKey(DatabaseMetaData meta, String schema, String table)
-            throws SQLException {
+    private static List<String> primaryKey(DatabaseMetaData meta, String catalog, String schema,
+            String table) throws SQLException {
         // KEY_SEQ orders the key columns; collect then sort by it.
         final List<int[]> seqIndex = new ArrayList<>();
         final List<String> cols = new ArrayList<>();
-        try (ResultSet rs = meta.getPrimaryKeys(null, schema, table)) {
+        try (ResultSet rs = meta.getPrimaryKeys(catalog, schema, table)) {
             int i = 0;
             while (rs.next()) {
                 cols.add(rs.getString("COLUMN_NAME"));
@@ -353,11 +361,11 @@ public class JdbcLookupSource extends LookupSource {
     }
 
     /** Unique secondary indexes: index name → columns in ORDINAL_POSITION order. */
-    private static Map<String, List<String>> uniqueIndexes(DatabaseMetaData meta, String schema,
-            String table) throws SQLException {
+    private static Map<String, List<String>> uniqueIndexes(DatabaseMetaData meta, String catalog,
+            String schema, String table) throws SQLException {
         final Map<String, List<int[]>> orderByIndex = new LinkedHashMap<>();
         final Map<String, List<String>> colsByIndex = new LinkedHashMap<>();
-        try (ResultSet rs = meta.getIndexInfo(null, schema, table, true, true)) {
+        try (ResultSet rs = meta.getIndexInfo(catalog, schema, table, true, true)) {
             while (rs.next()) {
                 if (rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic) {
                     continue;

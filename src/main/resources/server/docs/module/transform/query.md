@@ -46,7 +46,20 @@ JOIN LATERAL (
 
 - An aggregating block folds each key's set into one row (`COUNT(*) = 0` for a key that matches nothing, so the input row survives even with `JOIN`); a non-aggregating block fans out. `LEFT JOIN LATERAL ... ON TRUE` keeps the input row when the block yields no rows.
 - `ORDER BY` / `LIMIT` inside the block give per-input top-N.
-- Restrictions: the block must be a single `SELECT` over **one** lookup table; correlated conditions must sit in the `WHERE` directly over that table and fit the key contract (correlations in the select list or against non-key columns are not supported); the plain lookup-join is exactly the degenerate case with an identity block.
+- Restrictions: the block must be a single `SELECT` over **one** lookup table (derived-table nesting inside the block is fine — it flattens); correlated conditions must sit in the `WHERE` directly over that table and fit the key contract (correlations in the select list or against non-key columns are not supported); the plain lookup-join is exactly the degenerate case with an identity block.
+- Multiple LATERAL blocks in one `FROM` are supported, but each block may correlate to **one source alias only** (a Calcite converter limitation — one block referencing e.g. both `i` and `s1` fails to plan). To feed an earlier block's output into a later block's key, wrap the earlier join in a derived table and correlate to that alias:
+
+```sql
+SELECT b.uid, s2.amount
+FROM (
+  SELECT i.userId AS uid, s1.maxSeq AS maxSeq
+  FROM INPUT AS i
+  JOIN LATERAL (SELECT MAX(e.SEQ) AS maxSeq FROM db.EVENTS AS e
+                WHERE e.USER_ID = i.userId) AS s1 ON TRUE
+) AS b
+JOIN LATERAL (SELECT e2.AMOUNT AS amount FROM db.EVENTS AS e2
+              WHERE e2.USER_ID = b.uid AND e2.SEQ = b.maxSeq) AS s2 ON TRUE
+```
 
 Any other use of a lookup table — a standalone scan (`FROM db.table` without the key-join), a non-key join condition — fails at execution with an explanatory error; there is no silent fallback to a full scan.
 

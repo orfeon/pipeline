@@ -301,6 +301,162 @@ public class Query2LateralTest {
     }
 
     @Test
+    public void testMultipleLateralBlocksInOneFrom() {
+        // Several LATERAL blocks in one FROM are fine as long as each block
+        // correlates to a single source (here both to i) — a Calcite
+        // SqlToRelConverter limitation forbids one block referencing two
+        // different namespaces (e.g. i AND s1); chain via a derived table for
+        // that (see the chained test).
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").withTable("USERS").build())
+                .withSql("""
+                        SELECT
+                          i.userId AS userId,
+                          s1.maxSeq AS maxSeq,
+                          s2.name AS name
+                        FROM INPUT AS i
+                        JOIN LATERAL (
+                          SELECT MAX(e.SEQ) AS maxSeq
+                          FROM db.EVENTS AS e
+                          WHERE e.USER_ID = i.userId
+                        ) AS s1 ON TRUE
+                        JOIN LATERAL (
+                          SELECT u.NAME AS name
+                          FROM db.USERS AS u
+                          WHERE u.USER_ID = i.userId
+                        ) AS s2 ON TRUE
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, 0L)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            final MElement output = outputs.getFirst();
+            Assertions.assertEquals(3L, output.getAsLong("maxSeq"));
+            Assertions.assertEquals("alice", output.getAsString("name"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testChainedLateralViaDerivedTable() {
+        // A later block may use an earlier block's output by wrapping the first
+        // join in a derived table, so the block correlates to that single
+        // namespace — here a composite-key point lookup (USER_ID, SEQ) whose
+        // SEQ comes from the first block's aggregate.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        SELECT b.uid AS uid, b.maxSeq AS maxSeq, s2.amount AS lastAmount
+                        FROM (
+                          SELECT i.userId AS uid, s1.maxSeq AS maxSeq
+                          FROM INPUT AS i
+                          JOIN LATERAL (
+                            SELECT MAX(e.SEQ) AS maxSeq
+                            FROM db.EVENTS AS e
+                            WHERE e.USER_ID = i.userId
+                          ) AS s1 ON TRUE
+                        ) AS b
+                        JOIN LATERAL (
+                          SELECT e2.AMOUNT AS amount
+                          FROM db.EVENTS AS e2
+                          WHERE e2.USER_ID = b.uid AND e2.SEQ = b.maxSeq
+                        ) AS s2 ON TRUE
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, 0L), input(2L, 0L, 0L)), TIMESTAMP);
+            Assertions.assertEquals(2, outputs.size());
+            final Map<Long, MElement> byUser = new HashMap<>();
+            for (final MElement output : outputs) {
+                byUser.put(output.getAsLong("uid"), output);
+            }
+            Assertions.assertEquals(30L, byUser.get(1L).getAsLong("lastAmount")); // seq 3
+            Assertions.assertEquals(50L, byUser.get(2L).getAsLong("lastAmount")); // seq 2
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testNestedDerivedTablesInsideLateral() {
+        // FROM-subquery nesting inside the block flattens to a single
+        // Project/Filter/Aggregate chain over the one lookup scan — supported
+        // at any depth (two levels here).
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        SELECT i.userId AS userId, s.total AS total
+                        FROM INPUT AS i
+                        JOIN LATERAL (
+                          SELECT SUM(t2.a4) AS total
+                          FROM (
+                            SELECT t1.a2 * 2 AS a4
+                            FROM (
+                              SELECT e.AMOUNT * 2 AS a2
+                              FROM db.EVENTS AS e
+                              WHERE e.USER_ID = i.userId AND e.CATEGORY = 'a'
+                            ) AS t1
+                          ) AS t2
+                        ) AS s ON TRUE
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, 0L)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            // category 'a' amounts for user1: 10, 30 → (10+30) * 4 = 160
+            Assertions.assertEquals(160L, outputs.getFirst().getAsLong("total"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testCteAndDerivedTableOutsideLateral() {
+        // Outside the block, ordinary SQL nesting (WITH / derived tables) is
+        // unrestricted; the lateral applies to the derived input rows.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        WITH base AS (
+                          SELECT userId, lo FROM INPUT WHERE userId >= 1
+                        )
+                        SELECT b.uid AS uid, s.cnt AS cnt
+                        FROM (SELECT userId AS uid, lo FROM base) AS b
+                        JOIN LATERAL (
+                          SELECT COUNT(*) AS cnt
+                          FROM db.EVENTS AS e
+                          WHERE e.USER_ID = b.uid
+                        ) AS s ON TRUE
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, 0L), input(2L, 0L, 0L)), TIMESTAMP);
+            Assertions.assertEquals(2, outputs.size());
+            final Map<Long, MElement> byUser = new HashMap<>();
+            for (final MElement output : outputs) {
+                byUser.put(output.getAsLong("uid"), output);
+            }
+            Assertions.assertEquals(3L, byUser.get(1L).getAsLong("cnt"));
+            Assertions.assertEquals(2L, byUser.get(2L).getAsLong("cnt"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testUdfInsideLateralBlock() {
         // A UDF referenced inside the block travels through the generated inner
         // SQL and resolves in the per-block evaluator.
