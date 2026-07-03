@@ -575,6 +575,14 @@
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-kafka</artifactId>
     </dependency>
+    <!-- beam-sdks-java-io-kafka declares kafka-clients as provided, so the runtime
+         dependency must be supplied here for the kafka source module to work at all
+         (KafkaIO fails with NoClassDefFoundError without it). -->
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>3.9.1</version>
+    </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-io-rrio -->
     <dependency>
