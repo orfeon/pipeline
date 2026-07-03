@@ -9,6 +9,7 @@ import com.mercari.solution.util.pipeline.lookup.LookupLateralJoinRule;
 import com.mercari.solution.util.pipeline.lookup.LookupLateralRuntime;
 import com.mercari.solution.util.pipeline.lookup.LookupSchema;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
+import com.mercari.solution.util.pipeline.udf.UserDefinedFunctions;
 import com.mercari.solution.util.schema.CalciteSchemaUtil;
 
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.DataContext;
@@ -119,6 +120,7 @@ public class Query2 implements Serializable {
     private final String sql;
     private final Map<String, Schema> inputSchemas;
     private final List<LookupSource> sources;
+    private final List<UserDefinedFunctions.FunctionSpec> functions;
     private final Schema outputSchema;
 
     private transient PreparedStatement statement;
@@ -128,6 +130,7 @@ public class Query2 implements Serializable {
     private Query2(
             final Map<String, Schema> inputSchemas,
             final List<LookupSource> sources,
+            final List<UserDefinedFunctions.FunctionSpec> functions,
             final String sql) {
 
         if (sql == null || sql.isEmpty()) {
@@ -139,6 +142,7 @@ public class Query2 implements Serializable {
         this.sql = sql;
         this.inputSchemas = new LinkedHashMap<>(inputSchemas);
         this.sources = sources == null ? List.of() : List.copyOf(sources);
+        this.functions = functions == null ? List.of() : List.copyOf(functions);
         this.outputSchema = deriveOutputSchema();
     }
 
@@ -155,7 +159,7 @@ public class Query2 implements Serializable {
     }
 
     public static Query2 of(final Map<String, Schema> inputSchemas, final String sql) {
-        return new Query2(inputSchemas, List.of(), sql);
+        return new Query2(inputSchemas, List.of(), List.of(), sql);
     }
 
     public static Builder builder() {
@@ -167,6 +171,7 @@ public class Query2 implements Serializable {
 
         private final Map<String, Schema> inputSchemas = new LinkedHashMap<>();
         private final List<LookupSource> sources = new ArrayList<>();
+        private final List<UserDefinedFunctions.FunctionSpec> functions = new ArrayList<>();
         private String sql;
 
         public Builder withInput(final String name, final Schema schema) {
@@ -192,13 +197,34 @@ public class Query2 implements Serializable {
             return this;
         }
 
+        /**
+         * Registers a scalar UDF: every public static overload of
+         * {@code clazz.methodName}. Use an UPPERCASE name (see
+         * {@link UserDefinedFunctions}).
+         */
+        public Builder withScalarFunction(final String name, final Class<?> clazz,
+                final String methodName) {
+            this.functions.add(UserDefinedFunctions.scalar(name, clazz, methodName));
+            return this;
+        }
+
+        /**
+         * Registers an aggregate UDF (UDAF): {@code clazz} follows Calcite's
+         * accumulator convention — {@code A init()}, {@code A add(A, V...)},
+         * optional {@code A merge(A, A)}, {@code R result(A)}.
+         */
+        public Builder withAggregateFunction(final String name, final Class<?> clazz) {
+            this.functions.add(UserDefinedFunctions.aggregate(name, clazz));
+            return this;
+        }
+
         public Builder withSql(final String sql) {
             this.sql = sql;
             return this;
         }
 
         public Query2 build() {
-            return new Query2(inputSchemas, sources, sql);
+            return new Query2(inputSchemas, sources, functions, sql);
         }
     }
 
@@ -335,7 +361,14 @@ public class Query2 implements Serializable {
 
     private SchemaPlus createRootSchema(final Map<String, List<MElement>> buffers) {
         final SchemaPlus rootSchema = Frameworks.createRootSchema(true);
-        rootSchema.add("DefaultSchema", new InputSchema(inputSchemas, buffers));
+        final SchemaPlus defaultSchema =
+                rootSchema.add("DefaultSchema", new InputSchema(inputSchemas, buffers));
+        for (final Map.Entry<String, List<org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function>> entry
+                : UserDefinedFunctions.build(functions).entrySet()) {
+            for (final var function : entry.getValue()) {
+                defaultSchema.add(entry.getKey(), function);
+            }
+        }
         for (final LookupSource source : sources) {
             rootSchema.add(source.getName(), LookupSchema.of(source));
         }
@@ -411,7 +444,7 @@ public class Query2 implements Serializable {
         // before any decorrelation can rewrite them.
         final HepProgramBuilder hepProgram = new HepProgramBuilder();
         for (final LookupSource source : sources) {
-            hepProgram.addRuleInstance(new LookupLateralJoinRule(source, runtimes));
+            hepProgram.addRuleInstance(new LookupLateralJoinRule(source, runtimes, functions));
         }
         final HepPlanner hepPlanner = new HepPlanner(hepProgram.build());
         hepPlanner.setRoot(relNode);

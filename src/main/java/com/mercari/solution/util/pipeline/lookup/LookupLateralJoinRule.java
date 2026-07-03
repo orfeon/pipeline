@@ -70,16 +70,21 @@ public final class LookupLateralJoinRule extends RelOptRule {
 
     private final LookupSource source;
     private final List<LookupLateralRuntime> runtimes;
+    private final List<com.mercari.solution.util.pipeline.udf.UserDefinedFunctions.FunctionSpec> functions;
 
     /**
-     * @param runtimes collector for the created per-block evaluators; the caller
-     *                 owns their lifecycle and must close them on teardown
+     * @param runtimes  collector for the created per-block evaluators; the caller
+     *                  owns their lifecycle and must close them on teardown
+     * @param functions UDFs to register in the per-block evaluator (so the block
+     *                  may reference them)
      */
-    public LookupLateralJoinRule(LookupSource source, List<LookupLateralRuntime> runtimes) {
+    public LookupLateralJoinRule(LookupSource source, List<LookupLateralRuntime> runtimes,
+            List<com.mercari.solution.util.pipeline.udf.UserDefinedFunctions.FunctionSpec> functions) {
         super(operand(LogicalCorrelate.class, any()),
                 "LookupLateralJoinRule:" + source.getName());
         this.source = source;
         this.runtimes = runtimes;
+        this.functions = functions;
     }
 
     @Override
@@ -228,7 +233,7 @@ public final class LookupLateralJoinRule extends RelOptRule {
         }
 
         final LookupLateralRuntime runtime = LookupLateralRuntime.create(
-                source.getName(), tableName, leafSchema, innerSql, innerColumnTypes);
+                source.getName(), tableName, leafSchema, innerSql, innerColumnTypes, functions);
         runtimes.add(runtime);
 
         final int[] leafKeyPos = new int[analysis.range ? prefixLength + 1 : prefixLength];

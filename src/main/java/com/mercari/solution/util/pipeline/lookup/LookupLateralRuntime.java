@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline.lookup;
 
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.udf.UserDefinedFunctions;
 import com.mercari.solution.util.schema.CalciteSchemaUtil;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.DataContext;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.util.ByteString;
@@ -76,19 +77,22 @@ public final class LookupLateralRuntime implements AutoCloseable {
     private final Schema leafSchema;
     private final String innerSql;
     private final List<String> innerColumnTypes;
+    private final List<UserDefinedFunctions.FunctionSpec> functions;
 
     private List<Object[]> buffer;
     private Planner planner;
     private PreparedStatement statement;
 
     private LookupLateralRuntime(String schemaName, String tableName, Schema leafSchema,
-            String innerSql, List<String> innerColumnTypes) {
+            String innerSql, List<String> innerColumnTypes,
+            List<UserDefinedFunctions.FunctionSpec> functions) {
         this.id = IDS.incrementAndGet();
         this.schemaName = schemaName;
         this.tableName = tableName;
         this.leafSchema = leafSchema;
         this.innerSql = innerSql;
         this.innerColumnTypes = List.copyOf(innerColumnTypes);
+        this.functions = functions == null ? List.of() : List.copyOf(functions);
         RUNTIMES.put(id, this);
     }
 
@@ -98,11 +102,13 @@ public final class LookupLateralRuntime implements AutoCloseable {
      * @param leafSchema       the leaf table's row schema (buffer table row type)
      * @param innerSql         the stripped inner plan as SQL over {@code schemaName.tableName}
      * @param innerColumnTypes SqlTypeName names of the inner result columns, in order
+     * @param functions        UDFs the inner plan may reference
      */
     public static LookupLateralRuntime create(String schemaName, String tableName,
-            Schema leafSchema, String innerSql, List<String> innerColumnTypes) {
+            Schema leafSchema, String innerSql, List<String> innerColumnTypes,
+            List<UserDefinedFunctions.FunctionSpec> functions) {
         return new LookupLateralRuntime(
-                schemaName, tableName, leafSchema, innerSql, innerColumnTypes);
+                schemaName, tableName, leafSchema, innerSql, innerColumnTypes, functions);
     }
 
     public long id() {
@@ -146,6 +152,13 @@ public final class LookupLateralRuntime implements AutoCloseable {
         final SchemaPlus rootSchema = Frameworks.createRootSchema(true);
         rootSchema.add(schemaName,
                 new BufferSchema(tableName, new BufferTable(leafSchema, buffer)));
+        // UDFs referenced inside the block resolve against the root (default) schema.
+        for (final Map.Entry<String, List<org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function>> entry
+                : UserDefinedFunctions.build(functions).entrySet()) {
+            for (final var function : entry.getValue()) {
+                rootSchema.add(entry.getKey(), function);
+            }
+        }
         // The inner SQL is generated with every identifier double-quoted, so it
         // parses case-sensitively regardless of the outer query's lex.
         final SqlParser.Config parserConfig = SqlParser.configBuilder()

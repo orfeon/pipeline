@@ -316,4 +316,111 @@ public class Query2Test {
         }
         return String.valueOf(t.getMessage());
     }
+
+    /** Host of a scalar UDF (public static overloads become SQL overloads). */
+    public static class TestUdfs {
+
+        public static long scale(long value, long factor) {
+            return value * factor;
+        }
+
+        public static double scale(double value, long factor) {
+            return value * factor;
+        }
+    }
+
+    /** Aggregate UDF following Calcite's accumulator convention. */
+    public static class SumOfSquares {
+
+        public long init() {
+            return 0L;
+        }
+
+        public long add(long accumulator, long value) {
+            return accumulator + value * value;
+        }
+
+        public long merge(long a, long b) {
+            return a + b;
+        }
+
+        public long result(long accumulator) {
+            return accumulator;
+        }
+    }
+
+    @Test
+    public void testScalarUdf() {
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withScalarFunction("SCALE_", TestUdfs.class, "scale")
+                .withSql("SELECT userId, SCALE_(qty, 10) AS scaled FROM INPUT")
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(MElement.of(Map.of("userId", 1L, "qty", 3L), TIMESTAMP)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals(30L, outputs.getFirst().getAsLong("scaled"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testAggregateUdf() {
+        final Schema schema = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.STRING),
+                Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("category", Schema.FieldType.STRING),
+                        Schema.Field.of("amount", Schema.FieldType.INT64)))))));
+        final Query2 query = Query2.builder()
+                .withInput("MyTable", schema)
+                .withAggregateFunction("SUM_OF_SQUARES", SumOfSquares.class)
+                .withSql("""
+                        SELECT userId, SUM_OF_SQUARES(e.amount) AS ss
+                        FROM MyTable, UNNEST(events) AS e
+                        GROUP BY userId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final MElement input = MElement.of(Map.of(
+                    "userId", "u1",
+                    "events", List.of(
+                            Map.of("category", "a", "amount", 2L),
+                            Map.of("category", "b", "amount", 3L))), TIMESTAMP);
+            final List<MElement> outputs =
+                    query.execute(Map.of("MyTable", List.of(input)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals(13L, outputs.getFirst().getAsLong("ss")); // 4 + 9
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testBuiltinCurrentDateFunction() {
+        // Parity with the old Query core: CURRENT_DATE_ is registered by default.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSql("SELECT userId, CURRENT_DATE_('Asia/Tokyo') AS today FROM INPUT")
+                .build();
+        Assertions.assertEquals(Schema.Type.date,
+                query.getOutputSchema().getField("today").getFieldType().getType());
+        query.setup();
+        try {
+            final long before = java.time.LocalDate.now(
+                    java.time.ZoneId.of("Asia/Tokyo")).toEpochDay();
+            final List<MElement> outputs = query.execute(
+                    List.of(MElement.of(Map.of("userId", 1L, "qty", 1L), TIMESTAMP)), TIMESTAMP);
+            final long after = java.time.LocalDate.now(
+                    java.time.ZoneId.of("Asia/Tokyo")).toEpochDay();
+            final int today = (Integer) outputs.getFirst().getPrimitiveValue("today");
+            Assertions.assertTrue(today >= before && today <= after,
+                    "unexpected epoch day: " + today);
+        } finally {
+            query.teardown();
+        }
+    }
 }

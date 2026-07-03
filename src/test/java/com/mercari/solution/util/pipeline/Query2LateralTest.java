@@ -300,6 +300,35 @@ public class Query2LateralTest {
         }
     }
 
+    @Test
+    public void testUdfInsideLateralBlock() {
+        // A UDF referenced inside the block travels through the generated inner
+        // SQL and resolves in the per-block evaluator.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withScalarFunction("SCALE_", Query2Test.TestUdfs.class, "scale")
+                .withSql("""
+                        SELECT i.userId AS userId, s.total AS total
+                        FROM INPUT AS i
+                        JOIN LATERAL (
+                          SELECT SUM(SCALE_(e.AMOUNT, 2)) AS total
+                          FROM db.EVENTS AS e
+                          WHERE e.USER_ID = i.userId
+                        ) AS s ON TRUE
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, 0L)), TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals(120L, outputs.getFirst().getAsLong("total")); // 2*(10+20+30)
+        } finally {
+            query.teardown();
+        }
+    }
+
     private static Map<Long, MElement> collectByUser(final List<MElement> outputs) {
         final Map<Long, MElement> byUser = new HashMap<>();
         for (final MElement output : outputs) {
