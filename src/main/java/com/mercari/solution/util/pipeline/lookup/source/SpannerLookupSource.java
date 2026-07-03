@@ -19,6 +19,7 @@ import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupKey;
 import com.mercari.solution.util.pipeline.lookup.LookupRequest;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
+import com.mercari.solution.util.pipeline.lookup.PerKeyLookup;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.avatica.util.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,43 +29,154 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Cloud Spanner-backed {@link LookupSource} using the native client's key-driven
+ * Cloud Spanner-backed {@link LookupSource} exposing two kinds of tables:
+ *
+ * <p><b>Native tables</b> use the client's key-driven
  * {@code read(table, KeySet, columns)} — the natural fit for the lookup-join:
  * point keys become {@link Key}s and prefix+range requests become
  * {@link KeyRange}s, both in one {@link KeySet}. Unique secondary indexes are
  * answered with a two-step {@code readUsingIndex} (index → base primary keys →
- * full rows) inside one read-only snapshot.
+ * full rows) inside one read-only snapshot. Table metadata (columns, primary
+ * key, unique indexes) is derived once from {@code INFORMATION_SCHEMA} — at
+ * pipeline construction time — and serialized with the source. Columns of
+ * unsupported types (ARRAY / STRUCT / TOKENLIST) are skipped with a warning.
  *
- * <p>Table metadata (columns, primary key, unique indexes) is derived once from
- * {@code INFORMATION_SCHEMA} — at pipeline construction time — and serialized with
- * the source. Columns of unsupported types (ARRAY / STRUCT / TOKENLIST) are
- * skipped with a warning.
+ * <p><b>Query tables</b> expose a caller-supplied <em>parameterized GoogleSQL or
+ * GQL statement</em> as a synthetic key-driven table — the generic "input key →
+ * parameterized query → rows" shape behind Spanner Graph traversals and
+ * full-text search. The statement binds one parameter and returns the join-key
+ * column; two binding strategies cover the two backend shapes
+ * ({@link BindMode}): {@code ARRAY} binds the batch's distinct keys to one
+ * array parameter and runs the statement once per batch (graph's
+ * {@code WHERE n.id IN UNNEST(@keys)}), {@code PER_KEY} runs it once per
+ * distinct key binding a scalar (search's {@code SEARCH(tokens, @query)},
+ * which has no array form). The statement never goes through Calcite. The
+ * result schema is given explicitly or derived by dry-running the statement
+ * through {@code analyzeQuery(PLAN)}. Only point equality on the (single) key
+ * column is supported.
  */
 public class SpannerLookupSource extends LookupSource {
 
     private static final Logger LOG = LoggerFactory.getLogger(SpannerLookupSource.class);
 
-    private record TableConfig(String name, String table) implements Serializable {
+    /** How a query table binds the lookup keys to its statement parameter. */
+    public enum BindMode {
+        /** Bind the batch's distinct keys to one array param; run the statement once. */
+        ARRAY,
+        /** Run the statement once per distinct key, binding a scalar param. */
+        PER_KEY
     }
 
-    /** Serializable per-table metadata derived from INFORMATION_SCHEMA. */
+    private record TableConfig(String name, String table, QueryTableConfig query)
+            implements Serializable {
+    }
+
+    /** Configuration of one query table (a parameterized GoogleSQL/GQL statement). */
+    public static class QueryTableConfig implements Serializable {
+
+        private final String name;
+        private final String sql;
+        private final String keyField;
+        private final String paramName;
+        private final BindMode bindMode;
+        private final Schema fields;   // null = derive via analyzeQuery(PLAN)
+
+        private QueryTableConfig(QueryTableBuilder builder) {
+            this.name = Objects.requireNonNull(builder.name, "query table name must not be null");
+            this.sql = Objects.requireNonNull(builder.sql, "query table sql must not be null");
+            this.keyField = Objects.requireNonNull(builder.keyField,
+                    "query table keyField must not be null");
+            this.paramName = builder.paramName;
+            this.bindMode = builder.bindMode;
+            this.fields = builder.fields;
+            if (!sql.contains("@" + paramName)) {
+                throw new IllegalArgumentException("query of spanner query table '" + name
+                        + "' must reference the bind parameter '@" + paramName + "'");
+            }
+            if (fields != null && fieldIndex(fields, keyField) < 0) {
+                throw new IllegalArgumentException("fields of spanner query table '" + name
+                        + "' must contain the key field '" + keyField + "'");
+            }
+        }
+    }
+
+    public static QueryTableBuilder queryTable() {
+        return new QueryTableBuilder();
+    }
+
+    public static class QueryTableBuilder {
+
+        private String name;
+        private String sql;
+        private String keyField;
+        private String paramName = "keys";
+        private BindMode bindMode = BindMode.ARRAY;
+        private Schema fields;
+
+        public QueryTableBuilder withName(String name) {
+            this.name = name;
+            return this;
+        }
+
+        /** The parameterized GoogleSQL/GQL statement; must reference {@code @<paramName>}. */
+        public QueryTableBuilder withSql(String sql) {
+            this.sql = sql;
+            return this;
+        }
+
+        /** The join-key column; the statement must return it (so rows join back). */
+        public QueryTableBuilder withKeyField(String keyField) {
+            this.keyField = keyField;
+            return this;
+        }
+
+        public QueryTableBuilder withParamName(String paramName) {
+            this.paramName = paramName;
+            return this;
+        }
+
+        public QueryTableBuilder withBindMode(BindMode bindMode) {
+            this.bindMode = bindMode;
+            return this;
+        }
+
+        /** Result columns; omit to derive them via {@code analyzeQuery(PLAN)}. */
+        public QueryTableBuilder withFields(List<Schema.Field> fields) {
+            this.fields = Schema.of(fields);
+            return this;
+        }
+
+        public QueryTableConfig build() {
+            return new QueryTableConfig(this);
+        }
+    }
+
+    /**
+     * Serializable per-table metadata: derived from INFORMATION_SCHEMA for
+     * native tables, from the config / {@code analyzeQuery} for query tables.
+     */
     private static class TableMeta implements Serializable {
 
-        private final String physicalTable;
+        private final String physicalTable;    // null for query tables
+        private final QueryTableConfig query;  // null for native tables
         private final Schema schema;
         private final List<String> spannerTypes;  // base type per column (INT64, STRING, ...)
         private final List<LookupKey> keyCandidates;
         private final List<String> primaryKey;
 
-        private TableMeta(String physicalTable, Schema schema, List<String> spannerTypes,
-                List<LookupKey> keyCandidates, List<String> primaryKey) {
+        private TableMeta(String physicalTable, QueryTableConfig query, Schema schema,
+                List<String> spannerTypes, List<LookupKey> keyCandidates,
+                List<String> primaryKey) {
             this.physicalTable = physicalTable;
+            this.query = query;
             this.schema = schema;
             this.spannerTypes = spannerTypes;
             this.keyCandidates = keyCandidates;
@@ -72,17 +184,25 @@ public class SpannerLookupSource extends LookupSource {
         }
 
         private int columnIndex(String name) {
-            for (int i = 0; i < schema.countFields(); i++) {
-                if (schema.getField(i).getName().equals(name)) {
-                    return i;
-                }
+            final int index = fieldIndex(schema, name);
+            if (index < 0) {
+                throw new IllegalStateException("unknown column: " + name);
             }
-            throw new IllegalStateException("unknown column: " + name);
+            return index;
         }
 
         private String spannerType(String name) {
             return spannerTypes.get(columnIndex(name));
         }
+    }
+
+    private static int fieldIndex(Schema schema, String name) {
+        for (int i = 0; i < schema.countFields(); i++) {
+            if (schema.getField(i).getName().equals(name)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private final String projectId;
@@ -161,7 +281,13 @@ public class SpannerLookupSource extends LookupSource {
         }
 
         public Builder withTable(String name, String table) {
-            this.tables.add(new TableConfig(name, table));
+            this.tables.add(new TableConfig(name, table, null));
+            return this;
+        }
+
+        /** Exposes a parameterized GoogleSQL/GQL statement as a key-driven table. */
+        public Builder withQueryTable(QueryTableConfig query) {
+            this.tables.add(new TableConfig(query.name, null, query));
             return this;
         }
 
@@ -180,7 +306,9 @@ public class SpannerLookupSource extends LookupSource {
         if (meta == null) {
             final Map<String, TableMeta> derived = new LinkedHashMap<>();
             for (final TableConfig table : tables) {
-                derived.put(table.name(), deriveTableMeta(table));
+                derived.put(table.name(), table.query() != null
+                        ? deriveQueryTableMeta(table.query())
+                        : deriveTableMeta(table));
             }
             this.meta = derived;
         }
@@ -223,6 +351,9 @@ public class SpannerLookupSource extends LookupSource {
     public Iterable<Object[]> lookup(String table, String indexName, LookupBatch batch,
             int[] projects) {
         final TableMeta tableMeta = requireMeta(table);
+        if (tableMeta.query != null) {
+            return queryLookup(tableMeta, batch, projects);
+        }
         final List<String> keyColumns = keyColumns(tableMeta, indexName);
         final int[] outCols = projects != null
                 ? projects : CalciteValues.allColumns(tableMeta.schema.countFields());
@@ -484,8 +615,254 @@ public class SpannerLookupSource extends LookupSource {
         for (final Map.Entry<String, List<String>> index : uniqueIndexes.entrySet()) {
             candidates.add(LookupKey.index(index.getKey(), index.getValue()));
         }
-        return new TableMeta(table.table(), schemaBuilder.build(), spannerTypes,
+        return new TableMeta(table.table(), null, schemaBuilder.build(), spannerTypes,
                 candidates, primaryKey);
+    }
+
+    // ------------------------------------------------------------------
+    // Query tables: a parameterized GoogleSQL/GQL statement as a keyed table.
+    // ------------------------------------------------------------------
+
+    /** Builds a query table's metadata from explicit fields or analyzeQuery(PLAN). */
+    private TableMeta deriveQueryTableMeta(QueryTableConfig config) {
+        final Schema schema;
+        final List<String> spannerTypes = new ArrayList<>();
+        if (config.fields != null) {
+            schema = config.fields;
+            for (final Schema.Field field : schema.getFields()) {
+                spannerTypes.add(toSpannerType(field.getFieldType().getType(), config.name,
+                        field.getName()));
+            }
+        } else {
+            schema = deriveQuerySchema(config, spannerTypes);
+        }
+        final String keyType = spannerTypes.get(fieldIndex(schema, config.keyField));
+        if (!isSupportedQueryKeyType(keyType)) {
+            throw new IllegalStateException("key field '" + config.keyField
+                    + "' of spanner query table '" + config.name + "' has unsupported type "
+                    + keyType + " (INT64 / STRING / BYTES are supported)");
+        }
+        final List<String> primaryKey = List.of(config.keyField);
+        return new TableMeta(null, config, schema, spannerTypes,
+                List.of(LookupKey.primaryKey(primaryKey)), primaryKey);
+    }
+
+    /**
+     * Derives the result columns by dry-running the statement through
+     * {@code analyzeQuery(PLAN)} — no rows are read. Planning needs the bind
+     * parameter's type (= the key type, not yet known), so the analyze is
+     * retried across INT64 / STRING / BYTES until one plans; the true key type
+     * then comes from the returned metadata (the statement always returns the
+     * key column).
+     */
+    private Schema deriveQuerySchema(QueryTableConfig config, List<String> spannerTypes) {
+        com.google.cloud.spanner.SpannerException last = null;
+        for (final String candidate : List.of("INT64", "STRING", "BYTES")) {
+            final Statement statement =
+                    dummyBind(Statement.newBuilder(config.sql), config, candidate).build();
+            try (ReadContext context = singleUse();
+                 ResultSet rs = context.analyzeQuery(statement,
+                         ReadContext.QueryAnalyzeMode.PLAN)) {
+                // PLAN mode yields no rows; next() drives the RPC so metadata is populated.
+                rs.next();
+                final com.google.spanner.v1.ResultSetMetadata metadata = rs.getMetadata();
+                if (metadata != null && metadata.getRowType().getFieldsCount() > 0) {
+                    return buildDerivedSchema(config, metadata.getRowType(), spannerTypes);
+                }
+            } catch (com.google.cloud.spanner.SpannerException e) {
+                last = e;
+            }
+        }
+        throw new IllegalStateException("could not derive the result schema of spanner query"
+                + " table '" + config.name + "' via analyzeQuery (tried key types"
+                + " [INT64, STRING, BYTES]); specify fields explicitly."
+                + (last != null ? " Last error: " + last.getMessage() : ""), last);
+    }
+
+    private Schema buildDerivedSchema(QueryTableConfig config,
+            com.google.spanner.v1.StructType rowType, List<String> spannerTypes) {
+        final Schema.Builder builder = Schema.builder();
+        for (final com.google.spanner.v1.StructType.Field field : rowType.getFieldsList()) {
+            final String baseType = switch (field.getType().getCode()) {
+                case BOOL -> "BOOL";
+                case INT64 -> "INT64";
+                case FLOAT64 -> "FLOAT64";
+                case FLOAT32 -> "FLOAT32";
+                case NUMERIC -> "NUMERIC";
+                case STRING -> "STRING";
+                case BYTES -> "BYTES";
+                case DATE -> "DATE";
+                case TIMESTAMP -> "TIMESTAMP";
+                default -> throw new IllegalStateException("unsupported result column type "
+                        + field.getType().getCode() + " for column '" + field.getName()
+                        + "' of spanner query table '" + config.name
+                        + "'; specify fields explicitly");
+            };
+            builder.withField(field.getName(), toFieldType(baseType));
+            spannerTypes.add(baseType);
+        }
+        final Schema schema = builder.build();
+        if (fieldIndex(schema, config.keyField) < 0) {
+            throw new IllegalStateException("query of spanner query table '" + config.name
+                    + "' must return a column named '" + config.keyField + "' (the key field)");
+        }
+        return schema;
+    }
+
+    /** Binds the query parameter with an empty/null placeholder of the candidate type. */
+    private static Statement.Builder dummyBind(Statement.Builder builder,
+            QueryTableConfig config, String candidate) {
+        if (config.bindMode == BindMode.ARRAY) {
+            switch (candidate) {
+                case "INT64" -> builder.bind(config.paramName)
+                        .toInt64Array((Iterable<Long>) List.<Long>of());
+                case "STRING" -> builder.bind(config.paramName).toStringArray(List.of());
+                case "BYTES" -> builder.bind(config.paramName).toBytesArray(List.of());
+                default -> throw new IllegalStateException("unexpected candidate: " + candidate);
+            }
+        } else {
+            switch (candidate) {
+                case "INT64" -> builder.bind(config.paramName).to((Long) null);
+                case "STRING" -> builder.bind(config.paramName).to((String) null);
+                case "BYTES" -> builder.bind(config.paramName).to((ByteArray) null);
+                default -> throw new IllegalStateException("unexpected candidate: " + candidate);
+            }
+        }
+        return builder;
+    }
+
+    /** Runs the query table's statement for the batch (ARRAY: once; PER_KEY: per key). */
+    private Iterable<Object[]> queryLookup(TableMeta tableMeta, LookupBatch batch,
+            int[] projects) {
+        final QueryTableConfig config = tableMeta.query;
+        final int[] outCols = projects != null
+                ? projects : CalciteValues.allColumns(tableMeta.schema.countFields());
+        final String keyType = tableMeta.spannerType(config.keyField);
+        final String label = "Spanner query table '" + getName() + "." + config.name + "'";
+
+        if (config.bindMode == BindMode.PER_KEY) {
+            // A fresh single-use read per key: a single-use ReadContext is
+            // invalidated after one query, so it cannot be shared across keys.
+            return PerKeyLookup.run(batch, label, keyValues -> {
+                final Statement statement = bindScalar(Statement.newBuilder(config.sql),
+                        config.paramName, keyValues.get(0), keyType).build();
+                return runQuery(statement, tableMeta, outCols);
+            });
+        }
+
+        // ARRAY: bind the batch's distinct keys to one array param, run once.
+        final Set<Object> distinct = new LinkedHashSet<>();
+        for (final LookupRequest request : batch.requests()) {
+            if (request.isRange()) {
+                throw new IllegalStateException(label
+                        + " supports only point equality on its key");
+            }
+            final Object key = request.prefix().get(0);
+            if (key != null) {
+                distinct.add(key);
+            }
+        }
+        if (distinct.isEmpty()) {
+            return List.of();
+        }
+        final Statement statement = bindArray(Statement.newBuilder(config.sql),
+                config.paramName, distinct, keyType).build();
+        return runQuery(statement, tableMeta, outCols);
+    }
+
+    /** Executes the statement and decodes rows by column name (not position). */
+    private List<Object[]> runQuery(Statement statement, TableMeta tableMeta, int[] outCols) {
+        final List<Object[]> rows = new ArrayList<>();
+        try (ReadContext context = singleUse();
+             ResultSet rs = context.executeQuery(statement)) {
+            while (rs.next()) {
+                final Object[] row = new Object[outCols.length];
+                for (int i = 0; i < outCols.length; i++) {
+                    final String field = tableMeta.schema.getField(outCols[i]).getName();
+                    final int col;
+                    try {
+                        col = rs.getColumnIndex(field);
+                    } catch (IllegalArgumentException e) {
+                        throw new IllegalStateException("query of spanner query table '"
+                                + tableMeta.query.name + "' must return a column named '"
+                                + field + "' (matching the schema field)", e);
+                    }
+                    row[i] = decode(rs, col, tableMeta.spannerTypes.get(outCols[i]));
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    private static Statement.Builder bindArray(Statement.Builder builder, String paramName,
+            Set<Object> keys, String keyType) {
+        switch (keyType) {
+            case "INT64" -> {
+                final List<Long> values = new ArrayList<>(keys.size());
+                for (final Object key : keys) {
+                    values.add(((Number) key).longValue());
+                }
+                builder.bind(paramName).toInt64Array(values);
+            }
+            case "STRING" -> {
+                final List<String> values = new ArrayList<>(keys.size());
+                for (final Object key : keys) {
+                    values.add(key.toString());
+                }
+                builder.bind(paramName).toStringArray(values);
+            }
+            case "BYTES" -> {
+                final List<ByteArray> values = new ArrayList<>(keys.size());
+                for (final Object key : keys) {
+                    values.add(ByteArray.copyFrom(((ByteString) key).getBytes()));
+                }
+                builder.bind(paramName).toBytesArray(values);
+            }
+            default -> throw new IllegalStateException(
+                    "unsupported spanner query key type: " + keyType);
+        }
+        return builder;
+    }
+
+    private static Statement.Builder bindScalar(Statement.Builder builder, String paramName,
+            Object value, String keyType) {
+        switch (keyType) {
+            case "INT64" -> builder.bind(paramName).to(((Number) value).longValue());
+            case "STRING" -> builder.bind(paramName).to(value.toString());
+            case "BYTES" -> builder.bind(paramName)
+                    .to(ByteArray.copyFrom(((ByteString) value).getBytes()));
+            default -> throw new IllegalStateException(
+                    "unsupported spanner query key type: " + keyType);
+        }
+        return builder;
+    }
+
+    private static boolean isSupportedQueryKeyType(String spannerType) {
+        return switch (spannerType) {
+            case "INT64", "STRING", "BYTES" -> true;
+            default -> false;
+        };
+    }
+
+    /** Explicit field type → the Spanner base type the decoder reads it as. */
+    private static String toSpannerType(Schema.Type type, String tableName, String fieldName) {
+        return switch (type) {
+            case bool -> "BOOL";
+            case int8, int16, int32, int64 -> "INT64";
+            case float32 -> "FLOAT32";
+            case float64 -> "FLOAT64";
+            case decimal -> "NUMERIC";
+            case string, enumeration -> "STRING";
+            case json -> "JSON";
+            case bytes -> "BYTES";
+            case date -> "DATE";
+            case time -> "STRING";
+            case timestamp -> "TIMESTAMP";
+            default -> throw new IllegalArgumentException("unsupported field type " + type
+                    + " for field '" + fieldName + "' of spanner query table '"
+                    + tableName + "'");
+        };
     }
 
     /** Strips length/parameters: {@code STRING(MAX)} → {@code STRING}. */

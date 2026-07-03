@@ -195,6 +195,12 @@ public class QueryTransform extends Transform {
         private String name;
         private String table;
 
+        // spanner query table (parameterized GoogleSQL/GQL: graph traversal, full-text search, ...)
+        private String sql;
+        private String keyField;
+        private String paramName;
+        private String bindMode;
+
         // bigtable
         private String tableId;
         private String rowKeyField;
@@ -295,7 +301,28 @@ public class QueryTransform extends Transform {
                         .withEmulator(Boolean.TRUE.equals(source.emulator))
                         .withMaxStalenessSeconds(source.maxStalenessSeconds == null ? 0L : source.maxStalenessSeconds);
                 for(final TableParameters table : source.tables) {
-                    builder.withTable(table.name, table.table == null ? table.name : table.table);
+                    if(table.sql != null) {
+                        // Parameterized GoogleSQL/GQL statement as a key-driven table
+                        // (Spanner Graph traversal, full-text search, arbitrary query)
+                        final SpannerLookupSource.QueryTableBuilder queryBuilder =
+                                SpannerLookupSource.queryTable()
+                                        .withName(table.name)
+                                        .withSql(table.sql)
+                                        .withKeyField(table.keyField);
+                        if(table.paramName != null) {
+                            queryBuilder.withParamName(table.paramName);
+                        }
+                        if(table.bindMode != null) {
+                            queryBuilder.withBindMode(SpannerLookupSource.BindMode
+                                    .valueOf(table.bindMode.trim().toUpperCase()));
+                        }
+                        if(table.fields != null && !table.fields.isJsonNull()) {
+                            queryBuilder.withFields(parseFields(table.fields));
+                        }
+                        builder.withQueryTable(queryBuilder.build());
+                    } else {
+                        builder.withTable(table.name, table.table == null ? table.name : table.table);
+                    }
                 }
                 yield builder.build();
             }

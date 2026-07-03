@@ -105,7 +105,22 @@ Table: `name` (SQL table name, required), `table` (physical, optionally `schema.
 | emulator            | optional | Boolean | Connect to the emulator (`SPANNER_EMULATOR_HOST`).      |
 | maxStalenessSeconds | optional | Integer | Allow stale reads up to this bound (default: strong).   |
 
-Table: `name` (SQL table name), `table` (physical; defaults to `name`). Columns/keys derived from `INFORMATION_SCHEMA` (ARRAY / STRUCT / TOKENLIST columns are skipped). Primary-key joins use the native `read(KeySet)` (points, prefixes and ranges); unique-index joins use a two-step `readUsingIndex` inside one read-only snapshot.
+Two kinds of tables:
+
+**Native tables** — `name` (SQL table name), `table` (physical; defaults to `name`). Columns/keys derived from `INFORMATION_SCHEMA` (ARRAY / STRUCT / TOKENLIST columns are skipped). Primary-key joins use the native `read(KeySet)` (points, prefixes and ranges); unique-index joins use a two-step `readUsingIndex` inside one read-only snapshot.
+
+**Query tables** — a caller-supplied *parameterized GoogleSQL or GQL statement* exposed as a key-driven table: the generic "input key → parameterized query → rows" shape behind **Spanner Graph traversals** and **full-text search**. The statement never goes through Calcite — only its result rows do.
+
+| parameter | optional | type          | description                                                                                    |
+|-----------|----------|---------------|--------------------------------------------------------------------------------------------------|
+| name      | required | String        | SQL table name.                                                                                |
+| sql       | required | String        | Parameterized GoogleSQL/GQL statement; must reference `@<paramName>` and return the key column. |
+| keyField  | required | String        | The join-key column (returned by the statement, so rows join back).                            |
+| paramName | optional | String        | Bind parameter name (default `keys`).                                                          |
+| bindMode  | optional | String        | `array` (default): bind the batch's distinct keys to one array param, run once — for `WHERE k IN UNNEST(@keys)` (graph). `per_key`: run once per distinct key binding a scalar — for `SEARCH(tokens, @query)`, which has no array form. |
+| fields    | optional | Array<Field\> | Result columns; omit to derive them by dry-running the statement through `analyzeQuery(PLAN)` (no execution; INT64/STRING/BYTES key types are tried until one plans). |
+
+Only point equality on the (single) key column is supported for query tables. One key may fan out to many rows (search hits, traversal results) — combine with a correlated LATERAL block for per-key top-N or aggregation.
 
 ### bigtable source
 
@@ -330,6 +345,91 @@ transforms:
           databaseId: my-database
           tables:
             - name: UserHistory
+```
+
+### Spanner Graph traversal as a lookup (query table, array bind)
+
+The GQL traversal pattern is adapter configuration; the caller only joins on the
+start key. The batch's distinct start keys are bound to `@keys` and the traversal
+runs once per batch.
+
+```yaml
+transforms:
+  - name: related
+    module: query
+    inputs: [events]
+    parameters:
+      sql: |
+        SELECT
+          e.userId AS userId,
+          COALESCE(g.relatedCount, 0) AS relatedCount
+        FROM
+          INPUT AS e
+        LEFT JOIN graph.relatedPeople AS g ON g.userId = e.userId
+      sources:
+        - name: graph
+          type: spanner
+          projectId: my-project
+          instanceId: my-instance
+          databaseId: my-database
+          tables:
+            - name: relatedPeople
+              keyField: userId
+              sql: >
+                GRAPH SocialGraph
+                MATCH (a:Users)-[:Interacted]-(b:Users)
+                WHERE a.id IN UNNEST(@keys)
+                RETURN a.id AS userId, COUNT(DISTINCT b.id) AS relatedCount
+                GROUP BY userId
+```
+
+### Spanner full-text search with per-term top-N (query table, per-key bind)
+
+`SEARCH(tokenlist, @query)` takes a single query string, so the statement runs
+once per distinct search term (`bindMode: per_key`); the term is returned as
+`@query AS queryKey` so hits join back. One term fans out to all hits; the
+LATERAL block keeps the best one per input row.
+
+```yaml
+transforms:
+  - name: bestHit
+    module: query
+    inputs: [queries]
+    parameters:
+      sql: |
+        SELECT
+          i.term AS term,
+          s.docId AS docId,
+          s.title AS title
+        FROM
+          INPUT AS i
+        JOIN LATERAL (
+          SELECT d.docId, d.title
+          FROM fts.docs AS d
+          WHERE d.queryKey = i.term
+          ORDER BY d.score DESC
+          LIMIT 1
+        ) AS s ON TRUE
+      sources:
+        - name: fts
+          type: spanner
+          projectId: my-project
+          instanceId: my-instance
+          databaseId: my-database
+          tables:
+            - name: docs
+              keyField: queryKey
+              paramName: query
+              bindMode: per_key
+              sql: >
+                SELECT @query AS queryKey, docId, title,
+                       SCORE(title_tokens, @query) AS score
+                FROM Documents WHERE SEARCH(title_tokens, @query)
+              fields:
+                - { name: queryKey, type: string }
+                - { name: docId, type: int64 }
+                - { name: title, type: string }
+                - { name: score, type: float64 }
 ```
 
 ### Bigtable row-key lookup with a caller-built composite key
