@@ -26,7 +26,7 @@ public class Partition implements Serializable {
     private final Select select;
     private final Unnest unnest;
 
-    private final Query query;
+    private final Query2 query;
 
     // output
     private final Schema outputSchema;
@@ -64,7 +64,7 @@ public class Partition implements Serializable {
     private Partition(
             final String name,
             final Filter filter,
-            final Query query) {
+            final Query2 query) {
 
         this.name = name;
         this.filter = filter;
@@ -115,7 +115,7 @@ public class Partition implements Serializable {
 
         if(jsonObject.has("sql")) {
             final String sql  = jsonObject.get("sql").getAsString();
-            final Query query = Query.of(name, inputSchema, sql);
+            final Query2 query = Query2.of(name, inputSchema, sql);
             return new Partition(name, filter, query);
         }
 

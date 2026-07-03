@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Query Transform Module
-description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL so aggregation, ORDER BY/LIMIT and set operations run over the per-element collection. One element yields zero or more output rows.
-tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral]
+description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST) can be joined on their keys as batched lookup-joins — the external table is never scanned. One element yields zero or more output rows.
+tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest]
 timestamp: 2026-07-03T00:00:00Z
 ---
 
@@ -15,14 +15,30 @@ Unlike the [beamsql](beamsql.md) module — which plans SQL over whole PCollecti
 - **No shuffle, ever.** The query runs entirely inside the DoFn. Windowing, triggering, and element timestamps of the surrounding pipeline are preserved, so batch and streaming behave identically.
 - **Collections live inside the element.** Array-of-struct fields can be expanded with `UNNEST` (optionally with `LATERAL` subqueries), so aggregation (`COUNT`/`SUM`/`AVG`/…, `GROUP BY`, `HAVING`), ordering with `ORDER BY` / `LIMIT`, and set operations (`UNION` / `INTERSECT` / `EXCEPT`) all operate over the per-element collection.
 - **Fan-out or fold.** One input element yields zero or more output rows: a query without aggregation fans out (one row per unnested item), an aggregate query folds the element into one row, and a `WHERE` that matches nothing drops the element.
+- **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, REST APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
 
-This is a good fit for post-processing enrichment results — for example an upstream `lookup` / `bigtable` / `http` step that attaches an array of fetched records to each element, followed by this module to aggregate or select over that array with SQL.
+This is a good fit for enriching a stream with reference data held in a database or API, and for post-processing enrichment results with per-element SQL (aggregate or select over a fetched collection).
+
+## External lookup-join contract
+
+A join between the input and a lookup table is executed as a key-driven read when its `ON` condition constrains a **contiguous prefix of one of the table's candidate keys** (primary key first, then unique secondary indexes; Bigtable's row key; a REST table's request-parameter columns):
+
+- **Point**: equality on every key column — `ON t.key1 = i.a AND t.key2 = i.b`
+- **Prefix**: equality on the leading key columns only (JDBC / Spanner, index-backed prefix scan; fans out to all rows under the prefix) — `ON t.key1 = i.a`
+- **Prefix + range**: equality on the leading columns plus a bounded range on the next — `ON t.key1 = i.a AND t.key2 >= i.lo AND t.key2 <= i.hi`
+
+The right-hand side of each condition may be any expression over input columns **or a literal** (so a REST endpoint or header can be fixed in SQL). `INNER` and `LEFT` joins are supported. Key values are batched and deduplicated across the join, and one backend request is issued per batch (JDBC: one OR-of-tuples query; Spanner: one `read(KeySet)`; Bigtable: one multi-range `readRows`; REST: one HTTP call per **distinct** key tuple).
+
+Any other use of a lookup table — a standalone scan (`FROM db.table` without the key-join), a non-key join condition — fails at execution with an explanatory error; there is no silent fallback to a full scan.
 
 ## Limitations
 
-- The SQL sees exactly **one element per evaluation**. Aggregation across elements is out of scope — use the [aggregation](aggregation.md) or [beamsql](beamsql.md) module for cross-element grouping.
+- The SQL sees exactly **one element per evaluation**. Aggregation across elements is out of scope — use the [aggregation](aggregation.md) or [beamsql](beamsql.md) module for cross-element grouping. (Aggregation over the rows fetched *for* one element — e.g. `GROUP BY` over a lookup fan-out — is fine.)
 - Every expression in the select list must have an **explicit alias** (`AS name`); auto-generated column names such as `EXPR$0` are rejected at pipeline construction.
 - Reserved words used as field names (e.g. `value`) must be quoted with backticks.
+- Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata.
+- Lookups must be **read-only and idempotent** — a lookup may run many times, in any order, and per-bundle retries repeat it. Never point a REST table at a side-effecting endpoint.
+- `float32` external columns are surfaced as `float64` in SQL; timestamps are compared at millisecond precision inside the SQL engine.
 
 ## Transform module common parameters
 
@@ -39,6 +55,83 @@ This is a good fit for post-processing enrichment results — for example an ups
 |-----------|----------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | sql       | required | String | SQL query text. Also accepts a GCS path (`gs://...`), a local file path, a Parameter Manager resource path, or a base64-encoded string (`data:...`), same as the `beamsql` module.                        |
 | table     | optional | String | Table name under which the input element is visible in the SQL. Defaults to `INPUT`.                                                                                                                     |
+| sources   | optional | Array<Source\> | External lookup sources. Each source's tables are referenced in the SQL as `sourceName.tableName` and joined on their keys (see the contract above).                                              |
+
+### Source common parameters
+
+| parameter | optional | type           | description                                                                    |
+|-----------|----------|----------------|--------------------------------------------------------------------------------|
+| name      | required | String         | Schema name the source's tables are referenced by in SQL (`name.table`).       |
+| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`.                                  |
+| tables    | required | Array<Table\>  | Tables to expose. Per-type table parameters below.                             |
+
+### jdbc source
+
+| parameter | optional | type   | description                                                                     |
+|-----------|----------|--------|----------------------------------------------------------------------------------|
+| driver    | required | String | JDBC driver class name (e.g. `org.postgresql.Driver`).                          |
+| url       | required | String | JDBC connection URL.                                                            |
+| user      | optional | String | Database user.                                                                  |
+| password  | optional | String | Database password.                                                              |
+
+Table: `name` (SQL table name, required), `table` (physical, optionally `schema.table`; defaults to `name`). Columns, the primary key and unique secondary indexes are derived automatically from `DatabaseMetaData`; identifiers are matched in the exact case the database stores them (e.g. uppercase for H2). A unique-index join condition selects that index automatically.
+
+### spanner source
+
+| parameter           | optional | type    | description                                             |
+|---------------------|----------|---------|----------------------------------------------------------|
+| projectId           | required | String  | GCP project of the Spanner instance.                    |
+| instanceId          | required | String  | Spanner instance id.                                    |
+| databaseId          | required | String  | Spanner database id.                                    |
+| emulator            | optional | Boolean | Connect to the emulator (`SPANNER_EMULATOR_HOST`).      |
+| maxStalenessSeconds | optional | Integer | Allow stale reads up to this bound (default: strong).   |
+
+Table: `name` (SQL table name), `table` (physical; defaults to `name`). Columns/keys derived from `INFORMATION_SCHEMA` (ARRAY / STRUCT / TOKENLIST columns are skipped). Primary-key joins use the native `read(KeySet)` (points, prefixes and ranges); unique-index joins use a two-step `readUsingIndex` inside one read-only snapshot.
+
+### bigtable source
+
+| parameter    | optional | type   | description                          |
+|--------------|----------|--------|---------------------------------------|
+| projectId    | required | String | GCP project of the Bigtable instance.|
+| instanceId   | required | String | Bigtable instance id.                |
+| appProfileId | optional | String | App profile for the data client.     |
+
+Table parameters:
+
+| parameter   | optional | type            | description                                                                 |
+|-------------|----------|-----------------|------------------------------------------------------------------------------|
+| name        | required | String          | SQL table name.                                                             |
+| tableId     | optional | String          | Bigtable table id (defaults to `name`).                                     |
+| rowKeyField | optional | String          | Column name for the row key (default `rowKey`).                             |
+| rowKeyType  | optional | String          | `string` (default), `int64`, `bytes`, `int32`, `float64`, `date`, `timestamp`. |
+| columns     | optional | Array<Column\>  | Value columns: `name`, `family`, `qualifier` (defaults to `name`), `type`.  |
+
+The row key is a single opaque column and the **only** key — composite key structure (`user#ts`) is built by the caller in SQL, e.g. `ON b.rowKey = i.userId || '#' || i.date`. Cell bytes use the HBase-compatible codec (`DATE`/`TIMESTAMP` as epoch-microsecond INT64, numbers big-endian, strings UTF-8); only the latest cell version is read.
+
+### rest source
+
+| parameter    | optional | type                | description                                                     |
+|--------------|----------|---------------------|------------------------------------------------------------------|
+| baseUrl      | optional | String              | Prefix for relative `endpoint`s.                                |
+| headers      | optional | Map<String,String\> | Default headers merged into every request (e.g. auth).          |
+| allowedHosts | optional | Array<String\>      | If set, requests to any other host fail (SSRF guard).           |
+| timeoutMillis| optional | Integer             | Per-request timeout (default 60000).                            |
+
+Table parameters:
+
+| parameter | optional | type                | description                                                                                   |
+|-----------|----------|---------------------|-------------------------------------------------------------------------------------------------|
+| name      | required | String              | SQL table name.                                                                               |
+| endpoint  | required | String              | URL template with `{column}` placeholders.                                                    |
+| method    | optional | String              | HTTP method template (default `GET`).                                                        |
+| headers   | optional | Map<String,String\> | Per-request header templates.                                                                 |
+| params    | optional | Map<String,String\> | Query-parameter templates (values URL-encoded).                                               |
+| body      | optional | String              | Request body template.                                                                        |
+| keyFields | optional | Array<String\>      | Key columns in key order; defaults to the placeholders in appearance order.                   |
+| rowsFrom  | optional | String              | JSON pointer to a response array for fan-out (e.g. `/items`); without it the response is one row. |
+| fields    | optional | Array<Field\>       | Response columns (standard schema fields JSON: `name`, `type`, …). Use type `json` for nested objects. |
+
+Every `{column}` placeholder is a key column; binding a key column to a **literal** in SQL makes that request part static, binding it to an input column makes it dynamic. One HTTP call is made per distinct key tuple (point equality only). HTTP 404 is treated as "no row" — use a `LEFT JOIN` to keep the input element.
 
 ## Examples
 
@@ -119,4 +212,136 @@ transforms:
     inputs: [numbers]
     parameters:
       sql: "SELECT `value` AS id, `value` * 10 AS scaled FROM INPUT WHERE `value` > 1"
+```
+
+### Enrich from a database (JDBC lookup-join)
+
+Each element's `itemId` is looked up against the `ITEMS` table by primary key.
+Keys are batched and deduplicated; the table is never scanned. `LEFT JOIN` keeps
+elements whose key has no match (columns become null).
+
+```yaml
+transforms:
+  - name: enrich
+    module: query
+    inputs: [carts]
+    parameters:
+      sql: |
+        SELECT
+          i.itemId AS itemId,
+          m.TITLE AS title,
+          i.qty * m.PRICE AS total
+        FROM
+          INPUT AS i
+        LEFT JOIN db.ITEMS AS m ON m.ITEM_ID = i.itemId
+      sources:
+        - name: db
+          type: jdbc
+          driver: org.postgresql.Driver
+          url: jdbc:postgresql://localhost:5432/shop
+          user: app
+          password: secret
+          tables:
+            - name: ITEMS
+```
+
+### Fan-out from Spanner history rows and fold per element
+
+Prefix-only key equality (leading primary-key column) fans out to every row under
+the prefix; a range on the next key column bounds it; `GROUP BY` folds the fetched
+collection back to one row per element — all inside the DoFn.
+
+```yaml
+transforms:
+  - name: history
+    module: query
+    inputs: [users]
+    parameters:
+      sql: |
+        SELECT
+          i.userId AS userId,
+          COUNT(*) AS purchases,
+          SUM(h.amount) AS total
+        FROM
+          INPUT AS i
+        JOIN sp.UserHistory AS h
+          ON h.UserId = i.userId
+          AND h.PurchasedAt >= i.since AND h.PurchasedAt <= i.until
+        GROUP BY i.userId
+      sources:
+        - name: sp
+          type: spanner
+          projectId: my-project
+          instanceId: my-instance
+          databaseId: my-database
+          tables:
+            - name: UserHistory
+```
+
+### Bigtable row-key lookup with a caller-built composite key
+
+```yaml
+transforms:
+  - name: attrs
+    module: query
+    inputs: [events]
+    parameters:
+      sql: |
+        SELECT
+          i.userId AS userId,
+          b.plan AS plan,
+          b.score AS score
+        FROM
+          INPUT AS i
+        JOIN bt.user_attrs AS b ON b.rowKey = i.userId
+      sources:
+        - name: bt
+          type: bigtable
+          projectId: my-project
+          instanceId: my-instance
+          tables:
+            - name: user_attrs
+              tableId: user-attrs
+              rowKeyField: rowKey
+              rowKeyType: string
+              columns:
+                - { name: plan, family: cf, type: string }
+                - { name: score, family: cf, type: float64 }
+```
+
+### REST API lookup with response-array fan-out
+
+The `{userId}` placeholder is the key column; one GET per distinct key. `rowsFrom`
+points at the response array, so one key may yield many rows.
+
+```yaml
+transforms:
+  - name: orders
+    module: query
+    inputs: [users]
+    parameters:
+      sql: |
+        SELECT
+          i.userId AS userId,
+          o.orderId AS orderId,
+          o.amount AS amount
+        FROM
+          INPUT AS i
+        JOIN api.orders AS o ON o.userId = i.userId
+      sources:
+        - name: api
+          type: rest
+          baseUrl: https://internal.example.com
+          allowedHosts: [internal.example.com]
+          headers:
+            Authorization: Bearer xxxx
+          tables:
+            - name: orders
+              endpoint: /v1/orders
+              params:
+                userId: "{userId}"
+              rowsFrom: /items
+              fields:
+                - { name: orderId, type: string }
+                - { name: amount, type: int64 }
 ```
