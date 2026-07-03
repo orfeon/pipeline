@@ -182,22 +182,55 @@ public final class CalciteValues {
                 }
                 default -> value;
             };
-            case Types.ARRAY -> switch (value) {
-                case List<?> list -> {
-                    final List<Object> converted = new ArrayList<>(list.size());
-                    for (final Object element : list) {
-                        converted.add(normalizeElement(element));
-                    }
-                    yield converted;
+            case Types.ARRAY -> {
+                final List<?> list = asList(value);
+                if (list == null) {
+                    yield value;
                 }
-                default -> value;
-            };
+                final List<Object> converted = new ArrayList<>(list.size());
+                for (final Object element : list) {
+                    converted.add(normalizeElement(element));
+                }
+                yield converted;
+            }
             case Types.STRUCT, Types.JAVA_OBJECT -> switch (value) {
                 case Object[] row -> List.of(row);
                 default -> value;
             };
             default -> value;
         };
+    }
+
+    /**
+     * An array value in whatever form the engine produced it (a {@link List},
+     * or an Avatica {@link java.sql.Array} when it crossed a JDBC result
+     * boundary) → a Calcite-internal {@link List}; null when not an array.
+     */
+    static List<?> asList(final Object value) {
+        return switch (value) {
+            case List<?> list -> list;
+            case java.sql.Array array -> {
+                try {
+                    yield java.util.Arrays.asList((Object[]) array.getArray());
+                } catch (final SQLException e) {
+                    throw new IllegalStateException("failed to read array value", e);
+                }
+            }
+            case null, default -> null;
+        };
+    }
+
+    /** {@link #asList} + per-element normalization; passes non-arrays through. */
+    static Object toInternalList(final Object value) {
+        final List<?> list = asList(value);
+        if (list == null) {
+            return value;
+        }
+        final List<Object> converted = new ArrayList<>(list.size());
+        for (final Object element : list) {
+            converted.add(normalizeElement(element));
+        }
+        return converted;
     }
 
     /** Best-effort normalization for array elements (no per-element type metadata). */

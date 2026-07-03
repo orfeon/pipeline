@@ -170,6 +170,14 @@ public final class LookupLateralRuntime implements AutoCloseable {
         final FrameworkConfig config = Frameworks.newConfigBuilder()
                 .parserConfig(parserConfig)
                 .defaultSchema(rootSchema)
+                // Match the outer query's operator surface (ARRAY_AGG etc.);
+                // the planner chains the catalog reader for schema UDFs itself.
+                .operatorTable(org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite
+                        .sql.fun.SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
+                                org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite
+                                        .sql.fun.SqlLibrary.STANDARD,
+                                org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite
+                                        .sql.fun.SqlLibrary.BIG_QUERY))
                 .build();
         this.planner = Frameworks.getPlanner(config);
         try {
@@ -242,6 +250,7 @@ public final class LookupLateralRuntime implements AutoCloseable {
                 case String s -> new ByteString(s.getBytes(StandardCharsets.UTF_8));
                 default -> value;
             };
+            case "ARRAY" -> CalciteValues.toInternalList(value);
             default -> value;
         };
     }

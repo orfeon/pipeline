@@ -213,7 +213,20 @@ Query2.builder()
   don't, without a separate opted-in mode.
 - **BigQuery lex**: reserved words as field names need backticks (`` `value` ``);
   output columns must have explicit aliases (`EXPR$0` is rejected at
-  construction).
+  construction). `RUNNING` is reserved (a MATCH_RECOGNIZE keyword) — a
+  surprising alias failure.
+- The validator's operator table chains the **BigQuery library**
+  (`SqlLibraryOperatorTableFactory`, in `Query2.prepare` and mirrored in
+  `LookupLateralRuntime.init`) — that is what provides `ARRAY_AGG` etc.
+  Window functions (`OVER`) work in the enumerable path, both outer and
+  inside LATERAL blocks. One roundtrip wart: `ARRAY_AGG(x ORDER BY y)`
+  inside a LATERAL block fails — `RelToSqlConverter` unparses the collation
+  as `WITHIN GROUP`, which Calcite's own validator then rejects for
+  ARRAY_AGG. Ordered folds go in the outer `GROUP BY` form instead. Array
+  values crossing the lateral inner-statement boundary arrive as Avatica
+  `java.sql.Array`s — `CalciteValues.asList/toInternalList` converts them
+  back to internal `List`s (both in the lateral runtime and the outer
+  result conversion).
 - **`float32` → `FLOAT` (double)**: `CalciteSchemaUtil.convertSchema` maps
   float32 to Calcite `FLOAT`, which is 8-byte. Any source returning `Float`
   where the schema says float32 will CCE in generated code — widen to `Double`

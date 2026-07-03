@@ -44,8 +44,21 @@ JOIN LATERAL (
 ) AS s ON TRUE
 ```
 
-- An aggregating block folds each key's set into one row (`COUNT(*) = 0` for a key that matches nothing, so the input row survives even with `JOIN`); a non-aggregating block fans out. `LEFT JOIN LATERAL ... ON TRUE` keeps the input row when the block yields no rows.
+- **Multiplicity**: a non-aggregating block **fans out** — the outer result has one row per inner row (standard SQL LATERAL semantics; with `JOIN ... ON TRUE` an empty block result drops the input row, with `LEFT JOIN ... ON TRUE` it is kept with nulls). An aggregating block folds each key's set into **one row** (`COUNT(*) = 0` for a key that matches nothing, so the input row survives even with `JOIN`). To receive the fetched set as an **array column** instead of a fan-out, aggregate with `ARRAY_AGG` — for ordered arrays use the outer `GROUP BY` form:
+
+```sql
+SELECT b.userId, b.amounts   -- one row per input, fetched values as an ordered array
+FROM (
+  SELECT i.userId AS userId, ARRAY_AGG(h.amount ORDER BY h.ts) AS amounts
+  FROM INPUT AS i
+  JOIN db.HISTORY AS h ON h.userId = i.userId
+  GROUP BY i.userId
+) AS b
+```
+
+(`ARRAY_AGG(x ORDER BY y)` *inside* a LATERAL block does not currently round-trip — use it without `ORDER BY` there, or the outer `GROUP BY` form above.)
 - `ORDER BY` / `LIMIT` inside the block give per-input top-N.
+- **Window functions (`OVER`) are supported**, both over the join fan-out (`RANK() OVER (PARTITION BY i.userId ORDER BY h.amount DESC)`, running totals) and inside a LATERAL block (rank within the fetched set, filtered outside). Partitions never span input elements — everything is per-element.
 - Restrictions: the block must be a single `SELECT` over **one** lookup table (derived-table nesting inside the block is fine — it flattens); correlated conditions must sit in the `WHERE` directly over that table and fit the key contract (correlations in the select list or against non-key columns are not supported); the plain lookup-join is exactly the degenerate case with an identity block.
 - Multiple LATERAL blocks in one `FROM` are supported, but each block may correlate to **one source alias only** (a Calcite converter limitation — one block referencing e.g. both `i` and `s1` fails to plan). To feed an earlier block's output into a later block's key, wrap the earlier join in a derived table and correlate to that alias:
 
