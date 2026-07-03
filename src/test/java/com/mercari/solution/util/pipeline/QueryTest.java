@@ -5,6 +5,7 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
 import org.joda.time.Instant;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -12,6 +13,108 @@ import java.util.List;
 import java.util.Map;
 
 public class QueryTest {
+
+    @Test
+    public void testRepeatedExecution() {
+        final Schema inputSchema = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.STRING),
+                Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("category", Schema.FieldType.STRING),
+                        Schema.Field.of("amount", Schema.FieldType.INT64)
+                ))))
+        ));
+
+        final String sql = """
+                SELECT
+                  userId,
+                  COUNT(*) AS cnt,
+                  SUM(e.amount) AS total
+                FROM
+                  MyTable, UNNEST(events) AS e
+                GROUP BY
+                  userId
+                """;
+
+        final Query query = Query.of("MyTable", inputSchema, sql);
+        query.setup();
+        try {
+            final Instant timestamp = Instant.parse("2025-05-01T00:00:00Z");
+
+            // Same prepared query must be executable repeatedly with different inputs,
+            // as it is when used per-element inside a DoFn.
+            for (long i = 1; i <= 3; i++) {
+                final MElement input = MElement.of(Map.of(
+                        "userId", "u" + i,
+                        "events", List.of(
+                                Map.of("category", "a", "amount", i),
+                                Map.of("category", "b", "amount", i * 10))
+                ), timestamp);
+
+                final List<MElement> outputs = query
+                        .execute(Map.of("MyTable", List.of(input)), timestamp);
+
+                Assertions.assertEquals(1, outputs.size());
+                final MElement output = outputs.getFirst();
+                Assertions.assertEquals("u" + i, output.getAsString("userId"));
+                Assertions.assertEquals(2L, output.getAsLong("cnt"));
+                Assertions.assertEquals(i + i * 10, output.getAsLong("total"));
+            }
+
+            // An element whose per-element collection is empty must yield zero rows
+            final MElement empty = MElement.of(Map.of(
+                    "userId", "u0",
+                    "events", List.of()
+            ), timestamp);
+            final List<MElement> outputs = query
+                    .execute(Map.of("MyTable", List.of(empty)), timestamp);
+            Assertions.assertTrue(outputs.isEmpty());
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testLateralSubQuery() {
+        final Schema inputSchema = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.STRING),
+                Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("category", Schema.FieldType.STRING),
+                        Schema.Field.of("amount", Schema.FieldType.INT64)
+                ))))
+        ));
+
+        // Postgres style LEFT JOIN LATERAL keeps the input row even when the
+        // per-element collection is empty (fold with default).
+        final String sql = """
+                SELECT
+                  t.userId,
+                  s.total
+                FROM
+                  MyTable AS t
+                LEFT JOIN LATERAL (
+                  SELECT SUM(e.amount) AS total FROM UNNEST(t.events) AS e
+                ) AS s ON TRUE
+                """;
+
+        final Query query = Query.of("MyTable", inputSchema, sql);
+        query.setup();
+        try {
+            final Instant timestamp = Instant.parse("2025-05-01T00:00:00Z");
+            final MElement input = MElement.of(Map.of(
+                    "userId", "u1",
+                    "events", List.of(
+                            Map.of("category", "a", "amount", 1L),
+                            Map.of("category", "b", "amount", 10L))
+            ), timestamp);
+
+            final List<MElement> outputs = query
+                    .execute(Map.of("MyTable", List.of(input)), timestamp);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals(11L, outputs.getFirst().getAsLong("total"));
+        } finally {
+            query.teardown();
+        }
+    }
 
     @Test
     public void testSingleQuery() {
