@@ -2,6 +2,7 @@ package com.mercari.solution.module.source;
 
 import com.google.datastore.v1.Entity;
 import com.mercari.solution.module.*;
+import com.mercari.solution.util.cloud.google.DatastoreUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.schema.converter.EntityToElementConverter;
 import org.apache.beam.sdk.io.gcp.datastore.DatastoreIO;
@@ -32,6 +33,7 @@ public class DatastoreSource extends Source {
         private Integer numQuerySplits;
         private Boolean withKey;
         private Boolean emulator;
+        private String emulatorHost;
 
         private void validate() {
 
@@ -49,6 +51,17 @@ public class DatastoreSource extends Source {
         public void setDefaults() {
             if (withKey == null) {
                 withKey = false;
+            }
+            if (emulator == null) {
+                emulator = false;
+            }
+            // Resolution order: parameters.emulatorHost > DATASTORE_EMULATOR_HOST env var > system property.
+            // The legacy emulator=true flag falls back to the default local emulator port.
+            if (emulatorHost == null) {
+                emulatorHost = DatastoreUtil.getEmulatorHost();
+                if (emulatorHost == null && emulator) {
+                    emulatorHost = "localhost:8081";
+                }
             }
         }
     }
@@ -74,6 +87,10 @@ public class DatastoreSource extends Source {
 
         if(parameters.numQuerySplits != null) {
             read = read.withNumQuerySplits(parameters.numQuerySplits);
+        }
+
+        if(parameters.emulatorHost != null) {
+            read = read.withLocalhost(parameters.emulatorHost);
         }
 
         final Schema entitySchema = parameters.withKey ? EntityToElementConverter.addKeyToSchema(getSchema()) : getSchema();

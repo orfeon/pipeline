@@ -163,7 +163,7 @@ public class FirestoreSource extends Source {
 
         }
         return MCollectionTuple
-                .of(output, getSchema());
+                .of(output, getSchema().withType(DataType.DOCUMENT));
     }
 
     private static class ConvertListResponseDoFn extends DoFn<Document, MElement> {
