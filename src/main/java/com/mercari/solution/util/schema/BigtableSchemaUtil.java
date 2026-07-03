@@ -113,11 +113,8 @@ public class BigtableSchemaUtil {
             if(family == null) {
                 errorMessages.add("parameters.columns[" + i + "].family must not be null");
             }
-            if(qualifiers == null || qualifiers.isEmpty()) {
-                if(!TemplateUtil.isTemplateText(mutationOp) && !MutationOp.DELETE_FROM_FAMILY.name().equals(mutationOp)) {
-                    errorMessages.add("parameters.columns[" + i + "].qualifiers must not be empty");
-                }
-            } else {
+            // qualifiers may be absent or empty: setDefaults derives them from the input schema fields
+            if(qualifiers != null) {
                 for(int j=0; j<qualifiers.size(); j++) {
                     errorMessages.addAll(qualifiers.get(j).validate(i, j));
                 }
@@ -179,11 +176,12 @@ public class BigtableSchemaUtil {
             if(cellType == null) {
                 cellType = Optional.ofNullable(defaultCellType).orElse(CellType.last);
             }
-            if(qualifiers == null) {
+            if(qualifiers == null || qualifiers.isEmpty()) {
                 qualifiers = new ArrayList<>();
-                if(!TemplateUtil.isTemplateText(mutationOp)) {
+                if(fields != null && !TemplateUtil.isTemplateText(mutationOp)) {
                     switch (MutationOp.valueOf(mutationOp)) {
                         case SET_CELL, DELETE_FROM_COLUMN -> {
+                            // derive qualifiers from the input schema fields (qualifier name = field name)
                             for(final Schema.Field field : fields) {
                                 final ColumnQualifierProperties qualifier = ColumnQualifierProperties.of(field);
                                 qualifiers.add(qualifier);

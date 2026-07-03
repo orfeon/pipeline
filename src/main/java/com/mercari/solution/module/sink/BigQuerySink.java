@@ -87,8 +87,8 @@ public class BigQuerySink extends Sink {
         }
 
         private void validate(MCollectionTuple inputs) {
-            if(this.table == null && this.datasetId == null) {
-                throw new IllegalModuleException("parameters.datasetId, tableId is missing");
+            if(this.table == null && (this.datasetId == null || this.tableId == null)) {
+                throw new IllegalModuleException("parameters.table or parameters.datasetId and tableId are missing");
             }
         }
 
@@ -112,6 +112,10 @@ public class BigQuerySink extends Sink {
             }
             if(projectId == null) {
                 this.projectId = OptionUtil.getDefaultProject();
+            }
+            if(this.table == null) {
+                // datasetId and tableId form: build the table spec expected by BigQueryIO
+                this.table = String.format("%s.%s.%s", this.projectId, this.datasetId, this.tableId);
             }
             if(this.writeDisposition == null) {
                 this.writeDisposition = BigQueryIO.Write.WriteDisposition.WRITE_EMPTY;
@@ -305,11 +309,16 @@ public class BigQuerySink extends Sink {
         final PCollection<MElement> failure;
         final Schema resultSchema;
         if(isStreamingInsert) {
-            if(parameters.outputResult) {
+            if(parameters.outputResult && OptionUtil.isStreaming(inputs)) {
+                // WriteResult.getSuccessfulInserts is supported only for streaming inserts
+                // with successful-inserts propagation (Beam enables the propagation by default)
                 result = writeResult.getSuccessfulInserts()
                         .apply("ConvertSuccessfulInserts", ParDo.of(new SuccessfullInsertDoFn()));
                 resultSchema = inputSchema;
             } else {
+                if(parameters.outputResult) {
+                    LOG.warn("BigQuery sink outputResult is not supported for STREAMING_INSERTS in batch mode. No result output is produced.");
+                }
                 result = null;
                 resultSchema = null;
             }

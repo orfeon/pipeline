@@ -510,6 +510,8 @@ public class JdbcUtil {
             return DB.POSTGRESQL;
         } else if(driver.toLowerCase().contains("sqlserver")) {
             return DB.SQLSERVER;
+        } else if(driver.toLowerCase().contains("h2")) {
+            return DB.H2;
         } else {
             throw new IllegalArgumentException("Not supported database: " + driver);
         }

@@ -84,6 +84,12 @@ public class SpannerIT {
                             "CREATE TABLE DeleteTest ( " +
                                     "id STRING(64) NOT NULL, " +
                                     "longvalue INT64 " +
+                                    ") PRIMARY KEY (id)",
+                            "CREATE TABLE RoundTripElement ( " +
+                                    "id STRING(64) NOT NULL, " +
+                                    "longvalue INT64, " +
+                                    "createdat TIMESTAMP, " +
+                                    "birthday DATE " +
                                     ") PRIMARY KEY (id)"))
                     .get(60, TimeUnit.SECONDS);
         }
@@ -205,6 +211,103 @@ public class SpannerIT {
                 count++;
             }
             Assertions.assertEquals(3, count);
+            return null;
+        });
+
+        readPipeline.run().waitUntilFinish();
+    }
+
+    @Test
+    public void testRoundTripElementInput() throws Exception {
+        // pipeline 1: create source WITHOUT the "outputType": "AVRO" workaround -> spanner sink.
+        // The sink receives ELEMENT-typed inputs, exercising the ELEMENT-map path of
+        // ElementToSpannerMutationConverter incl. timestamp and date columns.
+        final String sinkConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "a", "longvalue": 1, "createdat": "2024-10-10T01:23:45Z", "birthday": "2000-05-15" },
+                          { "id": "b", "longvalue": 2, "createdat": "2024-10-20T12:34:56Z", "birthday": "1999-12-31" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "longvalue", "type": "int64" },
+                          { "name": "createdat", "type": "timestamp" },
+                          { "name": "birthday", "type": "date" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "spannerSink",
+                      "module": "spanner",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "table": "RoundTripElement",
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline writePipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(writePipeline, Config.load(sinkConfigJson));
+        writePipeline.run().waitUntilFinish();
+
+        // pipeline 2: spanner source (query) -> assert timestamps and dates round-tripped
+        final String sourceConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "spannerSource",
+                      "module": "spanner",
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "query": "SELECT id, longvalue, createdat, birthday FROM RoundTripElement",
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline readPipeline = createReadPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(readPipeline, Config.load(sourceConfigJson));
+        final MCollection output = outputs.get("spannerSource");
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                switch (row.getAsString("id")) {
+                    case "a" -> {
+                        Assertions.assertEquals(1L, row.getAsLong("longvalue"));
+                        Assertions.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-10T01:23:45.000Z"), row.getPrimitiveValue("createdat"));
+                        Assertions.assertEquals((int) java.time.LocalDate.parse("2000-05-15").toEpochDay(), row.getPrimitiveValue("birthday"));
+                    }
+                    case "b" -> {
+                        Assertions.assertEquals(2L, row.getAsLong("longvalue"));
+                        Assertions.assertEquals(DateTimeUtil.toEpochMicroSecond("2024-10-20T12:34:56.000Z"), row.getPrimitiveValue("createdat"));
+                        Assertions.assertEquals((int) java.time.LocalDate.parse("1999-12-31").toEpochDay(), row.getPrimitiveValue("birthday"));
+                    }
+                    default -> Assertions.fail("unexpected id: " + row.getAsString("id"));
+                }
+                count++;
+            }
+            Assertions.assertEquals(2, count);
             return null;
         });
 

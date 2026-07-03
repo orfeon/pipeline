@@ -256,6 +256,16 @@ public class JdbcUtilTest {
      */
 
     @Test
+    public void testExtractDbFromDriver() {
+        Assertions.assertEquals(JdbcUtil.DB.MYSQL, JdbcUtil.extractDbFromDriver("com.mysql.cj.jdbc.Driver"));
+        Assertions.assertEquals(JdbcUtil.DB.POSTGRESQL, JdbcUtil.extractDbFromDriver("org.postgresql.Driver"));
+        Assertions.assertEquals(JdbcUtil.DB.SQLSERVER, JdbcUtil.extractDbFromDriver("com.microsoft.sqlserver.jdbc.SQLServerDriver"));
+        Assertions.assertEquals(JdbcUtil.DB.H2, JdbcUtil.extractDbFromDriver("org.h2.Driver"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> JdbcUtil.extractDbFromDriver(null));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> JdbcUtil.extractDbFromDriver("oracle.jdbc.OracleDriver"));
+    }
+
+    @Test
     public void testCreateMySQLStatementInsert() {
         Schema schema = SchemaBuilder.builder()
             .record("root").fields()

@@ -91,6 +91,16 @@ public class BigQueryIT {
                                 new TableFieldSchema().setName("doublevalue").setType("FLOAT").setMode("NULLABLE"),
                                 new TableFieldSchema().setName("boolvalue").setType("BOOLEAN").setMode("NULLABLE")))))
                 .execute();
+        bigquery.tables()
+                .insert(PROJECT, DATASET, new Table()
+                        .setTableReference(new TableReference()
+                                .setProjectId(PROJECT)
+                                .setDatasetId(DATASET)
+                                .setTableId("datasettest"))
+                        .setSchema(new TableSchema().setFields(List.of(
+                                new TableFieldSchema().setName("id").setType("STRING").setMode("NULLABLE"),
+                                new TableFieldSchema().setName("longvalue").setType("INTEGER").setMode("NULLABLE")))))
+                .execute();
     }
 
     @AfterAll
@@ -238,6 +248,67 @@ public class BigQueryIT {
         // verify the written rows via jobs.query against the emulator
         final List<TableRow> rows = BigQueryUtil.query(PROJECT,
                 "SELECT id, longvalue FROM " + DATASET + ".createtest ORDER BY id");
+
+        Assertions.assertNotNull(rows);
+        Assertions.assertEquals(2, rows.size());
+
+        Assertions.assertEquals("a", cell(rows.get(0), 0));
+        Assertions.assertEquals(1L, Long.parseLong(cell(rows.get(0), 1)));
+        Assertions.assertEquals("b", cell(rows.get(1), 0));
+        Assertions.assertEquals(2L, Long.parseLong(cell(rows.get(1), 1)));
+    }
+
+    @Test
+    public void testWriteDatasetIdTableId() throws Exception {
+        // pipeline: create source -> bigquery sink addressed via datasetId/tableId (no table parameter)
+        final String sinkConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "outputType": "AVRO",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "a", "longvalue": 1 },
+                          { "id": "b", "longvalue": 2 }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "longvalue", "type": "int64" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "bigquerySink",
+                      "module": "bigquery",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "datasetId": "%s",
+                        "tableId": "datasettest",
+                        "method": "STREAMING_INSERTS",
+                        "writeDisposition": "WRITE_APPEND",
+                        "createDisposition": "CREATE_NEVER",
+                        "outputResult": false
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, DATASET);
+
+        final TestPipeline writePipeline = createPipeline();
+        MPipeline.apply(writePipeline, Config.load(sinkConfigJson));
+        writePipeline.run().waitUntilFinish();
+
+        // verify the written rows via jobs.query against the emulator
+        final List<TableRow> rows = BigQueryUtil.query(PROJECT,
+                "SELECT id, longvalue FROM " + DATASET + ".datasettest ORDER BY id");
 
         Assertions.assertNotNull(rows);
         Assertions.assertEquals(2, rows.size());

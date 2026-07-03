@@ -400,6 +400,61 @@ public class BigtableSchemaUtilTest {
         Assertions.assertEquals(-1L, setCell.getTimestampMicros());
     }
 
+    @Test
+    public void testToMutationsWithoutQualifiers() {
+        // qualifiers omitted: derived from the input schema fields on setDefaults
+        final String config = """
+                [
+                  { "family": "cf1" },
+                  { "family": "cf2", "qualifiers": [] }
+                ]
+                """;
+
+        final List<BigtableSchemaUtil.ColumnFamilyProperties> families = parseFamilies(config);
+        for (int i = 0; i < families.size(); i++) {
+            Assertions.assertTrue(
+                    families.get(i).validate(i).isEmpty(),
+                    "columns without qualifiers must be valid: " + families.get(i).validate(i));
+        }
+
+        final List<Schema.Field> fields = List.of(
+                Schema.Field.of("stringField", Schema.FieldType.STRING),
+                Schema.Field.of("longField", Schema.FieldType.INT64));
+        for (final BigtableSchemaUtil.ColumnFamilyProperties family : families) {
+            family.setDefaults(BigtableSchemaUtil.Format.bytes, null, null, null, null, fields);
+            family.setupSink();
+        }
+
+        final Map<String, Object> primitiveValues = new HashMap<>();
+        primitiveValues.put("stringField", "hello");
+        primitiveValues.put("longField", 42L);
+        final Map<String, Object> standardValues = new HashMap<>(primitiveValues);
+
+        final org.joda.time.Instant eventTime = org.joda.time.Instant.parse("2024-01-01T00:00:00Z");
+        final List<Mutation> mutations = BigtableSchemaUtil.toMutations(families, primitiveValues, standardValues, eventTime);
+
+        // both families derive a SET_CELL mutation per input field
+        Assertions.assertEquals(4, mutations.size());
+
+        Assertions.assertTrue(mutations.get(0).hasSetCell());
+        Assertions.assertEquals("cf1", mutations.get(0).getSetCell().getFamilyName());
+        Assertions.assertEquals("stringField", mutations.get(0).getSetCell().getColumnQualifier().toStringUtf8());
+        Assertions.assertEquals("hello", Bytes.toString(mutations.get(0).getSetCell().getValue().toByteArray()));
+
+        Assertions.assertTrue(mutations.get(1).hasSetCell());
+        Assertions.assertEquals("cf1", mutations.get(1).getSetCell().getFamilyName());
+        Assertions.assertEquals("longField", mutations.get(1).getSetCell().getColumnQualifier().toStringUtf8());
+        Assertions.assertEquals(42L, Bytes.toLong(mutations.get(1).getSetCell().getValue().toByteArray()));
+
+        Assertions.assertTrue(mutations.get(2).hasSetCell());
+        Assertions.assertEquals("cf2", mutations.get(2).getSetCell().getFamilyName());
+        Assertions.assertEquals("stringField", mutations.get(2).getSetCell().getColumnQualifier().toStringUtf8());
+
+        Assertions.assertTrue(mutations.get(3).hasSetCell());
+        Assertions.assertEquals("cf2", mutations.get(3).getSetCell().getFamilyName());
+        Assertions.assertEquals("longField", mutations.get(3).getSetCell().getColumnQualifier().toStringUtf8());
+    }
+
     private static List<BigtableSchemaUtil.ColumnFamilyProperties> createSourceFamilies() {
         final String config = """
                 [

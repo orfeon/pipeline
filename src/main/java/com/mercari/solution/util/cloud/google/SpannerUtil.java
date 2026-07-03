@@ -390,16 +390,9 @@ public class SpannerUtil {
 
         final DatabaseId database = DatabaseId.of(projectId, instanceId, databaseId);
         try(final Spanner spanner = connectSpanner(projectId, 1, 1, 1, false, emulator)) {
-            System.out.println(spanner);
             final DatabaseAdminClient client = spanner.getDatabaseAdminClient();
-            System.out.println(client.getDatabase(instanceId, databaseId));
-
             final List<String> ddls = client.getDatabaseDdl(instanceId, databaseId);
-            System.out.println(ddls);
-
-            for(final String ddl : ddls) {
-                System.out.println(ddl);
-            }
+            LOG.debug("database: {} ddls: {}", database, ddls);
             return new HashMap<>();
         }
     }

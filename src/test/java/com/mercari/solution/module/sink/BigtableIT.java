@@ -60,6 +60,7 @@ public class BigtableIT {
 
             admin.createTable(CreateTableRequest.of("RoundTrip").addFamily("f"));
             admin.createTable(CreateTableRequest.of("DeleteTest").addFamily("f"));
+            admin.createTable(CreateTableRequest.of("NoQualifiers").addFamily("f"));
         }
     }
 
@@ -195,6 +196,104 @@ public class BigtableIT {
                 count++;
             }
             Assertions.assertEquals(3, count);
+            return null;
+        });
+
+        readPipeline.run().waitUntilFinish();
+    }
+
+    @Test
+    public void testWriteWithoutQualifiers() throws Exception {
+        // pipeline 1: create source -> bigtable sink without qualifiers
+        // (qualifiers are derived automatically from the input schema fields)
+        final String sinkConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "outputType": "AVRO",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "a", "longvalue": 1 },
+                          { "id": "b", "longvalue": 2 }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "longvalue", "type": "int64" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "bigtableSink",
+                      "module": "bigtable",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "tableId": "NoQualifiers",
+                        "rowKey": "${id}",
+                        "columns": [
+                          { "family": "f" }
+                        ],
+                        "emulatorHost": "%s"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, emulator.getEmulatorEndpoint());
+
+        final TestPipeline writePipeline = createPipeline(false);
+        MPipeline.apply(writePipeline, Config.load(sinkConfigJson));
+        writePipeline.run().waitUntilFinish();
+
+        // pipeline 2: bigtable source reading the auto-derived qualifiers (named after the fields)
+        final String sourceConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "bigtableSource",
+                      "module": "bigtable",
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "tableId": "NoQualifiers",
+                        "columns": [
+                          {
+                            "family": "f",
+                            "qualifiers": [
+                              { "name": "id", "type": "string" },
+                              { "name": "longvalue", "type": "int64" }
+                            ]
+                          }
+                        ],
+                        "emulatorHost": "%s"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, emulator.getEmulatorEndpoint());
+
+        final TestPipeline readPipeline = createPipeline(true);
+        final Map<String, MCollection> outputs = MPipeline.apply(readPipeline, Config.load(sourceConfigJson));
+        final MCollection output = outputs.get("bigtableSource");
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                switch (row.getAsString("id")) {
+                    case "a" -> Assertions.assertEquals(1L, row.getAsLong("longvalue"));
+                    case "b" -> Assertions.assertEquals(2L, row.getAsLong("longvalue"));
+                    default -> Assertions.fail("unexpected id: " + row.getAsString("id"));
+                }
+                count++;
+            }
+            Assertions.assertEquals(2, count);
             return null;
         });
 

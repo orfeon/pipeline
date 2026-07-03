@@ -82,9 +82,9 @@ public class FirestoreSink extends Sink {
         }
 
         private void validate(final String name) {
-            if((this.collection == null || this.nameFields == null) && this.nameTemplate == null) {
-                //throw new IllegalArgumentException("Firestore sink module requires name parameter!");
-            }
+            // No required parameters: when collection/nameFields/nameTemplate are not set,
+            // the document name falls back to the input's __name__ field value,
+            // and finally to a random UUID (see ConvertWriteDoFn).
         }
 
         private void setDefaults(final PInput input) {
@@ -329,7 +329,7 @@ public class FirestoreSink extends Sink {
 
     }
 
-    private static class FailureDoFn extends DoFn<FirestoreV1.WriteFailure, BadRecord> {
+    static class FailureDoFn extends DoFn<FirestoreV1.WriteFailure, BadRecord> {
 
         @ProcessElement
         public void processElement(ProcessContext c) {
@@ -337,7 +337,25 @@ public class FirestoreSink extends Sink {
             if(writeFailure == null) {
                 return;
             }
-            // TODO
+
+            final Write write = writeFailure.getWrite();
+            final String name = switch (write.getOperationCase()) {
+                case UPDATE -> write.getUpdate().getName();
+                case DELETE -> write.getDelete();
+                default -> "";
+            };
+
+            final Map<String, Object> values = new HashMap<>();
+            values.put("name", name);
+            values.put("write", write.toString());
+
+            final com.google.rpc.Status status = writeFailure.getStatus();
+            final String message = String.format(
+                    "Failed to write firestore document: %s, status code: %d, message: %s",
+                    name, status.getCode(), status.getMessage());
+            final BadRecord badRecord = processError(
+                    message, values, new IllegalStateException(message), false);
+            c.output(badRecord);
         }
 
     }
