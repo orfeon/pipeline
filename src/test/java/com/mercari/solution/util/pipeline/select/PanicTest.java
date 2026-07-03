@@ -38,6 +38,9 @@ public class PanicTest {
                 create("{ \"name\": \"p\", \"func\": \"panic\", \"message\": \"boom\", \"rate\": \"abc\" }", inputFields()));
         Assertions.assertThrows(IllegalArgumentException.class, () ->
                 create("{ \"name\": \"p\", \"func\": \"panic\", \"message\": \"boom\", \"rate\": [0.5] }", inputFields()));
+        // message must be a primitive value
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                create("{ \"name\": \"p\", \"func\": \"panic\", \"message\": { \"a\": 1 } }", inputFields()));
     }
 
     @Test
@@ -53,7 +56,8 @@ public class PanicTest {
         input.put("intField", 1);
         final RuntimeException e = Assertions.assertThrows(RuntimeException.class,
                 () -> panic.apply(input, TIMESTAMP));
-        Assertions.assertTrue(e.getMessage().contains("boom"));
+        // the message must be the raw string value, without JSON quotes
+        Assertions.assertEquals("boom", e.getMessage());
     }
 
     @Test

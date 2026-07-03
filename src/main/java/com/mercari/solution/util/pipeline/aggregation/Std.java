@@ -138,6 +138,9 @@ public class Std implements AggregateFunction {
     @Override
     public List<String> validate(int parent, int index) {
         final List<String> errorMessages = new ArrayList<>();
+        if(this.field == null && this.expression == null) {
+            errorMessages.add("aggregations[" + parent + "].fields[" + index + "].field or expression must not be null");
+        }
         return errorMessages;
     }
 
@@ -264,6 +267,11 @@ public class Std implements AggregateFunction {
         return base;
     }
 
+    // Weights are interpreted as frequency weights (a weight of n is equivalent to
+    // observing the value n times): the accumulator holds the weighted M2
+    // (sum of weight * squared deviation, maintained incrementally by add() via
+    // West's algorithm and merged with the Chan et al. between-group correction),
+    // and the variance is M2 / (sumWeights - ddof).
     @Override
     public Object extractOutput(final Accumulator accumulator,
                                             final Map<String, Object> values) {

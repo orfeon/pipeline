@@ -182,9 +182,8 @@ public class PartitionTest {
                 Schema.Field.of("stringField", Schema.FieldType.STRING),
                 Schema.Field.of("longField", Schema.FieldType.INT64)));
 
-        // Partition registers the query table under the partition name.
-        // The single element execute() path feeds the table named "INPUT",
-        // so only a partition named INPUT receives the input element there.
+        // Partition registers the query table under the partition name,
+        // and the execute() paths feed the input elements to that table.
         final JsonObject partitionJson = new Gson().fromJson("""
                 {
                   "name": "INPUT",
@@ -217,8 +216,9 @@ public class PartitionTest {
 
         partition.teardown();
 
-        // a sql partition whose name does not match the fed table name
-        // must not throw and produces no rows for the single element execute() path
+        // a sql partition named other than INPUT must also receive the input
+        // element on the single element execute() path (the table is registered
+        // and fed under the partition name)
         final JsonObject otherJson = new Gson().fromJson("""
                 {
                   "name": "mytable",
@@ -227,7 +227,9 @@ public class PartitionTest {
                 """, JsonObject.class);
         final Partition other = Partition.of(otherJson, inputSchema);
         other.setup();
-        Assertions.assertTrue(other.execute(input, timestamp).isEmpty());
+        final List<MElement> otherOutputs = other.execute(input, timestamp);
+        Assertions.assertEquals(1, otherOutputs.size());
+        Assertions.assertEquals("a", otherOutputs.get(0).getPrimitiveValue("stringField"));
         other.teardown();
     }
 

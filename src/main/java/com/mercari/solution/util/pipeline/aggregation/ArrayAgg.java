@@ -182,11 +182,46 @@ public class ArrayAgg implements AggregateFunction {
                 }
                 output.add(rowValues);
             }
+            if(!Order.none.equals(order)) {
+                // sort the output rows by the aggregated fields in their declared order
+                // (first field primary, following fields as tie breakers)
+                output.sort((o1, o2) -> {
+                    final Map<?, ?> row1 = (Map<?, ?>) o1;
+                    final Map<?, ?> row2 = (Map<?, ?>) o2;
+                    for(final String field : fields) {
+                        final int c = compareValues(row1.get(field), row2.get(field));
+                        if(c != 0) {
+                            return c;
+                        }
+                    }
+                    return 0;
+                });
+            }
             return output;
         } else {
             final String key = outputKeyName(fields.getFirst());
-            return accumulator.getList(key);
+            final List<Object> list = accumulator.getList(key);
+            if(list == null || Order.none.equals(order)) {
+                return list;
+            }
+            final List<Object> output = new ArrayList<>(list);
+            output.sort(this::compareValues);
+            return output;
         }
+    }
+
+    // natural ordering (reversed for descending); nulls are always placed last
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private int compareValues(final Object v1, final Object v2) {
+        if(v1 == null && v2 == null) {
+            return 0;
+        } else if(v1 == null) {
+            return 1;
+        } else if(v2 == null) {
+            return -1;
+        }
+        final int c = ((Comparable) v1).compareTo(v2);
+        return Order.descending.equals(order) ? -c : c;
     }
 
     private String outputKeyName(String field) {

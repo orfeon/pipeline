@@ -174,7 +174,9 @@ public class SimpleRegression implements AggregateFunction {
     @Override
     public List<String> validate(int parent, int index) {
         final List<String> errorMessages = new ArrayList<>();
-
+        if(this.field == null && this.expression == null) {
+            errorMessages.add("aggregations[" + parent + "].fields[" + index + "].field or expression must not be null");
+        }
         return errorMessages;
     }
 
@@ -347,7 +349,8 @@ public class SimpleRegression implements AggregateFunction {
         output.put("Slope", slope);
         output.put("Intercept", getIntercept(accumulator, slope));
         output.put("RMSE", getRootMeanSumSquaredErrors(accumulator));
-        output.put("N", getDouble(accumulator, accumKeyCountName, 0D));
+        // N is declared as INT64 in the output field type
+        output.put("N", (long) getDouble(accumulator, accumKeyCountName, 0D));
         return output;
     }
 

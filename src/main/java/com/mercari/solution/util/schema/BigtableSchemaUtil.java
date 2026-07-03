@@ -954,7 +954,6 @@ public class BigtableSchemaUtil {
                 }
                 try {
                     final byte[] bytes = AvroSchemaUtil.encode(values);
-                    System.out.println("base64: " + Base64.getEncoder().encodeToString(bytes));
                     yield ByteString.copyFrom(bytes);
                 } catch (IOException e) {
                     throw new RuntimeException("Failed to convert to avro ByteString", e);

@@ -124,7 +124,15 @@ public class Query implements Serializable {
     }
 
     public List<MElement> execute(final List<MElement> inputs, final Instant timestamp) {
-        return execute(Map.of(DEFAULT_TABLE_NAME, inputs), timestamp);
+        // When a single table is registered, feed the inputs to it under its
+        // registered name (e.g. the partition name), falling back to the default table name.
+        final String tableName;
+        if(inputSchemas.size() == 1 && inputSchemas.keySet().iterator().next() != null) {
+            tableName = inputSchemas.keySet().iterator().next();
+        } else {
+            tableName = DEFAULT_TABLE_NAME;
+        }
+        return execute(Map.of(tableName, inputs), timestamp);
     }
 
     public List<MElement> execute_(final Map<String, MElement> inputs, final Instant timestamp) {

@@ -331,6 +331,24 @@ public class SelectFunctionTest {
         // duration without durationUnit is invalid
         Assertions.assertThrows(IllegalArgumentException.class, () ->
                 SelectFunction.of(json("{ \"name\": \"et\", \"func\": \"event_timestamp\", \"duration\": 1 }"), simpleInputFields()));
+
+        // with cutoff: timestamp is truncated (floored) to the specified time unit
+        final SelectFunction cutoff = SelectFunction.of(
+                json("{ \"name\": \"et\", \"func\": \"event_timestamp\", \"cutoff\": \"minute\" }"),
+                simpleInputFields());
+        cutoff.setup();
+        Assertions.assertEquals(
+                Instant.parse("2024-01-01T00:03:00Z").getMillis() * 1000L,
+                cutoff.apply(new HashMap<>(), Instant.parse("2024-01-01T00:03:45.678Z")));
+
+        // cutoff is applied after the duration shift
+        final SelectFunction shiftedCutoff = SelectFunction.of(
+                json("{ \"name\": \"et\", \"func\": \"event_timestamp\", \"duration\": 1, \"durationUnit\": \"minute\", \"cutoff\": \"hour\" }"),
+                simpleInputFields());
+        shiftedCutoff.setup();
+        Assertions.assertEquals(
+                Instant.parse("2024-01-01T01:00:00Z").getMillis() * 1000L,
+                shiftedCutoff.apply(new HashMap<>(), Instant.parse("2024-01-01T00:59:30Z")));
     }
 
     @Test

@@ -191,4 +191,34 @@ public class StdTest {
         Assertions.assertEquals(Schema.Type.float64, std.getOutputFieldType().getType());
     }
 
+    @Test
+    public void testFrequencyWeightedStdReferenceValue() {
+        // frequency weights semantics: variance = M2 / (sumWeights - ddof)
+        // values {1 (w=3), 5 (w=2)}: mean = (3*1 + 2*5)/5 = 2.6,
+        // M2 = 3*(1-2.6)^2 + 2*(5-2.6)^2 = 7.68 + 11.52 = 19.2
+        final AggregateFunction sample = create("{ \"name\": \"s\", \"op\": \"std\", \"field\": \"doubleField\", \"weightField\": \"weightField\" }");
+        Accumulator sampleAcc = Accumulator.of();
+        sampleAcc = sample.addInput(sampleAcc, element(0L, "doubleField", 1D, "weightField", 3D));
+        sampleAcc = sample.addInput(sampleAcc, element(1L, "doubleField", 5D, "weightField", 2D));
+        Assertions.assertEquals(Math.sqrt(19.2D / 4D), output(sample, sampleAcc), DELTA);
+
+        final AggregateFunction population = create("{ \"name\": \"s\", \"op\": \"std\", \"field\": \"doubleField\", \"weightField\": \"weightField\", \"ddof\": 0 }");
+        Accumulator populationAcc = Accumulator.of();
+        populationAcc = population.addInput(populationAcc, element(0L, "doubleField", 1D, "weightField", 3D));
+        populationAcc = population.addInput(populationAcc, element(1L, "doubleField", 5D, "weightField", 2D));
+        Assertions.assertEquals(Math.sqrt(19.2D / 5D), output(population, populationAcc), DELTA);
+    }
+
+    @Test
+    public void testValidate() {
+        final AggregateFunction valid = create("{ \"name\": \"s\", \"op\": \"std\", \"field\": \"doubleField\" }");
+        Assertions.assertTrue(valid.validate(0, 0).isEmpty());
+
+        // neither field nor expression: must be reported as a validation error
+        final AggregateFunction invalid = create("{ \"name\": \"s\", \"op\": \"std\" }");
+        final List<String> errorMessages = invalid.validate(1, 2);
+        Assertions.assertEquals(1, errorMessages.size());
+        Assertions.assertEquals("aggregations[1].fields[2].field or expression must not be null", errorMessages.get(0));
+    }
+
 }

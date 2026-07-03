@@ -99,10 +99,13 @@ public class OptionUtilTest {
                 "--template.longVar=10",
                 "--template.boolVar=true",
                 "--template.objVar={\"a\": 1, \"b\": [true, \"x\"]}",
+                "--template.msg=hello world",
                 "--runner=DirectRunner"
         };
         final Map<String, Object> templateArgs = OptionUtil.getTemplateArgs(args);
         Assertions.assertEquals("hello", templateArgs.get("stringVar"));
+        // values with trailing tokens must fall back to the raw string value
+        Assertions.assertEquals("hello world", templateArgs.get("msg"));
         Assertions.assertEquals(10L, templateArgs.get("longVar"));
         Assertions.assertEquals(true, templateArgs.get("boolVar"));
 

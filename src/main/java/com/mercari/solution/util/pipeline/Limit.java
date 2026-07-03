@@ -149,7 +149,20 @@ public class Limit {
                     }
                     return;
                 } else if(buffer != null) {
-
+                    // emit the latest element buffered before outputStartAt
+                    // (same semantics as LimitStreamingDoFn onTimer)
+                    bufferValueState.clear();
+                    if(this.limitCount != null) {
+                        final Integer outputCount = Optional
+                                .ofNullable(countValueState.read())
+                                .orElse(0);
+                        if(this.limitCount > outputCount) {
+                            c.output(buffer.getValue());
+                            countValueState.write(outputCount + 1);
+                        }
+                    } else {
+                        c.output(buffer.getValue());
+                    }
                 }
             }
 

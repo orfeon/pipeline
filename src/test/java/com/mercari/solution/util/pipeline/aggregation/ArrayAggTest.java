@@ -76,6 +76,71 @@ public class ArrayAggTest {
     }
 
     @Test
+    public void testSingleFieldOrderAscending() {
+        final AggregateFunction agg = create("{ \"name\": \"a\", \"op\": \"array_agg\", \"field\": \"longField\", \"order\": \"ascending\" }");
+        Accumulator accumulator = Accumulator.of();
+        accumulator = agg.addInput(accumulator, element(0L, "a", 3L));
+        accumulator = agg.addInput(accumulator, element(1L, "b", 1L));
+        accumulator = agg.addInput(accumulator, element(2L, "c", null));
+        accumulator = agg.addInput(accumulator, element(3L, "d", 2L));
+
+        final List<?> output = (List<?>) agg.extractOutput(accumulator, new HashMap<>());
+        // natural ascending order, nulls last
+        Assertions.assertEquals(4, output.size());
+        Assertions.assertEquals(1L, output.get(0));
+        Assertions.assertEquals(2L, output.get(1));
+        Assertions.assertEquals(3L, output.get(2));
+        Assertions.assertNull(output.get(3));
+    }
+
+    @Test
+    public void testSingleFieldOrderDescending() {
+        final AggregateFunction agg = create("{ \"name\": \"a\", \"op\": \"array_agg\", \"field\": \"longField\", \"order\": \"descending\" }");
+        Accumulator accumulator = Accumulator.of();
+        accumulator = agg.addInput(accumulator, element(0L, "a", 1L));
+        accumulator = agg.addInput(accumulator, element(1L, "b", null));
+        accumulator = agg.addInput(accumulator, element(2L, "c", 3L));
+        accumulator = agg.addInput(accumulator, element(3L, "d", 2L));
+
+        final List<?> output = (List<?>) agg.extractOutput(accumulator, new HashMap<>());
+        // natural descending order, nulls last (deterministic in both directions)
+        Assertions.assertEquals(4, output.size());
+        Assertions.assertEquals(3L, output.get(0));
+        Assertions.assertEquals(2L, output.get(1));
+        Assertions.assertEquals(1L, output.get(2));
+        Assertions.assertNull(output.get(3));
+    }
+
+    @Test
+    public void testMultiFieldsOrder() {
+        // for multi-field aggregation, the output rows are sorted by the aggregated
+        // fields in their declared order (first field primary, following fields as tie breakers)
+        final AggregateFunction ascending = create("{ \"name\": \"a\", \"op\": \"array_agg\", \"fields\": [\"stringField\", \"longField\"], \"order\": \"ascending\" }");
+        Accumulator accumulator = Accumulator.of();
+        accumulator = ascending.addInput(accumulator, element(0L, "b", 2L));
+        accumulator = ascending.addInput(accumulator, element(1L, "a", 3L));
+        accumulator = ascending.addInput(accumulator, element(2L, "a", 1L));
+
+        final List<?> output = (List<?>) ascending.extractOutput(accumulator, new HashMap<>());
+        Assertions.assertEquals(3, output.size());
+        Assertions.assertEquals(Map.of("stringField", "a", "longField", 1L), output.get(0));
+        Assertions.assertEquals(Map.of("stringField", "a", "longField", 3L), output.get(1));
+        Assertions.assertEquals(Map.of("stringField", "b", "longField", 2L), output.get(2));
+
+        final AggregateFunction descending = create("{ \"name\": \"a\", \"op\": \"array_agg\", \"fields\": [\"stringField\", \"longField\"], \"order\": \"descending\" }");
+        Accumulator accumulator2 = Accumulator.of();
+        accumulator2 = descending.addInput(accumulator2, element(0L, "b", 2L));
+        accumulator2 = descending.addInput(accumulator2, element(1L, "a", 3L));
+        accumulator2 = descending.addInput(accumulator2, element(2L, "a", 1L));
+
+        final List<?> output2 = (List<?>) descending.extractOutput(accumulator2, new HashMap<>());
+        Assertions.assertEquals(3, output2.size());
+        Assertions.assertEquals(Map.of("stringField", "b", "longField", 2L), output2.get(0));
+        Assertions.assertEquals(Map.of("stringField", "a", "longField", 3L), output2.get(1));
+        Assertions.assertEquals(Map.of("stringField", "a", "longField", 1L), output2.get(2));
+    }
+
+    @Test
     public void testMergeAccumulator() {
         final AggregateFunction agg = create("{ \"name\": \"a\", \"op\": \"array_agg\", \"field\": \"longField\" }");
         Accumulator acc1 = Accumulator.of();

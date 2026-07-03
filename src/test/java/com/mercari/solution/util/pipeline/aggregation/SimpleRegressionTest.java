@@ -221,6 +221,35 @@ public class SimpleRegressionTest {
         Assertions.assertTrue(elementSchema.hasField("Intercept"));
         Assertions.assertTrue(elementSchema.hasField("RMSE"));
         Assertions.assertTrue(elementSchema.hasField("N"));
+        // N is declared as INT64
+        Assertions.assertEquals(Schema.Type.int64, elementSchema.getField("N").getFieldType().getType());
+    }
+
+    @Test
+    public void testNOutputValueIsLong() {
+        // the declared output field type of N is INT64, so the output value must be a long
+        final AggregateFunction reg = create("{ \"name\": \"r\", \"op\": \"simple_regression\", \"field\": \"doubleField\", \"xField\": \"longField\" }");
+        final Accumulator accumulator = addPoints(reg, Accumulator.of(),
+                new double[][]{ {1, 3}, {2, 5} });
+        final Map<String, Object> out = output(reg, accumulator);
+        Assertions.assertInstanceOf(Long.class, out.get("N"));
+        Assertions.assertEquals(2L, out.get("N"));
+
+        final Map<String, Object> empty = output(reg, Accumulator.of());
+        Assertions.assertInstanceOf(Long.class, empty.get("N"));
+        Assertions.assertEquals(0L, empty.get("N"));
+    }
+
+    @Test
+    public void testValidate() {
+        final AggregateFunction valid = create("{ \"name\": \"r\", \"op\": \"simple_regression\", \"field\": \"doubleField\", \"xField\": \"longField\" }");
+        Assertions.assertTrue(valid.validate(0, 0).isEmpty());
+
+        // neither field nor expression: must be reported as a validation error
+        final AggregateFunction invalid = create("{ \"name\": \"r\", \"op\": \"simple_regression\", \"xField\": \"longField\" }");
+        final List<String> errorMessages = invalid.validate(0, 1);
+        Assertions.assertEquals(1, errorMessages.size());
+        Assertions.assertEquals("aggregations[0].fields[1].field or expression must not be null", errorMessages.get(0));
     }
 
 }

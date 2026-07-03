@@ -112,6 +112,41 @@ public class LimitTest {
     }
 
     @Test
+    public void testLimitBatchOutputStartAt() throws Exception {
+        final Schema schema = createSchema();
+
+        final Limit.LimitParameters parameters = new Gson().fromJson("{}", Limit.LimitParameters.class);
+        final java.lang.reflect.Field field = Limit.LimitParameters.class.getDeclaredField("outputStartAt");
+        field.setAccessible(true);
+        field.set(parameters, Instant.parse("2025-01-01T00:01:00Z"));
+
+        final PCollection<KV<String, MElement>> input = pipeline
+                .apply("Create", Create
+                        .timestamped(
+                                TimestampedValue.of(KV.of("k", element(1L)), Instant.parse("2025-01-01T00:00:01Z")),
+                                TimestampedValue.of(KV.of("k", element(2L)), Instant.parse("2025-01-01T00:00:02Z")),
+                                TimestampedValue.of(KV.of("k", element(3L)), Instant.parse("2025-01-01T00:02:00Z")))
+                        .withCoder(KvCoder.of(StringUtf8Coder.of(), ElementCoder.of(schema))));
+
+        final PCollection<MElement> outputs = input
+                .apply("Limit", Limit.of(parameters, List.of(schema), false));
+
+        PAssert.that(outputs).satisfies(elements -> {
+            final Set<Long> ids = new HashSet<>();
+            for(final MElement element : elements) {
+                ids.add(element.getAsLong("id"));
+            }
+            // element 3 is output directly (at/after outputStartAt),
+            // element 2 is the latest buffered element before outputStartAt
+            // and must also be emitted (same semantics as streaming)
+            Assertions.assertEquals(Set.of(2L, 3L), ids);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
     public void testLimitStreaming() {
         final Schema schema = createSchema();
         final Limit.LimitParameters parameters = new Gson().fromJson("{\"count\":1}", Limit.LimitParameters.class);
