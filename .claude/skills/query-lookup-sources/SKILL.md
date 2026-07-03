@@ -288,6 +288,26 @@ Query2.builder()
   per evaluation at ~1.1ms each, and it drags
   quartz/disruptor/log4j-core/guava/snakeyaml onto the worker classpath.
 
+## Reusing the sources from Beam SQL (`beamsql` module)
+
+Verified by `BeamSqlSeekableSpikeTest`: a `LookupSource` plugs into Beam SQL's
+native lookup mechanism (`BeamSqlSeekableTable` + `TableProvider`, registered
+via `SqlTransform.withTableProvider`) with a thin adapter — `seekRow(Row)` →
+one point `LookupRequest` → `lookup()` → rows back as Beam `Row`s; candidate
+keys match the sub-row's field names; `setUp`/`tearDown` map to
+`setup()`/`close()`. Constraints vs the query module: **point equi-joins
+only** (no prefix/range/LATERAL), **one `seekRow` per input row** (no
+batching/dedup — jdbc/spanner/bigtable lose their batch advantage; consider a
+bundle-scoped cache via `startBundle`/`finishBundle`), and a Beam quirk: the
+join condition must put the main-input column on the LEFT of `=`
+(`c.userId = u.USER_ID`) — the reverse crashes in Beam's
+`JoinAsLookup.joinFieldsMapping`. Productionizing needs: value conversion
+Beam Row ↔ Calcite-internal for date/time/bytes (the spike's int64/string/
+double pass through), pipeline-Schema → Beam Schema for `getSchema()`, a
+`sources`-style config on `BeamSQLTransform` (share the parsing with
+`QueryTransform.createSources`), and a composite-key probe (sub-row field
+ORDER for multi-column conditions is unverified).
+
 ## Origin & design rationale (for archaeology)
 
 Ported 2026-07 from `orfeon/calcite-multi-engine` (regular Calcite 1.42,
