@@ -288,25 +288,38 @@ Query2.builder()
   per evaluation at ~1.1ms each, and it drags
   quartz/disruptor/log4j-core/guava/snakeyaml onto the worker classpath.
 
-## Reusing the sources from Beam SQL (`beamsql` module)
+## Reusing the sources from Beam SQL (`beamsql` module) — IMPLEMENTED
 
-Verified by `BeamSqlSeekableSpikeTest`: a `LookupSource` plugs into Beam SQL's
-native lookup mechanism (`BeamSqlSeekableTable` + `TableProvider`, registered
-via `SqlTransform.withTableProvider`) with a thin adapter — `seekRow(Row)` →
-one point `LookupRequest` → `lookup()` → rows back as Beam `Row`s; candidate
-keys match the sub-row's field names; `setUp`/`tearDown` map to
-`setup()`/`close()`. Constraints vs the query module: **point equi-joins
-only** (no prefix/range/LATERAL), **one `seekRow` per input row** (no
-batching/dedup — jdbc/spanner/bigtable lose their batch advantage; consider a
-bundle-scoped cache via `startBundle`/`finishBundle`), and a Beam quirk: the
-join condition must put the main-input column on the LEFT of `=`
-(`c.userId = u.USER_ID`) — the reverse crashes in Beam's
-`JoinAsLookup.joinFieldsMapping`. Productionizing needs: value conversion
-Beam Row ↔ Calcite-internal for date/time/bytes (the spike's int64/string/
-double pass through), pipeline-Schema → Beam Schema for `getSchema()`, a
-`sources`-style config on `BeamSQLTransform` (share the parsing with
-`QueryTransform.createSources`), and a composite-key probe (sub-row field
-ORDER for multi-column conditions is unverified).
+`util/pipeline/lookup/LookupSeekableTable` exposes any `LookupSource` table to
+Beam SQL via the native seekable-table mechanism; `BeamSQLTransform` accepts
+the same `sources` parameter as the query module (shared parsing:
+`util/pipeline/lookup/source/LookupSourceConfig`, used by both transforms).
+Wiring: build tables between `source.setup()`/`close()` at expand time
+(metadata derived on the launcher), register per source via
+`SqlTransform.withTableProvider(name, new ReadOnlyTableProvider(name,
+LookupSeekableTable.tablesOf(source)))`; workers re-open clients in the
+table's `setUp`. `seekRow(Row)` → candidate key matched by the sub-row's
+field NAMES (any order, composite keys verified) → one point `lookup()` →
+rows attached as Beam `Row`s.
+
+Semantics & pitfalls (tests: `LookupSeekableTableTest`,
+`BeamSQLTransformTest#testJdbcLookupJoin`):
+
+- **Point equi-joins only** (no prefix/range/LATERAL), **one `seekRow` per
+  input row** (no batching/dedup — jdbc/spanner/bigtable lose their batch
+  advantage; a bundle-scoped cache via `startBundle`/`finishBundle` is the
+  future mitigation). For heavy enrichment prefer the query module.
+- Beam quirk: each equality must put the main-input column on the LEFT
+  (`c.userId = u.USER_ID`); the reverse crashes in Beam's
+  `JoinAsLookup.joinFieldsMapping` (AIOOBE).
+- Beam quirk: the seekable-join output builder
+  (`combineTwoRowsIntoOneHelper`) re-runs logical-type conversion on values
+  that are already base-typed, so **any `java.time` logical column in the
+  seek row breaks the join** regardless of how the Row was built — even when
+  the column isn't selected (the seek row carries all table columns). Hence
+  `LookupSeekableTable.beamSchema` surfaces DATE/TIME as ISO-8601 STRINGs
+  (`CAST` in SQL when needed); TIMESTAMP is Beam's primitive DATETIME and
+  passes through. Row values are `attachValues`'d in input form.
 
 ## Origin & design rationale (for archaeology)
 
