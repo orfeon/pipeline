@@ -233,6 +233,20 @@ Query2.builder()
   generated join code can only embed constants; ids are per-live-instance, so
   concurrent DoFns never collide, but every `setup()` must be paired with a
   close/teardown or the process leaks entries.
+- **MATCH_RECOGNIZE does not work** on this stack (probed 2026-07, three
+  independent blockers): (1) the validator throws "Cycle detected during
+  type-checking" against our `StructKind.PEEK_FIELDS` row types
+  (`CalciteSchemaUtil.convertSchema`) — a FULLY_QUALIFIED row type validates
+  and converts to `LogicalMatch` fine, so this one is fixable on our side;
+  but then (2) `RelRunners`' enumerable path cannot execute it — "Unable to
+  implement EnumerableMatch" even for fixed-length patterns, and (3)
+  quantified patterns (`UP+`) die earlier with "unknown kind:
+  PATTERN_QUANTIFIER" — Calcite 1.40's enumerable MATCH_RECOGNIZE support is
+  incomplete upstream. Supporting it would mean writing our own Match runtime
+  operator (the origin investigation estimated this the riskiest option);
+  the intended alternatives are ORDER BY/LIMIT/aggregation per key set, or a
+  pattern-matching scalar UDF over the array column (the UDF registration
+  hooks exist).
 
 ## Origin & design rationale (for archaeology)
 

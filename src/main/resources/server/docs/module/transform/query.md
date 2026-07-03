@@ -70,6 +70,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 - Reserved words used as field names (e.g. `value`) must be quoted with backticks.
 - Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata.
 - Lookups must be **read-only and idempotent** — a lookup may run many times, in any order, and per-bundle retries repeat it. Never point a REST table at a side-effecting endpoint.
+- `MATCH_RECOGNIZE` is **not supported** (the underlying Calcite enumerable runtime cannot execute it). For per-element sequence patterns, use `ORDER BY`/`LIMIT`/aggregation over the collection (optionally in a LATERAL block), or a scalar UDF over the array column.
 - `float32` external columns are surfaced as `float64` in SQL; timestamps are compared at millisecond precision inside the SQL engine.
 
 ## Transform module common parameters
