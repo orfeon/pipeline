@@ -47,7 +47,7 @@ public class JsonToMutationConverter {
                 }
             }
             case BYTES -> Value.bytes(isNull ? null : ByteArray.copyFrom(Base64.getDecoder().decode(jsonElement.getAsString())));
-            case FLOAT -> Value.float64(isNull ? null : Double.valueOf(jsonElement.getAsFloat()));
+            case FLOAT -> Value.float32(isNull ? null : jsonElement.getAsFloat());
             case DOUBLE -> Value.float64(isNull ? null : jsonElement.getAsDouble());
             case DECIMAL -> Value.numeric(isNull ? null : jsonElement.getAsBigDecimal());
             case BYTE -> Value.int64(isNull ? null : Long.valueOf(jsonElement.getAsByte()));
@@ -160,18 +160,18 @@ public class JsonToMutationConverter {
                         yield Value.bytesArray(values);
                     }
                     case FLOAT -> {
-                        // FLOAT arrays are written as float64Array, matching the scalar FLOAT case
+                        // FLOAT arrays are written as float32Array, matching the scalar FLOAT case
                         if (isNull) {
-                            yield Value.float64Array(new ArrayList<>());
+                            yield Value.float32Array(new ArrayList<>());
                         }
-                        final List<Double> values = new ArrayList<>();
+                        final List<Float> values = new ArrayList<>();
                         for (final JsonElement element : jsonArray) {
                             if (element == null || element.isJsonNull()) {
                                 continue;
                             }
-                            values.add(Double.valueOf(element.getAsFloat()));
+                            values.add(element.getAsFloat());
                         }
-                        yield Value.float64Array(values);
+                        yield Value.float32Array(values);
                     }
                     case DOUBLE -> {
                         if (isNull) {

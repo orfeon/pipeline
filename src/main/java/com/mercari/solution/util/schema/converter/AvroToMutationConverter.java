@@ -101,8 +101,7 @@ public class AvroToMutationConverter {
                     }
                     if(field.name().equals(primaryField)) {
                         primary = mutationArray.get(0);
-                        //mutations.addAll(mutationArray.subList(1, mutationArray.size()));
-                        mutations.addAll(mutationArray);
+                        mutations.addAll(mutationArray.subList(1, mutationArray.size()));
                     } else {
                         mutations.addAll(mutationArray);
                     }
@@ -113,7 +112,6 @@ public class AvroToMutationConverter {
         if(primary == null) {
             return MutationGroup.create(mutations.get(0), mutations.subList(1, mutations.size()));
         }
-        LOG.error("{} : {}", primary, mutations.size());
         return MutationGroup.create(primary, mutations);
     }
 

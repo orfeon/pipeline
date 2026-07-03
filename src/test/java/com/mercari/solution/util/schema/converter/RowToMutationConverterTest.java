@@ -12,6 +12,7 @@ import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
 import org.apache.beam.sdk.io.gcp.spanner.MutationGroup;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
+import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
 import org.apache.beam.sdk.values.Row;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.List;
@@ -43,6 +45,8 @@ public class RowToMutationConverterTest {
                 .addField("doubleField", Schema.FieldType.DOUBLE)
                 .addField("decimalField", Schema.FieldType.DECIMAL)
                 .addField("datetimeField", Schema.FieldType.DATETIME)
+                .addField("localDateTimeField", Schema.FieldType.logicalType(SqlTypes.DATETIME))
+                .addNullableField("nullableLocalDateTimeField", Schema.FieldType.logicalType(SqlTypes.DATETIME))
                 .addField("dateField", CalciteUtils.DATE)
                 .addField("timeField", CalciteUtils.TIME)
                 .addField("enumField", Schema.FieldType.logicalType(ENUM_TYPE))
@@ -52,6 +56,7 @@ public class RowToMutationConverterTest {
                 .addField("boolArrayField", Schema.FieldType.array(Schema.FieldType.BOOLEAN))
                 .addField("bytesArrayField", Schema.FieldType.array(Schema.FieldType.BYTES))
                 .addField("int64ArrayField", Schema.FieldType.array(Schema.FieldType.INT64))
+                .addField("floatArrayField", Schema.FieldType.array(Schema.FieldType.FLOAT))
                 .addField("doubleArrayField", Schema.FieldType.array(Schema.FieldType.DOUBLE))
                 .addField("decimalArrayField", Schema.FieldType.array(Schema.FieldType.DECIMAL))
                 .addField("datetimeArrayField", Schema.FieldType.array(Schema.FieldType.DATETIME))
@@ -74,6 +79,8 @@ public class RowToMutationConverterTest {
                 .withFieldValue("doubleField", 2.5d)
                 .withFieldValue("decimalField", new BigDecimal("123.45"))
                 .withFieldValue("datetimeField", Instant.parse("2024-03-01T12:00:00.000Z"))
+                .withFieldValue("localDateTimeField", LocalDateTime.of(2024, 3, 1, 12, 0, 0, 123456789))
+                .withFieldValue("nullableLocalDateTimeField", null)
                 .withFieldValue("dateField", LocalDate.of(2024, 3, 1))
                 .withFieldValue("timeField", LocalTime.of(12, 34, 56))
                 .withFieldValue("enumField", ENUM_TYPE.valueOf("BAR"))
@@ -83,6 +90,7 @@ public class RowToMutationConverterTest {
                 .withFieldValue("boolArrayField", List.of(true, false))
                 .withFieldValue("bytesArrayField", List.of("b1".getBytes(StandardCharsets.UTF_8)))
                 .withFieldValue("int64ArrayField", List.of(1L, 2L))
+                .withFieldValue("floatArrayField", List.of(1.5f))
                 .withFieldValue("doubleArrayField", List.of(2.5d))
                 .withFieldValue("decimalArrayField", List.of(new BigDecimal("1.5")))
                 .withFieldValue("datetimeArrayField", List.of(Instant.parse("2024-03-01T12:00:00.000Z")))
@@ -109,11 +117,17 @@ public class RowToMutationConverterTest {
         Assertions.assertEquals(Value.int64(16L), map.get("int16Field"));
         Assertions.assertEquals(Value.int64(32L), map.get("int32Field"));
         Assertions.assertEquals(Value.int64(64L), map.get("int64Field"));
-        // FLOAT is written as float64, matching convertFieldType (Type.float64) and the array path
-        Assertions.assertEquals(Value.float64(1.5d), map.get("floatField"));
+        // Beam FLOAT is written as Spanner FLOAT32, matching convertFieldType (Type.float32) and the array path
+        Assertions.assertEquals(Value.float32(1.5f), map.get("floatField"));
         Assertions.assertEquals(Value.float64(2.5d), map.get("doubleField"));
         Assertions.assertEquals(Value.numeric(new BigDecimal("123.45")), map.get("decimalField"));
         Assertions.assertEquals(Value.timestamp(Timestamp.parseTimestamp("2024-03-01T12:00:00Z")), map.get("datetimeField"));
+        // DATETIME logical type is interpreted as UTC and written as epoch-based timestamp
+        Assertions.assertEquals(
+                Value.timestamp(Timestamp.parseTimestamp("2024-03-01T12:00:00.123456789Z")),
+                map.get("localDateTimeField"));
+        Assertions.assertTrue(map.get("nullableLocalDateTimeField").isNull());
+        Assertions.assertEquals(Type.timestamp(), map.get("nullableLocalDateTimeField").getType());
         Assertions.assertEquals(Value.date(Date.fromYearMonthDay(2024, 3, 1)), map.get("dateField"));
         Assertions.assertEquals(Value.string("12:34:56"), map.get("timeField"));
         Assertions.assertEquals(Value.string("BAR"), map.get("enumField"));
@@ -124,6 +138,7 @@ public class RowToMutationConverterTest {
         Assertions.assertEquals(Value.boolArray(List.of(true, false)), map.get("boolArrayField"));
         Assertions.assertEquals(Value.bytesArray(List.of(ByteArray.copyFrom("b1"))), map.get("bytesArrayField"));
         Assertions.assertEquals(Value.int64Array(List.of(1L, 2L)), map.get("int64ArrayField"));
+        Assertions.assertEquals(Value.float32Array(List.of(1.5f)), map.get("floatArrayField"));
         Assertions.assertEquals(Value.float64Array(List.of(2.5d)), map.get("doubleArrayField"));
         Assertions.assertEquals(Value.numericArray(List.of(new BigDecimal("1.5"))), map.get("decimalArrayField"));
         Assertions.assertEquals(Value.timestampArray(List.of(Timestamp.parseTimestamp("2024-03-01T12:00:00Z"))), map.get("datetimeArrayField"));
@@ -158,6 +173,7 @@ public class RowToMutationConverterTest {
         Assertions.assertEquals(Type.int64(), map.get("int32Field").getType());
         Assertions.assertTrue(map.get("int64Field").isNull());
         Assertions.assertTrue(map.get("floatField").isNull());
+        Assertions.assertEquals(Type.float32(), map.get("floatField").getType());
         Assertions.assertTrue(map.get("doubleField").isNull());
         Assertions.assertTrue(map.get("boolField").isNull());
         Assertions.assertTrue(map.get("bytesField").isNull());
@@ -243,15 +259,18 @@ public class RowToMutationConverterTest {
         Assertions.assertEquals(Type.int64(), fieldType(type, "int16Field"));
         Assertions.assertEquals(Type.int64(), fieldType(type, "int32Field"));
         Assertions.assertEquals(Type.int64(), fieldType(type, "int64Field"));
-        Assertions.assertEquals(Type.float64(), fieldType(type, "floatField"));
+        Assertions.assertEquals(Type.float32(), fieldType(type, "floatField"));
         Assertions.assertEquals(Type.float64(), fieldType(type, "doubleField"));
         Assertions.assertEquals(Type.numeric(), fieldType(type, "decimalField"));
         Assertions.assertEquals(Type.timestamp(), fieldType(type, "datetimeField"));
+        Assertions.assertEquals(Type.timestamp(), fieldType(type, "localDateTimeField"));
         Assertions.assertEquals(Type.date(), fieldType(type, "dateField"));
         Assertions.assertEquals(Type.string(), fieldType(type, "timeField"));
         Assertions.assertEquals(Type.string(), fieldType(type, "enumField"));
         Assertions.assertEquals(Type.array(Type.string()), fieldType(type, "stringArrayField"));
         Assertions.assertEquals(Type.array(Type.int64()), fieldType(type, "int64ArrayField"));
+        Assertions.assertEquals(Type.array(Type.float32()), fieldType(type, "floatArrayField"));
+        Assertions.assertEquals(Type.array(Type.float64()), fieldType(type, "doubleArrayField"));
         Assertions.assertEquals(Type.array(Type.date()), fieldType(type, "dateArrayField"));
 
         final Schema rowSchema = Schema.builder()

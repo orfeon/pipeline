@@ -418,6 +418,15 @@ public class DocumentSchemaUtilTest {
 
         Assertions.assertEquals(Arrays.asList(1L, 2L), DocumentSchemaUtil.getAsStandard(Value.newBuilder()
                 .setArrayValue(ArrayValue.newBuilder().addValues(integerValue(1L)).addValues(integerValue(2L))).build()));
+
+        // array elements use the standard representation too (bytes -> ByteBuffer, timestamp -> Instant)
+        Assertions.assertEquals(
+                Arrays.asList(ByteBuffer.wrap(TEST_BYTES), TEST_INSTANT),
+                DocumentSchemaUtil.getAsStandard(Value.newBuilder()
+                        .setArrayValue(ArrayValue.newBuilder()
+                                .addValues(Value.newBuilder().setBytesValue(ByteString.copyFrom(TEST_BYTES)))
+                                .addValues(Value.newBuilder().setTimestampValue(TEST_TIMESTAMP)))
+                        .build()));
     }
 
     @Test

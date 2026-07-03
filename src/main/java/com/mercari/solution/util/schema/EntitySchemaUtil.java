@@ -496,11 +496,11 @@ public class EntitySchemaUtil {
             case INTEGER_VALUE -> value.getIntegerValue();
             case DOUBLE_VALUE -> value.getDoubleValue();
             case BLOB_VALUE -> ByteBuffer.wrap(value.getBlobValue().toByteArray());
-            case TIMESTAMP_VALUE -> DateTimeUtil.toEpochMicroSecond(value.getTimestampValue());
+            case TIMESTAMP_VALUE -> DateTimeUtil.toInstant(value.getTimestampValue());
             case GEO_POINT_VALUE -> value.getGeoPointValue().toString();
             case ENTITY_VALUE -> EntityToMapConverter.convert(value.getEntityValue());
             case ARRAY_VALUE -> value.getArrayValue().getValuesList().stream()
-                    .map(EntitySchemaUtil::getAsPrimitive)
+                    .map(EntitySchemaUtil::getAsStandard)
                     .collect(Collectors.toList());
             case KEY_VALUE -> value.getKeyValue().toString();
             case NULL_VALUE, VALUETYPE_NOT_SET -> null;

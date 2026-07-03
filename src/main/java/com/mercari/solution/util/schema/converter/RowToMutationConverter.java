@@ -26,6 +26,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -111,9 +112,9 @@ public class RowToMutationConverter {
                     builder.set(fieldName).to(longValue);
                     break;
                 case FLOAT:
-                    // FLOAT columns are declared as float64 by convertFieldType; write float64 values to match
+                    // Beam FLOAT is written as Spanner FLOAT32, matching convertFieldType (Type.float32)
                     final Float floatValue = hide ? (nullableField ? null : 0F) : (isNullField ? null : row.getFloat(fieldName));
-                    builder.set(fieldName).to(floatValue == null ? null : Double.valueOf(floatValue.doubleValue()));
+                    builder.set(fieldName).to(floatValue);
                     break;
                 case DOUBLE:
                     final Double doubleValue = hide ? (nullableField ? null : 0D) : (isNullField ? null : row.getDouble(fieldName));
@@ -166,12 +167,12 @@ public class RowToMutationConverter {
                         if(isCommitTimestampField) {
                             builder.set(fieldName).to(Value.COMMIT_TIMESTAMP);
                         } else {
-                            final String datetimeStrValue = hide ?
-                                    (nullableField ? null : "1970-01-01T00:00:00.00Z") :
-                                    (isNullField ? null : row.getDateTime(fieldName)
+                            final Timestamp timestampValue = hide ?
+                                    (nullableField ? null : Timestamp.parseTimestamp("1970-01-01T00:00:00.00Z")) :
+                                    (isNullField ? null : Timestamp.parseTimestamp(row.getDateTime(fieldName)
                                             .toDateTime()
-                                            .toString(ISODateTimeFormat.dateTime()));
-                            builder.set(fieldName).to(datetimeStrValue);
+                                            .toString(ISODateTimeFormat.dateTime())));
+                            builder.set(fieldName).to(timestampValue);
                         }
                     } else if(RowSchemaUtil.isLogicalTypeDateTime(field.getType())) {
                         if(isCommitTimestampField) {
@@ -185,8 +186,9 @@ public class RowToMutationConverter {
                                     datetime = Timestamp.ofTimeMicroseconds(0L);
                                 }
                             } else {
+                                // interpret the LocalDateTime as UTC and use epoch seconds
                                 final LocalDateTime localDateTime = row.getLogicalTypeValue(fieldName, LocalDateTime.class);
-                                datetime = Timestamp.ofTimeSecondsAndNanos(localDateTime.getSecond(), localDateTime.getNano());
+                                datetime = Timestamp.ofTimeSecondsAndNanos(localDateTime.toEpochSecond(ZoneOffset.UTC), localDateTime.getNano());
                             }
                             builder.set(fieldName).to(datetime);
                         }
@@ -241,6 +243,12 @@ public class RowToMutationConverter {
                             }
                             break;
                         case FLOAT:
+                            if(hide) {
+                                builder.set(fieldName).toFloat32Array(new ArrayList<>());
+                            } else {
+                                builder.set(fieldName).toFloat32Array(isNullField ? null : row.<Float>getArray(fieldName));
+                            }
+                            break;
                         case DOUBLE:
                             if(hide) {
                                 builder.set(fieldName).toFloat64Array(new ArrayList<>());
@@ -428,6 +436,7 @@ public class RowToMutationConverter {
             case INT64:
                 return Type.int64();
             case FLOAT:
+                return Type.float32();
             case DOUBLE:
                 return Type.float64();
             case DATETIME:

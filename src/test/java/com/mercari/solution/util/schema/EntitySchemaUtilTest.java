@@ -504,13 +504,23 @@ public class EntitySchemaUtilTest {
         Assertions.assertEquals(1.5D, EntitySchemaUtil.getAsStandard(doubleValue(1.5D)));
         Assertions.assertEquals(true, EntitySchemaUtil.getAsStandard(booleanValue(true)));
         Assertions.assertEquals(ByteBuffer.wrap(TEST_BYTES), EntitySchemaUtil.getAsStandard(Value.newBuilder().setBlobValue(ByteString.copyFrom(TEST_BYTES)).build()));
-        Assertions.assertEquals(TEST_TIMESTAMP_MICROS, EntitySchemaUtil.getAsStandard(Value.newBuilder().setTimestampValue(TEST_TIMESTAMP).build()));
+        // standard representation of timestamp is java.time.Instant (same as DocumentSchemaUtil.getAsStandard)
+        Assertions.assertEquals(TEST_INSTANT, EntitySchemaUtil.getAsStandard(Value.newBuilder().setTimestampValue(TEST_TIMESTAMP).build()));
 
         final Key key = Key.newBuilder().addPath(Key.PathElement.newBuilder().setKind("MyKind").setId(1L)).build();
         Assertions.assertEquals(key.toString(), EntitySchemaUtil.getAsStandard(Value.newBuilder().setKeyValue(key).build()));
 
         Assertions.assertEquals(Arrays.asList(1L, 2L), EntitySchemaUtil.getAsStandard(Value.newBuilder()
                 .setArrayValue(ArrayValue.newBuilder().addValues(integerValue(1L)).addValues(integerValue(2L))).build()));
+
+        // array elements use the standard representation too (blob -> ByteBuffer, timestamp -> Instant)
+        Assertions.assertEquals(
+                Arrays.asList(ByteBuffer.wrap(TEST_BYTES), TEST_INSTANT),
+                EntitySchemaUtil.getAsStandard(Value.newBuilder()
+                        .setArrayValue(ArrayValue.newBuilder()
+                                .addValues(Value.newBuilder().setBlobValue(ByteString.copyFrom(TEST_BYTES)))
+                                .addValues(Value.newBuilder().setTimestampValue(TEST_TIMESTAMP)))
+                        .build()));
     }
 
     @Test

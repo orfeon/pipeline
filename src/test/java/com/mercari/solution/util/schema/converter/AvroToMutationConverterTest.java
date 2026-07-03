@@ -336,6 +336,17 @@ public class AvroToMutationConverterTest {
         Assertions.assertEquals(Value.string("b"), group.attached().get(0).asMap().get("name"));
         Assertions.assertEquals("others", group.attached().get(1).getTable());
         Assertions.assertEquals(Value.string("c"), group.attached().get(1).asMap().get("name"));
+
+        // primary field matched on an array field: the primary mutation must not be duplicated in attached
+        final MutationGroup primaryGroup = AvroToMutationConverter.convertGroup(parentSchema, parent, "INSERT", "children");
+        Assertions.assertEquals("children", primaryGroup.primary().getTable());
+        Assertions.assertEquals(Value.string("a"), primaryGroup.primary().asMap().get("name"));
+        Assertions.assertEquals(Value.int64(1L), primaryGroup.primary().asMap().get("age"));
+        Assertions.assertEquals(2, primaryGroup.attached().size());
+        Assertions.assertEquals("children", primaryGroup.attached().get(0).getTable());
+        Assertions.assertEquals(Value.string("b"), primaryGroup.attached().get(0).asMap().get("name"));
+        Assertions.assertEquals("others", primaryGroup.attached().get(1).getTable());
+        Assertions.assertEquals(Value.string("c"), primaryGroup.attached().get(1).asMap().get("name"));
     }
 
     private static Type fieldType(final Type structType, final String fieldName) {

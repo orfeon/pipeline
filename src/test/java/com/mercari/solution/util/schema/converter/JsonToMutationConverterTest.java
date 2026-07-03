@@ -145,7 +145,7 @@ public class JsonToMutationConverterTest {
         Assertions.assertEquals(Value.json("{\"a\":1}"), values.get("jsonStringField"));
         Assertions.assertEquals(Value.string("POINT(1 1)"), values.get("geographyStringField"));
         Assertions.assertEquals(Value.bytes(ByteArray.copyFrom("bytes")), values.get("bytesField"));
-        Assertions.assertEquals(Value.float64(1.5d), values.get("floatField"));
+        Assertions.assertEquals(Value.float32(1.5f), values.get("floatField"));
         Assertions.assertEquals(Value.float64(2.5d), values.get("doubleField"));
         Assertions.assertEquals(Value.numeric(new BigDecimal("123.45")), values.get("decimalField"));
         Assertions.assertEquals(Value.int64(3L), values.get("byteField"));
@@ -161,8 +161,8 @@ public class JsonToMutationConverterTest {
         // null elements are skipped
         Assertions.assertEquals(Value.stringArray(List.of("a", "b")), values.get("stringArrayField"));
         Assertions.assertEquals(Value.bytesArray(List.of(ByteArray.copyFrom("b1"))), values.get("bytesArrayField"));
-        // FLOAT arrays are written as float64Array, matching the scalar FLOAT case (float64)
-        Assertions.assertEquals(Value.float64Array(List.of(1.5d)), values.get("floatArrayField"));
+        // Beam FLOAT arrays are written as float32Array, matching the scalar FLOAT case (float32)
+        Assertions.assertEquals(Value.float32Array(List.of(1.5f)), values.get("floatArrayField"));
         Assertions.assertEquals(Value.float64Array(List.of(2.5d)), values.get("doubleArrayField"));
         Assertions.assertEquals(Value.int64Array(List.of(1L, 2L)), values.get("int64ArrayField"));
         Assertions.assertEquals(
@@ -209,7 +209,7 @@ public class JsonToMutationConverterTest {
         Assertions.assertEquals(Value.boolArray(List.of()), values.get("boolArrayField"));
         Assertions.assertEquals(Value.stringArray(List.of()), values.get("stringArrayField"));
         Assertions.assertEquals(Value.bytesArray(List.of()), values.get("bytesArrayField"));
-        Assertions.assertEquals(Value.float64Array(List.of()), values.get("floatArrayField"));
+        Assertions.assertEquals(Value.float32Array(List.of()), values.get("floatArrayField"));
         Assertions.assertEquals(Value.float64Array(List.of()), values.get("doubleArrayField"));
         Assertions.assertEquals(Value.int64Array(List.of()), values.get("int64ArrayField"));
         Assertions.assertEquals(Value.timestampArray(List.of()), values.get("datetimeArrayField"));
