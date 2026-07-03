@@ -247,23 +247,32 @@ Query2.builder()
   the intended alternatives are ORDER BY/LIMIT/aggregation per key set, or a
   pattern-matching scalar UDF over the array column (the UDF registration
   hooks exist).
-- **Sequence-pattern UDF engine survey (probed 2026-07)** — if/when building
-  the pattern UDF, use the **vendored Calcite pattern runtime**
+- **Sequence patterns: use the built-in `SEQ_MATCH` UDF**
+  (`util/pipeline/udf/SequenceMatchFunctions` + `SequencePattern`), built on
+  the **vendored Calcite pattern runtime**
   (`...calcite.runtime.Pattern/Automaton/Matcher`, the standalone machinery
   behind EnumerableMatch): zero new dependencies, `matcher.match(rows)` is
-  per-call isolated (no cross-evaluation state), ~26µs per 6-row evaluation,
-  and bounded `repeat(n,m)` / `plus` / `star` / `or` all build — only
-  unbounded `repeat(n,-1)` throws (rewrite `X{n,}` as n-1 copies + `plus`).
-  Two wrinkles: the convenience `match()` gives predicates no history
-  (`Memory.get(-1)` throws) — precompute PREV values into the row arrays
-  instead; and `Matcher.PartialMatch`'s fields (rows/symbols) are
-  package-private — read via one-time reflection at setup or an in-package
-  accessor shim. **Siddhi (io.siddhi:siddhi-core 5.1.33, Apache-2.0) was
-  probed and rejected** for this use: detection and synchronous callbacks
-  work, but a streaming CEP runtime has no reset — reusing a
-  `SiddhiAppRuntime` across bounded evaluations produced phantom matches
-  spanning arrays (proven), so correctness requires create+shutdown per
-  evaluation at ~1.1ms each (vs 72µs reused-but-leaky), and it drags
+  per-call isolated (no cross-evaluation state), ~26µs per 6-row evaluation.
+  Implementation notes that cost probing time: bounded `repeat(n,m)` /
+  `plus` / `star` / `or` compile, but unbounded `repeat(n,-1)` throws —
+  `SequencePattern.emit` rewrites `X{n,}` as n-1 copies + `X+`; the
+  convenience `match()` gives predicates no history (`Memory.get(-1)`
+  throws) — predicates instead receive the whole row list + index (`RowAt`),
+  so `PREV` is plain list indexing; `Matcher.PartialMatch`'s fields are
+  package-private — matched rows are read via one-time reflection. The UDF
+  returns a fixed `ARRAY<ROW(matchNo,startIdx,endIdx))` (1-based) — the
+  return type cannot be derived reflectively, hence the hand-built
+  `ScalarFunction`+`ImplementableFunction` with
+  `RexImpTable.createImplementor(new ReflectiveCallNotNullImplementor(m),
+  NullPolicy.NONE, false)` — copy that plumbing for any future UDF whose
+  return type isn't expressible in Java signatures. `UNNEST(udf(...))` and
+  dynamic array indexing (`arr[m.startIdx].field`) both work in the
+  enumerable path (verified). **Siddhi (io.siddhi:siddhi-core 5.1.33,
+  Apache-2.0) was probed and rejected** for this use: detection and
+  synchronous callbacks work, but a streaming CEP runtime has no reset —
+  reusing a `SiddhiAppRuntime` across bounded evaluations produced phantom
+  matches spanning arrays (proven), so correctness requires create+shutdown
+  per evaluation at ~1.1ms each, and it drags
   quartz/disruptor/log4j-core/guava/snakeyaml onto the worker classpath.
 
 ## Origin & design rationale (for archaeology)

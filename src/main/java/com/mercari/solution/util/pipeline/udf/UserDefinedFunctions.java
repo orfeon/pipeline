@@ -53,7 +53,8 @@ public final class UserDefinedFunctions {
 
     /**
      * Materializes the descriptors into Calcite functions (name → overloads),
-     * prepending the built-in functions ({@link DateTimeFunctions}).
+     * prepending the built-in functions ({@link DateTimeFunctions},
+     * {@link SequenceMatchFunctions SEQ_MATCH}).
      */
     public static Map<String, List<Function>> build(List<FunctionSpec> specs) {
         final Map<String, List<Function>> functions = new LinkedHashMap<>();
@@ -61,6 +62,8 @@ public final class UserDefinedFunctions {
             functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
                     .add(entry.getValue());
         }
+        functions.computeIfAbsent("SEQ_MATCH", k -> new ArrayList<>())
+                .add(SequenceMatchFunctions.function());
         for (final FunctionSpec spec : specs) {
             final Class<?> clazz;
             try {

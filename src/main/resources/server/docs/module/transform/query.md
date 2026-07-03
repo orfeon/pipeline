@@ -70,7 +70,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 - Reserved words used as field names (e.g. `value`) must be quoted with backticks.
 - Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata.
 - Lookups must be **read-only and idempotent** — a lookup may run many times, in any order, and per-bundle retries repeat it. Never point a REST table at a side-effecting endpoint.
-- `MATCH_RECOGNIZE` is **not supported** (the underlying Calcite enumerable runtime cannot execute it). For per-element sequence patterns, use `ORDER BY`/`LIMIT`/aggregation over the collection (optionally in a LATERAL block), or a scalar UDF over the array column.
+- `MATCH_RECOGNIZE` is **not supported** (the underlying Calcite enumerable runtime cannot execute it). For per-element sequence patterns, use the built-in `SEQ_MATCH` function (below), or `ORDER BY`/`LIMIT`/aggregation over the collection (optionally in a LATERAL block).
 - `float32` external columns are surfaced as `float64` in SQL; timestamps are compared at millisecond precision inside the SQL engine.
 
 ## Transform module common parameters
@@ -180,6 +180,39 @@ Table parameters:
 | fields    | optional | Array<Field\>       | Response columns (standard schema fields JSON: `name`, `type`, …). Use type `json` for nested objects. |
 
 Every `{column}` placeholder is a key column; binding a key column to a **literal** in SQL makes that request part static, binding it to an input column makes it dynamic. One HTTP call is made per distinct key tuple (point equality only). HTTP 404 is treated as "no row" — use a `LEFT JOIN` to keep the input element.
+
+## Built-in functions
+
+Besides the standard Calcite SQL functions:
+
+| function | description |
+|----------|-------------|
+| `CURRENT_DATE_([timezone])` | Current date, optionally in a time zone (`CURRENT_DATE_('Asia/Tokyo')`). |
+| `SEQ_MATCH(rows, fields, pattern, define)` | Sequence-pattern matching over an array column — the bounded, per-element replacement for `MATCH_RECOGNIZE`. Returns `ARRAY<ROW(matchNo INT, startIdx INT, endIdx INT)>` with **1-based** indexes; expand with `UNNEST` (one row per match) and read matched values via array indexing. |
+
+`SEQ_MATCH` arguments:
+
+- `rows` — an `ARRAY<ROW>` (or array of scalars) column; array order is the sequence order.
+- `fields` — the row field names in row order (`'seq,amount'`), used by `$name` references (`$0`, `$1`, … work without it; for scalar arrays `$0` is the element itself).
+- `pattern` — a regex over symbols: sequence, alternation `|`, grouping `( )`, quantifiers `? * + {n} {n,} {n,m}`. Example: `'STRT UP{2,}'`.
+- `define` — per-symbol predicates, `;`-separated: `$field` refs, `PREV($f [, n])`, literals, `+ - * /`, comparisons, `AND OR NOT`, parentheses. A symbol without a definition always matches; comparisons with null are false. Example: `'UP: $amount > PREV($amount)'`.
+
+Matches are non-overlapping and longest-per-start (MATCH_RECOGNIZE defaults: after a match, scanning resumes past its last row). No match (or a null/empty array) yields an empty array, so `UNNEST` drops the element.
+
+```sql
+-- Intervals where the amount rose at least twice in a row, with their values
+SELECT
+  i.userId,
+  m.matchNo,
+  i.events[m.startIdx].amount AS fromAmount,
+  i.events[m.endIdx].amount   AS toAmount
+FROM INPUT AS i,
+UNNEST(SEQ_MATCH(
+  i.events, 'seq,amount',
+  'STRT UP{2,}',
+  'UP: $amount > PREV($amount)'
+)) AS m
+```
 
 ## Examples
 
