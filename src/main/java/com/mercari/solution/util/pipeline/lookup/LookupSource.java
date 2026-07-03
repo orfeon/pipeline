@@ -95,6 +95,17 @@ public abstract class LookupSource implements Serializable, AutoCloseable {
     public abstract List<LookupKey> keyCandidates(String table);
 
     /**
+     * Whether this source can answer a lookup that constrains only a
+     * <em>leading prefix</em> of a candidate key by equality (no range on the
+     * next column) — an index-backed prefix scan returning all rows under the
+     * prefix. True for ordered-key stores (JDBC, Spanner); false for sources
+     * whose key columns are all required request parameters (REST).
+     */
+    public boolean supportsKeyPrefixLookup() {
+        return false;
+    }
+
+    /**
      * Fetches rows of {@code table} matching the batch via the chosen key.
      * {@code indexName} is {@code null} for the primary key, or a unique index
      * name. May return a superset; the lookup-join operator filters to exact

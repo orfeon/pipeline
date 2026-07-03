@@ -113,7 +113,8 @@ public final class LookupJoinRule extends RelOptRule {
             if (!usable) {
                 continue;
             }
-            Analysis analysis = analyze(conjuncts, keyGlobalIndex, leftCount);
+            Analysis analysis = analyze(conjuncts, keyGlobalIndex, leftCount,
+                    source.supportsKeyPrefixLookup());
             if (analysis == null) {
                 continue;
             }
@@ -190,7 +191,8 @@ public final class LookupJoinRule extends RelOptRule {
         boolean upperInclusive;
     }
 
-    private Analysis analyze(List<RexNode> conjuncts, int[] keyGlobalIndex, int leftCount) {
+    private Analysis analyze(List<RexNode> conjuncts, int[] keyGlobalIndex, int leftCount,
+            boolean allowPrefixOnly) {
         int keyCount = keyGlobalIndex.length;
         RexNode[] eq = new RexNode[keyCount];
         RexNode[] lower = new RexNode[keyCount];
@@ -268,14 +270,24 @@ public final class LookupJoinRule extends RelOptRule {
             analysis.range = false;
             return analysis;
         }
-        // Column m must have a full range; later columns nothing; no stray equality.
-        if (lower[m] == null || upper[m] == null) {
-            return null;
-        }
+        // Later columns must be unconstrained; no stray equality past the prefix.
         for (int i = m + 1; i < keyCount; i++) {
             if (eq[i] != null || lower[i] != null || upper[i] != null) {
                 return null;
             }
+        }
+        if (lower[m] == null && upper[m] == null) {
+            // Equality on a strict leading prefix, nothing else: an index-backed
+            // prefix lookup, for sources that support it.
+            if (m == 0 || !allowPrefixOnly) {
+                return null;
+            }
+            analysis.range = false;
+            return analysis;
+        }
+        // Otherwise column m must carry a bounded range.
+        if (lower[m] == null || upper[m] == null) {
+            return null;
         }
         analysis.range = true;
         analysis.lowerExpr = lower[m];

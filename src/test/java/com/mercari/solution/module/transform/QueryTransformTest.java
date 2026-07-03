@@ -243,4 +243,99 @@ public class QueryTransformTest {
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
     }
 
+    @Test
+    public void testJdbcLookupJoin() throws Exception {
+        final String url = "jdbc:h2:mem:querytransformtest;DB_CLOSE_DELAY=-1";
+        // Keep the named in-memory database alive for the duration of the test.
+        try (final java.sql.Connection connection =
+                     java.sql.DriverManager.getConnection(url, "sa", "")) {
+            try (final java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS ITEMS (
+                          ITEM_ID VARCHAR(16) PRIMARY KEY,
+                          TITLE VARCHAR(64),
+                          PRICE BIGINT
+                        )""");
+                statement.execute("DELETE FROM ITEMS");
+                statement.execute("""
+                        INSERT INTO ITEMS VALUES
+                          ('i1', 'apple', 100),
+                          ('i2', 'banana', 200)""");
+            }
+
+            final String configJson = """
+                    {
+                      "sources": [
+                        {
+                          "name": "carts",
+                          "module": "create",
+                          "parameters": {
+                            "type": "element",
+                            "elements": [
+                              { "itemId": "i1", "qty": 2 },
+                              { "itemId": "i2", "qty": 3 },
+                              { "itemId": "i9", "qty": 1 }
+                            ]
+                          },
+                          "schema": {
+                            "fields": [
+                              { "name": "itemId", "type": "string" },
+                              { "name": "qty", "type": "int64" }
+                            ]
+                          }
+                        }
+                      ],
+                      "transforms": [
+                        {
+                          "name": "query",
+                          "module": "query",
+                          "inputs": ["carts"],
+                          "parameters": {
+                            "sql": "SELECT i.itemId AS itemId, m.TITLE AS title, i.qty * m.PRICE AS total FROM INPUT AS i LEFT JOIN db.ITEMS AS m ON m.ITEM_ID = i.itemId",
+                            "sources": [
+                              {
+                                "name": "db",
+                                "type": "jdbc",
+                                "driver": "org.h2.Driver",
+                                "url": "%s",
+                                "user": "sa",
+                                "password": "",
+                                "tables": [
+                                  { "name": "ITEMS" }
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                    """.formatted(url);
+
+            final Config config = Config.load(configJson);
+            final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+            final MCollection output = outputs.get("query");
+            Assertions.assertNotNull(output);
+            Assertions.assertNotNull(output.getSchema().getField("title"));
+            Assertions.assertNotNull(output.getSchema().getField("total"));
+
+            PAssert.that(output.getCollection()).satisfies(elements -> {
+                final Map<String, MElement> byItem = new HashMap<>();
+                for(final MElement element : elements) {
+                    byItem.put(element.getAsString("itemId"), element);
+                }
+                Assertions.assertEquals(3, byItem.size());
+                Assertions.assertEquals("apple", byItem.get("i1").getAsString("title"));
+                Assertions.assertEquals(200L, byItem.get("i1").getAsLong("total"));
+                Assertions.assertEquals("banana", byItem.get("i2").getAsString("title"));
+                Assertions.assertEquals(600L, byItem.get("i2").getAsLong("total"));
+                // unknown item: LEFT JOIN keeps the input row with nulls
+                Assertions.assertNull(byItem.get("i9").getPrimitiveValue("title"));
+                return null;
+            });
+
+            pipeline.run();
+        }
+    }
+
 }
