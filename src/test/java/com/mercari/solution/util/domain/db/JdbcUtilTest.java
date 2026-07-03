@@ -4,8 +4,8 @@ import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.domain.db.stmt.PreparedStatementTemplate;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
@@ -25,14 +25,14 @@ public class JdbcUtilTest {
         startOffsets1.add(JdbcUtil.IndexOffset.of("intField1", Schema.Type.INT, true, 5));
         final List<String> conditions1 = JdbcUtil.createSeekConditions(startOffsets1, true,true);
         final String result1 = "(" + String.join(" OR ", conditions1) + ")";
-        Assert.assertEquals("(intField1 > ?)", result1);
+        Assertions.assertEquals("(intField1 > ?)", result1);
 
         final List<JdbcUtil.IndexOffset> startOffsets2 = new ArrayList<>();
         startOffsets2.add(JdbcUtil.IndexOffset.of("intField1", Schema.Type.INT, true, 5));
         startOffsets2.add(JdbcUtil.IndexOffset.of("intField2", Schema.Type.INT, true, 3));
         final List<String> conditions2 = JdbcUtil.createSeekConditions(startOffsets2, true, true);
         final String result2 = "(" + String.join(" OR ", conditions2) + ")";
-        Assert.assertEquals("((intField1 = ? AND intField2 > ?) OR intField1 > ?)", result2);
+        Assertions.assertEquals("((intField1 = ? AND intField2 > ?) OR intField1 > ?)", result2);
 
         final List<JdbcUtil.IndexOffset> startOffsets3 = new ArrayList<>();
         startOffsets3.add(JdbcUtil.IndexOffset.of("intField1", Schema.Type.INT, true, 5));
@@ -40,21 +40,21 @@ public class JdbcUtilTest {
         startOffsets3.add(JdbcUtil.IndexOffset.of("intField3", Schema.Type.INT, true, 1));
         final List<String> conditions3 = JdbcUtil.createSeekConditions(startOffsets3, true, true);
         final String result3 = "(" + String.join(" OR ", conditions3) + ")";
-        Assert.assertEquals("((intField1 = ? AND intField2 = ? AND intField3 > ?) OR (intField1 = ? AND intField2 > ?) OR intField1 > ?)", result3);
+        Assertions.assertEquals("((intField1 = ? AND intField2 = ? AND intField3 > ?) OR (intField1 = ? AND intField2 > ?) OR intField1 > ?)", result3);
 
         // Test stop conditions
         final List<JdbcUtil.IndexOffset> stopOffsets1 = new ArrayList<>();
         stopOffsets1.add(JdbcUtil.IndexOffset.of("intField1", Schema.Type.INT, true, 5));
         final List<String> stopConditions1 = JdbcUtil.createSeekConditions(stopOffsets1, false, false);
         final String stopResult1 = "(" + String.join(" OR ", stopConditions1) + ")";
-        Assert.assertEquals("(intField1 <= ?)", stopResult1);
+        Assertions.assertEquals("(intField1 <= ?)", stopResult1);
 
         final List<JdbcUtil.IndexOffset> stopOffsets2 = new ArrayList<>();
         stopOffsets2.add(JdbcUtil.IndexOffset.of("intField1", Schema.Type.INT, true, 5));
         stopOffsets2.add(JdbcUtil.IndexOffset.of("intField2", Schema.Type.INT, true, 3));
         final List<String> stopConditions2 = JdbcUtil.createSeekConditions(stopOffsets2, false, false);
         final String stopResult2 = "(" + String.join(" OR ", stopConditions2) + ")";
-        Assert.assertEquals("((intField1 = ? AND intField2 <= ?) OR intField1 <= ?)", stopResult2);
+        Assertions.assertEquals("((intField1 = ? AND intField2 <= ?) OR intField1 <= ?)", stopResult2);
     }
 
     @Test
@@ -73,7 +73,7 @@ public class JdbcUtilTest {
 
         final List<String> parameterFields1 = Arrays.asList("intField1", "intField2", "intField3");
         final String preparedQuery1 = JdbcUtil.createSeekPreparedQuery(JdbcUtil.IndexPosition.of(startOffsets1, true), JdbcUtil.IndexPosition.of(stopOffsets1, false), fields, table, parameterFields1, 1000);
-        Assert.assertEquals("SELECT intField1,intField2,intField3 FROM mytable WHERE ((intField1 = ? AND intField2 = ? AND intField3 > ?) OR (intField1 = ? AND intField2 > ?) OR intField1 > ?) AND (intField1 <= ?) ORDER BY intField1, intField2, intField3 LIMIT 1000", preparedQuery1);
+        Assertions.assertEquals("SELECT intField1,intField2,intField3 FROM mytable WHERE ((intField1 = ? AND intField2 = ? AND intField3 > ?) OR (intField1 = ? AND intField2 > ?) OR intField1 > ?) AND (intField1 <= ?) ORDER BY intField1, intField2, intField3 LIMIT 1000", preparedQuery1);
 
         //
         final List<JdbcUtil.IndexOffset> startOffsets2 = new ArrayList<>();
@@ -85,7 +85,7 @@ public class JdbcUtilTest {
 
         final List<String> parameterFields2 = Arrays.asList("intField1", "intField2");
         final String preparedQuery2 = JdbcUtil.createSeekPreparedQuery(JdbcUtil.IndexPosition.of(startOffsets2, true), JdbcUtil.IndexPosition.of(stopOffsets2, false), fields, table, parameterFields2, 1000);
-        Assert.assertEquals("SELECT intField1,intField2,intField3 FROM mytable WHERE ((intField1 = ? AND intField2 IS NOT NULL) OR intField1 > ?) AND (intField1 <= ?) ORDER BY intField1, intField2 LIMIT 1000", preparedQuery2);
+        Assertions.assertEquals("SELECT intField1,intField2,intField3 FROM mytable WHERE ((intField1 = ? AND intField2 IS NOT NULL) OR intField1 > ?) AND (intField1 <= ?) ORDER BY intField1, intField2 LIMIT 1000", preparedQuery2);
     }
 
     @Test
@@ -110,11 +110,11 @@ public class JdbcUtilTest {
                         originalRange.getTo().getOffsets(),
                         4);
 
-        Assert.assertEquals(2, splittedRanges1.size());
-        Assert.assertEquals(1, (int)splittedRanges1.get(0).getFrom().getOffsets().get(0).getIntValue());
-        Assert.assertEquals(2, (int)splittedRanges1.get(0).getTo().getOffsets().get(0).getIntValue());
-        Assert.assertEquals(2, (int)splittedRanges1.get(1).getFrom().getOffsets().get(0).getIntValue());
-        Assert.assertEquals(3, (int)splittedRanges1.get(1).getTo().getOffsets().get(0).getIntValue());
+        Assertions.assertEquals(2, splittedRanges1.size());
+        Assertions.assertEquals(1, (int)splittedRanges1.get(0).getFrom().getOffsets().get(0).getIntValue());
+        Assertions.assertEquals(2, (int)splittedRanges1.get(0).getTo().getOffsets().get(0).getIntValue());
+        Assertions.assertEquals(2, (int)splittedRanges1.get(1).getFrom().getOffsets().get(0).getIntValue());
+        Assertions.assertEquals(3, (int)splittedRanges1.get(1).getTo().getOffsets().get(0).getIntValue());
     }
 
     @Test
@@ -139,24 +139,24 @@ public class JdbcUtilTest {
                         originalRange1.getTo().getOffsets(),
                         4);
 
-        Assert.assertEquals(4, splittedRanges1.size());
-        Assert.assertEquals(3, splittedRanges1.get(0).getFrom().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(1).getFrom().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(2).getFrom().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(3).getFrom().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(0).getTo().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(1).getTo().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(2).getTo().getOffsets().size());
-        Assert.assertEquals(1, splittedRanges1.get(3).getTo().getOffsets().size());
-        Assert.assertEquals("", splittedRanges1.get(0).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("add", splittedRanges1.get(0).getFrom().getOffsets().get(1).getStringValue());
-        Assert.assertEquals("aff", splittedRanges1.get(0).getFrom().getOffsets().get(2).getStringValue());
-        Assert.assertEquals("7", splittedRanges1.get(1).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("N", splittedRanges1.get(1).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("N", splittedRanges1.get(2).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("d", splittedRanges1.get(2).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("d", splittedRanges1.get(3).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("znbff", splittedRanges1.get(3).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals(4, splittedRanges1.size());
+        Assertions.assertEquals(3, splittedRanges1.get(0).getFrom().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(1).getFrom().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(2).getFrom().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(3).getFrom().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(0).getTo().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(1).getTo().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(2).getTo().getOffsets().size());
+        Assertions.assertEquals(1, splittedRanges1.get(3).getTo().getOffsets().size());
+        Assertions.assertEquals("", splittedRanges1.get(0).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("add", splittedRanges1.get(0).getFrom().getOffsets().get(1).getStringValue());
+        Assertions.assertEquals("aff", splittedRanges1.get(0).getFrom().getOffsets().get(2).getStringValue());
+        Assertions.assertEquals("7", splittedRanges1.get(1).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("N", splittedRanges1.get(1).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("N", splittedRanges1.get(2).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("d", splittedRanges1.get(2).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("d", splittedRanges1.get(3).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("znbff", splittedRanges1.get(3).getTo().getOffsets().get(0).getStringValue());
 
         // isCaseInsensitive alphabet
         final List<JdbcUtil.IndexOffset> startOffsets2 = new ArrayList<>();
@@ -176,13 +176,13 @@ public class JdbcUtilTest {
                         originalRange2.getTo().getOffsets(),
                         4);
 
-        Assert.assertEquals(3, splittedRanges2.size());
-        Assert.assertEquals("A", splittedRanges2.get(0).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("B", splittedRanges2.get(0).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("B", splittedRanges2.get(1).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("C", splittedRanges2.get(1).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("C", splittedRanges2.get(2).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("d", splittedRanges2.get(2).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals(3, splittedRanges2.size());
+        Assertions.assertEquals("A", splittedRanges2.get(0).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("B", splittedRanges2.get(0).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("B", splittedRanges2.get(1).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("C", splittedRanges2.get(1).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("C", splittedRanges2.get(2).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("d", splittedRanges2.get(2).getTo().getOffsets().get(0).getStringValue());
 
         // isCaseInsensitive
         final List<JdbcUtil.IndexOffset> startOffsets3 = new ArrayList<>();
@@ -202,15 +202,15 @@ public class JdbcUtilTest {
                         originalRange3.getTo().getOffsets(),
                         4);
 
-        Assert.assertEquals(4, splittedRanges3.size());
-        Assert.assertEquals("y", splittedRanges3.get(0).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("\\", splittedRanges3.get(0).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("\\", splittedRanges3.get(1).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("^", splittedRanges3.get(1).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("^", splittedRanges3.get(2).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("{", splittedRanges3.get(2).getTo().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("{", splittedRanges3.get(3).getFrom().getOffsets().get(0).getStringValue());
-        Assert.assertEquals("}", splittedRanges3.get(3).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals(4, splittedRanges3.size());
+        Assertions.assertEquals("y", splittedRanges3.get(0).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("\\", splittedRanges3.get(0).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("\\", splittedRanges3.get(1).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("^", splittedRanges3.get(1).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("^", splittedRanges3.get(2).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("{", splittedRanges3.get(2).getTo().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("{", splittedRanges3.get(3).getFrom().getOffsets().get(0).getStringValue());
+        Assertions.assertEquals("}", splittedRanges3.get(3).getTo().getOffsets().get(0).getStringValue());
     }
 
     @Test
@@ -251,9 +251,19 @@ public class JdbcUtilTest {
         byte[] end = Hex.decodeHex("85".toCharArray());
         JdbcUtil.IndexPosition startPosition = JdbcUtil.IndexPosition.of(Arrays.asList(JdbcUtil.IndexOffset.of("f1", Schema.Type.BYTES, true, ByteBuffer.wrap(start))), true);
         JdbcUtil.IndexPosition stopPosition = JdbcUtil.IndexPosition.of(Arrays.asList(JdbcUtil.IndexOffset.of("f1", Schema.Type.BYTES, true, ByteBuffer.wrap(end))), false);
-        Assert.assertFalse(startPosition.isOverTo(stopPosition));
+        Assertions.assertFalse(startPosition.isOverTo(stopPosition));
     }
      */
+
+    @Test
+    public void testExtractDbFromDriver() {
+        Assertions.assertEquals(JdbcUtil.DB.MYSQL, JdbcUtil.extractDbFromDriver("com.mysql.cj.jdbc.Driver"));
+        Assertions.assertEquals(JdbcUtil.DB.POSTGRESQL, JdbcUtil.extractDbFromDriver("org.postgresql.Driver"));
+        Assertions.assertEquals(JdbcUtil.DB.SQLSERVER, JdbcUtil.extractDbFromDriver("com.microsoft.sqlserver.jdbc.SQLServerDriver"));
+        Assertions.assertEquals(JdbcUtil.DB.H2, JdbcUtil.extractDbFromDriver("org.h2.Driver"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> JdbcUtil.extractDbFromDriver(null));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> JdbcUtil.extractDbFromDriver("oracle.jdbc.OracleDriver"));
+    }
 
     @Test
     public void testCreateMySQLStatementInsert() {
@@ -272,11 +282,11 @@ public class JdbcUtilTest {
                 "INSERT INTO people (id,name,age,created_at)" +
                 " VALUES (?,?,?,?)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -301,11 +311,11 @@ public class JdbcUtilTest {
                 "`age` = VALUES(`age`)," +
                 "`created_at` = VALUES(`created_at`)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -328,11 +338,11 @@ public class JdbcUtilTest {
                 " ON DUPLICATE KEY UPDATE " +
                 "`id` = VALUES(`id`)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -352,11 +362,11 @@ public class JdbcUtilTest {
                 "INSERT INTO people (id,name,age,created_at)" +
                 " VALUES (?,?,?,?::timestamp)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -385,11 +395,11 @@ public class JdbcUtilTest {
                 " INSERT (id,name,age,created_at)" +
                 " VALUES (item.id,item.name,item.age,item.created_at)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -415,11 +425,11 @@ public class JdbcUtilTest {
                 " INSERT (id,name,age,created_at)" +
                 " VALUES (item.id,item.name,item.age,item.created_at)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -439,11 +449,11 @@ public class JdbcUtilTest {
                 "INSERT INTO people (id,name,age,created_at)" +
                 " VALUES (?,?,?,?)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -458,9 +468,9 @@ public class JdbcUtilTest {
 
         List<String> keyFields = Arrays.stream(new String[]{"id"}).toList();
 
-        Assert.assertThrows("SQLServer does not support INSERT_OR_UPDATE.", IllegalArgumentException.class, () -> {
+        Assertions.assertThrows(IllegalArgumentException.class, () -> {
            JdbcUtil.createStatement("people", schema, JdbcUtil.OP.INSERT_OR_UPDATE, JdbcUtil.DB.SQLSERVER, keyFields);
-        });
+        }, "SQLServer does not support INSERT_OR_UPDATE.");
     }
 
     @Test
@@ -475,9 +485,9 @@ public class JdbcUtilTest {
 
         List<String> keyFields = Arrays.stream(new String[]{"id"}).toList();
 
-        Assert.assertThrows("SQLServer does not support INSERT_OR_DONOTHING.", IllegalArgumentException.class, () -> {
+        Assertions.assertThrows(IllegalArgumentException.class, () -> {
             JdbcUtil.createStatement("people", schema, JdbcUtil.OP.INSERT_OR_DONOTHING, JdbcUtil.DB.SQLSERVER, keyFields);
-        });
+        }, "SQLServer does not support INSERT_OR_DONOTHING.");
     }
 
     @Test
@@ -497,11 +507,11 @@ public class JdbcUtilTest {
                 "INSERT INTO people (id,name,age,created_at)" +
                 " VALUES (?,?,?,?)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -522,11 +532,11 @@ public class JdbcUtilTest {
                 "MERGE INTO people (id,name,age,created_at) KEY (id)" +
                 " VALUES (?,?,?,?)";
 
-        Assert.assertEquals(expectedStatement, template.getStatementString());
-        Assert.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
-        Assert.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
-        Assert.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
-        Assert.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
+        Assertions.assertEquals(expectedStatement, template.getStatementString());
+        Assertions.assertArrayEquals(new int[]{1}, toIntArray(mappings.get(1)));
+        Assertions.assertArrayEquals(new int[]{2}, toIntArray(mappings.get(2)));
+        Assertions.assertArrayEquals(new int[]{3}, toIntArray(mappings.get(3)));
+        Assertions.assertArrayEquals(new int[]{4}, toIntArray(mappings.get(4)));
     }
 
     @Test
@@ -540,8 +550,8 @@ public class JdbcUtilTest {
                 .endRecord();
         List<String> keyFields = Arrays.stream(new String[]{"id"}).toList();
 
-        Assert.assertThrows("H2 does not support INSERT_OR_DONOTHING.", IllegalArgumentException.class, () -> {
+        Assertions.assertThrows(IllegalArgumentException.class, () -> {
             JdbcUtil.createStatement("people", schema, JdbcUtil.OP.INSERT_OR_DONOTHING, JdbcUtil.DB.H2, keyFields);
-        });
+        }, "H2 does not support INSERT_OR_DONOTHING.");
     }
 }

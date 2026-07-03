@@ -60,6 +60,25 @@ public class DatastoreUtil {
         }
     }
 
+    /**
+     * Resolves the Datastore emulator host used by the datastore source/sink modules when no
+     * explicit {@code emulatorHost} parameter is configured.
+     * Resolution order: the {@code DATASTORE_EMULATOR_HOST} environment variable, then the
+     * {@code DATASTORE_EMULATOR_HOST} system property (env vars cannot be set from within a JVM,
+     * so tests use the system property). Returns null if neither is set.
+     * Any scheme prefix is stripped because {@code DatastoreV1.withLocalhost} expects "host:port".
+     */
+    public static String getEmulatorHost() {
+        String host = System.getenv("DATASTORE_EMULATOR_HOST");
+        if(host == null || host.isEmpty()) {
+            host = System.getProperty("DATASTORE_EMULATOR_HOST");
+        }
+        if(host == null || host.isEmpty()) {
+            return null;
+        }
+        return host.contains("://") ? host.substring(host.indexOf("://") + 3) : host;
+    }
+
     public static Datastore getDatastore(final PipelineOptions pipelineOptions) {
         final GcpOptions gcpOptions = pipelineOptions.as(GcpOptions.class);
         return getDatastore(gcpOptions.getProject(), gcpOptions.getGcpCredential());

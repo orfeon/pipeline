@@ -56,6 +56,7 @@ public class CsvSink implements FileIO.Sink<KV<String, MElement>> {
             os.write(0xbb);
             os.write(0xbf);
         }
+        this.writer = new PrintWriter(new BufferedWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8)));
         if(this.outputHeader) {
             if(this.headerLine != null) {
                 this.writer.println(headerLine);
@@ -63,7 +64,6 @@ public class CsvSink implements FileIO.Sink<KV<String, MElement>> {
                 this.writer.println(String.join(",", this.fields));
             }
         }
-        this.writer = new PrintWriter(new BufferedWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8)));
     }
 
     @Override

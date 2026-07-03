@@ -138,6 +138,9 @@ public class Std implements AggregateFunction {
     @Override
     public List<String> validate(int parent, int index) {
         final List<String> errorMessages = new ArrayList<>();
+        if(this.field == null && this.expression == null) {
+            errorMessages.add("aggregations[" + parent + "].fields[" + index + "].field or expression must not be null");
+        }
         return errorMessages;
     }
 
@@ -248,11 +251,27 @@ public class Std implements AggregateFunction {
 
         final Double baseVar = Optional.ofNullable(base.getAsDouble(name)).orElse(0D);
         final Double inputVar = Optional.ofNullable(input.getAsDouble(name)).orElse(0D);
-        base.put(name, baseVar + inputVar);
+
+        // between-group variance term (Chan et al. parallel merge)
+        final double w1 = Optional.ofNullable(baseWeight).orElse(0D);
+        final double w2 = Optional.ofNullable(inputWeight).orElse(0D);
+        final double correction;
+        if(w1 > 0 && w2 > 0 && baseAvg != null && inputAvg != null) {
+            final double delta = inputAvg - baseAvg;
+            correction = delta * delta * (w1 * w2 / (w1 + w2));
+        } else {
+            correction = 0D;
+        }
+        base.put(name, baseVar + inputVar + correction);
 
         return base;
     }
 
+    // Weights are interpreted as frequency weights (a weight of n is equivalent to
+    // observing the value n times): the accumulator holds the weighted M2
+    // (sum of weight * squared deviation, maintained incrementally by add() via
+    // West's algorithm and merged with the Chan et al. between-group correction),
+    // and the variance is M2 / (sumWeights - ddof).
     @Override
     public Object extractOutput(final Accumulator accumulator,
                                             final Map<String, Object> values) {
@@ -288,7 +307,7 @@ public class Std implements AggregateFunction {
         double deltaPrev = inputValue - Optional.ofNullable(prevAvg).orElse(0D);
         double deltaNext = inputValue - Optional.ofNullable(nextAvg).orElse(0D);
         final Double prevVar = Optional.ofNullable(accumulator.getAsDouble(name)).orElse(0D);
-        final Double nextVar = prevVar + (deltaPrev * deltaNext);
+        final Double nextVar = prevVar + (Optional.ofNullable(inputWeight).orElse(0D) * deltaPrev * deltaNext);
 
         accumulator.put(name, nextVar);
 

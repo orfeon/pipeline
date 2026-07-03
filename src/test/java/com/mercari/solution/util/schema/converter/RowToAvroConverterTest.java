@@ -6,8 +6,8 @@ import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
 import org.apache.beam.sdk.values.Row;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class RowToAvroConverterTest {
 
@@ -31,9 +31,9 @@ public class RowToAvroConverterTest {
         builder.set("field0", "ok");
         builder.set("field2", new GenericRecordBuilder(AvroSchemaUtil.unnestUnion(schema.getField("field2").schema())).build());
         GenericRecord record = builder.build();
-        Assert.assertEquals("ok", record.get("field0").toString());
-        Assert.assertEquals(10L, record.get("field1"));
-        Assert.assertEquals("ok", ((GenericRecord)record.get("field2")).get("fieldA").toString());
+        Assertions.assertEquals("ok", record.get("field0").toString());
+        Assertions.assertEquals(10L, record.get("field1"));
+        Assertions.assertEquals("ok", ((GenericRecord)record.get("field2")).get("fieldA").toString());
     }
 
     @Test
@@ -43,7 +43,7 @@ public class RowToAvroConverterTest {
         final GenericRecord sourceRecord = RowToRecordConverter.convert(schema, sourceRow);
 
         final Row targetRow = AvroToRowConverter.convert(sourceRow.getSchema(), sourceRecord);
-        Assert.assertEquals(RowToJsonConverter.convert(sourceRow), RowToJsonConverter.convert(targetRow));
+        Assertions.assertEquals(RowToJsonConverter.convert(sourceRow), RowToJsonConverter.convert(targetRow));
     }
 
 }

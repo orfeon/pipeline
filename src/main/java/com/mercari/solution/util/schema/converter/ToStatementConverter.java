@@ -420,7 +420,10 @@ public class ToStatementConverter {
             case ROW -> convertRowWithKeys((Row) element.getValue(), statement, keyFields);
             case STRUCT -> convertStructWithKeys((Struct) element.getValue(), statement, keyFields);
             case ENTITY -> convertEntityWithKeys((Entity) element.getValue(), statement, keyFields);
-            default -> throw new IllegalArgumentException();
+            default -> throw new IllegalArgumentException(
+                    "jdbc sink does not support input data type: " + element.getType()
+                            + ". Supported input types are AVRO, ROW, STRUCT and ENTITY."
+                            + " Set outputType (e.g. outputType: AVRO) on the input module to convert its output.");
         }
     }
 

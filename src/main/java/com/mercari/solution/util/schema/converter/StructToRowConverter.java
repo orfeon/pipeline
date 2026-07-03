@@ -72,7 +72,10 @@ public class StructToRowConverter {
             case INT16, INT32, INT64 -> {
                 return struct.getLong(fieldName);
             }
-            case FLOAT, DOUBLE -> {
+            case FLOAT -> {
+                return struct.getFloat(fieldName);
+            }
+            case DOUBLE -> {
                 return struct.getDouble(fieldName);
             }
             case DATETIME -> {
@@ -90,13 +93,13 @@ public class StructToRowConverter {
                 }
             }
             case ROW -> {
-                return convert(fieldType.getRowSchema(), struct);
+                return convert(fieldType.getRowSchema(), struct.getStruct(fieldName));
             }
             case ARRAY, ITERABLE -> {
                 return getArray(fieldName, fieldType.getCollectionElementType(), struct);
             }
             default -> {
-                return new IllegalArgumentException("Unsupported field type: " + fieldType.getTypeName() + " for field: " + fieldName);
+                throw new IllegalArgumentException("Unsupported field type: " + fieldType.getTypeName() + " for field: " + fieldName);
             }
         }
     }
@@ -121,6 +124,7 @@ public class StructToRowConverter {
             case INT64:
                 return struct.getLongList(fieldName);
             case FLOAT:
+                return struct.getFloatList(fieldName);
             case DOUBLE:
                 return struct.getDoubleList(fieldName);
             case DATETIME:

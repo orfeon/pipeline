@@ -1,6 +1,8 @@
 package com.mercari.solution.util.schema.converter;
 
 import com.google.cloud.ByteArray;
+import com.google.cloud.Date;
+import com.google.cloud.Timestamp;
 import com.google.cloud.spanner.Key;
 import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Struct;
@@ -12,6 +14,9 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.values.Row;
 
 import java.nio.ByteBuffer;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 public class ElementToSpannerMutationConverter {
@@ -135,6 +140,10 @@ public class ElementToSpannerMutationConverter {
                 final String stringValue = Optional.ofNullable(value).map(Object::toString).orElse(null);
                 builder.set(fieldName).to(stringValue);
             }
+            case json -> {
+                final String jsonValue = Optional.ofNullable(value).map(Object::toString).orElse(null);
+                builder.set(fieldName).to(Value.json(jsonValue));
+            }
             case bytes -> {
                 final ByteArray bytesValue;
                 if(value == null) {
@@ -159,6 +168,44 @@ public class ElementToSpannerMutationConverter {
             case float64 -> {
                 final Double doubleValue = (Double) value;
                 builder.set(fieldName).to(doubleValue);
+            }
+            case date -> {
+                // date is represented as epoch days (Integer)
+                final Date dateValue;
+                if(isNullField) {
+                    dateValue = null;
+                } else {
+                    final LocalDate localDate = LocalDate.ofEpochDay(((Number) value).longValue());
+                    dateValue = Date.fromYearMonthDay(
+                            localDate.getYear(), localDate.getMonthValue(), localDate.getDayOfMonth());
+                }
+                builder.set(fieldName).to(dateValue);
+            }
+            case time -> {
+                // time is represented as micros of day (Long). Spanner has no TIME type: write as string
+                final String timeValue;
+                if(isNullField) {
+                    timeValue = null;
+                } else {
+                    timeValue = LocalTime
+                            .ofNanoOfDay(((Number) value).longValue() * 1000L)
+                            .format(DateTimeFormatter.ISO_LOCAL_TIME);
+                }
+                builder.set(fieldName).to(timeValue);
+            }
+            case timestamp -> {
+                // timestamp is represented as epoch micros (Long)
+                if(isCommitTimestampField) {
+                    builder.set(fieldName).to(Value.COMMIT_TIMESTAMP);
+                } else {
+                    final Timestamp timestampValue;
+                    if(isNullField) {
+                        timestampValue = null;
+                    } else {
+                        timestampValue = Timestamp.ofTimeMicroseconds(((Number) value).longValue());
+                    }
+                    builder.set(fieldName).to(timestampValue);
+                }
             }
         }
     }

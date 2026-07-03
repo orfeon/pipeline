@@ -32,7 +32,7 @@ public class JsonToMutationConverter {
         final Schema.Options options = field.getOptions();
         final boolean isNull = jsonElement == null || jsonElement.isJsonNull();
         return switch (field.getType().getTypeName()) {
-            case BOOLEAN -> Value.bool(jsonElement.getAsBoolean());
+            case BOOLEAN -> Value.bool(isNull ? null : jsonElement.getAsBoolean());
             case STRING -> {
                 final String stringValue = isNull ? null : jsonElement.getAsString();
                 final String sqlType = options.hasOption("sqlType") ? options.getValue("sqlType") : null;
@@ -47,21 +47,21 @@ public class JsonToMutationConverter {
                 }
             }
             case BYTES -> Value.bytes(isNull ? null : ByteArray.copyFrom(Base64.getDecoder().decode(jsonElement.getAsString())));
-            case FLOAT -> Value.float64(isNull ? null : jsonElement.getAsFloat());
+            case FLOAT -> Value.float32(isNull ? null : jsonElement.getAsFloat());
             case DOUBLE -> Value.float64(isNull ? null : jsonElement.getAsDouble());
             case DECIMAL -> Value.numeric(isNull ? null : jsonElement.getAsBigDecimal());
-            case BYTE -> Value.int64(isNull ? null : jsonElement.getAsByte());
-            case INT16 -> Value.int64(isNull ? null : jsonElement.getAsShort());
-            case INT32 -> Value.int64(isNull ? null : jsonElement.getAsInt());
+            case BYTE -> Value.int64(isNull ? null : Long.valueOf(jsonElement.getAsByte()));
+            case INT16 -> Value.int64(isNull ? null : Long.valueOf(jsonElement.getAsShort()));
+            case INT32 -> Value.int64(isNull ? null : Long.valueOf(jsonElement.getAsInt()));
             case INT64 -> Value.int64(isNull ? null : jsonElement.getAsLong());
             case DATETIME -> Value.timestamp(isNull ? null : Timestamp.parseTimestamp(jsonElement.getAsString()));
             case LOGICAL_TYPE -> {
-                if(!jsonElement.isJsonPrimitive()) {
+                if(!isNull && !jsonElement.isJsonPrimitive()) {
                     final String message = "json fieldType: " + field.getType().getTypeName() + ", value: " + jsonElement + " could not be convert to logicalType";
                     LOG.warn(message);
                     throw new IllegalStateException(message);
                 }
-                final JsonPrimitive primitive = jsonElement.getAsJsonPrimitive();
+                final JsonPrimitive primitive = isNull ? null : jsonElement.getAsJsonPrimitive();
                 if(RowSchemaUtil.isLogicalTypeDate(field.getType())) {
                     yield Value.date(isNull ? null : Date.parseDate(primitive.getAsString()));
                 } else if(RowSchemaUtil.isLogicalTypeTime(field.getType())) {
@@ -160,6 +160,7 @@ public class JsonToMutationConverter {
                         yield Value.bytesArray(values);
                     }
                     case FLOAT -> {
+                        // FLOAT arrays are written as float32Array, matching the scalar FLOAT case
                         if (isNull) {
                             yield Value.float32Array(new ArrayList<>());
                         }
@@ -208,7 +209,7 @@ public class JsonToMutationConverter {
                                 continue;
                             }
                             if(element.isJsonPrimitive()) {
-                                final JsonPrimitive primitive = jsonElement.getAsJsonPrimitive();
+                                final JsonPrimitive primitive = element.getAsJsonPrimitive();
                                 if(primitive.isString()) {
                                     values.add(Timestamp.parseTimestamp(element.getAsString()));
                                 } else if(primitive.isNumber()) {
@@ -221,13 +222,7 @@ public class JsonToMutationConverter {
                         yield Value.timestampArray(values);
                     }
                     case LOGICAL_TYPE -> {
-                        if(!jsonElement.isJsonPrimitive()) {
-                            final String message = "json element fieldType: " + field.getType().getTypeName() + ", value: " + jsonElement + " could not be convert to logicalType";
-                            LOG.warn(message);
-                            throw new IllegalStateException(message);
-                        }
-                        final JsonPrimitive primitive = jsonElement.getAsJsonPrimitive();
-                        if(RowSchemaUtil.isLogicalTypeDate(field.getType())) {
+                        if(RowSchemaUtil.isLogicalTypeDate(elementType)) {
                             if(isNull) {
                                 yield Value.dateArray(new ArrayList<>());
                             }
@@ -239,7 +234,7 @@ public class JsonToMutationConverter {
                                 values.add(Date.parseDate(element.getAsString()));
                             }
                             yield Value.dateArray(values);
-                        } else if(RowSchemaUtil.isLogicalTypeTime(field.getType())) {
+                        } else if(RowSchemaUtil.isLogicalTypeTime(elementType)) {
                             if(isNull) {
                                 yield Value.stringArray(new ArrayList<>());
                             }
@@ -251,7 +246,7 @@ public class JsonToMutationConverter {
                                 values.add(element.getAsString());
                             }
                             yield Value.stringArray(values);
-                        } else if(RowSchemaUtil.isLogicalTypeTimestamp(field.getType())) {
+                        } else if(RowSchemaUtil.isLogicalTypeTimestamp(elementType)) {
                             if(isNull) {
                                 yield Value.timestampArray(new ArrayList<>());
                             }
@@ -263,7 +258,7 @@ public class JsonToMutationConverter {
                                 values.add(Timestamp.parseTimestamp(element.getAsString()));
                             }
                             yield Value.timestampArray(values);
-                        } else if(RowSchemaUtil.isLogicalTypeEnum(field.getType())) {
+                        } else if(RowSchemaUtil.isLogicalTypeEnum(elementType)) {
                             if(isNull) {
                                 yield Value.stringArray(new ArrayList<>());
                             }
@@ -277,7 +272,7 @@ public class JsonToMutationConverter {
                             yield Value.stringArray(values);
                         } else {
                             throw new IllegalArgumentException(
-                                    "Unsupported Beam logical type: " + field.getType().getLogicalType().getIdentifier());
+                                    "Unsupported Beam logical type: " + elementType.getLogicalType().getIdentifier());
                         }
                     }
                     default -> throw new IllegalStateException("Not supported array field schema: " + elementType);

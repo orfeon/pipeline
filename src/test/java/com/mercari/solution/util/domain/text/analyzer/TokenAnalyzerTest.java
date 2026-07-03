@@ -4,8 +4,8 @@ import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.analysis.tokenattributes.TypeAttribute;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.StringReader;
@@ -74,17 +74,17 @@ public class TokenAnalyzerTest {
                 final TypeAttribute ta = tokenStream.getAttribute(TypeAttribute.class);
                 count += 1;
                 if("title".equals(ta.type())) {
-                    Assert.assertEquals("This is title", cta.toString());
+                    Assertions.assertEquals("This is title", cta.toString());
                 } else if("url".equals(ta.type())) {
-                    Assert.assertEquals("https://example.com/link?p=ok", cta.toString());
+                    Assertions.assertEquals("https://example.com/link?p=ok", cta.toString());
                 } else if("mail".equals(ta.type())) {
-                    Assert.assertEquals("support@example.com", cta.toString());
+                    Assertions.assertEquals("support@example.com", cta.toString());
                 } else {
-                    Assert.assertEquals("anchor:Anchor text", ta.type());
-                    Assert.assertEquals("https://example.com/anchor", cta.toString());
+                    Assertions.assertEquals("anchor:Anchor text", ta.type());
+                    Assertions.assertEquals("https://example.com/anchor", cta.toString());
                 }
             }
-            Assert.assertEquals(4, count);
+            Assertions.assertEquals(4, count);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

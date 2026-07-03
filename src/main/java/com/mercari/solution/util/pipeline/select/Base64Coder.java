@@ -109,7 +109,7 @@ public class Base64Coder implements SelectFunction {
                 yield switch (outputFieldType.getType()) {
                     case bytes -> ByteBuffer.wrap(Base64.getEncoder().encode(bytes));
                     case string, json -> Base64.getEncoder().encodeToString(bytes);
-                    default -> new IllegalArgumentException();
+                    default -> throw new IllegalArgumentException("SelectField base64" + code.name() + ": " + name + " does not support output type: " + outputFieldType.getType());
                 };
             }
             case decode -> {
@@ -125,7 +125,7 @@ public class Base64Coder implements SelectFunction {
                 yield switch (outputFieldType.getType()) {
                     case bytes -> ByteBuffer.wrap(bytes);
                     case string, json -> new String(bytes, StandardCharsets.UTF_8);
-                    default -> new IllegalArgumentException();
+                    default -> throw new IllegalArgumentException("SelectField base64" + code.name() + ": " + name + " does not support output type: " + outputFieldType.getType());
                 };
             }
         };

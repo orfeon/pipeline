@@ -40,7 +40,11 @@ public class Panic implements SelectFunction {
         if(!jsonObject.has("message")) {
             throw new IllegalArgumentException("SelectField panic: " + name + " requires message parameter");
         }
-        final String message = jsonObject.get("message").toString();
+        final JsonElement messageElement = jsonObject.get("message");
+        if(!messageElement.isJsonPrimitive()) {
+            throw new IllegalArgumentException("SelectField panic: " + name + " message must be primitive but: " + messageElement);
+        }
+        final String message = messageElement.getAsString();
 
         final String condition;
         if(jsonObject.has("condition")) {

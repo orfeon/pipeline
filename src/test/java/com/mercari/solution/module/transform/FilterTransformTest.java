@@ -4,19 +4,21 @@ import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
+import com.mercari.solution.module.IllegalModuleException;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 public class FilterTransformTest {
 
     private static final double DELTA = 1e-15;
 
-    @Rule
-    public final transient TestPipeline pipeline = TestPipeline.create();
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
     public void test() throws Exception {
@@ -95,12 +97,148 @@ public class FilterTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 
         pipeline.run();
 
+    }
+
+    @Test
+    public void testFilterModuleFilterOnly() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "filterOnlyCreate",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0, 1, 2, 3, 4, 5]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "filterOnly",
+                      "module": "filter",
+                      "inputs": ["filterOnlyCreate"],
+                      "parameters": {
+                        "filter": [
+                          { "key": "value", "op": ">", "value": 2 }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("filterOnly");
+        Assertions.assertNotNull(output);
+
+        // filter only keeps input schema as-is
+        Assertions.assertNotNull(output.getSchema().getField("value"));
+        Assertions.assertNotNull(output.getSchema().getField("sequence"));
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Set<Long> values = new HashSet<>();
+            for(final MElement element : elements) {
+                values.add((Long) element.getPrimitiveValue("value"));
+            }
+            Assertions.assertEquals(Set.of(3L, 4L, 5L), values);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testFilterModuleFilterAndSelect() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "filterSelectCreate",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0, 1, 2, 3, 4, 5]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "filterSelect",
+                      "module": "filter",
+                      "inputs": ["filterSelectCreate"],
+                      "parameters": {
+                        "filter": [
+                          { "key": "value", "op": "<", "value": 2 }
+                        ],
+                        "select": [
+                          { "name": "id", "field": "value" },
+                          { "name": "doubled", "expression": "value * 2", "type": "float64" },
+                          { "name": "constantValue", "type": "string", "value": "fixed" }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("filterSelect");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                final long id = (Long) element.getPrimitiveValue("id");
+                Assertions.assertTrue(id < 2, "id: " + id);
+                Assertions.assertEquals(id * 2.0D, (Double) element.getPrimitiveValue("doubled"), DELTA);
+                Assertions.assertEquals("fixed", element.getAsString("constantValue"));
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testFilterModuleValidationError() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "filterInvalidCreate",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0, 1]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "filterInvalid",
+                      "module": "filter",
+                      "inputs": ["filterInvalidCreate"],
+                      "parameters": {}
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
     }
 
 }

@@ -8,7 +8,7 @@ import com.mercari.solution.util.pipeline.Select;
 import com.mercari.solution.util.pipeline.select.stateful.StatefulFunction;
 import org.apache.beam.sdk.values.TimestampedValue;
 import org.joda.time.Instant;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -98,7 +98,7 @@ public class SelectTest {
         final List<SelectFunction> selectFunctions = SelectFunction.of(array, inputFields);
 
         final Schema outputSchema = SelectFunction.createSchema(selectFunctions);
-        //Assert.assertEquals(Schema.Type.int64, outputSchema.getField("sumLongField").getFieldType().getType());
+        //Assertions.assertEquals(Schema.Type.int64, outputSchema.getField("sumLongField").getFieldType().getType());
 
         final Select select = Select.of(selectFunctions);
         select.setup();

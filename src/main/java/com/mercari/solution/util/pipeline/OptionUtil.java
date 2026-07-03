@@ -3,8 +3,8 @@ package com.mercari.solution.util.pipeline;
 import com.google.cloud.ServiceOptions;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonParseException;
 import com.google.gson.JsonPrimitive;
-import com.google.gson.JsonSyntaxException;
 import com.mercari.solution.MPipeline;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -50,7 +50,9 @@ public class OptionUtil {
             JsonElement jsonElement;
             try {
                 jsonElement = new Gson().fromJson(entry.getValue(), JsonElement.class);
-            } catch (final JsonSyntaxException e) {
+            } catch (final JsonParseException e) {
+                // covers JsonSyntaxException and JsonIOException (e.g. values with
+                // trailing tokens such as "hello world"): fall back to the string value
                 jsonElement = new JsonPrimitive(entry.getValue());
             }
             map.put(entry.getKey(), extractTemplateParameters(jsonElement));

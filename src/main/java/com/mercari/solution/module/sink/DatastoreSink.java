@@ -4,6 +4,7 @@ import com.google.datastore.v1.Entity;
 import com.google.datastore.v1.Value;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
+import com.mercari.solution.util.cloud.google.DatastoreUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.converter.ElementToEntityConverter;
 import freemarker.template.Template;
@@ -34,6 +35,7 @@ public class DatastoreSink extends Sink {
         private Boolean delete;
         private List<String> excludeFromIndexFields;
         private Boolean enableRampupThrottling;
+        private String emulatorHost;
 
         private String separator;
 
@@ -58,6 +60,10 @@ public class DatastoreSink extends Sink {
             }
             if(separator == null) {
                 separator = "#";
+            }
+            // Resolution order: parameters.emulatorHost > DATASTORE_EMULATOR_HOST env var > system property.
+            if(emulatorHost == null) {
+                emulatorHost = DatastoreUtil.getEmulatorHost();
             }
         }
     }
@@ -85,14 +91,17 @@ public class DatastoreSink extends Sink {
         final String projectId = Optional.ofNullable(parameters.projectId).orElse(execEnvProject);
 
         if(parameters.delete) {
-            final DatastoreV1.DeleteEntity delete = DatastoreIO
+            DatastoreV1.DeleteEntity delete = DatastoreIO
                     .v1()
                     .deleteEntity()
                     .withProjectId(projectId);
+            if(parameters.emulatorHost != null) {
+                delete = delete.withLocalhost(parameters.emulatorHost);
+            }
             final PDone done = entities.apply("DeleteEntity", delete);
             return MCollectionTuple.done(done);
         } else {
-            final DatastoreV1.Write write;
+            DatastoreV1.Write write;
             if(parameters.enableRampupThrottling) {
                 write = DatastoreIO.v1().write()
                         .withProjectId(projectId);
@@ -100,6 +109,9 @@ public class DatastoreSink extends Sink {
                 write = DatastoreIO.v1().write()
                         .withRampupThrottlingDisabled()
                         .withProjectId(projectId);
+            }
+            if(parameters.emulatorHost != null) {
+                write = write.withLocalhost(parameters.emulatorHost);
             }
             final PCollection<MElement> output = entities
                     .apply("WriteEntity", write.withResults())

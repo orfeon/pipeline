@@ -4,7 +4,7 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.coders.Coder;
 import org.joda.time.Instant;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;

@@ -26,6 +26,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -34,6 +35,7 @@ public class RowToMutationConverter {
     private static final Logger LOG = LoggerFactory.getLogger(RowToMutationConverter.class);
 
     private static final DateTimeFormatter FORMATTER_HH_MM_SS   = DateTimeFormat.forPattern("HH:mm:ss");
+    private static final java.time.format.DateTimeFormatter FORMATTER_JAVA_HH_MM_SS = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss");
 
     public static Type convertSchema(final Schema schema) {
         return Type.struct(schema.getFields().stream()
@@ -99,17 +101,18 @@ public class RowToMutationConverter {
                     break;
                 case INT16:
                     final Short shortValue = hide ? (nullableField ? null : (short)0) : (isNullField ? null : row.getInt16(fieldName));
-                    builder.set(fieldName).to(shortValue);
+                    builder.set(fieldName).to(shortValue == null ? null : Long.valueOf(shortValue));
                     break;
                 case INT32:
                     final Integer intValue = hide ? (nullableField ? null : 0) : (isNullField ? null : row.getInt32(fieldName));
-                    builder.set(fieldName).to(intValue);
+                    builder.set(fieldName).to(intValue == null ? null : Long.valueOf(intValue));
                     break;
                 case INT64:
                     final Long longValue = hide ? (nullableField ? null : 0L) : (isNullField ? null : row.getInt64(fieldName));
                     builder.set(fieldName).to(longValue);
                     break;
                 case FLOAT:
+                    // Beam FLOAT is written as Spanner FLOAT32, matching convertFieldType (Type.float32)
                     final Float floatValue = hide ? (nullableField ? null : 0F) : (isNullField ? null : row.getFloat(fieldName));
                     builder.set(fieldName).to(floatValue);
                     break;
@@ -158,18 +161,18 @@ public class RowToMutationConverter {
                     } else if(RowSchemaUtil.isLogicalTypeTime(field.getType())) {
                         final String timeValue = hide ?
                                 (nullableField ? null : "00:00:00") :
-                                (isNullField ? null : row.getLogicalTypeValue(fieldName, Instant.class).toString(FORMATTER_HH_MM_SS));
+                                (isNullField ? null : row.getLogicalTypeValue(fieldName, LocalTime.class).format(FORMATTER_JAVA_HH_MM_SS));
                         builder.set(fieldName).to(timeValue);
                     } else if(RowSchemaUtil.isLogicalTypeTimestamp(field.getType())) {
                         if(isCommitTimestampField) {
                             builder.set(fieldName).to(Value.COMMIT_TIMESTAMP);
                         } else {
-                            final String datetimeStrValue = hide ?
-                                    (nullableField ? null : "1970-01-01T00:00:00.00Z") :
-                                    (isNullField ? null : row.getDateTime(fieldName)
+                            final Timestamp timestampValue = hide ?
+                                    (nullableField ? null : Timestamp.parseTimestamp("1970-01-01T00:00:00.00Z")) :
+                                    (isNullField ? null : Timestamp.parseTimestamp(row.getDateTime(fieldName)
                                             .toDateTime()
-                                            .toString(ISODateTimeFormat.dateTime()));
-                            builder.set(fieldName).to(datetimeStrValue);
+                                            .toString(ISODateTimeFormat.dateTime())));
+                            builder.set(fieldName).to(timestampValue);
                         }
                     } else if(RowSchemaUtil.isLogicalTypeDateTime(field.getType())) {
                         if(isCommitTimestampField) {
@@ -183,8 +186,9 @@ public class RowToMutationConverter {
                                     datetime = Timestamp.ofTimeMicroseconds(0L);
                                 }
                             } else {
+                                // interpret the LocalDateTime as UTC and use epoch seconds
                                 final LocalDateTime localDateTime = row.getLogicalTypeValue(fieldName, LocalDateTime.class);
-                                datetime = Timestamp.ofTimeSecondsAndNanos(localDateTime.getSecond(), localDateTime.getNano());
+                                datetime = Timestamp.ofTimeSecondsAndNanos(localDateTime.toEpochSecond(ZoneOffset.UTC), localDateTime.getNano());
                             }
                             builder.set(fieldName).to(datetime);
                         }
@@ -239,6 +243,12 @@ public class RowToMutationConverter {
                             }
                             break;
                         case FLOAT:
+                            if(hide) {
+                                builder.set(fieldName).toFloat32Array(new ArrayList<>());
+                            } else {
+                                builder.set(fieldName).toFloat32Array(isNullField ? null : row.<Float>getArray(fieldName));
+                            }
+                            break;
                         case DOUBLE:
                             if(hide) {
                                 builder.set(fieldName).toFloat64Array(new ArrayList<>());
@@ -281,9 +291,9 @@ public class RowToMutationConverter {
                                     builder.set(fieldName).toStringArray(new ArrayList<>());
                                 } else {
                                     builder.set(fieldName)
-                                            .toStringArray(isNullField ? null : row.<Instant>getArray(fieldName).stream()
+                                            .toStringArray(isNullField ? null : row.<LocalTime>getArray(fieldName).stream()
                                                     .filter(Objects::nonNull)
-                                                    .map(i -> i.toString(FORMATTER_HH_MM_SS))
+                                                    .map(t -> t.format(FORMATTER_JAVA_HH_MM_SS))
                                                     .collect(Collectors.toList()));
                                 }
                             } else if(RowSchemaUtil.isLogicalTypeTimestamp(field.getType().getCollectionElementType())) {
@@ -426,6 +436,7 @@ public class RowToMutationConverter {
             case INT64:
                 return Type.int64();
             case FLOAT:
+                return Type.float32();
             case DOUBLE:
                 return Type.float64();
             case DATETIME:

@@ -83,6 +83,23 @@ public class SpannerUtil {
             "  TABLE_TYPE != 'VIEW' ";
 
 
+    /**
+     * Resolves the Spanner emulator host used when a module is configured with emulator=true.
+     * Resolution order: the {@code SPANNER_EMULATOR_HOST} environment variable, then the
+     * {@code SPANNER_EMULATOR_HOST} system property (env vars cannot be set from within a JVM,
+     * so tests use the system property), then the default {@code http://localhost:9010}.
+     */
+    public static String getEmulatorHost() {
+        String host = System.getenv("SPANNER_EMULATOR_HOST");
+        if(host == null || host.isEmpty()) {
+            host = System.getProperty("SPANNER_EMULATOR_HOST");
+        }
+        if(host == null || host.isEmpty()) {
+            return SPANNER_HOST_EMULATOR;
+        }
+        return host.contains("://") ? host : ("http://" + host);
+    }
+
     public static Spanner connectSpanner(final String projectId,
                                          final int channel,
                                          final int sessionMin,
@@ -118,7 +135,7 @@ public class SpannerUtil {
         }
 
         if(emulator) {
-            return builder.setEmulatorHost(SPANNER_HOST_EMULATOR).build().getService();
+            return builder.setEmulatorHost(getEmulatorHost()).build().getService();
         }
         if(batch) {
             return builder.setHost(SPANNER_HOST_BATCH).build().getService();
@@ -373,16 +390,9 @@ public class SpannerUtil {
 
         final DatabaseId database = DatabaseId.of(projectId, instanceId, databaseId);
         try(final Spanner spanner = connectSpanner(projectId, 1, 1, 1, false, emulator)) {
-            System.out.println(spanner);
             final DatabaseAdminClient client = spanner.getDatabaseAdminClient();
-            System.out.println(client.getDatabase(instanceId, databaseId));
-
             final List<String> ddls = client.getDatabaseDdl(instanceId, databaseId);
-            System.out.println(ddls);
-
-            for(final String ddl : ddls) {
-                System.out.println(ddl);
-            }
+            LOG.debug("database: {} ddls: {}", database, ddls);
             return new HashMap<>();
         }
     }

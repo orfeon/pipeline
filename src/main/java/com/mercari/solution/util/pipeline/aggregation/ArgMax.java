@@ -172,7 +172,6 @@ public class ArgMax implements AggregateFunction {
 
     @Override
     public Schema.FieldType getOutputFieldType() {
-        System.out.println(outputFieldType);
         return outputFieldType;
     }
 

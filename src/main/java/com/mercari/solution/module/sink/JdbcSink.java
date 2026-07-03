@@ -158,6 +158,10 @@ public class JdbcSink extends Sink {
             return JdbcUtil.DB.MYSQL;
         } else if(driver.contains("postgresql")) {
             return JdbcUtil.DB.POSTGRESQL;
+        } else if(driver.contains("sqlserver")) {
+            return JdbcUtil.DB.SQLSERVER;
+        } else if(driver.contains("h2")) {
+            return JdbcUtil.DB.H2;
         } else {
             throw new IllegalStateException("Not supported JDBC driver: " + driver);
         }

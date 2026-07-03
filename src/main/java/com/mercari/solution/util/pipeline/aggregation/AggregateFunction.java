@@ -160,11 +160,11 @@ public interface AggregateFunction extends StatefulFunction {
             case Long v1_ -> v1_ + (Long) v2;
             case Float v1_ -> v1_ + (Float) v2;
             case Integer v1_ -> v1_ + (Integer) v2;
-            case Short v1_ -> v1_ + (Short) v2;
+            case Short v1_ -> (short) (v1_ + (Short) v2);
             case BigDecimal v1_ -> v1_.add((BigDecimal) v2);
             case Boolean v1_ -> v1_ || (Boolean) v2;
             case String v1_ -> v1_ + (String) v2;
-            default -> new IllegalArgumentException("Sum not supported type object: " + v1);
+            default -> throw new IllegalArgumentException("Sum not supported type object: " + v1);
         };
     }
 

@@ -7,8 +7,7 @@ import com.mercari.solution.module.MElement;
 import org.apache.beam.sdk.extensions.sql.meta.provider.pubsub.PubsubTableProvider;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -16,8 +15,7 @@ public class BeamSQLTransformTest {
 
     private static final double DELTA = 1e-15;
 
-    @Rule
-    public final transient TestPipeline pipeline = TestPipeline.create();
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
     public void test() throws Exception {
@@ -57,7 +55,7 @@ public class BeamSQLTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 
@@ -147,7 +145,7 @@ public class BeamSQLTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 
@@ -270,7 +268,7 @@ public class BeamSQLTransformTest {
                 count++;
             }
             System.out.println(count);
-            //Assert.assertEquals(3, count);
+            //Assertions.assertEquals(3, count);
             return null;
         });
 
@@ -359,30 +357,30 @@ public class BeamSQLTransformTest {
             int count = 0;
             for (final Row row : rows) {
                 count++;
-                Assert.assertNotNull(row.getString("uuidField"));
+                Assertions.assertNotNull(row.getString("uuidField"));
                 if("a".equals(row.getString("stringField"))) {
-                    Assert.assertEquals(2L, Objects.requireNonNull(row.getInt64("longFieldMax")).longValue());
-                    Assert.assertEquals(1L, Objects.requireNonNull(row.getInt64("longFieldMin")).longValue());
-                    Assert.assertEquals(0.2D, Objects.requireNonNull(row.getDouble("doubleFieldMax")), DELTA);
-                    Assert.assertEquals(0.1D, Objects.requireNonNull(row.getDouble("doubleFieldMin")), DELTA);
+                    Assertions.assertEquals(2L, Objects.requireNonNull(row.getInt64("longFieldMax")).longValue());
+                    Assertions.assertEquals(1L, Objects.requireNonNull(row.getInt64("longFieldMin")).longValue());
+                    Assertions.assertEquals(0.2D, Objects.requireNonNull(row.getDouble("doubleFieldMax")), DELTA);
+                    Assertions.assertEquals(0.1D, Objects.requireNonNull(row.getDouble("doubleFieldMin")), DELTA);
                 } else if("b".equals(row.getString("stringField"))) {
-                    Assert.assertEquals(1L, Objects.requireNonNull(row.getInt64("longFieldMax")).longValue());
-                    Assert.assertEquals(1L, Objects.requireNonNull(row.getInt64("longFieldMin")).longValue());
-                    Assert.assertEquals(0.1D, Objects.requireNonNull(row.getDouble("doubleFieldMax")), DELTA);
-                    Assert.assertEquals(0.1D, Objects.requireNonNull(row.getDouble("doubleFieldMin")), DELTA);
+                    Assertions.assertEquals(1L, Objects.requireNonNull(row.getInt64("longFieldMax")).longValue());
+                    Assertions.assertEquals(1L, Objects.requireNonNull(row.getInt64("longFieldMin")).longValue());
+                    Assertions.assertEquals(0.1D, Objects.requireNonNull(row.getDouble("doubleFieldMax")), DELTA);
+                    Assertions.assertEquals(0.1D, Objects.requireNonNull(row.getDouble("doubleFieldMin")), DELTA);
                 } else if("c".equals(row.getString("stringField"))) {
-                    Assert.assertEquals(2L, Objects.requireNonNull(row.getInt64("longFieldMax")).longValue());
-                    Assert.assertEquals(2L, Objects.requireNonNull(row.getInt64("longFieldMin")).longValue());
-                    Assert.assertEquals(0.2D, Objects.requireNonNull(row.getDouble("doubleFieldMax")), DELTA);
-                    Assert.assertEquals(0.2D, Objects.requireNonNull(row.getDouble("doubleFieldMin")), DELTA);
+                    Assertions.assertEquals(2L, Objects.requireNonNull(row.getInt64("longFieldMax")).longValue());
+                    Assertions.assertEquals(2L, Objects.requireNonNull(row.getInt64("longFieldMin")).longValue());
+                    Assertions.assertEquals(0.2D, Objects.requireNonNull(row.getDouble("doubleFieldMax")), DELTA);
+                    Assertions.assertEquals(0.2D, Objects.requireNonNull(row.getDouble("doubleFieldMin")), DELTA);
                 } else if("d".equals(row.getString("stringField"))) {
-                    Assert.assertNull(row.getInt64("longFieldMax"));
-                    Assert.assertNull(row.getInt64("longFieldMin"));
-                    Assert.assertNull(row.getInt64("doubleFieldMax"));
-                    Assert.assertNull(row.getInt64("doubleFieldMin"));
+                    Assertions.assertNull(row.getInt64("longFieldMax"));
+                    Assertions.assertNull(row.getInt64("longFieldMin"));
+                    Assertions.assertNull(row.getInt64("doubleFieldMax"));
+                    Assertions.assertNull(row.getInt64("doubleFieldMin"));
                 }
             }
-            Assert.assertEquals(4, count);
+            Assertions.assertEquals(4, count);
             return null;
         });
 
@@ -462,26 +460,26 @@ public class BeamSQLTransformTest {
             for (final Row row : rows) {
                 count++;
                 if("a".equals(row.getString("stringField"))) {
-                    Assert.assertTrue(Objects.requireNonNull(row.getBoolean("cl")));
-                    Assert.assertTrue(Objects.requireNonNull(row.getBoolean("cs")));
+                    Assertions.assertTrue(Objects.requireNonNull(row.getBoolean("cl")));
+                    Assertions.assertTrue(Objects.requireNonNull(row.getBoolean("cs")));
                 } else if("b".equals(row.getString("stringField"))) {
-                    Assert.assertTrue(Objects.requireNonNull(row.getBoolean("cl")));
-                    Assert.assertTrue(Objects.requireNonNull(row.getBoolean("cs")));
+                    Assertions.assertTrue(Objects.requireNonNull(row.getBoolean("cl")));
+                    Assertions.assertTrue(Objects.requireNonNull(row.getBoolean("cs")));
                 } else if("c".equals(row.getString("stringField"))) {
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
                 } else if("d".equals(row.getString("stringField"))) {
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
                 } else if("e".equals(row.getString("stringField"))) {
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
                 } else if("f".equals(row.getString("stringField"))) {
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
-                    Assert.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cl")));
+                    Assertions.assertFalse(Objects.requireNonNull(row.getBoolean("cs")));
                 }
             }
-            Assert.assertEquals(6, count);
+            Assertions.assertEquals(6, count);
             return null;
         });
 
@@ -539,22 +537,22 @@ public class BeamSQLTransformTest {
             int count = 0;
             for (final Row row : rows) {
                 count++;
-                Assert.assertEquals("a", row.getString("stringField"));
-                Assert.assertEquals(Long.valueOf(2), row.getInt64("sfdd"));
-                Assert.assertEquals(Long.valueOf(1), row.getInt64("ldfb"));
+                Assertions.assertEquals("a", row.getString("stringField"));
+                Assertions.assertEquals(Long.valueOf(2), row.getInt64("sfdd"));
+                Assertions.assertEquals(Long.valueOf(1), row.getInt64("ldfb"));
 
-                Assert.assertEquals(3, row.getArray("sfa").size());
-                Assert.assertEquals(2, row.getArray("sfda").size());
-                Assert.assertEquals(3, row.getArray("lfa").size());
-                Assert.assertEquals(2, row.getArray("sfb").size());
-                Assert.assertEquals(2, row.getArray("lfb").size());
+                Assertions.assertEquals(3, row.getArray("sfa").size());
+                Assertions.assertEquals(2, row.getArray("sfda").size());
+                Assertions.assertEquals(3, row.getArray("lfa").size());
+                Assertions.assertEquals(2, row.getArray("sfb").size());
+                Assertions.assertEquals(2, row.getArray("lfb").size());
 
-                Assert.assertTrue(Arrays.asList(1L, 3L, 5L).containsAll(row.getArray("lfa")));
-                Assert.assertTrue(Arrays.asList("a", "c", "c").containsAll(row.getArray("sfa")));
-                Assert.assertTrue(Arrays.asList(2L).containsAll(row.getArray("lfb")));
-                Assert.assertTrue(Arrays.asList("b").containsAll(row.getArray("sfb")));
+                Assertions.assertTrue(Arrays.asList(1L, 3L, 5L).containsAll(row.getArray("lfa")));
+                Assertions.assertTrue(Arrays.asList("a", "c", "c").containsAll(row.getArray("sfa")));
+                Assertions.assertTrue(Arrays.asList(2L).containsAll(row.getArray("lfb")));
+                Assertions.assertTrue(Arrays.asList("b").containsAll(row.getArray("sfb")));
             }
-            Assert.assertEquals(1, count);
+            Assertions.assertEquals(1, count);
             return null;
         });
 

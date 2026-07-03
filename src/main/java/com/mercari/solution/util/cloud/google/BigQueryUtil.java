@@ -184,17 +184,8 @@ public class BigQueryUtil {
     }
 
     private static Job getQueryDryRunJob(final String projectId, final String query) {
-        final HttpTransport transport = new NetHttpTransport();
-        final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
-            final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
-                    new HttpCredentialsAdapter(credential),
-                    // Do not log 404. It clutters the output and is possibly even required by the caller.
-                    new RetryHttpRequestInitializer(ImmutableList.of(404)));
-            final Bigquery bigquery = new Bigquery.Builder(transport, jsonFactory, initializer)
-                    .setApplicationName("BigQueryClient")
-                    .build();
+            final Bigquery bigquery = createBigqueryClient();
 
             final String queryRunProjectId;
             if(projectId != null) {
@@ -415,42 +406,66 @@ public class BigQueryUtil {
     }
 
     public static Bigquery getBigquery() {
-        final HttpTransport transport = new NetHttpTransport();
-        final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
-            final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
-                    new HttpCredentialsAdapter(credential),
-                    // Do not log 404. It clutters the output and is possibly even required by the caller.
-                    new RetryHttpRequestInitializer(ImmutableList.of(404)));
-            return new Bigquery.Builder(transport, jsonFactory, initializer)
-                    .setApplicationName("BigQueryClient")
-                    .build();
+            return createBigqueryClient();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
 
     }
 
-    public static List<TableRow> query(final String projectId, final String query) {
+    /**
+     * Resolves the BigQuery emulator endpoint used by the direct (non-Beam) BigQuery clients in
+     * this class when running against an emulator (e.g. ghcr.io/goccy/bigquery-emulator).
+     * Resolution order: the {@code BIGQUERY_EMULATOR_HOST} environment variable, then the
+     * {@code BIGQUERY_EMULATOR_HOST} system property (env vars cannot be set from within a JVM,
+     * so tests use the system property). Returns null if neither is set.
+     * An http scheme is prepended if missing because the value is used as the client root URL.
+     */
+    public static String getEmulatorHost() {
+        String host = System.getenv("BIGQUERY_EMULATOR_HOST");
+        if(host == null || host.isEmpty()) {
+            host = System.getProperty("BIGQUERY_EMULATOR_HOST");
+        }
+        if(host == null || host.isEmpty()) {
+            return null;
+        }
+        return host.contains("://") ? host : "http://" + host;
+    }
+
+    private static Bigquery createBigqueryClient() throws IOException {
         final HttpTransport transport = new NetHttpTransport();
         final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
-        try {
+        final String emulatorHost = getEmulatorHost();
+        final HttpRequestInitializer initializer;
+        if(emulatorHost != null) {
+            // The emulator neither requires nor verifies credentials
+            // (and application default credentials may not exist in test environments)
+            initializer = new RetryHttpRequestInitializer(ImmutableList.of(404));
+        } else {
             final Credentials credential = GoogleCredentials.getApplicationDefault();
-            final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
+            initializer = new ChainingHttpRequestInitializer(
                     new HttpCredentialsAdapter(credential),
                     // Do not log 404. It clutters the output and is possibly even required by the caller.
                     new RetryHttpRequestInitializer(ImmutableList.of(404)));
+        }
+        final Bigquery.Builder builder = new Bigquery.Builder(transport, jsonFactory, initializer)
+                .setApplicationName("BigQueryClient");
+        if(emulatorHost != null) {
+            builder.setRootUrl(emulatorHost);
+        }
+        return builder.build();
+    }
 
+    public static List<TableRow> query(final String projectId, final String query) {
+        try {
             final String queryRunProjectId;
             if(projectId != null) {
                 queryRunProjectId = projectId;
             } else {
                 queryRunProjectId = getDefaultProjectId();
             }
-            final Bigquery bigquery = new Bigquery.Builder(transport, jsonFactory, initializer)
-                    .setApplicationName("BigQueryClient")
-                    .build();
+            final Bigquery bigquery = createBigqueryClient();
             return query(bigquery, queryRunProjectId, query);
         } catch (IOException e) {
             throw new RuntimeException("Failed to dry run query: " + query + ", for projectId: " + projectId, e);

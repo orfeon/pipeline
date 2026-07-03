@@ -79,7 +79,7 @@ public class SpannerSink extends Sink {
             }
 
             if(this.emulator) {
-                if(MPipeline.Runner.direct.equals(runner)) {
+                if(!MPipeline.Runner.direct.equals(runner)) {
                     errorMessages.add("If use spanner emulator, Use DirectRunner");
                 }
             }

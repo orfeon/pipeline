@@ -10,8 +10,8 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
 import org.apache.beam.sdk.schemas.Schema;
 import org.joda.time.Instant;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
@@ -67,28 +67,28 @@ public class EntityToAvroConverterTest {
         final byte[] bytesFieldValueBytes = new byte[bytesFieldValue.remaining()];
         bytesFieldValue.get(bytesFieldValueBytes);
 
-        Assert.assertEquals(true, convertedRecord.get("booleanField"));
-        Assert.assertEquals("str", convertedRecord.get("stringField"));
-        Assert.assertEquals(new String(bytes), new String(bytesFieldValueBytes));
-        Assert.assertEquals(1, convertedRecord.get("intField"));
-        Assert.assertEquals(1L, convertedRecord.get("longField"));
-        Assert.assertEquals(1F, convertedRecord.get("floatField"));
-        Assert.assertEquals(1D, convertedRecord.get("doubleField"));
-        Assert.assertEquals(Instant.parse("2023-04-20T00:00:00Z").getMillis() * 1000L, convertedRecord.get("timestampField"));
-        Assert.assertEquals(Long.valueOf(LocalDate.of(2021,12,1).toEpochDay()).intValue(), convertedRecord.get("dateField"));
-        Assert.assertEquals(LocalTime.of(18, 51,32, 123000000).toNanoOfDay() / 1000, convertedRecord.get("timeField"));
+        Assertions.assertEquals(true, convertedRecord.get("booleanField"));
+        Assertions.assertEquals("str", convertedRecord.get("stringField"));
+        Assertions.assertEquals(new String(bytes), new String(bytesFieldValueBytes));
+        Assertions.assertEquals(1, convertedRecord.get("intField"));
+        Assertions.assertEquals(1L, convertedRecord.get("longField"));
+        Assertions.assertEquals(1F, convertedRecord.get("floatField"));
+        Assertions.assertEquals(1D, convertedRecord.get("doubleField"));
+        Assertions.assertEquals(Instant.parse("2023-04-20T00:00:00Z").getMillis() * 1000L, convertedRecord.get("timestampField"));
+        Assertions.assertEquals(Long.valueOf(LocalDate.of(2021,12,1).toEpochDay()).intValue(), convertedRecord.get("dateField"));
+        Assertions.assertEquals(LocalTime.of(18, 51,32, 123000000).toNanoOfDay() / 1000, convertedRecord.get("timeField"));
 
         final ByteBuffer bf = (ByteBuffer)convertedRecord.get("decimalField");
         final BigDecimal decimal = AvroSchemaUtil.getAsBigDecimal(avroSchemaWithKey.getField("decimalField").schema(), bf);
-        Assert.assertEquals(1234.56789D, decimal.doubleValue(), DELTA);
+        Assertions.assertEquals(1234.56789D, decimal.doubleValue(), DELTA);
 
         final GenericRecord keyRecord = (GenericRecord) convertedRecord.get("__key__");
-        Assert.assertEquals("", keyRecord.get("namespace").toString());
-        Assert.assertEquals("", keyRecord.get("app").toString());
-        Assert.assertEquals("\"MyKind\", \"mykey\"", keyRecord.get("path").toString());
-        Assert.assertEquals("MyKind", keyRecord.get("kind").toString());
-        Assert.assertEquals("mykey", keyRecord.get("name").toString());
-        Assert.assertNull(keyRecord.get("id"));
+        Assertions.assertEquals("", keyRecord.get("namespace").toString());
+        Assertions.assertEquals("", keyRecord.get("app").toString());
+        Assertions.assertEquals("\"MyKind\", \"mykey\"", keyRecord.get("path").toString());
+        Assertions.assertEquals("MyKind", keyRecord.get("kind").toString());
+        Assertions.assertEquals("mykey", keyRecord.get("name").toString());
+        Assertions.assertNull(keyRecord.get("id"));
     }
 
 }

@@ -1,8 +1,8 @@
 package com.mercari.solution.config;
 
 import com.google.gson.JsonObject;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.*;
 
@@ -43,21 +43,21 @@ public class ConfigTest {
             final Config config = Config.parse(configYaml1, null, Config.Format.yaml, new String[0]);
             final SourceConfig sourceConfig = config.getSources().getFirst();
             final SinkConfig sinkConfig = config.getSinks().getFirst();
-            Assert.assertEquals("BigQueryInput", sourceConfig.getName());
-            Assert.assertEquals("bigquery", sourceConfig.getModule());
-            Assert.assertEquals("SELECT\n" +
+            Assertions.assertEquals("BigQueryInput", sourceConfig.getName());
+            Assertions.assertEquals("bigquery", sourceConfig.getModule());
+            Assertions.assertEquals("SELECT\n" +
                     "  *\n" +
                     "FROM\n" +
                     "  `myproject:mydataset.mytable`\n" +
                     "WHERE\n" +
                     "  timestamp > TIMESTAMP(\"2025-01-01T00:00:00Z\")", sourceConfig.getParameters().get("query").getAsString());
-            Assert.assertEquals("asia-northeast1", sourceConfig.getParameters().get("queryLocation").getAsString());
+            Assertions.assertEquals("asia-northeast1", sourceConfig.getParameters().get("queryLocation").getAsString());
 
-            Assert.assertEquals("BigQueryOutput", sinkConfig.getName());
-            Assert.assertEquals("bigquery", sinkConfig.getModule());
-            Assert.assertEquals("yourproject:yourrdataset.yourtable", sinkConfig.getParameters().get("table").getAsString());
-            Assert.assertEquals("WRITE_APPEND", sinkConfig.getParameters().get("writeDisposition").getAsString());
-            Assert.assertEquals("gs://mybucket/myobject", sinkConfig.getParameters().get("customGcsTempLocation").getAsString());
+            Assertions.assertEquals("BigQueryOutput", sinkConfig.getName());
+            Assertions.assertEquals("bigquery", sinkConfig.getModule());
+            Assertions.assertEquals("yourproject:yourrdataset.yourtable", sinkConfig.getParameters().get("table").getAsString());
+            Assertions.assertEquals("WRITE_APPEND", sinkConfig.getParameters().get("writeDisposition").getAsString());
+            Assertions.assertEquals("gs://mybucket/myobject", sinkConfig.getParameters().get("customGcsTempLocation").getAsString());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -83,13 +83,13 @@ public class ConfigTest {
                 String[] args = new String[]{"args.condition=TRUE"};
                 final Config config = Config.parse(configYaml1, null, Config.Format.yaml, args);
                 final SourceConfig sourceConfig = config.getSources().getFirst();
-                Assert.assertEquals("SELECT * FROM `mydataset.mytable` WHERE TRUE", sourceConfig.getParameters().get("query").getAsString());
+                Assertions.assertEquals("SELECT * FROM `mydataset.mytable` WHERE TRUE", sourceConfig.getParameters().get("query").getAsString());
             }
             {
                 String[] args = new String[0];
                 final Config config = Config.parse(configYaml1, null, Config.Format.yaml, args);
                 final SourceConfig sourceConfig = config.getSources().getFirst();
-                Assert.assertEquals("SELECT * FROM `mydataset.mytable` WHERE updated_at > '2025-01-01T00:00:00Z'", sourceConfig.getParameters().get("query").getAsString());
+                Assertions.assertEquals("SELECT * FROM `mydataset.mytable` WHERE updated_at > '2025-01-01T00:00:00Z'", sourceConfig.getParameters().get("query").getAsString());
             }
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -138,40 +138,40 @@ public class ConfigTest {
 
         try {
             final Config config = Config.parse(configTag1, null, Config.Format.json, new String[0]);
-            Assert.assertNull(config.getSystem().getContext());
-            Assert.assertNull(config.getSources().getFirst().getIgnore());
-            Assert.assertNull(config.getTransforms().getFirst().getIgnore());
-            Assert.assertNull(config.getSinks().getFirst().getIgnore());
+            Assertions.assertNull(config.getSystem().getContext());
+            Assertions.assertNull(config.getSources().getFirst().getIgnore());
+            Assertions.assertNull(config.getTransforms().getFirst().getIgnore());
+            Assertions.assertNull(config.getSinks().getFirst().getIgnore());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
         try {
             final Config config = Config.parse(configTag1, "tag1", Config.Format.json, new String[0]);
-            Assert.assertEquals("tag1", config.getSystem().getContext());
-            Assert.assertFalse(config.getSources().getFirst().getIgnore());
-            Assert.assertTrue(config.getTransforms().getFirst().getIgnore());
-            Assert.assertTrue(config.getSinks().getFirst().getIgnore());
+            Assertions.assertEquals("tag1", config.getSystem().getContext());
+            Assertions.assertFalse(config.getSources().getFirst().getIgnore());
+            Assertions.assertTrue(config.getTransforms().getFirst().getIgnore());
+            Assertions.assertTrue(config.getSinks().getFirst().getIgnore());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
         try {
             final Config config = Config.parse(configTag1, "tag2", Config.Format.json, new String[0]);
-            Assert.assertEquals("tag2", config.getSystem().getContext());
-            Assert.assertTrue(config.getSources().getFirst().getIgnore());
-            Assert.assertFalse(config.getTransforms().getFirst().getIgnore());
-            Assert.assertTrue(config.getSinks().getFirst().getIgnore());
+            Assertions.assertEquals("tag2", config.getSystem().getContext());
+            Assertions.assertTrue(config.getSources().getFirst().getIgnore());
+            Assertions.assertFalse(config.getTransforms().getFirst().getIgnore());
+            Assertions.assertTrue(config.getSinks().getFirst().getIgnore());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
 
         try {
             final Config config = Config.parse(configTag1, "tag3", Config.Format.json, new String[0]);
-            Assert.assertEquals("tag3", config.getSystem().getContext());
-            Assert.assertTrue(config.getSources().getFirst().getIgnore());
-            Assert.assertTrue(config.getTransforms().getFirst().getIgnore());
-            Assert.assertTrue(config.getSinks().getFirst().getIgnore());
+            Assertions.assertEquals("tag3", config.getSystem().getContext());
+            Assertions.assertTrue(config.getSources().getFirst().getIgnore());
+            Assertions.assertTrue(config.getTransforms().getFirst().getIgnore());
+            Assertions.assertTrue(config.getSinks().getFirst().getIgnore());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -191,12 +191,12 @@ public class ConfigTest {
         };
 
         final Map<String, String> parameters = Config.extractArgs(args);
-        Assert.assertEquals(5, parameters.size());
-        Assert.assertEquals("2021-01-01", parameters.get("startDate"));
-        Assert.assertEquals("false", parameters.get("create"));
-        Assert.assertEquals("myproject", parameters.get("projectId"));
-        Assert.assertEquals("mytable", parameters.get("table"));
-        Assert.assertEquals("myinstance", parameters.get("instanceId"));
+        Assertions.assertEquals(5, parameters.size());
+        Assertions.assertEquals("2021-01-01", parameters.get("startDate"));
+        Assertions.assertEquals("false", parameters.get("create"));
+        Assertions.assertEquals("myproject", parameters.get("projectId"));
+        Assertions.assertEquals("mytable", parameters.get("table"));
+        Assertions.assertEquals("myinstance", parameters.get("instanceId"));
     }
 
     @Test
@@ -260,16 +260,16 @@ public class ConfigTest {
         };
         final Config config = Config.parse(configYaml, null, Config.Format.yaml, args);
 
-        Assert.assertEquals(2, config.getSources().size());
-        Assert.assertEquals(1, config.getTransforms().size());
-        Assert.assertEquals(1, config.getSinks().size());
+        Assertions.assertEquals(2, config.getSources().size());
+        Assertions.assertEquals(1, config.getTransforms().size());
+        Assertions.assertEquals(1, config.getSinks().size());
 
         // Source BigQuery
         final SourceConfig inputBigqueryConfig = config.getSources().stream()
                 .filter(s -> s.getName().equals("BigQueryInput"))
                 .findAny()
                 .orElseThrow();
-        Assert.assertEquals("SELECT\n" +
+        Assertions.assertEquals("SELECT\n" +
                 "  BField1, BField2\n" +
                 "FROM\n" +
                 "  `myproject.mydataset.mytable`\n" +
@@ -289,19 +289,19 @@ public class ConfigTest {
                 .orElseThrow()
                 .getParameters();
 
-        Assert.assertEquals(
+        Assertions.assertEquals(
                 "anotherproject",
                 outputSpannerParameters.get("projectId").getAsString());
-        Assert.assertEquals(
+        Assertions.assertEquals(
                 "anotherinstance",
                 outputSpannerParameters.get("instanceId").getAsString());
-        Assert.assertEquals(
+        Assertions.assertEquals(
                 "mydatabase",
                 outputSpannerParameters.get("databaseId").getAsString());
-        Assert.assertEquals(
+        Assertions.assertEquals(
                 "anothertable",
                 outputSpannerParameters.get("table").getAsString());
-        Assert.assertFalse(outputSpannerParameters.get("createTable").getAsBoolean());
+        Assertions.assertFalse(outputSpannerParameters.get("createTable").getAsBoolean());
     }
 
 }

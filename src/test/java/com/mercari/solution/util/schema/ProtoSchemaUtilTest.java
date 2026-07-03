@@ -6,7 +6,7 @@ import com.google.protobuf.util.JsonFormat;
 import com.mercari.solution.util.ResourceUtil;
 import com.mercari.solution.util.schema.converter.ProtoToAvroConverter;
 import org.apache.avro.Schema;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;

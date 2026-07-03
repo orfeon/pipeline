@@ -174,7 +174,9 @@ public class SimpleRegression implements AggregateFunction {
     @Override
     public List<String> validate(int parent, int index) {
         final List<String> errorMessages = new ArrayList<>();
-
+        if(this.field == null && this.expression == null) {
+            errorMessages.add("aggregations[" + parent + "].fields[" + index + "].field or expression must not be null");
+        }
         return errorMessages;
     }
 
@@ -254,23 +256,23 @@ public class SimpleRegression implements AggregateFunction {
         } else {
             if(hasIntercept) {
                 final double fact1 = inputWeight + weight;
-                final double fact2 = weight / fact1;
+                final double fact2 = weight * inputWeight / fact1;
                 final double dx = x - xBar;
                 final double dy = y - yBar;
                 sumXX += (dx * dx * fact2);
                 sumYY += (dy * dy * fact2);
                 sumXY += (dx * dy * fact2);
-                xBar += (dx / fact1);
-                yBar += (dy / fact1);
+                xBar += (dx * inputWeight / fact1);
+                yBar += (dy * inputWeight / fact1);
             }
         }
         if(!hasIntercept) {
-            sumXX += (x * x);
-            sumYY += (y * y);
-            sumXY += (x * y);
+            sumXX += (x * x * inputWeight);
+            sumYY += (y * y * inputWeight);
+            sumXY += (x * y * inputWeight);
         }
-        sumX += x;
-        sumY += y;
+        sumX += (x * inputWeight);
+        sumY += (y * inputWeight);
 
         accumulator.put(accumKeyCountName, count + 1);
         accumulator.put(accumKeyWeightName, weight + inputWeight);
@@ -347,7 +349,8 @@ public class SimpleRegression implements AggregateFunction {
         output.put("Slope", slope);
         output.put("Intercept", getIntercept(accumulator, slope));
         output.put("RMSE", getRootMeanSumSquaredErrors(accumulator));
-        output.put("N", getDouble(accumulator, accumKeyCountName, 0D));
+        // N is declared as INT64 in the output field type
+        output.put("N", (long) getDouble(accumulator, accumKeyCountName, 0D));
         return output;
     }
 

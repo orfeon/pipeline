@@ -24,9 +24,9 @@ public class FirestoreSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(FirestoreSource.class);
 
-    private static final Pattern PATTERN_CONDITION = Pattern.compile("(.+?)(s*>=s*|s*<=s*|s*=s*|s*>s*|s*<s*)(.+)");
+    private static final Pattern PATTERN_CONDITION = Pattern.compile("(.+?)(\\s*>=\\s*|\\s*<=\\s*|\\s*=\\s*|\\s*>\\s*|\\s*<\\s*)(.+)");
 
-    private static class Parameters implements Serializable {
+    static class Parameters implements Serializable {
 
         private String projectId;
         private String databaseId;
@@ -163,7 +163,7 @@ public class FirestoreSource extends Source {
 
         }
         return MCollectionTuple
-                .of(output, getSchema());
+                .of(output, getSchema().withType(DataType.DOCUMENT));
     }
 
     private static class ConvertListResponseDoFn extends DoFn<Document, MElement> {
@@ -195,7 +195,7 @@ public class FirestoreSource extends Source {
         return databaseRootName + "/documents" + parameters.parent;
     }
 
-    private StructuredQuery createQuery(
+    static StructuredQuery createQuery(
             final Schema schema,
             final Parameters parameters) {
 
@@ -222,8 +222,10 @@ public class FirestoreSource extends Source {
         }
 
         if(parameters.filter != null) {
+            // the keywords require surrounding whitespace so that field names
+            // containing "and"/"or" (e.g. brand, order) are not split
             try(final Scanner scanner = new Scanner(parameters.filter)
-                    .useDelimiter("s*ands*|s*ors*|s*ANDs*|s*ORs*")) {
+                    .useDelimiter("\\s+and\\s+|\\s+or\\s+|\\s+AND\\s+|\\s+OR\\s+")) {
 
                 final List<StructuredQuery.Filter> filters = new ArrayList<>();
                 while(scanner.hasNext()) {
