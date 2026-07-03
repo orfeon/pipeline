@@ -400,6 +400,53 @@ public class Query2Test {
     }
 
     @Test
+    public void testStandardFunctionSurface() {
+        // Smoke test over representative functions from each documented
+        // category (string / numeric / datetime / conditional / array / cast).
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSql("""
+                        SELECT
+                          SUBSTR('hello', 2, 3) AS s1,
+                          REGEXP_REPLACE('a1b2', '[0-9]', '') AS s2,
+                          STARTS_WITH('abc', 'ab') AS b1,
+                          POWER(2, 10) AS n1,
+                          MOD(10, 3) AS n2,
+                          SAFE_DIVIDE(1.0, 0.0) AS n3,
+                          IF(1 > 0, 'y', 'n') AS c1,
+                          IFNULL(CAST(NULL AS VARCHAR), 'x') AS c2,
+                          GREATEST(1, 5, 3) AS c3,
+                          UNIX_MILLIS(TIMESTAMP_MILLIS(1234)) AS t1,
+                          ARRAY_LENGTH(ARRAY[1, 2, 3]) AS a1,
+                          ARRAY_TO_STRING(ARRAY['a', 'b'], '-') AS a2,
+                          SAFE_CAST('x' AS INTEGER) AS v1
+                        FROM INPUT
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(MElement.of(Map.of("userId", 1L, "qty", 1L), TIMESTAMP)), TIMESTAMP);
+            final MElement output = outputs.getFirst();
+            Assertions.assertEquals("ell", output.getAsString("s1"));
+            Assertions.assertEquals("ab", output.getAsString("s2"));
+            Assertions.assertEquals(true, output.getPrimitiveValue("b1"));
+            Assertions.assertEquals(1024.0d, output.getAsDouble("n1"), 1e-9);
+            Assertions.assertEquals(1L, output.getAsLong("n2"));
+            Assertions.assertNull(output.getPrimitiveValue("n3"));
+            Assertions.assertEquals("y", output.getAsString("c1"));
+            Assertions.assertEquals("x", output.getAsString("c2"));
+            Assertions.assertEquals(5L, output.getAsLong("c3"));
+            Assertions.assertEquals(1234L, output.getAsLong("t1"));
+            Assertions.assertEquals(3, ((Number) output.getPrimitiveValue("a1")).intValue());
+            Assertions.assertEquals("a-b", output.getAsString("a2"));
+            Assertions.assertNull(output.getPrimitiveValue("v1"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testBuiltinCurrentDateFunction() {
         // Parity with the old Query core: CURRENT_DATE_ is registered by default.
         final Query2 query = Query2.builder()

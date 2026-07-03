@@ -196,7 +196,7 @@ Every `{column}` placeholder is a key column; binding a key column to a **litera
 
 ## Built-in functions
 
-Besides the standard Calcite SQL functions:
+Module-specific functions, registered for every query:
 
 | function | description |
 |----------|-------------|
@@ -226,6 +226,58 @@ UNNEST(SEQ_MATCH(
   'UP: $amount > PREV($amount)'
 )) AS m
 ```
+
+## Standard SQL function reference
+
+The SQL surface is Apache Calcite's **standard operator set plus the BigQuery
+function library** (matching the module's BigQuery-style lexical rules). The
+tables below list the functions available to queries, by category (generated
+from the registered operator table). Most have full runtime support; a few
+niche ones may be rejected at planning time — the error names the function.
+Timestamps compare at millisecond precision inside queries.
+
+### Aggregate functions (usable in `GROUP BY` queries and as `OVER` windows)
+
+| | functions |
+|---|---|
+| basic | `COUNT` `COUNTIF` `SUM` `AVG` `MIN` `MAX` `ANY_VALUE` `MODE` `ARG_MAX` `ARG_MIN` `APPROX_COUNT_DISTINCT` |
+| logical | `EVERY` `SOME` `LOGICAL_AND` `LOGICAL_OR` `BIT_AND` `BIT_OR` `BIT_XOR` |
+| statistical | `STDDEV` `STDDEV_POP` `STDDEV_SAMP` `VARIANCE` `VAR_POP` `VAR_SAMP` `COVAR_POP` `COVAR_SAMP` `REGR_COUNT` `REGR_SXX` `REGR_SYY` `PERCENTILE_CONT` `PERCENTILE_DISC` |
+| collecting | `ARRAY_AGG` `ARRAY_CONCAT_AGG` `STRING_AGG` `LISTAGG` `COLLECT` `JSON_ARRAYAGG` `JSON_OBJECTAGG` — note: `ARRAY_AGG(x ORDER BY y)` works in outer `GROUP BY` queries but not *inside* a LATERAL block (see above) |
+
+### Window-only functions (require `OVER`)
+
+`ROW_NUMBER` `RANK` `DENSE_RANK` `PERCENT_RANK` `CUME_DIST` `NTILE` `LEAD` `LAG` `FIRST_VALUE` `LAST_VALUE` `NTH_VALUE`
+
+### String
+
+`ASCII` `CHR` `CHAR_LENGTH` `CHARACTER_LENGTH` `CONCAT` (and `||`) `CONTAINS_SUBSTR` `ENDS_WITH` `STARTS_WITH` `INITCAP` `INSTR` `LEFT` `RIGHT` `LENGTH` `LOWER` `UPPER` `LPAD` `RPAD` `LTRIM` `RTRIM` `TRIM` `OCTET_LENGTH` `OVERLAY` `POSITION` `STRPOS` `REPEAT` `REPLACE` `REVERSE` `SPLIT` `SUBSTR` `SUBSTRING` `TRANSLATE` `SOUNDEX` — regex: `REGEXP_CONTAINS` `REGEXP_EXTRACT` `REGEXP_EXTRACT_ALL` `REGEXP_INSTR` `REGEXP_REPLACE` `REGEXP_SUBSTR` `LIKE` `SIMILAR TO` — encoding/hash: `MD5` `SHA1` `SHA256` `SHA512` `TO_BASE32` `FROM_BASE32` `FROM_BASE64` `TO_HEX` `FROM_HEX` `TO_CODE_POINTS` `CODE_POINTS_TO_BYTES` `CODE_POINTS_TO_STRING`
+
+### Numeric
+
+`ABS` `CEIL` `FLOOR` `ROUND` `TRUNC` `TRUNCATE` `MOD` `SIGN` `EXP` `LN` `LOG` `LOG10` `POW` `POWER` `SQRT` `CBRT` `PI` `RAND` `RAND_INTEGER` `DEGREES` `RADIANS` `IS_INF` `IS_NAN` — trigonometric: `SIN` `COS` `TAN` `COT` `SEC` `CSC` `ASIN` `ACOS` `ATAN` `ATAN2` and hyperbolic variants (`SINH` `COSH` `TANH` `COTH` `SECH` `CSCH` `ASINH` `ACOSH` `ATANH`) — overflow-safe: `SAFE_ADD` `SAFE_SUBTRACT` `SAFE_MULTIPLY` `SAFE_DIVIDE` `SAFE_NEGATE` — bitwise: `BITAND` `BITOR` `BITXOR` `BITNOT` `BIT_COUNT`
+
+### Date / time
+
+`CURRENT_DATE` `CURRENT_TIME` `CURRENT_DATETIME` `CURRENT_TIMESTAMP` `LOCALTIME` `LOCALTIMESTAMP` (see also the built-in `CURRENT_DATE_` with a time-zone argument) — constructors: `DATE` `TIME` `DATETIME` `TIMESTAMP` `DATE_FROM_UNIX_DATE` `TIMESTAMP_SECONDS` `TIMESTAMP_MILLIS` `TIMESTAMP_MICROS` — arithmetic: `DATE_ADD` `DATE_SUB` `DATE_DIFF` `DATE_TRUNC` `TIME_ADD` `TIME_SUB` `TIME_DIFF` `TIME_TRUNC` `DATETIME_ADD` `DATETIME_SUB` `DATETIME_DIFF` `DATETIME_TRUNC` `TIMESTAMP_ADD` `TIMESTAMP_SUB` `TIMESTAMP_DIFF` `TIMESTAMP_TRUNC` `TIMESTAMPADD` `TIMESTAMPDIFF` `LAST_DAY` — parts: `EXTRACT` `YEAR` `QUARTER` `MONTH` `WEEK` `DAYOFMONTH` `DAYOFWEEK` `DAYOFYEAR` `HOUR` `MINUTE` `SECOND` — format/parse: `FORMAT_DATE` `FORMAT_TIME` `FORMAT_DATETIME` `FORMAT_TIMESTAMP` `PARSE_DATE` `PARSE_TIME` `PARSE_DATETIME` `PARSE_TIMESTAMP` — epoch: `UNIX_DATE` `UNIX_SECONDS` `UNIX_MILLIS` `UNIX_MICROS`
+
+### Conditional / comparison
+
+`CASE` `COALESCE` `IF` `IFNULL` `NULLIF` `GREATEST` `LEAST` `BETWEEN` `IN` `EXISTS` `IS [NOT] NULL` `IS [NOT] TRUE/FALSE/UNKNOWN` `IS [NOT] DISTINCT FROM`
+
+### Array / complex types
+
+`ARRAY[...]` constructor, `arr[i]` element access (**1-based**), `ARRAY_CONCAT` `ARRAY_LENGTH` `ARRAY_REVERSE` `ARRAY_TO_STRING` `CARDINALITY` `ELEMENT` `UNNEST` (+ `WITH ORDINALITY`), `ROW` constructor, `MAP` — plus the built-in `SEQ_MATCH` (above)
+
+### Type conversion & JSON
+
+`CAST` `SAFE_CAST` `TYPEOF` `CONVERT` — JSON: `JSON_VALUE` `JSON_QUERY` `JSON_EXISTS` `JSON_OBJECT` `JSON_ARRAY` `JSON_TYPE` `JSON_DEPTH` `JSON_KEYS` `JSON_LENGTH` `JSON_PRETTY` `JSON_INSERT` `JSON_REPLACE` `JSON_REMOVE` `JSON_SET` `JSON_STORAGE_SIZE` `IS [NOT] JSON [VALUE|OBJECT|ARRAY|SCALAR]`
+
+### Not available
+
+- `MATCH_RECOGNIZE` and its navigation functions (`PREV` `NEXT` `FIRST` `LAST` `CLASSIFIER` `MATCH_NUMBER`) — use `SEQ_MATCH` instead.
+- Streaming group-window functions (`TUMBLE` `HOP` `SESSION`) — windowing belongs to the surrounding pipeline, not to this per-element SQL.
+- User-defined functions can be added when using `Query2` directly (Java API: `withScalarFunction` / `withAggregateFunction`); the `query` module config does not currently expose UDF registration.
 
 ## Examples
 
