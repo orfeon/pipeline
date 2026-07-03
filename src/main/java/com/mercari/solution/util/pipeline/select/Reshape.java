@@ -19,6 +19,7 @@ public class Reshape implements SelectFunction {
     private final List<Integer> strides;
 
     private final List<Schema.Field> inputFields;
+    private final Schema.FieldType fieldType;
     private final Schema.FieldType outputFieldType;
     private final boolean ignore;
 
@@ -28,6 +29,7 @@ public class Reshape implements SelectFunction {
             final List<Integer> shape,
             final List<Integer> indices,
             final Schema.Field inputField,
+            final Schema.FieldType fieldType,
             final Schema.FieldType outputFieldType,
             final boolean ignore) {
 
@@ -38,6 +40,7 @@ public class Reshape implements SelectFunction {
         this.strides = computeStrides(shape);
         this.inputFields = new ArrayList<>();
         this.inputFields.add(inputField);
+        this.fieldType = fieldType;
         this.outputFieldType = outputFieldType;
         this.ignore = ignore;
     }
@@ -85,7 +88,7 @@ public class Reshape implements SelectFunction {
                     yield outputElementFieldType.getArrayValueType();
                 } else if(indices.size() < shape.size()) {
                     final List<Integer> newShape = new ArrayList<>();
-                    for(int i=0; i<shape.size() - indices.size(); i++) {
+                    for(int i=indices.size(); i<shape.size(); i++) {
                         newShape.add(shape.get(i));
                     }
                     yield Schema.FieldType.matrix(outputElementFieldType.getArrayValueType(), newShape);
@@ -101,7 +104,7 @@ public class Reshape implements SelectFunction {
                     yield outputElementFieldType.getMatrixValueType();
                 } else if(indices.size() < shape.size()) {
                     final List<Integer> newShape = new ArrayList<>();
-                    for(int i=0; i<shape.size() - indices.size(); i++) {
+                    for(int i=indices.size(); i<shape.size(); i++) {
                         newShape.add(shape.get(i));
                     }
                     yield Schema.FieldType.matrix(outputElementFieldType.getMatrixValueType(), newShape);
@@ -112,7 +115,7 @@ public class Reshape implements SelectFunction {
             default -> Schema.FieldType.matrix(outputElementFieldType, shape);
         };
 
-        return new Reshape(name, field, shape, indices, inputField, outputFieldType, ignore);
+        return new Reshape(name, field, shape, indices, inputField, outputElementFieldType, outputFieldType, ignore);
     }
 
     @Override
@@ -146,7 +149,7 @@ public class Reshape implements SelectFunction {
         if(inputValue == null) {
             return null;
         }
-        final Object value =  switch (inputFields.getFirst().getFieldType().getType()) {
+        final Object value =  switch (fieldType.getType()) {
             case array, matrix -> inputValue;
             default -> throw new IllegalArgumentException();
         };

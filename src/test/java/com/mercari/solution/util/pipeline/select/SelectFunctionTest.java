@@ -165,4 +165,217 @@ public class SelectFunctionTest {
         Assertions.assertEquals(10L, results.get("bytesDecodedLongField"));
     }
 
+    private static List<Schema.Field> simpleInputFields() {
+        return List.of(
+                Schema.Field.of("stringField", Schema.FieldType.STRING),
+                Schema.Field.of("intField", Schema.FieldType.INT32),
+                Schema.Field.of("longField", Schema.FieldType.INT64));
+    }
+
+    private static JsonObject json(final String text) {
+        return new Gson().fromJson(text, JsonObject.class);
+    }
+
+    @Test
+    public void testFuncInference() {
+        final List<Schema.Field> inputFields = simpleInputFields();
+
+        // name only -> pass
+        Assertions.assertInstanceOf(Pass.class,
+                SelectFunction.of(json("{ \"name\": \"stringField\" }"), inputFields));
+        // field only -> rename
+        Assertions.assertInstanceOf(Rename.class,
+                SelectFunction.of(json("{ \"name\": \"renamed\", \"field\": \"stringField\" }"), inputFields));
+        // field + type -> cast
+        Assertions.assertInstanceOf(Cast.class,
+                SelectFunction.of(json("{ \"name\": \"casted\", \"field\": \"intField\", \"type\": \"int64\" }"), inputFields));
+        // type only (size 2) -> cast
+        Assertions.assertInstanceOf(Cast.class,
+                SelectFunction.of(json("{ \"name\": \"intField\", \"type\": \"int64\" }"), inputFields));
+        // value + type -> constant
+        Assertions.assertInstanceOf(Constant.class,
+                SelectFunction.of(json("{ \"name\": \"c\", \"value\": \"v\", \"type\": \"string\" }"), inputFields));
+        // expression
+        Assertions.assertInstanceOf(Expression.class,
+                SelectFunction.of(json("{ \"name\": \"e\", \"expression\": \"intField + 1\" }"), inputFields));
+        // text
+        Assertions.assertInstanceOf(Text.class,
+                SelectFunction.of(json("{ \"name\": \"t\", \"text\": \"${stringField}\" }"), inputFields));
+        // fields -> struct
+        Assertions.assertInstanceOf(Struct.class,
+                SelectFunction.of(json("{ \"name\": \"s\", \"fields\": [ { \"name\": \"stringField\" } ] }"), inputFields));
+        // op key works like func
+        Assertions.assertInstanceOf(Concat.class,
+                SelectFunction.of(json("{ \"name\": \"c\", \"op\": \"concat\", \"fields\": [\"stringField\"] }"), inputFields));
+
+        // missing name
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.of(json("{ \"field\": \"stringField\" }"), inputFields));
+        // value without type
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.of(json("{ \"name\": \"c\", \"value\": \"v\" }"), inputFields));
+        // no func inferable
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.of(json("{ \"name\": \"x\", \"foo\": \"bar\" }"), inputFields));
+    }
+
+    @Test
+    public void testOfJsonArrayEdgeCases() {
+        final List<Schema.Field> inputFields = simpleInputFields();
+
+        // null array
+        Assertions.assertTrue(SelectFunction.of((JsonArray) null, inputFields).isEmpty());
+
+        // non-object elements are skipped, ignored functions are excluded
+        final JsonArray array = new Gson().fromJson("""
+                [
+                  "notAnObject",
+                  { "name": "stringField" },
+                  { "name": "ignored", "field": "stringField", "ignore": true }
+                ]
+                """, JsonArray.class);
+        final List<SelectFunction> selectFunctions = SelectFunction.of(array, inputFields);
+        Assertions.assertEquals(1, selectFunctions.size());
+        Assertions.assertEquals("stringField", selectFunctions.get(0).getName());
+    }
+
+    @Test
+    public void testCreateSchemaFlattenErrors() {
+        final List<Schema.Field> inputFields = simpleInputFields();
+        final JsonArray array = new Gson().fromJson("[ { \"name\": \"longField\" } ]", JsonArray.class);
+        final List<SelectFunction> selectFunctions = SelectFunction.of(array, inputFields);
+
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.createSchema(selectFunctions, "noSuchField"));
+        // flatten field must be array type
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.createSchema(selectFunctions, "longField"));
+    }
+
+    @Test
+    public void testApplyWithMElement() {
+        final List<Schema.Field> inputFields = simpleInputFields();
+        final JsonArray array = new Gson().fromJson("""
+                [
+                  { "name": "renamed", "field": "stringField" },
+                  { "name": "concatField", "func": "concat", "delimiter": "-", "fields": ["stringField", "longField"] }
+                ]
+                """, JsonArray.class);
+        final List<SelectFunction> selectFunctions = SelectFunction.of(array, inputFields);
+        for(final SelectFunction selectFunction : selectFunctions) {
+            selectFunction.setup();
+        }
+
+        final Instant timestamp = Instant.parse("2024-01-01T00:00:00Z");
+        final com.mercari.solution.module.MElement element = com.mercari.solution.module.MElement.builder()
+                .withString("stringField", "abc")
+                .withInt64("longField", 5L)
+                .withEventTime(timestamp)
+                .build();
+
+        final Map<String, Object> results = SelectFunction.apply(selectFunctions, element, timestamp);
+        Assertions.assertEquals("abc", results.get("renamed"));
+        Assertions.assertEquals("abc-5", results.get("concatField"));
+    }
+
+    @Test
+    public void testIsGroupingAndIsStateful() {
+        final List<Schema.Field> inputFields = simpleInputFields();
+
+        Assertions.assertFalse(SelectFunction.isGrouping(null));
+        Assertions.assertFalse(SelectFunction.isGrouping(List.of()));
+        Assertions.assertFalse(SelectFunction.isStateful(null));
+        Assertions.assertFalse(SelectFunction.isStateful(List.of()));
+
+        final JsonArray statelessArray = new Gson().fromJson("[ { \"name\": \"stringField\" } ]", JsonArray.class);
+        final List<SelectFunction> stateless = SelectFunction.of(statelessArray, inputFields);
+        Assertions.assertFalse(SelectFunction.isGrouping(stateless));
+        Assertions.assertFalse(SelectFunction.isStateful(stateless));
+
+        final JsonArray statefulArray = new Gson().fromJson(
+                "[ { \"name\": \"sumLongField\", \"func\": \"sum\", \"field\": \"longField\" } ]", JsonArray.class);
+        final List<SelectFunction> stateful = SelectFunction.of(statefulArray, inputFields);
+        Assertions.assertTrue(SelectFunction.isGrouping(stateful));
+        Assertions.assertTrue(SelectFunction.isStateful(stateful));
+    }
+
+    @Test
+    public void testGetStringParameter() {
+        final JsonObject jsonObject = json("{ \"str\": \"value\", \"obj\": { \"a\": 1 } }");
+        Assertions.assertEquals("value", SelectFunction.getStringParameter("n", jsonObject, "str", "default"));
+        Assertions.assertEquals("default", SelectFunction.getStringParameter("n", jsonObject, "missing", "default"));
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.getStringParameter("n", jsonObject, "obj", "default"));
+    }
+
+    @Test
+    public void testEventTimestamp() {
+        final Instant timestamp = Instant.parse("2024-01-01T00:00:00Z");
+
+        // without duration: returns event timestamp as epoch micros
+        final SelectFunction plain = SelectFunction.of(
+                json("{ \"name\": \"et\", \"func\": \"event_timestamp\" }"), simpleInputFields());
+        plain.setup();
+        Assertions.assertEquals(timestamp.getMillis() * 1000L, plain.apply(new HashMap<>(), timestamp));
+        Assertions.assertEquals(Schema.Type.timestamp, plain.getOutputFieldType().getType());
+
+        // with duration: timestamp is shifted
+        final SelectFunction shifted = SelectFunction.of(
+                json("{ \"name\": \"et\", \"func\": \"event_timestamp\", \"duration\": 1, \"durationUnit\": \"minute\" }"),
+                simpleInputFields());
+        shifted.setup();
+        Assertions.assertEquals(
+                timestamp.plus(org.joda.time.Duration.standardMinutes(1)).getMillis() * 1000L,
+                shifted.apply(new HashMap<>(), timestamp));
+
+        // duration without durationUnit is invalid
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.of(json("{ \"name\": \"et\", \"func\": \"event_timestamp\", \"duration\": 1 }"), simpleInputFields()));
+    }
+
+    @Test
+    public void testUuid() {
+        final Instant timestamp = Instant.parse("2024-01-01T00:00:00Z");
+
+        final SelectFunction uuid = SelectFunction.of(
+                json("{ \"name\": \"u\", \"func\": \"uuid\" }"), simpleInputFields());
+        uuid.setup();
+        final Object value1 = uuid.apply(new HashMap<>(), timestamp);
+        final Object value2 = uuid.apply(new HashMap<>(), timestamp);
+        Assertions.assertEquals(36, ((String) value1).length());
+        Assertions.assertNotEquals(value1, value2);
+
+        final SelectFunction sized = SelectFunction.of(
+                json("{ \"name\": \"u\", \"func\": \"uuid\", \"size\": 8 }"), simpleInputFields());
+        sized.setup();
+        Assertions.assertEquals(8, ((String) sized.apply(new HashMap<>(), timestamp)).length());
+
+        final SelectFunction oversized = SelectFunction.of(
+                json("{ \"name\": \"u\", \"func\": \"uuid\", \"size\": 100 }"), simpleInputFields());
+        oversized.setup();
+        Assertions.assertEquals(36, ((String) oversized.apply(new HashMap<>(), timestamp)).length());
+    }
+
+    @Test
+    public void testCurrentTimestamp() {
+        final SelectFunction current = SelectFunction.of(
+                json("{ \"name\": \"c\", \"func\": \"current_timestamp\" }"), simpleInputFields());
+        current.setup();
+        final long before = Instant.now().getMillis() * 1000L;
+        final Object value = current.apply(new HashMap<>(), Instant.parse("2024-01-01T00:00:00Z"));
+        final long after = Instant.now().getMillis() * 1000L;
+        Assertions.assertInstanceOf(Long.class, value);
+        Assertions.assertTrue((Long) value >= before && (Long) value <= after);
+    }
+
+    @Test
+    public void testCastValidation() {
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                Cast.of("c", json("{ \"name\": \"c\", \"field\": \"stringField\" }"), simpleInputFields(), false));
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                Cast.of("c", json("{ \"name\": \"c\", \"field\": [\"a\"], \"type\": \"string\" }"), simpleInputFields(), false));
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.of(json("{ \"name\": \"c\", \"field\": \"noSuchField\", \"type\": \"string\" }"), simpleInputFields()));
+    }
+
 }

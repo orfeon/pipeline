@@ -96,7 +96,7 @@ public class EventTimestamp implements SelectFunction {
         if(cutoffUnit != null) {
             //instant = DateTimeUtil.reduceAccuracy()
         }
-        return timestamp.getMillis() * 1000L;
+        return instant.getMillis() * 1000L;
     }
 
 }
