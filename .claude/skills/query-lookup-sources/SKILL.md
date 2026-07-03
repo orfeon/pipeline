@@ -247,6 +247,24 @@ Query2.builder()
   the intended alternatives are ORDER BY/LIMIT/aggregation per key set, or a
   pattern-matching scalar UDF over the array column (the UDF registration
   hooks exist).
+- **Sequence-pattern UDF engine survey (probed 2026-07)** — if/when building
+  the pattern UDF, use the **vendored Calcite pattern runtime**
+  (`...calcite.runtime.Pattern/Automaton/Matcher`, the standalone machinery
+  behind EnumerableMatch): zero new dependencies, `matcher.match(rows)` is
+  per-call isolated (no cross-evaluation state), ~26µs per 6-row evaluation,
+  and bounded `repeat(n,m)` / `plus` / `star` / `or` all build — only
+  unbounded `repeat(n,-1)` throws (rewrite `X{n,}` as n-1 copies + `plus`).
+  Two wrinkles: the convenience `match()` gives predicates no history
+  (`Memory.get(-1)` throws) — precompute PREV values into the row arrays
+  instead; and `Matcher.PartialMatch`'s fields (rows/symbols) are
+  package-private — read via one-time reflection at setup or an in-package
+  accessor shim. **Siddhi (io.siddhi:siddhi-core 5.1.33, Apache-2.0) was
+  probed and rejected** for this use: detection and synchronous callbacks
+  work, but a streaming CEP runtime has no reset — reusing a
+  `SiddhiAppRuntime` across bounded evaluations produced phantom matches
+  spanning arrays (proven), so correctness requires create+shutdown per
+  evaluation at ~1.1ms each (vs 72µs reused-but-leaky), and it drags
+  quartz/disruptor/log4j-core/guava/snakeyaml onto the worker classpath.
 
 ## Origin & design rationale (for archaeology)
 
