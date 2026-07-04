@@ -15,7 +15,6 @@ src/main/webapp/
 
 ## Technology Stack
 
-- jQuery 4.0.0 (DOM manipulation, AJAX)
 - Bootstrap 5.3.2 (UI components, modals, accordion)
 - Bootstrap Icons 1.11.1 (icon library)
 - Drawflow 0.0.60 (visual node editor)
@@ -23,16 +22,21 @@ src/main/webapp/
 - Monaco Editor 0.53.0 (YAML code editor, loaded lazily via ESM)
 - monaco-yaml-inline 1.0.0 (YAML language server for Monaco, loaded lazily via ESM)
 
+No framework and no jQuery: DOM access uses the native DOM API and HTTP uses `fetch`.
+All CDN `<script>`/`<link>` tags from jsdelivr carry SRI (`integrity` + `crossorigin`)
+attributes; when bumping a library version, recompute the hash
+(`curl -s <url> | openssl dgst -sha384 -binary | openssl base64 -A`).
+
 ## Architecture
 
 All application code lives in a single IIFE in `app.js`:
 
 ```javascript
-(function($) {
+(function() {
     'use strict';
     // All state, functions, and event handlers are private
     // No global namespace pollution
-})(jQuery);
+})();
 ```
 
 ### Section Layout
@@ -41,6 +45,7 @@ All application code lives in a single IIFE in `app.js`:
 
 | Section | Description |
 |---------|-------------|
+| 0 | DOM & HTTP helpers (`$id`, `on`, `show`/`hide`, `showModal`/`hideModal`, `getJson`/`postJson`) |
 | 1 | State variables |
 | 1.5 | Monaco Editor management (lazy loading, creation, value get/set) |
 | 1.8 | YAML Schema builders and lazy-load helpers |
@@ -89,14 +94,14 @@ Returns only lightweight module summaries (~3KB):
 
 Schemas are fetched and cached when the corresponding modal opens for the first time:
 
-| Endpoint | Trigger | Cache variable |
-|----------|---------|---------------|
+| Endpoint | Trigger | Cache |
+|----------|---------|-------|
 | `GET /api/spec/{type}/{name}` | Module config modal opens | (not cached, fetched every time) |
-| `GET /api/spec/system` | System modal opens | `cachedSystemSchema` |
-| `GET /api/spec/options` | Options modal opens | `cachedOptionsSchema` |
-| `GET /api/spec/launch` | Launch modal opens | `cachedLaunchSchema` |
+| `GET /api/spec/system` | System modal opens | `schemaCache.system` |
+| `GET /api/spec/options` | Options modal opens | `schemaCache.options` |
+| `GET /api/spec/launch` | Launch modal opens | `schemaCache.launch` |
 
-Lazy-load helpers: `ensureSystemSchema()`, `ensureOptionsSchema()`, `ensureLaunchSchema()`.
+Lazy-load helper: `ensureSchema(kind)` with `kind` = `'system' | 'options' | 'launch'`.
 
 ## Monaco Editor Integration
 
@@ -138,10 +143,9 @@ Examples:
 | `moduleSchemas` | Dryrun result cache (module name -> output schema) |
 | `moduleOutputs` | Run result cache (module name -> output records) |
 | `currentEditingNodeId` | Node ID being edited in module config modal |
+| `pending` | Values handed from modal openers to their `shown.bs.modal` handlers (`moduleYaml`, `moduleType`, `moduleName`, `systemYaml`, `optionsYaml`) |
 | `yamlApi` | `configureMonacoYaml` return value for schema updates |
-| `cachedSystemSchema` | Lazy-loaded system JSON Schema |
-| `cachedOptionsSchema` | Lazy-loaded options JSON Schema |
-| `cachedLaunchSchema` | Lazy-loaded launch JSON Schema |
+| `schemaCache` | Lazy-loaded JSON Schemas keyed by kind (`system` / `options` / `launch`) |
 | `monacoInstance` | Cached Monaco module promise |
 | `monacoEditors` | Map of containerId -> Monaco editor instance |
 
@@ -161,9 +165,7 @@ Examples:
 | Function | Description |
 |----------|-------------|
 | `buildStaticSchemas()` | Builds schema array from cached system/options schemas |
-| `ensureSystemSchema()` | Fetches and caches system schema (returns promise) |
-| `ensureOptionsSchema()` | Fetches and caches options schema (returns promise) |
-| `ensureLaunchSchema()` | Fetches and caches launch schema (returns promise) |
+| `ensureSchema(kind)` | Fetches and caches `/api/spec/{kind}` (system/options/launch, returns promise) |
 
 ### Canvas & Config
 
@@ -174,6 +176,7 @@ Examples:
 | `createNodeHtml(moduleName, moduleType, name)` | Generates HTML for a Drawflow node |
 | `generateConfig()` | Generates full pipeline config YAML from canvas state |
 | `getValidationErrors(config)` | Returns array of validation error strings |
+| `importConfigToCanvas(config)` | Clears and rebuilds the canvas from a parsed config (used by the config editor's Apply and the agent's apply-config) |
 | `runPipeline(type)` | Executes pipeline (dryrun/run) via `/api/pipeline` |
 
 ### Modals
@@ -201,51 +204,52 @@ Examples:
 
 ## Event Handlers
 
+All handlers are bound in `initEventHandlers()` via the `on(id, eventName, handler)` helper
+(a thin wrapper over `addEventListener`; Bootstrap dispatches its modal events natively):
+
 ```javascript
 // Header buttons
-$('#btn-dryrun').on('click', () => runPipeline('dryrun'))
-$('#btn-run').on('click', () => runPipeline('run'))
-$('#btn-launch').on('click', openLaunchModal)
-$('#btn-edit').on('click', openConfigEditor)
+on('btn-dryrun', 'click', () => runPipeline('dryrun'))
+on('btn-run', 'click', () => runPipeline('run'))
+on('btn-launch', 'click', openLaunchModal)
+on('btn-edit', 'click', openConfigEditor)
 
 // Settings buttons
-$('#btn-system').on('click', openSystemModal)
-$('#btn-options').on('click', openOptionsModal)
-$('#btn-apply-system').on('click', applySystemConfig)
-$('#btn-apply-options').on('click', applyOptionsConfig)
+on('btn-system', 'click', openSystemModal)
+on('btn-options', 'click', openOptionsModal)
+on('btn-apply-system', 'click', applySystemConfig)
+on('btn-apply-options', 'click', applyOptionsConfig)
 
 // Module config modal
-$('#btn-save-module').on('click', saveModuleConfig)
-$('#btn-delete-module').on('click', deleteModule)
+on('btn-save-module', 'click', saveModuleConfig)
+on('btn-delete-module', 'click', deleteModule)
 
 // Launch modal
-$('#launch-runner').on('change', onRunnerChanged)
-$('#launch-environment').on('change', onEnvironmentChanged)
-$('#btn-launch-execute').on('click', executeLaunch)
+on('launch-runner', 'change', onRunnerChanged)
+on('launch-environment', 'change', onEnvironmentChanged)
+on('btn-launch-execute', 'click', executeLaunch)
 
 // Agent chat
-$('#btn-agent').on('click', openAgentModal)
-$('#btn-agent-send').on('click', agentSendMessage)
-$('#btn-agent-clear').on('click', agentClearHistory)
+on('btn-agent', 'click', openAgentModal)
+on('btn-agent-send', 'click', agentSendMessage)
+on('btn-agent-clear', 'click', agentClearHistory)
 
 // Edit config modal
-$('#btn-edit').on('click', openConfigEditor)
-$('#edit-format').on('change', updateConfigEditorContent)
-$('#btn-copy-config').on('click', copyConfigToClipboard)
-$('#btn-download-config').on('click', downloadConfig)
-$('#btn-apply-config').on('click', applyConfig)
+on('edit-format', 'change', updateConfigEditorContent)
+on('btn-copy-config', 'click', copyConfigToClipboard)
+on('btn-download-config', 'click', downloadConfig)
+on('btn-apply-config', 'click', applyConfig)
+on('btn-clear-config', 'click', clearConfigEditor)
 
 // Monaco: modal shown handlers (schema loading + editor init)
-$('#moduleConfigModal').on('shown.bs.modal', ...)  // Fetch module schema + init editor
-$('#systemModal').on('shown.bs.modal', ...)         // ensureSystemSchema + init editor
-$('#optionsModal').on('shown.bs.modal', ...)        // ensureOptionsSchema + init editor
-$('#editConfigModal').on('shown.bs.modal', ...)     // Init editor
+on('moduleConfigModal', 'shown.bs.modal', ...)  // Fetch module schema + init editor
+on('systemModal', 'shown.bs.modal', ...)        // ensureSchema('system') + init editor
+on('optionsModal', 'shown.bs.modal', ...)       // ensureSchema('options') + init editor
+on('editConfigModal', 'shown.bs.modal', ...)    // Init editor
 
 // Drawflow events
-editor.on('nodeCreated', ...)
 editor.on('nodeRemoved', ...)
 editor.on('connectionCreated', ...)
-editor.on('connectionRemoved', ...)
 container.addEventListener('dblclick', handleDoubleClick)  // Opens module config modal
 ```
 
@@ -320,8 +324,6 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 #agent-chat-messages, #agent-chat-input
 #btn-agent-send, #btn-agent-clear
 
-<!-- Hidden -->
-#file-import (hidden file input)
 ```
 
 ## CSS Architecture (index.css)
@@ -497,15 +499,14 @@ sinks:
 ```javascript
 // In the appropriate section, add:
 function openNewModal() {
-    const modal = new bootstrap.Modal(document.getElementById('newModal'));
-    modal.show();
+    showModal('newModal');
 }
 
 // In initEventHandlers(), bind:
-$('#btn-new').on('click', openNewModal);
+on('btn-new', 'click', openNewModal);
 
 // If Monaco editor is needed, add shown.bs.modal handler:
-$('#newModal').on('shown.bs.modal', function() {
+on('newModal', 'shown.bs.modal', function() {
     loadMonaco().then(function() {
         // Set up schema and editor
     });
@@ -527,17 +528,9 @@ public static void serveNewSchema(...) throws IOException {
 case "new" -> SpecService.serveNewSchema(request, response);
 ```
 
-3. Add a lazy-load helper in `app.js`:
+3. Use the generic lazy-load helper in `app.js` — no new code needed:
 ```javascript
-let cachedNewSchema = null;
-
-function ensureNewSchema() {
-    if (cachedNewSchema) return Promise.resolve(cachedNewSchema);
-    return $.ajax({ url: '/api/spec/new', type: 'GET', dataType: 'json' }).then(function(data) {
-        cachedNewSchema = data;
-        return data;
-    });
-}
+ensureSchema('new').then(function(schema) { ... });  // cached in schemaCache.new
 ```
 
 ## Cache Busting
@@ -545,8 +538,8 @@ function ensureNewSchema() {
 When making changes, increment the `id` query parameter in `index.jsp`:
 
 ```html
-<link href="css/index.css?id=15" rel="stylesheet">
-<script src="js/app.js?id=15"></script>
+<link href="css/index.css?id=17" rel="stylesheet">
+<script src="js/app.js?id=25"></script>
 ```
 
 ## Development Commands
