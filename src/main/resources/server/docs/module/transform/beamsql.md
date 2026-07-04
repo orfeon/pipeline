@@ -38,6 +38,7 @@ A variety of built-in [UDFs and UDAFs](#built-in-udfs) are also available.
 | namedParameters      | optional | Map<String,String\> | Named parameters for the SQL query. Cannot be used together with `positionalParameters`.                                                                                                                                                         |
 | positionalParameters | optional | Array<String\>      | Positional parameters for the SQL query. Cannot be used together with `namedParameters`.                                                                                                                                                         |
 | autoLoading          | optional | Boolean             | Enable auto-loading of Beam SQL table providers.                                                                                                                                                                                                 |
+| sources              | optional | Array<Source\>      | External lookup sources (jdbc / spanner / bigtable / rest). Each source's tables are referenced as `sourceName.tableName` and joined as inline lookups — see below. Same per-type parameters as the [query](query.md) module.                     |
 
 ### SQL loading
 
@@ -59,6 +60,52 @@ Each input step is available as a table in the SQL query, referenced by its step
 SELECT a.field1, b.field2
 FROM `inputA` AS a
 JOIN `inputB` AS b ON a.key = b.key
+```
+
+## External lookup sources
+
+With `sources`, tables in external systems are registered through Beam SQL's native
+seekable-table mechanism: a join against one is planned as an **inline lookup** — for
+each input row the matching rows are fetched from the external system (never a scan
+of the external table; a standalone `FROM sourceName.tableName` fails). The
+configuration is identical to the [query](query.md) module's `sources` (jdbc /
+spanner incl. parameterized query tables / bigtable / rest).
+
+Constraints (differences from the `query` module's lookup-join):
+
+- **Point equi-joins only** — the join columns must together form one of the table's
+  keys (primary key / unique index / row key / request parameters); key-prefix and
+  bounded-range fetches are not available here.
+- Write each equality with the **main-input column on the left**:
+  `ON c.itemId = m.ITEM_ID` (the reverse order fails inside Beam's join planning).
+- One backend request per input row — there is no batching or key deduplication.
+  For high-volume enrichment prefer the `query` module (512-row batched fetches).
+- `DATE` / `TIME` columns of a lookup table surface as ISO-8601 **strings** (a Beam
+  limitation on logical types in the seekable-join output); `CAST` them in SQL when
+  the temporal type is needed. `TIMESTAMP` columns pass through natively.
+- Lookups must be read-only and idempotent; the launcher needs connectivity to the
+  sources at pipeline construction (table metadata is derived once and shipped to
+  workers).
+
+```yaml
+transforms:
+  - name: enrich
+    module: beamsql
+    inputs: [carts]
+    parameters:
+      sql: |
+        SELECT c.itemId, m.TITLE AS title, c.qty * m.PRICE AS total
+        FROM carts AS c
+        JOIN db.ITEMS AS m ON c.itemId = m.ITEM_ID
+      sources:
+        - name: db
+          type: jdbc
+          driver: org.postgresql.Driver
+          url: jdbc:postgresql://localhost:5432/shop
+          user: app
+          password: secret
+          tables:
+            - name: ITEMS
 ```
 
 ## Built-in UDFs

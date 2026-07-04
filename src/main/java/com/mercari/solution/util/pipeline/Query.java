@@ -6,10 +6,9 @@ import com.mercari.solution.util.schema.CalciteSchemaUtil;
 import com.mercari.solution.util.domain.sql.calcite.MemorySchema;
 
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.config.Lex;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptUtil;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelRoot;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelWriter;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.externalize.RelWriterImpl;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.SchemaPlus;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlExplainLevel;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.SqlNode;
@@ -20,11 +19,32 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.PrintWriter;
 import java.io.Serializable;
 import java.sql.*;
 import java.util.*;
 
+/**
+ * Executes a Calcite SQL statement over bounded, in-memory {@link MElement} lists.
+ *
+ * <p>This is the reusable core for running SQL inside a Beam {@code DoFn}: the SQL is
+ * planned and compiled once per worker, then evaluated repeatedly against small in-memory
+ * inputs (e.g. one input element per call, or a fetched result set), so no shuffle or
+ * cross-element state is ever involved. Windowing/triggering of the surrounding pipeline
+ * is unaffected: outputs carry the timestamp handed to {@link #execute}.
+ *
+ * <p>Lifecycle:
+ * <ol>
+ *   <li>Construct via {@link #of} at pipeline construction time — this validates the SQL
+ *       against the input schemas and derives {@link #getOutputSchema()} without executing.</li>
+ *   <li>The instance is {@link Serializable}; ship it to workers inside a {@code DoFn}.</li>
+ *   <li>Call {@link #setup()} in {@code @Setup} — plans and prepares the statement once.</li>
+ *   <li>Call {@link #execute} per element/bundle as often as needed.</li>
+ *   <li>Call {@link #teardown()} in {@code @Teardown}.</li>
+ * </ol>
+ *
+ * <p>Instances are not thread-safe after {@link #setup()}; use one instance per DoFn instance
+ * (Beam guarantees a DoFn instance is not called concurrently).
+ */
 public class Query implements Serializable {
 
     private static final String DEFAULT_TABLE_NAME = "INPUT";
@@ -135,14 +155,11 @@ public class Query implements Serializable {
         return execute(Map.of(tableName, inputs), timestamp);
     }
 
-    public List<MElement> execute_(final Map<String, MElement> inputs, final Instant timestamp) {
-        final Map<String, List<MElement>> elements = new HashMap<>();
-        for(final Map.Entry<String, MElement> entry : inputs.entrySet()) {
-            elements.put(entry.getKey(), List.of(entry.getValue()));
-        }
-        return execute(elements, timestamp);
-    }
-
+    /**
+     * Evaluates the prepared statement against the given per-table inputs.
+     * Table names must match the schema names given at construction; the outputs
+     * are {@code DataType.ELEMENT} rows carrying the given timestamp as event time.
+     */
     public List<MElement> execute(final Map<String, List<MElement>> inputs, final Instant timestamp) {
         for(final Map.Entry<String, List<MElement>> entry : inputs.entrySet()) {
             if(elements.containsKey(entry.getKey())) {
@@ -263,11 +280,9 @@ public class Query implements Serializable {
         final RelRoot relRoot = planner.rel(sqlNodeValidated);
         final RelNode relNode = relRoot.project();
 
-        //final Pair<SqlNode, RelDataType> a = planner.validateAndGetType(sqlNodeValidated);
-        //final Schema s = CalciteSchemaUtil.convertSchema(relNode.getRowType());
-
-        final RelWriter relWriter = new RelWriterImpl(new PrintWriter(System.out), SqlExplainLevel.EXPPLAN_ATTRIBUTES, false);
-        relNode.explain(relWriter);
+        if(LOG.isDebugEnabled()) {
+            LOG.debug("query plan for sql: {}\n{}", sql, RelOptUtil.toString(relNode, SqlExplainLevel.EXPPLAN_ATTRIBUTES));
+        }
 
         return RelRunners.run(relNode);
     }

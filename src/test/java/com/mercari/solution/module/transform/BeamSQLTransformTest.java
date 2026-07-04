@@ -561,4 +561,103 @@ public class BeamSQLTransformTest {
 
      */
 
+    @Test
+    public void testJdbcLookupJoin() throws Exception {
+        final String url = "jdbc:h2:mem:beamsqllookuptest;DB_CLOSE_DELAY=-1";
+        // Keep the named in-memory database alive for the duration of the test.
+        try (final java.sql.Connection connection =
+                     java.sql.DriverManager.getConnection(url, "sa", "")) {
+            try (final java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS ITEMS (
+                          ITEM_ID VARCHAR(16) PRIMARY KEY,
+                          TITLE VARCHAR(64),
+                          PRICE BIGINT
+                        )""");
+                statement.execute("DELETE FROM ITEMS");
+                statement.execute("""
+                        INSERT INTO ITEMS VALUES
+                          ('i1', 'apple', 100),
+                          ('i2', 'banana', 200)""");
+            }
+
+            // A whole-PCollection SQL joined against an external lookup source
+            // registered via 'sources': planned as Beam's inline seekable lookup
+            // (point equi-join; the main-input column goes on the LEFT of '=').
+            final String configJson = """
+                    {
+                      "sources": [
+                        {
+                          "name": "carts",
+                          "module": "create",
+                          "parameters": {
+                            "type": "element",
+                            "elements": [
+                              { "itemId": "i1", "qty": 2 },
+                              { "itemId": "i2", "qty": 3 },
+                              { "itemId": "i9", "qty": 1 }
+                            ]
+                          },
+                          "schema": {
+                            "fields": [
+                              { "name": "itemId", "type": "string" },
+                              { "name": "qty", "type": "int64" }
+                            ]
+                          }
+                        }
+                      ],
+                      "transforms": [
+                        {
+                          "name": "beamsql",
+                          "module": "beamsql",
+                          "inputs": ["carts"],
+                          "parameters": {
+                            "sql": "SELECT c.itemId, m.TITLE AS title, c.qty * m.PRICE AS total FROM carts AS c JOIN db.ITEMS AS m ON c.itemId = m.ITEM_ID",
+                            "sources": [
+                              {
+                                "name": "db",
+                                "type": "jdbc",
+                                "driver": "org.h2.Driver",
+                                "url": "%s",
+                                "user": "sa",
+                                "password": "",
+                                "tables": [
+                                  { "name": "ITEMS" }
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                    """.formatted(url);
+
+            final Config config = Config.load(configJson);
+            final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+            final MCollection output = outputs.get("beamsql");
+            org.junit.jupiter.api.Assertions.assertNotNull(output);
+
+            PAssert.that(output.getCollection()).satisfies(elements -> {
+                final Map<String, MElement> byItem = new java.util.HashMap<>();
+                for(final MElement element : elements) {
+                    byItem.put(element.getAsString("itemId"), element);
+                }
+                // i9 has no match and is dropped by the INNER join
+                org.junit.jupiter.api.Assertions.assertEquals(2, byItem.size());
+                org.junit.jupiter.api.Assertions.assertEquals("apple",
+                        byItem.get("i1").getAsString("title"));
+                org.junit.jupiter.api.Assertions.assertEquals(200L,
+                        byItem.get("i1").getAsLong("total"));
+                org.junit.jupiter.api.Assertions.assertEquals("banana",
+                        byItem.get("i2").getAsString("title"));
+                org.junit.jupiter.api.Assertions.assertEquals(600L,
+                        byItem.get("i2").getAsLong("total"));
+                return null;
+            });
+
+            pipeline.run();
+        }
+    }
+
 }

@@ -63,7 +63,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 **Sources** (`module/source/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg`
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create`.
 
-**Transforms** (`module/transform/`): `select` `filter` `aggregation` `beamsql` `partition` `lookup`
+**Transforms** (`module/transform/`): `select` `filter` `aggregation` `beamsql` `query` `partition` `lookup`
 `compare` `deserialize` `reshuffle` `http` `bigtable` `onnx` `onnx_gen` `pdfextract` `vertexai.gemini`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
@@ -83,14 +83,31 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 ### Utilities (`util/`)
 - `schema/` — schema + `converter/` between Avro / Row / Entity / Struct / Document / Proto / JSON.
 - `pipeline/` — pipeline building blocks (`select/`, `aggregation/`, `mutation/`, `action/`, filters, queries).
+  - `pipeline/Query2.java` + `pipeline/lookup/` + `pipeline/udf/` — the per-element SQL engine behind the
+    `query` transform: Calcite SQL inside a DoFn (plan once per worker, no shuffle) with key-driven
+    lookup-joins to external sources (jdbc / spanner incl. parameterized GoogleSQL/GQL query tables /
+    bigtable / rest), correlated LATERAL blocks evaluated per key set, and UDF/UDAF registration.
+    Built on the Beam-vendored Calcite 1.40 — never add a regular `org.apache.calcite` dependency.
+    Maintain via the **`query-lookup-sources` skill** (`.claude/skills/query-lookup-sources/`).
 - `cloud/` — cloud service clients (`google/`, `amazon/`, `hashicorp/`, `crm/`).
 - `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`, `web/`.
+  - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
+    still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
 - `coder/` — Beam coders.
 
 ### Server (`server/`)
 - `PipelineApiServer.java` — REST API for validating/launching pipelines (`api/`: Pipeline/Schema/Spec/Launch/Probe/Agent).
 - `PipelineMcpStreamableServer.java` / `PipelineMcpSseServer.java` — MCP servers (`mcp/tool`, `mcp/resource`, `mcp/prompt`) for AI integration.
 - `PipelineWebhookServer.java`, `agent/` (PipelineAgent + tools). Docs served from `src/main/resources/server/docs/`.
+
+## Skills
+
+- **`add-module`** (`.claude/skills/add-module/`) — adding a source/transform/sink module (implementation,
+  tests, agent-readable docs).
+- **`query-lookup-sources`** (`.claude/skills/query-lookup-sources/`) — the `query` transform's SQL engine:
+  adding/changing external lookup sources, the key-prefix join contract, correlated LATERAL internals,
+  UDF/UDAF registration, Calcite-internal value conventions, and the emulator IT patterns. Consult it before
+  touching `util/pipeline/Query2.java` or `util/pipeline/lookup/`.
 
 ## Adding a New Module
 

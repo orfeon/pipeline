@@ -9,8 +9,12 @@ import com.mercari.solution.util.schema.converter.ElementToRowConverter;
 import com.mercari.solution.util.domain.sql.beamsql.udf.AggregateFunctions;
 import com.mercari.solution.util.domain.sql.beamsql.udf.ArrayFunctions;
 import com.mercari.solution.util.domain.sql.beamsql.udf.MathFunctions;
+import com.mercari.solution.util.pipeline.lookup.LookupSeekableTable;
+import com.mercari.solution.util.pipeline.lookup.LookupSource;
+import com.mercari.solution.util.pipeline.lookup.source.LookupSourceConfig;
 import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
+import org.apache.beam.sdk.extensions.sql.meta.provider.ReadOnlyTableProvider;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
@@ -34,11 +38,13 @@ public class BeamSQLTransform extends Transform {
         private Map<String, String> namedParameters;
         private List<String> positionalParameters;
         private Boolean autoLoading;
+        private List<LookupSourceConfig.SourceParameters> sources;
 
         private void validate() {
             if(this.sql == null) {
                 throw new IllegalModuleException("parameters.sql must not be null");
             }
+            LookupSourceConfig.validate(this.sources);
         }
 
         private void setDefaults(Map<String, String> templateArgs) {
@@ -49,6 +55,9 @@ public class BeamSQLTransform extends Transform {
             }
             if(positionalParameters == null) {
                 positionalParameters = new ArrayList<>();
+            }
+            if(sources == null) {
+                sources = new ArrayList<>();
             }
         }
 
@@ -173,6 +182,22 @@ public class BeamSQLTransform extends Transform {
         }
         if(parameters.autoLoading != null) {
             transform = transform.withAutoLoading(parameters.autoLoading);
+        }
+
+        // External lookup sources: each source's tables are registered as
+        // seekable tables (sourceName.tableName in SQL); a join against one is
+        // planned as an inline lookup, one seekRow per input row. Metadata is
+        // derived here once (the launcher needs connectivity); workers re-open
+        // clients via the table's setUp.
+        for(final LookupSource source : LookupSourceConfig.createSources(parameters.sources)) {
+            try {
+                source.setup();
+                transform = transform.withTableProvider(source.getName(),
+                        new ReadOnlyTableProvider(source.getName(),
+                                LookupSeekableTable.tablesOf(source)));
+            } finally {
+                source.close();
+            }
         }
 
         transform = transform
