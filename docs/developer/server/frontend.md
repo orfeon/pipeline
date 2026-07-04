@@ -6,11 +6,17 @@ This document describes the frontend architecture of Mercari Pipeline GUI Editor
 
 ```
 src/main/webapp/
-├── index.jsp                     # Main JSP page (entry point)
+├── index.html                    # Main page (entry point, plain HTML — no JSP)
 ├── css/
 │   └── index.css                 # Custom styles
-└── js/
-    └── app.js                    # Single consolidated application file (IIFE)
+└── js/                           # Native ES modules (no bundler / build step)
+    ├── main.js                   # Entry point: loads spec, wires all modules together
+    ├── util.js                   # DOM/HTTP helpers, escapeHtml/setStatus, schema & records rendering
+    ├── monaco.js                 # Monaco editor management + JSON Schema cache/registration
+    ├── canvas.js                 # Drawflow adapter + config generate/validate/import
+    ├── result.js                 # Result modal + pipeline execution (dryrun/run/launch)
+    ├── modals.js                 # Module config / System / Options / Config editor / Launch modals
+    └── agent.js                  # AI agent chat
 ```
 
 ## Technology Stack
@@ -29,46 +35,44 @@ attributes; when bumping a library version, recompute the hash
 
 ## Architecture
 
-All application code lives in a single IIFE in `app.js`:
+The application is split into native ES modules loaded via
+`<script type="module" src="js/main.js">` — no bundler, npm, or build step.
+State is private to each module; cross-module access goes through exported functions only.
 
-```javascript
-(function() {
-    'use strict';
-    // All state, functions, and event handlers are private
-    // No global namespace pollution
-})();
+Import graph (acyclic; `util.js` at the bottom, `main.js` at the top):
+
+```
+main.js ─→ canvas.js, monaco.js, modals.js, result.js, agent.js
+modals.js ─→ util, monaco, canvas, result
+result.js ─→ util, canvas
+agent.js  ─→ util, canvas
+canvas.js ─→ util          (ALL Drawflow API access lives here — adapter)
+monaco.js ─→ util
 ```
 
-### Section Layout
+Two deliberate boundaries:
 
-`app.js` is organized into numbered sections:
-
-| Section | Description |
-|---------|-------------|
-| 0 | DOM & HTTP helpers (`$id`, `on`, `show`/`hide`, `showModal`/`hideModal`, `getJson`/`postJson`) |
-| 1 | State variables |
-| 1.5 | Monaco Editor management (lazy loading, creation, value get/set) |
-| 1.8 | YAML Schema builders and lazy-load helpers |
-| 2 | Utilities (escapeHtml, setStatus, formatTimestamp, schema/records rendering) |
-| 3 | Drawflow & Canvas (init, module list, node management) |
-| 4 | Pipeline config generation (generateConfig, getValidationErrors) |
-| 5 | Module Config Modal |
-| 6 | System & Options Modals |
-| 7 | Config Editor Modal |
-| 8 | Launch Modal |
-| 9 | Result Modal |
-| 10 | Pipeline Execution (dryrun, run) |
-| 10.5 | Agent Chat |
-| 11 | Init & Event Handlers |
+- **`canvas.js` is the Drawflow adapter.** No other module touches the Drawflow
+  editor instance; they call exported functions (`getNodeData`, `updateNodeData`,
+  `isNodeNameTaken`, `removeNode`, `generateConfig`, `importConfigToCanvas`, …).
+  Replacing the node-editor library should touch this file only.
+- **canvas → UI callbacks are injected.** `initDrawflow({ onEditNode, onShowSchema,
+  onShowRecords })` receives the modal-opening functions from `main.js`, so
+  `canvas.js` never imports UI modules and the graph stays acyclic.
 
 ## Initialization Flow
+
+`main.js`:
 
 ```
 init()
   → loadSpec()              // GET /api/spec (module summaries only)
-  → initDrawflow()          // Initialize Drawflow editor
-  → initModuleList()        // Render module items in left pane
-  → initEventHandlers()     // Bind all event handlers
+  → initDrawflow(callbacks) // Initialize Drawflow editor (canvas.js)
+  → initModuleList(defs)    // Render module items in left pane (canvas.js)
+  → initRunButtons()        // Dry Run / Run buttons (result.js)
+  → initModalEvents()       // All modal buttons + shown.bs.modal handlers (modals.js)
+  → initAgent()             // Agent chat events (agent.js)
+  → initResizeHandle()      // Left pane resizing (main.js)
   → loadMonaco()            // Pre-load Monaco (fire-and-forget)
 ```
 
@@ -204,8 +208,10 @@ Examples:
 
 ## Event Handlers
 
-All handlers are bound in `initEventHandlers()` via the `on(id, eventName, handler)` helper
-(a thin wrapper over `addEventListener`; Bootstrap dispatches its modal events natively):
+Each module binds its own handlers in an `init*` function called from `main.js`
+(`initRunButtons` in result.js, `initModalEvents` in modals.js, `initAgent` in agent.js),
+via the `on(id, eventName, handler)` helper — a thin wrapper over `addEventListener`
+(Bootstrap dispatches its modal events natively):
 
 ```javascript
 // Header buttons
@@ -253,7 +259,7 @@ editor.on('connectionCreated', ...)
 container.addEventListener('dblclick', handleDoubleClick)  // Opens module config modal
 ```
 
-## HTML Structure (index.jsp)
+## HTML Structure (index.html)
 
 ### Main Layout IDs
 
@@ -479,7 +485,7 @@ sinks:
 
 ### Adding a New Modal
 
-1. Add HTML modal structure in `index.jsp`:
+1. Add HTML modal structure in `index.html`:
 ```html
 <div class="modal fade" id="newModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -495,14 +501,14 @@ sinks:
 </div>
 ```
 
-2. Add functions and event handlers in `app.js`:
+2. Add functions and event handlers in `modals.js` (or the module that owns the feature):
 ```javascript
 // In the appropriate section, add:
 function openNewModal() {
     showModal('newModal');
 }
 
-// In initEventHandlers(), bind:
+// In the owning module's init*Events() function, bind:
 on('btn-new', 'click', openNewModal);
 
 // If Monaco editor is needed, add shown.bs.modal handler:
@@ -528,23 +534,26 @@ public static void serveNewSchema(...) throws IOException {
 case "new" -> SpecService.serveNewSchema(request, response);
 ```
 
-3. Use the generic lazy-load helper in `app.js` — no new code needed:
+3. Use the generic lazy-load helper in `monaco.js` — no new code needed:
 ```javascript
 ensureSchema('new').then(function(schema) { ... });  // cached in schemaCache.new
 ```
 
-## Cache Busting
+## Caching
 
-When making changes, increment the `id` query parameter in `index.jsp`:
-
-```html
-<link href="css/index.css?id=17" rel="stylesheet">
-<script src="js/app.js?id=25"></script>
-```
+No manual cache busting is needed. `web.xml` overrides Jetty's `default` servlet with
+`cacheControl=no-cache` + `etags=true`, so browsers revalidate every static resource
+(HTML/CSS/JS modules) with a conditional request and receive `304 Not Modified` unless
+the file changed. Note this override references
+`org.eclipse.jetty.ee11.servlet.DefaultServlet` and is therefore Jetty-specific
+(fine here: both the jib image and the maven plugin run Jetty 12 ee11).
 
 ## Development Commands
 
 ```bash
+# Run the server locally against src/main/webapp (no packaging needed)
+mvn -Pserver jetty:run -DskipTests
+
 # Build WAR file
 mvn clean package -Pserver -DskipTests
 
@@ -556,7 +565,7 @@ http://localhost:8080/
 
 - Modern browsers (Chrome, Firefox, Safari, Edge)
 - Requires JavaScript enabled
-- Uses ES6+ features (let, const, arrow functions, template literals, dynamic import)
+- Uses native ES modules, `fetch` + `AbortSignal.timeout`, and dynamic `import()`
 
 ## Known Limitations
 
@@ -593,8 +602,8 @@ All JSON Schemas served to Monaco editors must be "flattened" before sending to 
 
 ### Modal Not Opening
 
-1. Check modal ID in `index.jsp` matches the ID used in `app.js`
-2. Verify event handler is bound in `initEventHandlers()`
+1. Check modal ID in `index.html` matches the ID used in the JS module
+2. Verify event handler is bound in the owning module's `init*Events()` function
 3. Check browser console for errors
 
 ## Related Documentation
