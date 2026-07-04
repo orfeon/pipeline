@@ -220,6 +220,23 @@ function clearConfigEditor() {
     setEditorValue('edit-content', '', format === 'yaml' ? 'yaml' : 'json');
 }
 
+function onImportFileSelected(e) {
+    const file = e.target.files[0];
+    e.target.value = ''; // allow re-selecting the same file later
+    if (!file) return;
+
+    const isJson = file.name.toLowerCase().endsWith('.json');
+    const format = isJson ? 'json' : 'yaml';
+    file.text().then(function(text) {
+        $id('edit-format').value = format;
+        return setEditorValue('edit-content', text, format);
+    }).then(function() {
+        setStatus('Loaded ' + file.name + ' — review and click Apply');
+    }).catch(function(err) {
+        setStatus('Failed to read ' + file.name + ': ' + err.message, 'error');
+    });
+}
+
 function applyConfig() {
     const format = $id('edit-format').value;
     const content = getEditorValue('edit-content').trim();
@@ -582,6 +599,8 @@ export function initModalEvents() {
     // Config Editor Modal
     on('btn-edit', 'click', openConfigEditor);
     on('edit-format', 'change', updateConfigEditorContent);
+    on('btn-import-config', 'click', function() { $id('file-import').click(); });
+    on('file-import', 'change', onImportFileSelected);
     on('btn-copy-config', 'click', copyConfigToClipboard);
     on('btn-download-config', 'click', downloadConfig);
     on('btn-apply-config', 'click', applyConfig);

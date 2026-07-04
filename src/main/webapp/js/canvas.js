@@ -19,6 +19,17 @@ const moduleOutputs = {};   // run result cache (module name -> output)
 // Wired by initDrawflow: { onEditNode(nodeId), onShowSchema(name, schema), onShowRecords(name, output) }
 let callbacks = {};
 
+// Notified (post-hoc) whenever the pipeline on the canvas changes; used for auto-save.
+let changeListener = null;
+
+export function setChangeListener(listener) {
+    changeListener = listener;
+}
+
+function notifyChanged() {
+    if (changeListener) changeListener();
+}
+
 // =============================
 // System / Options config state
 // =============================
@@ -29,6 +40,7 @@ export function getSystemConfig() {
 
 export function setSystemConfig(config) {
     systemConfig = config || {};
+    notifyChanged();
 }
 
 export function getOptionsConfig() {
@@ -37,6 +49,7 @@ export function getOptionsConfig() {
 
 export function setOptionsConfig(config) {
     optionsConfig = config || {};
+    notifyChanged();
 }
 
 // =============================
@@ -68,6 +81,12 @@ export function initDrawflow(cb) {
     editor.on('nodeRemoved', function() {
         setStatus('Module removed');
     });
+
+    // Auto-save notifications for every structural change
+    ['nodeCreated', 'nodeRemoved', 'nodeMoved', 'connectionCreated', 'connectionRemoved']
+        .forEach(function(eventName) {
+            editor.on(eventName, notifyChanged);
+        });
 
     editor.on('connectionCreated', function(connection) {
         // Prevent input_1 connections on source nodes
@@ -273,6 +292,7 @@ export function updateNodeData(nodeId, data) {
     if (nodeElement) {
         nodeElement.innerHTML = newHtml;
     }
+    notifyChanged();
 }
 
 export function isNodeNameTaken(name, excludeNodeId) {
@@ -549,5 +569,32 @@ function positionNode(nodeId, x, y) {
     if (nodeElement) {
         nodeElement.style.left = x + 'px';
         nodeElement.style.top = y + 'px';
+    }
+}
+
+// =============================
+// Node positions (for workspace auto-save)
+// =============================
+
+export function exportNodePositions() {
+    const nodes = editor.export().drawflow.Home.data;
+    const positions = {};
+    for (const id in nodes) {
+        positions[nodes[id].data.name] = { x: nodes[id].pos_x, y: nodes[id].pos_y };
+    }
+    return positions;
+}
+
+export function applyNodePositions(positions) {
+    if (!positions) return;
+    const nodes = editor.export().drawflow.Home.data;
+    for (const id in nodes) {
+        const pos = positions[nodes[id].data.name];
+        if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+            positionNode(id, pos.x, pos.y);
+        }
+    }
+    for (const id in nodes) {
+        editor.updateConnectionNodes('node-' + id);
     }
 }

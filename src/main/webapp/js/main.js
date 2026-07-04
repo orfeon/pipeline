@@ -9,6 +9,7 @@ import { initDrawflow, initModuleList } from './canvas.js';
 import { openModuleConfig, initModalEvents } from './modals.js';
 import { showModuleSchema, showModuleRecords, initRunButtons } from './result.js';
 import { initAgent } from './agent.js';
+import { initAutoSave } from './autosave.js';
 
 function toModuleDef(schema) {
     const schemaId = schema['$id'] || '';
@@ -79,6 +80,7 @@ function init() {
             initResizeHandle();
             loadMonaco(); // Pre-load Monaco so language service initializes before first modal open
             setStatus('Ready');
+            initAutoSave(); // After 'Ready' so a restore message stays visible
         })
         .catch(function(error) {
             console.error('Failed to load definitions:', error);

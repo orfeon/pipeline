@@ -16,7 +16,8 @@ src/main/webapp/
     ├── canvas.js                 # Drawflow adapter + config generate/validate/import
     ├── result.js                 # Result modal + pipeline execution (dryrun/run/launch)
     ├── modals.js                 # Module config / System / Options / Config editor / Launch modals
-    └── agent.js                  # AI agent chat
+    ├── agent.js                  # AI agent chat
+    └── autosave.js               # localStorage workspace auto-save / restore
 ```
 
 ## Technology Stack
@@ -42,10 +43,11 @@ State is private to each module; cross-module access goes through exported funct
 Import graph (acyclic; `util.js` at the bottom, `main.js` at the top):
 
 ```
-main.js ─→ canvas.js, monaco.js, modals.js, result.js, agent.js
+main.js ─→ canvas.js, monaco.js, modals.js, result.js, agent.js, autosave.js
 modals.js ─→ util, monaco, canvas, result
 result.js ─→ util, canvas
 agent.js  ─→ util, canvas
+autosave.js ─→ util, canvas
 canvas.js ─→ util          (ALL Drawflow API access lives here — adapter)
 monaco.js ─→ util
 ```
@@ -74,7 +76,17 @@ init()
   → initAgent()             // Agent chat events (agent.js)
   → initResizeHandle()      // Left pane resizing (main.js)
   → loadMonaco()            // Pre-load Monaco (fire-and-forget)
+  → initAutoSave()          // Restore saved workspace + start auto-saving (autosave.js)
 ```
+
+## Workspace Auto-Save
+
+`autosave.js` persists `{ config: generateConfig(), positions, savedAt }` to
+`localStorage` (key `mercari-pipeline-workspace`) with a 1s debounce, and restores it
+on page load, so a reload does not lose work. Change notifications come from
+`canvas.js` (`setChangeListener`): Drawflow node/connection events, `updateNodeData`,
+and `setSystemConfig`/`setOptionsConfig`. A corrupted or empty saved payload is
+ignored (startup falls back to a blank canvas).
 
 ## Data Loading Strategy
 
@@ -315,6 +327,7 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 <!-- Edit Config Modal (Monaco editor, YAML or JSON) -->
 #editConfigModal
 #edit-format, #edit-content (Monaco container)
+#file-import (hidden file input), #btn-import-config
 #btn-copy-config, #btn-download-config, #btn-apply-config
 
 <!-- Result Modal -->
@@ -571,7 +584,6 @@ http://localhost:8080/
 
 - Single canvas/module space (Drawflow "Home")
 - No undo/redo functionality
-- No auto-save (manual export required)
 - Connection ports limited to single input/output per side
 
 ## Troubleshooting
