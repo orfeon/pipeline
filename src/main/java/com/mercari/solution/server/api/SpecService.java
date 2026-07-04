@@ -454,8 +454,15 @@ public class SpecService {
 
         public static void load() {
             if(schemas == null || schemaRegistry == null) {
-                final URL uri = Thread.currentThread().getContextClassLoader().getResource(RESOURCES_JSON_SCHEMA_DIR);
-                schemas = JsonSchemaUtil.loadJsonSchemas(uri.getPath());
+                final URL url = Thread.currentThread().getContextClassLoader().getResource(RESOURCES_JSON_SCHEMA_DIR);
+                final String basePath;
+                try {
+                    // URL.getPath() returns "/C:/..." on Windows, which Path.of cannot parse
+                    basePath = java.nio.file.Path.of(url.toURI()).toString();
+                } catch (final java.net.URISyntaxException e) {
+                    throw new RuntimeException("Failed to resolve JSON-Schema resource dir: " + url, e);
+                }
+                schemas = JsonSchemaUtil.loadJsonSchemas(basePath);
                 schemaRegistry = JsonSchemaUtil.createSchemaRegistry(schemas);
             }
         }
