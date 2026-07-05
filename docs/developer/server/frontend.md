@@ -94,17 +94,21 @@ The frontend uses a **lazy-loading** approach for schemas:
 
 ### Page Load (`GET /api/spec`)
 
-Returns only lightweight module summaries (~3KB):
+Returns the module catalog taken from the agent-readable docs index
+`src/main/resources/server/docs/module/index.yaml` (the `title` field there is the
+registered module name; new modules must be added to that file to appear in the UI):
 
 ```json
 {
   "modules": {
-    "sources":    [{"$id": "...bigquery", "title": "BigQuery", "description": "..."}],
+    "sources":    [{"name": "bigquery", "description": "...", "tags": ["source", "gcp"]}],
     "transforms": [...],
     "sinks":      [...]
   }
 }
 ```
+
+The left pane shows `name` as the label and `description` + `tags` as the tooltip.
 
 ### On-Demand Schema Loading
 
@@ -112,7 +116,7 @@ Schemas are fetched and cached when the corresponding modal opens for the first 
 
 | Endpoint | Trigger | Cache |
 |----------|---------|-------|
-| `GET /api/spec/{type}/{name}` | Module config modal opens | (not cached, fetched every time) |
+| `GET /api/spec/{type}/{name}` | Module config modal opens | (not cached, fetched every time; a 404 is tolerated — the YAML editor then runs without completion for that module) |
 | `GET /api/spec/system` | System modal opens | `schemaCache.system` |
 | `GET /api/spec/options` | Options modal opens | `schemaCache.options` |
 | `GET /api/spec/launch` | Launch modal opens | `schemaCache.launch` |

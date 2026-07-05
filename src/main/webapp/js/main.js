@@ -11,13 +11,12 @@ import { showModuleSchema, showModuleRecords, initRunButtons } from './result.js
 import { initAgent } from './agent.js';
 import { initAutoSave } from './autosave.js';
 
-function toModuleDef(schema) {
-    const schemaId = schema['$id'] || '';
-    const name = schemaId.split('/').pop() || schema.title;
+// /api/spec serves the module catalog from server/docs/module/index.yaml
+function toModuleDef(entry) {
     return {
-        name: name,
-        label: schema.title || name,
-        description: schema.description || ''
+        name: entry.name || '',
+        description: entry.description || '',
+        tags: entry.tags || []
     };
 }
 

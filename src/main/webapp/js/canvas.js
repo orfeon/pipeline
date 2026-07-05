@@ -197,8 +197,9 @@ function createModuleItem(module, type) {
     item.className = 'module-item ' + type;
     item.dataset.module = module.name;
     item.dataset.type = type;
-    item.title = module.description;
-    item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(module.label);
+    item.title = module.description
+        + (module.tags && module.tags.length ? '\n\nTags: ' + module.tags.join(', ') : '');
+    item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(module.name);
     item.addEventListener('click', function() {
         addModuleToCanvas(module.name, type);
     });

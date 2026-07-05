@@ -2,6 +2,9 @@ sources:
   - title: bigquery
     description: Reads data from Google BigQuery via SQL query or table direct read. Supports Standard SQL with query result caching, Storage Read API for direct table access with field/row filtering, view mode for periodic polling, and microbatch mode for near real-time streaming.
     tags: [source, bigquery, batch, gcp, sql]
+  - title: bigtable
+    description: Reads rows from Google Cloud Bigtable. Supports row key range and prefix filtering, column family/qualifier filters, and cell value deserialization.
+    tags: [source, bigtable, batch, gcp, nosql, wide-column]
   - title: create
     description: Generates data directly from configuration without external data sources. Supports listing explicit elements or generating sequences from a range specification.
     tags: [source, create, batch, streaming, generate, test, dummy]
@@ -20,6 +23,9 @@ sources:
   - title: http
     description: Sends HTTP requests and outputs the responses. Supports GET/POST/PUT/DELETE methods, FreeMarker template expressions for endpoint/params/headers/body, loop-based pagination, request chaining with input dependencies, response format handling (text/json/xml/bytes), backoff/retry configuration, and rate limiting.
     tags: [source, http, batch, api, rest]
+  - title: jdbc
+    description: Reads data from relational databases via JDBC queries. Supports MySQL, PostgreSQL and other JDBC-compatible databases with parallel reads over split queries.
+    tags: [source, jdbc, batch, database, sql, mysql, postgresql]
   - title: postgres
     description: .
     tags: [source, postgres, batch]
@@ -48,10 +54,16 @@ transforms:
   - title: query
     description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL so aggregation, ORDER BY/LIMIT and set operations (UNION/INTERSECT/EXCEPT) run over the per-element collection. External tables (JDBC / Spanner / Bigtable / REST) can be joined on their keys as batched lookup-joins that never scan the external table - point, key-prefix or bounded-range fetches, and correlated LATERAL blocks whose aggregation/ORDER BY/LIMIT run over each key's fetched rows inside the DoFn. Spanner sources also expose parameterized GoogleSQL/GQL statements as key-driven query tables (Spanner Graph traversals, full-text SEARCH, arbitrary parameterized queries). One element yields zero or more output rows (fan-out or fold), and windowing/timestamps are preserved so batch and streaming behave identically.
     tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, graph, search]
+  - title: reshuffle
+    description: Redistributes elements across workers to prevent fusion and enable checkpointing. Useful for balancing load after a fan-out step or before an expensive operation.
+    tags: [transform, reshuffle, batch, streaming, fusion, checkpoint]
   - title: select
     description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
     tags: [transform, select, filter, batch, streaming, field, projection]
 sinks:
+  - title: auxia
+    description: Sends input data as events to the Auxia platform via its ingestion API.
+    tags: [sink, auxia, batch, streaming, event, api]
   - title: bigquery
     description: Writes input data to Google BigQuery tables. Supports multiple write methods (FILE_LOADS, STREAMING_INSERTS, STORAGE_WRITE_API, STORAGE_API_AT_LEAST_ONCE), dynamic destination tables via FreeMarker templates, time partitioning, clustering, primary key, schema update options, auto-sharding, KMS encryption, and failure handling.
     tags: [sink, bigquery, batch, streaming, gcp, sql]
@@ -70,6 +82,9 @@ sinks:
   - title: firestore
     description: Writes or deletes documents in Google Cloud Firestore. Supports flexible document name generation from fields, templates, or auto-generated UUIDs. Includes RPC QoS tuning for write throughput control.
     tags: [sink, firestore, batch, streaming, gcp, nosql, document]
+  - title: jdbc
+    description: Writes data to relational databases via JDBC statements. Supports MySQL, PostgreSQL and other JDBC-compatible databases with batching and configurable write operations.
+    tags: [sink, jdbc, batch, streaming, database, sql, mysql, postgresql]
   - title: pubsub
     description: Publishes input data as messages to Google Cloud Pub/Sub topics. Supports JSON, Avro, and Protocol Buffers serialization formats. Includes dynamic topic routing via FreeMarker templates, custom message attributes with template expressions, message ID and ordering key control, batch size tuning, and passthrough of PubsubMessage inputs.
     tags: [sink, pubsub, batch, streaming, gcp, messaging]
