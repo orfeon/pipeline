@@ -114,11 +114,8 @@ public class JsonSchemaUtil {
     }
 
     private static String generateId(String baseDir, Path path) {
-        return "https://mercari.com" + path
-                .toFile()
-                .getPath()
-                .replaceFirst(baseDir, "")
-                .replaceFirst("\\.json", "");
+        final String relative = Path.of(baseDir).relativize(path).toString().replace('\\', '/');
+        return "https://mercari.com/" + relative.replaceFirst("\\.json$", "");
     }
 
     private static String readFile(Path path) {

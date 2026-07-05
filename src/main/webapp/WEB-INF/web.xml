@@ -7,8 +7,27 @@
     <display-name>Mercari Pipeline Server</display-name>
 
     <welcome-file-list>
-        <welcome-file>index.jsp</welcome-file>
+        <welcome-file>index.html</welcome-file>
     </welcome-file-list>
+
+    <!-- Serve static resources with no-cache (revalidate via Last-Modified/ETag) so the
+         ES modules under js/ never go stale after a redeploy. Jetty-specific override. -->
+    <servlet>
+        <servlet-name>default</servlet-name>
+        <servlet-class>org.eclipse.jetty.ee11.servlet.DefaultServlet</servlet-class>
+        <init-param>
+            <param-name>cacheControl</param-name>
+            <param-value>no-cache</param-value>
+        </init-param>
+        <init-param>
+            <param-name>etags</param-name>
+            <param-value>true</param-value>
+        </init-param>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>default</servlet-name>
+        <url-pattern>/</url-pattern>
+    </servlet-mapping>
 
     <servlet>
         <servlet-name>MPipelineApiServer</servlet-name>

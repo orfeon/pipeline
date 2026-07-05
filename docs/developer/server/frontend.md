@@ -6,16 +6,22 @@ This document describes the frontend architecture of Mercari Pipeline GUI Editor
 
 ```
 src/main/webapp/
-├── index.jsp                     # Main JSP page (entry point)
+├── index.html                    # Main page (entry point, plain HTML — no JSP)
 ├── css/
 │   └── index.css                 # Custom styles
-└── js/
-    └── app.js                    # Single consolidated application file (IIFE)
+└── js/                           # Native ES modules (no bundler / build step)
+    ├── main.js                   # Entry point: loads spec, wires all modules together
+    ├── util.js                   # DOM/HTTP helpers, escapeHtml/setStatus, schema & records rendering
+    ├── monaco.js                 # Monaco editor management + JSON Schema cache/registration
+    ├── canvas.js                 # Drawflow adapter + config generate/validate/import
+    ├── result.js                 # Result modal + pipeline execution (dryrun/run/launch)
+    ├── modals.js                 # Module config / System / Options / Config editor / Launch modals
+    ├── agent.js                  # AI agent chat
+    └── autosave.js               # localStorage workspace auto-save / restore
 ```
 
 ## Technology Stack
 
-- jQuery 4.0.0 (DOM manipulation, AJAX)
 - Bootstrap 5.3.2 (UI components, modals, accordion)
 - Bootstrap Icons 1.11.1 (icon library)
 - Drawflow 0.0.60 (visual node editor)
@@ -23,49 +29,64 @@ src/main/webapp/
 - Monaco Editor 0.53.0 (YAML code editor, loaded lazily via ESM)
 - monaco-yaml-inline 1.0.0 (YAML language server for Monaco, loaded lazily via ESM)
 
+No framework and no jQuery: DOM access uses the native DOM API and HTTP uses `fetch`.
+All CDN `<script>`/`<link>` tags from jsdelivr carry SRI (`integrity` + `crossorigin`)
+attributes; when bumping a library version, recompute the hash
+(`curl -s <url> | openssl dgst -sha384 -binary | openssl base64 -A`).
+
 ## Architecture
 
-All application code lives in a single IIFE in `app.js`:
+The application is split into native ES modules loaded via
+`<script type="module" src="js/main.js">` — no bundler, npm, or build step.
+State is private to each module; cross-module access goes through exported functions only.
 
-```javascript
-(function($) {
-    'use strict';
-    // All state, functions, and event handlers are private
-    // No global namespace pollution
-})(jQuery);
+Import graph (acyclic; `util.js` at the bottom, `main.js` at the top):
+
+```
+main.js ─→ canvas.js, monaco.js, modals.js, result.js, agent.js, autosave.js
+modals.js ─→ util, monaco, canvas, result
+result.js ─→ util, canvas
+agent.js  ─→ util, canvas
+autosave.js ─→ util, canvas
+canvas.js ─→ util          (ALL Drawflow API access lives here — adapter)
+monaco.js ─→ util
 ```
 
-### Section Layout
+Two deliberate boundaries:
 
-`app.js` is organized into numbered sections:
-
-| Section | Description |
-|---------|-------------|
-| 1 | State variables |
-| 1.5 | Monaco Editor management (lazy loading, creation, value get/set) |
-| 1.8 | YAML Schema builders and lazy-load helpers |
-| 2 | Utilities (escapeHtml, setStatus, formatTimestamp, schema/records rendering) |
-| 3 | Drawflow & Canvas (init, module list, node management) |
-| 4 | Pipeline config generation (generateConfig, getValidationErrors) |
-| 5 | Module Config Modal |
-| 6 | System & Options Modals |
-| 7 | Config Editor Modal |
-| 8 | Launch Modal |
-| 9 | Result Modal |
-| 10 | Pipeline Execution (dryrun, run) |
-| 10.5 | Agent Chat |
-| 11 | Init & Event Handlers |
+- **`canvas.js` is the Drawflow adapter.** No other module touches the Drawflow
+  editor instance; they call exported functions (`getNodeData`, `updateNodeData`,
+  `isNodeNameTaken`, `removeNode`, `generateConfig`, `importConfigToCanvas`, …).
+  Replacing the node-editor library should touch this file only.
+- **canvas → UI callbacks are injected.** `initDrawflow({ onEditNode, onShowSchema,
+  onShowRecords })` receives the modal-opening functions from `main.js`, so
+  `canvas.js` never imports UI modules and the graph stays acyclic.
 
 ## Initialization Flow
+
+`main.js`:
 
 ```
 init()
   → loadSpec()              // GET /api/spec (module summaries only)
-  → initDrawflow()          // Initialize Drawflow editor
-  → initModuleList()        // Render module items in left pane
-  → initEventHandlers()     // Bind all event handlers
+  → initDrawflow(callbacks) // Initialize Drawflow editor (canvas.js)
+  → initModuleList(defs)    // Render module items in left pane (canvas.js)
+  → initRunButtons()        // Dry Run / Run buttons (result.js)
+  → initModalEvents()       // All modal buttons + shown.bs.modal handlers (modals.js)
+  → initAgent()             // Agent chat events (agent.js)
+  → initResizeHandle()      // Left pane resizing (main.js)
   → loadMonaco()            // Pre-load Monaco (fire-and-forget)
+  → initAutoSave()          // Restore saved workspace + start auto-saving (autosave.js)
 ```
+
+## Workspace Auto-Save
+
+`autosave.js` persists `{ config: generateConfig(), positions, savedAt }` to
+`localStorage` (key `mercari-pipeline-workspace`) with a 1s debounce, and restores it
+on page load, so a reload does not lose work. Change notifications come from
+`canvas.js` (`setChangeListener`): Drawflow node/connection events, `updateNodeData`,
+and `setSystemConfig`/`setOptionsConfig`. A corrupted or empty saved payload is
+ignored (startup falls back to a blank canvas).
 
 ## Data Loading Strategy
 
@@ -89,14 +110,14 @@ Returns only lightweight module summaries (~3KB):
 
 Schemas are fetched and cached when the corresponding modal opens for the first time:
 
-| Endpoint | Trigger | Cache variable |
-|----------|---------|---------------|
+| Endpoint | Trigger | Cache |
+|----------|---------|-------|
 | `GET /api/spec/{type}/{name}` | Module config modal opens | (not cached, fetched every time) |
-| `GET /api/spec/system` | System modal opens | `cachedSystemSchema` |
-| `GET /api/spec/options` | Options modal opens | `cachedOptionsSchema` |
-| `GET /api/spec/launch` | Launch modal opens | `cachedLaunchSchema` |
+| `GET /api/spec/system` | System modal opens | `schemaCache.system` |
+| `GET /api/spec/options` | Options modal opens | `schemaCache.options` |
+| `GET /api/spec/launch` | Launch modal opens | `schemaCache.launch` |
 
-Lazy-load helpers: `ensureSystemSchema()`, `ensureOptionsSchema()`, `ensureLaunchSchema()`.
+Lazy-load helper: `ensureSchema(kind)` with `kind` = `'system' | 'options' | 'launch'`.
 
 ## Monaco Editor Integration
 
@@ -138,10 +159,9 @@ Examples:
 | `moduleSchemas` | Dryrun result cache (module name -> output schema) |
 | `moduleOutputs` | Run result cache (module name -> output records) |
 | `currentEditingNodeId` | Node ID being edited in module config modal |
+| `pending` | Values handed from modal openers to their `shown.bs.modal` handlers (`moduleYaml`, `moduleType`, `moduleName`, `systemYaml`, `optionsYaml`) |
 | `yamlApi` | `configureMonacoYaml` return value for schema updates |
-| `cachedSystemSchema` | Lazy-loaded system JSON Schema |
-| `cachedOptionsSchema` | Lazy-loaded options JSON Schema |
-| `cachedLaunchSchema` | Lazy-loaded launch JSON Schema |
+| `schemaCache` | Lazy-loaded JSON Schemas keyed by kind (`system` / `options` / `launch`) |
 | `monacoInstance` | Cached Monaco module promise |
 | `monacoEditors` | Map of containerId -> Monaco editor instance |
 
@@ -161,9 +181,7 @@ Examples:
 | Function | Description |
 |----------|-------------|
 | `buildStaticSchemas()` | Builds schema array from cached system/options schemas |
-| `ensureSystemSchema()` | Fetches and caches system schema (returns promise) |
-| `ensureOptionsSchema()` | Fetches and caches options schema (returns promise) |
-| `ensureLaunchSchema()` | Fetches and caches launch schema (returns promise) |
+| `ensureSchema(kind)` | Fetches and caches `/api/spec/{kind}` (system/options/launch, returns promise) |
 
 ### Canvas & Config
 
@@ -174,6 +192,7 @@ Examples:
 | `createNodeHtml(moduleName, moduleType, name)` | Generates HTML for a Drawflow node |
 | `generateConfig()` | Generates full pipeline config YAML from canvas state |
 | `getValidationErrors(config)` | Returns array of validation error strings |
+| `importConfigToCanvas(config)` | Clears and rebuilds the canvas from a parsed config (used by the config editor's Apply and the agent's apply-config) |
 | `runPipeline(type)` | Executes pipeline (dryrun/run) via `/api/pipeline` |
 
 ### Modals
@@ -201,55 +220,58 @@ Examples:
 
 ## Event Handlers
 
+Each module binds its own handlers in an `init*` function called from `main.js`
+(`initRunButtons` in result.js, `initModalEvents` in modals.js, `initAgent` in agent.js),
+via the `on(id, eventName, handler)` helper — a thin wrapper over `addEventListener`
+(Bootstrap dispatches its modal events natively):
+
 ```javascript
 // Header buttons
-$('#btn-dryrun').on('click', () => runPipeline('dryrun'))
-$('#btn-run').on('click', () => runPipeline('run'))
-$('#btn-launch').on('click', openLaunchModal)
-$('#btn-edit').on('click', openConfigEditor)
+on('btn-dryrun', 'click', () => runPipeline('dryrun'))
+on('btn-run', 'click', () => runPipeline('run'))
+on('btn-launch', 'click', openLaunchModal)
+on('btn-edit', 'click', openConfigEditor)
 
 // Settings buttons
-$('#btn-system').on('click', openSystemModal)
-$('#btn-options').on('click', openOptionsModal)
-$('#btn-apply-system').on('click', applySystemConfig)
-$('#btn-apply-options').on('click', applyOptionsConfig)
+on('btn-system', 'click', openSystemModal)
+on('btn-options', 'click', openOptionsModal)
+on('btn-apply-system', 'click', applySystemConfig)
+on('btn-apply-options', 'click', applyOptionsConfig)
 
 // Module config modal
-$('#btn-save-module').on('click', saveModuleConfig)
-$('#btn-delete-module').on('click', deleteModule)
+on('btn-save-module', 'click', saveModuleConfig)
+on('btn-delete-module', 'click', deleteModule)
 
 // Launch modal
-$('#launch-runner').on('change', onRunnerChanged)
-$('#launch-environment').on('change', onEnvironmentChanged)
-$('#btn-launch-execute').on('click', executeLaunch)
+on('launch-runner', 'change', onRunnerChanged)
+on('launch-environment', 'change', onEnvironmentChanged)
+on('btn-launch-execute', 'click', executeLaunch)
 
 // Agent chat
-$('#btn-agent').on('click', openAgentModal)
-$('#btn-agent-send').on('click', agentSendMessage)
-$('#btn-agent-clear').on('click', agentClearHistory)
+on('btn-agent', 'click', openAgentModal)
+on('btn-agent-send', 'click', agentSendMessage)
+on('btn-agent-clear', 'click', agentClearHistory)
 
 // Edit config modal
-$('#btn-edit').on('click', openConfigEditor)
-$('#edit-format').on('change', updateConfigEditorContent)
-$('#btn-copy-config').on('click', copyConfigToClipboard)
-$('#btn-download-config').on('click', downloadConfig)
-$('#btn-apply-config').on('click', applyConfig)
+on('edit-format', 'change', updateConfigEditorContent)
+on('btn-copy-config', 'click', copyConfigToClipboard)
+on('btn-download-config', 'click', downloadConfig)
+on('btn-apply-config', 'click', applyConfig)
+on('btn-clear-config', 'click', clearConfigEditor)
 
 // Monaco: modal shown handlers (schema loading + editor init)
-$('#moduleConfigModal').on('shown.bs.modal', ...)  // Fetch module schema + init editor
-$('#systemModal').on('shown.bs.modal', ...)         // ensureSystemSchema + init editor
-$('#optionsModal').on('shown.bs.modal', ...)        // ensureOptionsSchema + init editor
-$('#editConfigModal').on('shown.bs.modal', ...)     // Init editor
+on('moduleConfigModal', 'shown.bs.modal', ...)  // Fetch module schema + init editor
+on('systemModal', 'shown.bs.modal', ...)        // ensureSchema('system') + init editor
+on('optionsModal', 'shown.bs.modal', ...)       // ensureSchema('options') + init editor
+on('editConfigModal', 'shown.bs.modal', ...)    // Init editor
 
 // Drawflow events
-editor.on('nodeCreated', ...)
 editor.on('nodeRemoved', ...)
 editor.on('connectionCreated', ...)
-editor.on('connectionRemoved', ...)
 container.addEventListener('dblclick', handleDoubleClick)  // Opens module config modal
 ```
 
-## HTML Structure (index.jsp)
+## HTML Structure (index.html)
 
 ### Main Layout IDs
 
@@ -305,6 +327,7 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 <!-- Edit Config Modal (Monaco editor, YAML or JSON) -->
 #editConfigModal
 #edit-format, #edit-content (Monaco container)
+#file-import (hidden file input), #btn-import-config
 #btn-copy-config, #btn-download-config, #btn-apply-config
 
 <!-- Result Modal -->
@@ -320,8 +343,6 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 #agent-chat-messages, #agent-chat-input
 #btn-agent-send, #btn-agent-clear
 
-<!-- Hidden -->
-#file-import (hidden file input)
 ```
 
 ## CSS Architecture (index.css)
@@ -477,7 +498,7 @@ sinks:
 
 ### Adding a New Modal
 
-1. Add HTML modal structure in `index.jsp`:
+1. Add HTML modal structure in `index.html`:
 ```html
 <div class="modal fade" id="newModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog">
@@ -493,19 +514,18 @@ sinks:
 </div>
 ```
 
-2. Add functions and event handlers in `app.js`:
+2. Add functions and event handlers in `modals.js` (or the module that owns the feature):
 ```javascript
 // In the appropriate section, add:
 function openNewModal() {
-    const modal = new bootstrap.Modal(document.getElementById('newModal'));
-    modal.show();
+    showModal('newModal');
 }
 
-// In initEventHandlers(), bind:
-$('#btn-new').on('click', openNewModal);
+// In the owning module's init*Events() function, bind:
+on('btn-new', 'click', openNewModal);
 
 // If Monaco editor is needed, add shown.bs.modal handler:
-$('#newModal').on('shown.bs.modal', function() {
+on('newModal', 'shown.bs.modal', function() {
     loadMonaco().then(function() {
         // Set up schema and editor
     });
@@ -527,31 +547,26 @@ public static void serveNewSchema(...) throws IOException {
 case "new" -> SpecService.serveNewSchema(request, response);
 ```
 
-3. Add a lazy-load helper in `app.js`:
+3. Use the generic lazy-load helper in `monaco.js` — no new code needed:
 ```javascript
-let cachedNewSchema = null;
-
-function ensureNewSchema() {
-    if (cachedNewSchema) return Promise.resolve(cachedNewSchema);
-    return $.ajax({ url: '/api/spec/new', type: 'GET', dataType: 'json' }).then(function(data) {
-        cachedNewSchema = data;
-        return data;
-    });
-}
+ensureSchema('new').then(function(schema) { ... });  // cached in schemaCache.new
 ```
 
-## Cache Busting
+## Caching
 
-When making changes, increment the `id` query parameter in `index.jsp`:
-
-```html
-<link href="css/index.css?id=15" rel="stylesheet">
-<script src="js/app.js?id=15"></script>
-```
+No manual cache busting is needed. `web.xml` overrides Jetty's `default` servlet with
+`cacheControl=no-cache` + `etags=true`, so browsers revalidate every static resource
+(HTML/CSS/JS modules) with a conditional request and receive `304 Not Modified` unless
+the file changed. Note this override references
+`org.eclipse.jetty.ee11.servlet.DefaultServlet` and is therefore Jetty-specific
+(fine here: both the jib image and the maven plugin run Jetty 12 ee11).
 
 ## Development Commands
 
 ```bash
+# Run the server locally against src/main/webapp (no packaging needed)
+mvn -Pserver jetty:run -DskipTests
+
 # Build WAR file
 mvn clean package -Pserver -DskipTests
 
@@ -563,13 +578,12 @@ http://localhost:8080/
 
 - Modern browsers (Chrome, Firefox, Safari, Edge)
 - Requires JavaScript enabled
-- Uses ES6+ features (let, const, arrow functions, template literals, dynamic import)
+- Uses native ES modules, `fetch` + `AbortSignal.timeout`, and dynamic `import()`
 
 ## Known Limitations
 
 - Single canvas/module space (Drawflow "Home")
 - No undo/redo functionality
-- No auto-save (manual export required)
 - Connection ports limited to single input/output per side
 
 ## Troubleshooting
@@ -600,8 +614,8 @@ All JSON Schemas served to Monaco editors must be "flattened" before sending to 
 
 ### Modal Not Opening
 
-1. Check modal ID in `index.jsp` matches the ID used in `app.js`
-2. Verify event handler is bound in `initEventHandlers()`
+1. Check modal ID in `index.html` matches the ID used in the JS module
+2. Verify event handler is bound in the owning module's `init*Events()` function
 3. Check browser console for errors
 
 ## Related Documentation
