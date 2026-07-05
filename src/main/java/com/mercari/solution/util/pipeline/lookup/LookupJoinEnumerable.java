@@ -120,7 +120,7 @@ public final class LookupJoinEnumerable extends AbstractEnumerable<Object[]> {
         Map<List<Object>, List<Object[]>> byPrefix = new HashMap<>();
         if (!requests.isEmpty()) {
             Iterable<Object[]> fetched =
-                    source.lookup(table, indexName, LookupBatch.of(requests), rightProjects);
+                    source.lookupWithCache(table, indexName, LookupBatch.of(requests), rightProjects);
             for (Object[] row : fetched) {
                 List<Object> prefixKey = new ArrayList<>(rightPrefixPos.length);
                 for (int pos : rightPrefixPos) {

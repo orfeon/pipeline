@@ -37,6 +37,14 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
     metadata once; `close()` deregisters and must leave the instance
     re-`setup()`-able. `tableSchemas()`, `keyCandidates(table)`,
     `lookup(table, indexName, batch, projects)`, `supportsKeyPrefixLookup()`.
+    The base class also owns the **on-memory lookup cache** (opt-in via
+    `setCacheSpec` / the `cache` config block, Guava Cache, per-request
+    granularity): runtime callers go through the final `lookupWithCache()`,
+    which serves point/prefix-equality requests from cache, fetches only the
+    misses and attributes returned rows to requests by key prefix; range
+    batches and projections missing the key columns bypass it. Cached rows are
+    shared — never mutate them. New runtime call sites should use
+    `lookupWithCache`, not `lookup` (which stays the subclass SPI).
   - `LookupJoinRule` / `LookupJoin` / `LookupJoinEnumerable` — the plain
     lookup-join: planner rule (key-prefix contract), enumerable rel (codegen
     embeds registry ids as constants), batched runtime (512-row batches, key
@@ -307,8 +315,9 @@ Semantics & pitfalls (tests: `LookupSeekableTableTest`,
 
 - **Point equi-joins only** (no prefix/range/LATERAL), **one `seekRow` per
   input row** (no batching/dedup — jdbc/spanner/bigtable lose their batch
-  advantage; a bundle-scoped cache via `startBundle`/`finishBundle` is the
-  future mitigation). For heavy enrichment prefer the query module.
+  advantage; the source-level on-memory cache (`cache` block →
+  `lookupWithCache`) absorbs repeated keys). For heavy enrichment prefer the
+  query module.
 - Beam quirk: each equality must put the main-input column on the LEFT
   (`c.userId = u.USER_ID`); the reverse crashes in Beam's
   `JoinAsLookup.joinFieldsMapping` (AIOOBE).
