@@ -131,7 +131,7 @@ public class LookupSeekableTable extends SchemaBaseBeamTable implements BeamSqlS
             keyValues.add(value);
         }
 
-        final Iterable<Object[]> rows = source.lookup(table, matched.indexName(),
+        final Iterable<Object[]> rows = source.lookupWithCache(table, matched.indexName(),
                 LookupBatch.of(List.of(LookupRequest.point(keyValues))), null);
 
         // The lookup contract allows a superset; filter to exact key matches.

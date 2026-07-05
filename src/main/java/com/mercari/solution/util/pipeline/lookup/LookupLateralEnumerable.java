@@ -114,7 +114,7 @@ public final class LookupLateralEnumerable extends AbstractEnumerable<Object[]> 
         }
 
         if (!matchedByRequest.isEmpty()) {
-            final Iterable<Object[]> fetched = source.lookup(table, indexName,
+            final Iterable<Object[]> fetched = source.lookupWithCache(table, indexName,
                     LookupBatch.of(new ArrayList<>(matchedByRequest.keySet())), null);
             // Index leaf rows by key prefix, then assign each request its exact
             // (range-filtered) row set.

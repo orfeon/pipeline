@@ -79,7 +79,9 @@ Constraints (differences from the `query` module's lookup-join):
 - Write each equality with the **main-input column on the left**:
   `ON c.itemId = m.ITEM_ID` (the reverse order fails inside Beam's join planning).
 - One backend request per input row — there is no batching or key deduplication.
-  For high-volume enrichment prefer the `query` module (512-row batched fetches).
+  The source-level `cache` block (see the [query](query.md) module's "Lookup cache")
+  applies here too and absorbs repeated keys; for high-volume enrichment still
+  prefer the `query` module (512-row batched fetches).
 - `DATE` / `TIME` columns of a lookup table surface as ISO-8601 **strings** (a Beam
   limitation on logical types in the seekable-join output); `CAST` them in SQL when
   the temporal type is needed. `TIMESTAMP` columns pass through natively.

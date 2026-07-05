@@ -110,6 +110,41 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 | name      | required | String         | Schema name the source's tables are referenced by in SQL (`name.table`).       |
 | type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`.                                  |
 | tables    | required | Array<Table\>  | Tables to expose. Per-type table parameters below.                             |
+| cache     | optional | Cache          | On-memory cache over the source's lookups (see below). Off unless the block is present. |
+
+### Lookup cache
+
+Because the SQL is evaluated **per element**, the same key is looked up again for
+every element that carries it. The `cache` block keeps recent lookup results in a
+bounded in-memory cache on each worker, so repeated keys (hot users, small master
+tables, REST endpoints) skip the backend call. Cached results are **stale for up to
+`expireAfterSeconds`** (in addition to any backend-side staleness such as Spanner
+`maxStalenessSeconds`), so enable it only when the looked-up tables are read-mostly.
+
+| parameter          | optional | type    | description                                                                          |
+|--------------------|----------|---------|----------------------------------------------------------------------------------------|
+| enabled            | optional | Boolean | Set `false` to keep the cache off while leaving the block in place (default `true`). |
+| maxSize            | optional | Integer | Max cached lookup keys (default 10000).                                              |
+| expireAfterSeconds | optional | Integer | TTL from write in seconds; omit or `0` for no expiry.                                |
+| cacheEmptyResults  | optional | Boolean | Also cache "no matching row" results — recommended for LEFT joins against sparse tables (default `true`). |
+
+Point and key-prefix equality lookups are cached per key (and per column
+projection); **range conditions always go to the backend**. The cache applies to
+all of the source's tables, is per worker thread, and counts hits/misses in the
+`lookup_cache` metrics namespace (`<sourceName>_hit` / `<sourceName>_miss`).
+
+```yaml
+sources:
+  - name: db
+    type: jdbc
+    driver: org.postgresql.Driver
+    url: jdbc:postgresql://localhost:5432/mydb
+    cache:
+      maxSize: 10000
+      expireAfterSeconds: 300
+    tables:
+      - name: users
+```
 
 ### jdbc source
 

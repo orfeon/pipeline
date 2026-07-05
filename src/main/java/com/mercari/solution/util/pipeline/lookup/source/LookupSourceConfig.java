@@ -49,9 +49,14 @@ public final class LookupSourceConfig {
         private List<String> allowedHosts;
         private Long timeoutMillis;
 
+        private CacheParameters cache;
+
         private List<TableParameters> tables;
 
         public void validate(int index) {
+            if(cache != null) {
+                cache.validate(index);
+            }
             if(name == null) {
                 throw new IllegalModuleException("parameters.sources[" + index + "].name must not be null");
             }
@@ -85,6 +90,43 @@ public final class LookupSourceConfig {
                 default -> throw new IllegalModuleException(
                         "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest but was: " + type);
             }
+        }
+    }
+
+    /**
+     * On-memory cache over the source's key-driven lookups. Presence of the
+     * block enables the cache (set {@code enabled: false} to keep it off);
+     * point / prefix-equality lookups are then served from a bounded per-worker
+     * cache — range lookups always go to the backend. Cached rows are stale up
+     * to {@code expireAfterSeconds}, so enable it only for read-mostly tables.
+     */
+    public static class CacheParameters implements Serializable {
+
+        private Boolean enabled;
+        private Long maxSize;
+        private Long expireAfterSeconds;
+        private Boolean cacheEmptyResults;
+
+        private void validate(int index) {
+            if(maxSize != null && maxSize <= 0) {
+                throw new IllegalModuleException(
+                        "parameters.sources[" + index + "].cache.maxSize must be positive");
+            }
+            if(expireAfterSeconds != null && expireAfterSeconds < 0) {
+                throw new IllegalModuleException(
+                        "parameters.sources[" + index + "].cache.expireAfterSeconds must not be negative");
+            }
+        }
+
+        private boolean isEnabled() {
+            return !Boolean.FALSE.equals(enabled);
+        }
+
+        private LookupSource.CacheSpec toSpec() {
+            return new LookupSource.CacheSpec(
+                    maxSize == null ? LookupSource.CacheSpec.DEFAULT_MAX_SIZE : maxSize,
+                    expireAfterSeconds == null ? 0L : expireAfterSeconds,
+                    cacheEmptyResults == null || cacheEmptyResults);
         }
     }
 
@@ -145,6 +187,14 @@ public final class LookupSourceConfig {
     }
 
     private static LookupSource createSource(final SourceParameters source) {
+        final LookupSource lookupSource = createSourceInternal(source);
+        if(source.cache != null && source.cache.isEnabled()) {
+            lookupSource.setCacheSpec(source.cache.toSpec());
+        }
+        return lookupSource;
+    }
+
+    private static LookupSource createSourceInternal(final SourceParameters source) {
         return switch (source.type) {
             case "jdbc" -> {
                 final JdbcLookupSource.Builder builder = JdbcLookupSource.builder()
