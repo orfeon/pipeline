@@ -27,7 +27,7 @@ When the module has multiple inputs, each input is reshuffled independently and 
 | name       | required | String                            | Step name. specified to be unique in config file.                     |
 | module     | required | String                            | Specified `reshuffle`                                                 |
 | inputs     | required | Array<String\>                    | Specify the names of the steps to be used as input.                   |
-| wait       | optional | Array<String\>                    | Specify the names of the steps to wait for before processing.        |
+| waits      | optional | Array<String\>                    | Specify the names of the steps to wait for before processing.        |
 | strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.                           |
 | parameters | optional | Map<String,Object\>               | This module takes no individual parameters.                           |
 

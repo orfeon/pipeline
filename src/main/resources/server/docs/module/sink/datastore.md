@@ -19,7 +19,7 @@ The entity key can be generated from one or more input fields, a FreeMarker temp
 | name      | required | String              | Step name. specified to be unique in config file.                     |
 | module    | required | String              | Specified `datastore`                                                 |
 | inputs    | required | Array<String\>      | Specify the names of the step to be used as input.                    |
-| wait      | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
+| waits     | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
 | strategy  | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.               |
 | parameters | required | Map<String,Object\> | Specify the following individual parameters                          |
 

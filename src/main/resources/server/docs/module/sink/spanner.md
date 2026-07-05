@@ -25,7 +25,7 @@ Supports the following mutation operations:
 | name       | required | String              | Step name. specified to be unique in config file.                     |
 | module     | required | String              | Specified `spanner`                                                   |
 | inputs     | required | Array<String\>      | Specify the names of the step to be used as input.                    |
-| wait       | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
+| waits      | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
 | strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.               |
 | failFast   | optional | Boolean             | If `true`, write failures cause the pipeline to fail immediately. If `false`, failed mutations are reported to the failure output. Default: `true`. |
 | parameters | required | Map<String,Object\> | Specify the following individual parameters                          |
@@ -431,7 +431,7 @@ sinks:
     module: spanner
     inputs:
       - child_source
-    wait:
+    waits:
       - parent_sink
     parameters:
       projectId: myproject
@@ -547,7 +547,7 @@ sinks:
     module: spanner
     inputs:
       - diff
-    wait:
+    waits:
       - spanner_write
     parameters:
       projectId: myproject

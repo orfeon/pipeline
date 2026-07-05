@@ -19,7 +19,7 @@ The row key is generated from a FreeMarker template expression. Column families 
 | name       | required | String              | Step name. specified to be unique in config file.                     |
 | module     | required | String              | Specified `bigtable`                                                  |
 | inputs     | required | Array<String\>      | Specify the names of the step to be used as input.                    |
-| wait       | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
+| waits      | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
 | strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.               |
 | logging    | optional | Array<[Logging](../common/logging.md)\> | Logging settings. Supports `input` and `output` targets. |
 | parameters | required | Map<String,Object\> | Specify the following individual parameters                          |
