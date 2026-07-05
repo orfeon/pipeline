@@ -1,21 +1,49 @@
 # Mercari Pipeline
 
-The Mercari Pipeline enables you to run various pipelines without writing programs by simply defining a configuration file.
+[![test](https://github.com/orfeon/pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/orfeon/pipeline/actions/workflows/test.yml)
 
-Mercari Pipeline's primary target is Cloud Dataflow, and the same configuration files can also be run locally (DirectRunner) or on Apache Flink and Apache Spark clusters via Maven profiles.
+The Mercari Pipeline enables you to run various data pipelines without writing programs by simply defining a configuration file.
 
-(Mercari Dataflow Template has been renamed Mercari Pipeline)
+* **Config-driven**: describe a pipeline as sources → transforms → sinks in a YAML/JSON file — no code required.
+* **Rich built-in modules**: BigQuery, Cloud Spanner, Bigtable, Datastore, Firestore, Iceberg, JDBC, Pub/Sub, Kafka, Cloud Storage, HTTP, ONNX inference, per-element SQL and more. See the [module list](docs/config/module/README.md).
+* **Portable runners**: the primary target is Cloud Dataflow, and the same configuration file can also run locally (DirectRunner) or on Apache Flink / Apache Spark clusters via Maven profiles.
+* **Pipeline API Server**: an auxiliary web UI / REST API / MCP server with a built-in AI agent that helps you create, validate, debug, and deploy pipelines.
 
-See the [Document](docs/README.md) for usage, and [examples](examples/README.md) for ready-to-use configuration files for common use cases.
+> **Note**: Mercari Dataflow Template has been renamed **Mercari Pipeline**. If you are looking for the old name, this is the same project.
 
-## Usage Example
+## Documentation
 
-Mercari Pipeline can be deployed as a [FlexTemplate](https://cloud.google.com/dataflow/docs/guides/templates/using-flex-templates) for use with [Cloud Dataflow](https://cloud.google.com/dataflow) Runner.
-Pipelines are assembled based on the defined configuration file and can be executed as Cloud Dataflow Jobs.
+* [How to Deploy Pipeline](docs/deploy/README.md) — build container images / bundled jars for each runner
+* [How to Define Pipeline](docs/config/README.md) — configuration file reference ([module list](docs/config/module/README.md))
+* [How to Execute Pipeline](docs/exec/README.md) — run on Dataflow, locally, or on Flink/Spark
+* [Examples](examples/README.md) — ready-to-use configuration files for common use cases
+* [Developer docs](docs/developer/README.md) — internals and how to extend modules
 
-Write the following yaml file and upload it to GCS (Suppose you upload it to gs://example/config.yaml).
+## Quick Start
 
-This configuration file stores the BigQuery query results in the table specified by Spanner.
+Mercari Pipeline is deployed as a [FlexTemplate](https://cloud.google.com/dataflow/docs/guides/templates/using-flex-templates) for use with the [Cloud Dataflow](https://cloud.google.com/dataflow) runner.
+Pipelines are assembled based on the defined configuration file and executed as Cloud Dataflow jobs.
+
+### 1. Deploy the template (first time only)
+
+Requirements: Java 21, [Maven 3](https://maven.apache.org/index.html), and the [gcloud command-line tool](https://cloud.google.com/sdk/gcloud).
+
+```sh
+# Build the source code and push the FlexTemplate container image to Artifact Registry
+gcloud auth configure-docker {region}-docker.pkg.dev
+mvn clean package -DskipTests -Dimage={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest
+
+# Generate a template file from the container image and upload it to GCS
+gcloud dataflow flex-template build gs://{path/to/template_file} \
+  --image "{region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest" \
+  --sdk-language "JAVA"
+```
+
+See [How to Deploy Pipeline](docs/deploy/README.md) for details, including images for local execution, the Pipeline API server, and bundled jars for Flink/Spark.
+
+### 2. Write a configuration file
+
+This configuration file stores BigQuery query results in the specified Cloud Spanner table.
 
 ```yaml
 sources:
@@ -39,13 +67,13 @@ sinks:
       table: mytable
 ```
 
-Assuming you have deployed the Mercari Pipeline to gs://example/template, run the following command.
+### 3. Run the job
 
 ```sh
 gcloud dataflow flex-template run bigquery-to-spanner \
   --project={gcp_project} \
   --region={region} \
-  --template-file-gcs-location=gs://example/template \
+  --template-file-gcs-location=gs://{path/to/template_file} \
   --parameters=config="$(cat path/to/config.yaml)"
 ```
 
@@ -53,180 +81,43 @@ The Dataflow job will be started, and you can check the execution status of the 
 
 <img src="docs/images/bigquery-to-spanner.png">
 
+You can also pass the config as a GCS path (`--parameters=config=gs://{path/to/config.yaml}`), run in streaming mode, launch via the REST API, run the pipeline locally with Docker, or submit it to a Flink/Spark cluster.
+See [How to Execute Pipeline](docs/exec/README.md) for all execution methods.
 
-## Deploy Template
+## Supported Runners (Maven profiles)
 
-Mercari Pipeline is used as FlexTemplate.
-Therefore, the Mercari Pipeline should be deployed according to the FlexTemplate creation steps.
+| Maven profile        | Runner         | Build artifact                                                 |
+|----------------------|----------------|----------------------------------------------------------------|
+| `dataflow` (default) | DataflowRunner | FlexTemplate container image                                   |
+| `direct`             | DirectRunner   | Container image for local execution                            |
+| `flink`              | FlinkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
+| `spark`              | SparkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
+| `server`             | —              | Pipeline API server container image (WAR on Jetty)             |
 
-### Requirements
+(Other profiles: `prism`, `portable`, `dataflow-gpu`.)
 
-* Java 21
-* [Maven 3](https://maven.apache.org/index.html)
-* [gcloud command-line tool](https://cloud.google.com/sdk/gcloud)
+## Pipeline API Server
 
-### Push Template Container Image to Cloud Container Registry.
+The Pipeline server is an auxiliary tool for creating, debugging, and deploying pipelines. It provides:
 
-The first step is to build the source code and register it as a container image in the [Cloud Artifact Registry](https://cloud.google.com/artifact-registry).
+* **Web UI (Pipeline Builder)** — build and edit pipeline configs in a GUI editor
+* **REST API** — validate config files and launch jobs programmatically
+* **MCP server & built-in AI agent** — AI integration that references the bundled module documentation to help you design pipelines
 
-To upload container images to the Artifact registry via Docker commands, you will first need to execute the following commands, depending on the repository region.
-
-```sh
-gcloud auth configure-docker {region}-docker.pkg.dev
-```
-
-The following command will generate a container for FlexTemplate from the source code and upload it to Artifact Registry.
-
-```sh
-mvn clean package -DskipTests -Dimage={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest
-```
-
-### Upload template file.
-
-The next step is to generate a template file to start a job from the container image and upload it to GCS.
-
-Use the following command to generate a template file that can execute a dataflow job from a container image, and upload it to GCS.
+Build and run it locally as follows, then open `http://localhost:8080/` in your browser.
 
 ```sh
-gcloud dataflow flex-template build gs://{path/to/template_file} \
-  --image "{region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/dataflow:latest" \
-  --sdk-language "JAVA"
-```
-
-## Run dataflow job from template file
-
-Run Dataflow Job from the template file.
-
-* gcloud command
-
-You can run template specifying config content text or gcs path that uploaded config file.
-
-```sh
-gcloud dataflow flex-template run {job_name} \
-  --project={gcp_project} \
-  --region={region} \
-  --template-file-gcs-location=gs://{path/to/template_file} \
-  --parameters=config="$(cat path/to/config.yaml)"
-```
-
-* REST API
-
-You can also run template by [REST API](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.flexTemplates/launch).
-
-```sh
-PROJECT_ID=[PROJECT_ID]
-REGION=[REGION]
-CONFIG="$(cat examples/xxx.yaml)"
-
-curl -X POST -H "Content-Type: application/json"  -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://dataflow.googleapis.com/v1b3/projects/${PROJECT_ID}/locations/${REGION}/flexTemplates:launch" -d "{
-  'launchParameter': {
-    'jobName': 'myJobName',
-    'containerSpecGcsPath': 'gs://{path/to/template_file}',
-    'parameters': {
-      'config': '$(echo "$CONFIG")',
-      'stagingLocation': 'gs://{path/to/staging}'
-    },
-    'environment': {
-      'tempLocation': 'gs://{path/to/temp}'
-    }
-  }
-}"
-```
-
-(The options `tempLocation` and `stagingLocation` are optional. If not specified, a bucket named `dataflow-staging-{region}-{project_no}` will be automatically generated and used)
-
-### Run Template in streaming mode
-
-To run Template in streaming mode, specify `streaming=true` in the parameter.
-
-```sh
-gcloud dataflow flex-template run {job_name} \
-  --project={gcp_project} \
-  --region={region} \
-  --template-file-gcs-location=gs://{path/to/template_file} \
-  --parameters=config=gs://{path/to/config.yaml} \
-  --parameters=streaming=true
-```
-
-## Build Docker image for local pipeline execution
-
-You can run pipeline locally. This is useful when you want to process small data quickly.
-
-```sh
-# To push the image to the GAR,
-# you may do so by using the following commands
-gcloud auth configure-docker {region}-docker.pkg.dev
-
-# Create and Upload Docker image to GAR for local run
-mvn clean package -DskipTests -Pdirect -Dimage="{region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct"
-
-# Pull direct container image
-docker pull {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct
-```
-
-## Run Pipeline locally
-
-For local execution, execute the following command to grant the necessary permissions
-
-```shell
-gcloud auth application-default login
-```
-
-The following is an example of a locally executed command.
-The authentication file and config file are mounted for access by the container.
-The other arguments (such as `project` and `config`) are the same as for normal execution.
-
-If you want to run in streaming mode, specify streaming=true in the argument as you would in normal execution.
-
-### Mac OS
-
-```sh
-docker run \
-  -v ~/.config/gcloud:/mnt/gcloud:ro \
-  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
-  --config="$(cat path/to/config.yaml)"
-```
-
-### Windows OS
-
-```sh
-docker run ^
-  -v C:\Users\{YourUserName}\AppData\Roaming\gcloud:/mnt/gcloud:ro ^
-  -v C:\Users\{YourWorkingDirPath}\:/mnt/config:ro ^
-  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct ^
-  --config=/mnt/config/{MyConfig}.yaml
-```
-
-* Note:
-  * If you use BigQuery module locally, you will need to specify the `tempLocation` argument.
-  * If the pipeline is to access an emulator running on a local machine, such as Cloud Spanner, the `--net=host` option is required.
-
-## Build Docker image for Pipeline API server
-
-You can build the Pipeline server, an auxiliary tool for creating, debugging, and deploying pipelines.
-It provides a web UI and REST API to validate config files and launch jobs, as well as an MCP server and
-built-in AI agent that reference the bundled module documentation to help you design pipelines.
-
-```sh
-# Create and Upload Docker image to GAR for pipeline api server
+# Build and push the server container image
 mvn clean package -DskipTests -Pserver -Dimage="{region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server"
 
-# Pull direct container image
-docker pull {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server
-```
-
-## Run Pipeline API server locally
-
-Execute the following command to open the `http://localhost:8080/` in your browser.
-
-### Mac OS
-
-```sh
+# Run locally
 docker run \
   -p "8080:8080" \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server
 ```
+
+See [How to Deploy Pipeline](docs/deploy/README.md) for deploying the server to Cloud Run.
 
 ## Committers
 
@@ -241,6 +132,6 @@ https://www.mercari.com/cla/
 
 ## License
 
-Copyright 2026 Mercari, Inc.
+Copyright (c) 2020 mercari
 
-Licensed under the MIT License.
+Licensed under the [MIT License](LICENSE).
