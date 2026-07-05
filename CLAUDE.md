@@ -169,6 +169,8 @@ server read docs from this location (bundled on the classpath):
 - `module/<type>/<name>.md` — per-module config reference, read by the agent's `DocsReader` tool
   (`listModules` / `getModule`). Each file needs YAML front-matter with `title:`.
 - `module/index.yaml` — module catalog (`title` / `description` / `tags` per module), used for discovery.
+  It is also the source of the Pipeline Builder UI's module list (`/api/spec`) — a module missing here
+  does not appear in the GUI editor.
 - `system.md` — `system` block reference.
 - MCP `DocsResources` also exposes these files as `docs://` resources.
 

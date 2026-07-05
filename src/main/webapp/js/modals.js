@@ -615,13 +615,15 @@ export function initModalEvents() {
         const yaml = pending.moduleYaml;
         Promise.all([
             loadMonaco(),
-            getJson('/api/spec/' + type + '/' + name)
+            // Not every catalog module has an editor schema — edit without one on 404
+            getJson('/api/spec/' + type + '/' + name).catch(function() { return null; })
         ]).then(function(results) {
-            applyYamlSchemas([{
+            const moduleEditorSchema = results[1];
+            applyYamlSchemas(moduleEditorSchema ? [{
                 uri: 'internal://module-config/' + type + '/' + name,
                 fileMatch: ['internal://server/module-yaml-editor.yaml'],
-                schema: results[1]
-            }]);
+                schema: moduleEditorSchema
+            }] : []);
             return setEditorValue('module-yaml-editor', yaml);
         });
     });

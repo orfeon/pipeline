@@ -5,10 +5,14 @@ import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.networknt.schema.SchemaRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * REST API service that returns all pipeline resource definitions in a single response.
@@ -18,6 +22,7 @@ public class SpecService {
 
     public static void init() {
         ConfigSchema.load();
+        ModuleIndex.load();
     }
 
     /**
@@ -28,7 +33,7 @@ public class SpecService {
             final HttpServletRequest request,
             final HttpServletResponse response) throws IOException {
 
-        response.setContentType("application/schema+json");
+        response.setContentType("application/json");
         response.setCharacterEncoding("UTF-8");
 
         try {
@@ -53,36 +58,12 @@ public class SpecService {
     }
 
     /**
-     * Returns only $id, title, description from each module schema (lightweight summaries).
+     * Returns the module catalog for the Pipeline Builder UI, taken from the
+     * agent-readable docs index (server/docs/module/index.yaml).
      */
-    private static JsonArray getModuleSummaries(final JsonArray fullSchemas) {
-        final JsonArray summaries = new JsonArray();
-        for (int i = 0; i < fullSchemas.size(); i++) {
-            final JsonObject full = fullSchemas.get(i).getAsJsonObject();
-            final JsonObject summary = new JsonObject();
-            if (full.has("$id")) {
-                summary.addProperty("$id", full.get("$id").getAsString());
-            }
-            if (full.has("title")) {
-                summary.addProperty("title", full.get("title").getAsString());
-            }
-            if (full.has("description")) {
-                summary.addProperty("description", full.get("description").getAsString());
-            }
-            summaries.add(summary);
-        }
-        return summaries;
-    }
-
     public static JsonObject getAllSchemasAsArrays() {
         final JsonObject result = new JsonObject();
-
-        final JsonObject modules = new JsonObject();
-        modules.add("sources", getModuleSummaries(ConfigSchema.getSourceJsonSchemas()));
-        modules.add("transforms", getModuleSummaries(ConfigSchema.getTransformJsonSchemas()));
-        modules.add("sinks", getModuleSummaries(ConfigSchema.getSinkJsonSchemas()));
-        result.add("modules", modules);
-
+        result.add("modules", ModuleIndex.getModules().deepCopy());
         return result;
     }
 
@@ -439,6 +420,69 @@ public class SpecService {
             }
             // Remove $defs after processing
             obj.remove("$defs");
+        }
+    }
+
+    /**
+     * Module catalog loaded from the agent-readable docs index
+     * (server/docs/module/index.yaml). The `title` field of each entry is the
+     * registered module name (matches @Source/@Transform/@Sink.Module(name=...)).
+     */
+    private static class ModuleIndex {
+
+        private static final String RESOURCES_MODULE_INDEX = "server/docs/module/index.yaml";
+
+        private static JsonObject modules;
+
+        private ModuleIndex(){};
+
+        public static void load() {
+            if (modules != null) {
+                return;
+            }
+            try (final InputStream is = Thread.currentThread().getContextClassLoader()
+                    .getResourceAsStream(RESOURCES_MODULE_INDEX)) {
+                if (is == null) {
+                    throw new RuntimeException("Module index resource not found: " + RESOURCES_MODULE_INDEX);
+                }
+                final Map<String, Object> index = new Yaml().load(is);
+                final JsonObject result = new JsonObject();
+                for (final String type : List.of("sources", "transforms", "sinks")) {
+                    result.add(type, toModuleArray(index.get(type)));
+                }
+                modules = result;
+            } catch (final IOException e) {
+                throw new RuntimeException("Failed to read module index: " + RESOURCES_MODULE_INDEX, e);
+            }
+        }
+
+        public static JsonObject getModules() {
+            load();
+            return modules;
+        }
+
+        private static JsonArray toModuleArray(final Object entries) {
+            final JsonArray array = new JsonArray();
+            if (!(entries instanceof List<?> list)) {
+                return array;
+            }
+            for (final Object entryObj : list) {
+                if (!(entryObj instanceof Map<?, ?> entry)) {
+                    continue;
+                }
+                final JsonObject module = new JsonObject();
+                module.addProperty("name", Objects.toString(entry.get("title"), ""));
+                module.addProperty("description", Objects.toString(entry.get("description"), ""));
+                final JsonArray tags = new JsonArray();
+                if (entry.get("tags") instanceof List<?> tagList) {
+                    for (final Object tag : tagList) {
+                        tags.add(Objects.toString(tag, ""));
+                    }
+                }
+                module.add("tags", tags);
+                array.add(module);
+            }
+            return array;
         }
     }
 

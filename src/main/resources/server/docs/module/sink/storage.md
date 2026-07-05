@@ -20,7 +20,7 @@ This module differs from the [Files Sink Module](files.md): the Files module wri
 | module    | required | String              | Specified `storage`                                                   |
 | inputs    | required | Array<String\>      | Specify the names of the step to be used as input.                    |
 | schema    | optional | [Schema](SCHEMA.md) | Output schema. If not specified, the input schema is used.            |
-| wait      | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
+| waits     | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
 | strategy  | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.               |
 | parameters | required | Map<String,Object\> | Specify the following individual parameters                          |
 

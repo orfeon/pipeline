@@ -28,7 +28,7 @@ The destination table can be specified statically or dynamically using FreeMarke
 | name       | required | String              | Step name. specified to be unique in config file.                     |
 | module     | required | String              | Specified `bigquery`                                                  |
 | inputs     | required | Array<String\>      | Specify the names of the step to be used as input.                    |
-| wait       | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
+| waits      | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
 | strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.               |
 | parameters | required | Map<String,Object\> | Specify the following individual parameters                          |
 

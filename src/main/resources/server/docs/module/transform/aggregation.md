@@ -31,7 +31,7 @@ Supports:
 | name       | required | String                                      | Step name. specified to be unique in config file.                     |
 | module     | required | String                                      | Specified `aggregation`                                               |
 | inputs     | required | Array<String\>                              | Specify the names of the steps to be used as input for aggregation.   |
-| wait       | optional | Array<String\>                              | Specify the names of the steps to wait for before processing.        |
+| waits      | optional | Array<String\>                              | Specify the names of the steps to wait for before processing.        |
 | strategy   | optional | [Strategy](../common/strategy.md)           | Windowing strategy for streaming execution.                           |
 | parameters | required | Map<String,Object\>                         | Specify the following individual parameters                          |
 
