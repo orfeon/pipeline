@@ -28,7 +28,7 @@ import java.io.Serializable;
 import java.time.Instant;
 import java.util.*;
 
-@Sink.Module(name="storage")
+@Sink.Module(name="storage", schema=true)
 public class StorageSink extends Sink {
 
     private static final Logger LOG = LoggerFactory.getLogger(StorageSink.class);

@@ -36,7 +36,7 @@ import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-@Sink.Module(name="pubsub")
+@Sink.Module(name="pubsub", schema=true)
 public class PubSubSink extends Sink {
 
     private static final Logger LOG = LoggerFactory.getLogger(PubSubSink.class);

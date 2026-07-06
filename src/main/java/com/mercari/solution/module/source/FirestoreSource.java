@@ -19,7 +19,7 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-@Source.Module(name="firestore")
+@Source.Module(name="firestore", schema=true)
 public class FirestoreSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(FirestoreSource.class);

@@ -32,7 +32,7 @@ import java.sql.*;
 import java.util.*;
 
 
-@Source.Module(name="jdbc")
+@Source.Module(name="jdbc", schema=true)
 public class JdbcSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(JdbcSource.class);

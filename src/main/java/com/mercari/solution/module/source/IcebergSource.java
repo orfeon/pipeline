@@ -11,7 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-@Source.Module(name="iceberg")
+@Source.Module(name="iceberg", schema=true)
 public class IcebergSource extends Source {
 
     private static class Parameters implements Serializable {

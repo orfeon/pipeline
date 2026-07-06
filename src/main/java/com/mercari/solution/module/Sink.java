@@ -23,6 +23,8 @@ public abstract class Sink extends Module<MCollectionTuple> {
     @Target(ElementType.TYPE)
     public @interface Module {
         String name();
+        /** Whether this module consumes a schema declaration (schema-redesign.md Phase 3). */
+        boolean schema() default false;
     }
 
     private static final Map<String, Class<Sink>> sinks = findSinksInPackage("com.mercari.solution.module.sink");
@@ -56,7 +58,7 @@ public abstract class Sink extends Module<MCollectionTuple> {
             final MErrorHandler errorHandler) {
 
         super.setup(config, options, waits, errorHandler);
-        this.schema = config.getSchema();
+        this.schema = resolveSchema(config, config.getSchema(), properties.schema());
         this.strategy = Optional
                 .ofNullable(config.getStrategy())
                 .orElseGet(Strategy::createDefaultStrategy);

@@ -8,6 +8,8 @@ Guides for working on the Mercari Pipeline codebase itself (extending modules, u
   loop, the unified data model (`MElement` / `DataType` / `Schema`), config loading & templating, module
   discovery, error handling, and the Server.
 * [Server Frontend](server/frontend.md) — Pipeline Server web UI.
+* [Schema Redesign (Design Document)](schema-redesign.md) — accepted design for restructuring the `schema`
+  block (fields / encoding / reference), moving it into `parameters`, and the phased migration plan.
 
 ## Quick reference
 

@@ -94,6 +94,67 @@ public class BigtableSchemaUtilTest {
     }
 
     @Test
+    public void testFormatAndCellTypeCascade() {
+        // Characterization for docs/developer/schema-redesign.md P4: the per-cell decode format
+        // cascades top-level default -> family -> qualifier, and cellType cascades per family.
+        final List<BigtableSchemaUtil.ColumnFamilyProperties> families = parseFamilies("""
+                [
+                  { "family": "f1",
+                    "qualifiers": [
+                      { "name": "qDefault", "field": "fieldDefault", "type": "long" },
+                      { "name": "qText", "field": "fieldText", "type": "long", "format": "text" }
+                    ]
+                  },
+                  { "family": "f2", "format": "text", "cellType": "all",
+                    "qualifiers": [
+                      { "name": "qInherit", "field": "fieldInherit", "type": "long" },
+                      { "name": "qBytes", "field": "fieldBytes", "type": "long", "format": "bytes" }
+                    ]
+                  }
+                ]
+                """);
+        for (final BigtableSchemaUtil.ColumnFamilyProperties family : families) {
+            // same top-level defaults as BigtableSource.Parameters.setDefaults
+            family.setDefaults(BigtableSchemaUtil.Format.bytes, BigtableSchemaUtil.CellType.last);
+            family.setupSource();
+        }
+
+        final Row row = Row.newBuilder()
+                .setKey(ByteString.copyFromUtf8("key1"))
+                .addFamilies(Family.newBuilder()
+                        .setName("f1")
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qDefault"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFrom(Bytes.toBytes(42L))))
+                                .addCells(Cell.newBuilder().setTimestampMicros(1000L).setValue(ByteString.copyFrom(Bytes.toBytes(41L)))))
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qText"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFromUtf8("42")))))
+                .addFamilies(Family.newBuilder()
+                        .setName("f2")
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qInherit"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFromUtf8("7")))
+                                .addCells(Cell.newBuilder().setTimestampMicros(1000L).setValue(ByteString.copyFromUtf8("8"))))
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qBytes"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFrom(Bytes.toBytes(9L))))))
+                .build();
+
+        final Map<String, Object> values = BigtableSchemaUtil.toPrimitiveValues(row, BigtableSchemaUtil.toMap(families));
+
+        // top-level default format (bytes) cascades to qualifiers without their own format;
+        // cellType last picks the first cell in the column's cell list
+        Assertions.assertEquals(42L, values.get("fieldDefault"));
+        // qualifier-level format overrides the top-level default
+        Assertions.assertEquals(42L, values.get("fieldText"));
+        // family-level format cascades to its qualifiers; family-level cellType all returns every cell
+        Assertions.assertEquals(List.of(7L, 8L), values.get("fieldInherit"));
+        // qualifier-level format overrides the family-level one
+        Assertions.assertEquals(List.of(9L), values.get("fieldBytes"));
+    }
+
+    @Test
     public void testToByteStringObject() {
         Assertions.assertEquals(ByteString.EMPTY, BigtableSchemaUtil.toByteString(null));
         Assertions.assertEquals("abc", BigtableSchemaUtil.toByteString("abc").toStringUtf8());
