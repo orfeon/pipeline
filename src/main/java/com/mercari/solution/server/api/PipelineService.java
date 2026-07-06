@@ -182,6 +182,22 @@ public class PipelineService {
             responseJson.addProperty("status", "ok");
             responseJson.addProperty("millis", (endMillis - startMillis));
 
+            // deprecation warnings (schema-redesign.md Phase 5): surfaced in the validation
+            // response, derived from the same analysis as the upgrade-config tool
+            try {
+                final JsonObject configJson = Config.convertConfigJson(configText, Format.unknown);
+                final List<String> deprecations = com.mercari.solution.config.SchemaConfigUpgrader.scanDeprecations(configJson);
+                if(!deprecations.isEmpty()) {
+                    final JsonArray warnings = new JsonArray();
+                    for(final String deprecation : deprecations) {
+                        warnings.add(deprecation);
+                    }
+                    responseJson.add("warnings", warnings);
+                }
+            } catch (final Throwable e) {
+                LOG.warn("failed to scan config deprecations: {}", e.getMessage());
+            }
+
             final JsonObject specJson = new JsonObject();
             final JsonArray modulesArray = new JsonArray();
             for(final Map.Entry<String, MCollection> entry : outputs.entrySet()) {
