@@ -124,7 +124,9 @@ schema:
 ## Legacy format
 
 The following keys are the older spelling and remain supported, but must not be mixed with
-`encoding`/`reference` in the same schema block:
+`encoding`/`reference` in the same schema block. See the
+[Schema Migration Guide](schema-migration.md) — the MCP `upgrade-config` tool rewrites configs
+automatically:
 
 | legacy key                          | new form                                                   |
 |-------------------------------------|------------------------------------------------------------|
