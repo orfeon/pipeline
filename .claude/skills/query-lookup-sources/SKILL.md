@@ -109,6 +109,18 @@ REST endpoint is fixed in SQL). INNER and LEFT only. A non-matching condition
 leaves the join alone → the plan scans the lookup table → the scan throws the
 rejection error at execution. That error is the intended UX, not a bug.
 
+**Key columns pruned from the projection are fine.** `RelRunners`' standard
+program field-trims before the volcano phase, so a query that never selects a
+trailing key column (e.g. prefix-only `ON e.USER_ID = i.userId` selecting only
+`CATEGORY`) reaches `LookupJoinRule` with that column missing from the
+`Project` over the scan. The rule only requires the *constrained* key columns
+(the matched prefix + range column) to be projected — a constrained column is
+always projected because the join condition references it; unconstrained
+trailing columns get a `-1` sentinel in `keyGlobalIndex` and simply never
+match a conjunct. (Back-ported 2026-07 from the origin repo, where the same
+over-restriction was found; test:
+`JdbcLookupSourceTest#testPrefixLookupWithTrailingKeyColumnPruned`.)
+
 ## Adding a new lookup source
 
 1. Extend `LookupSource` in `util/pipeline/lookup/source/`. Serializable
