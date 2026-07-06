@@ -27,6 +27,43 @@ import java.util.*;
 public class AvroSchemaUtilTest {
 
     @Test
+    public void testToBuilderProjection() {
+        // Characterization for docs/developer/schema-redesign.md P3: this is the building block of
+        // the storage source's parquet `fields` projection (StorageSource.createParquetRead).
+        final Schema schema = new Schema.Parser().parse("""
+                {
+                  "type": "record",
+                  "name": "root",
+                  "namespace": "com.example",
+                  "fields": [
+                    { "name": "keepField", "type": "string" },
+                    { "name": "dropField", "type": "long" },
+                    { "name": "alsoKeepField", "type": "double" }
+                  ]
+                }
+                """);
+
+        // only listed fields survive; source-schema order is preserved
+        final Schema projected = AvroSchemaUtil
+                .toBuilder(schema, List.of("alsoKeepField", "keepField"))
+                .endRecord();
+        Assertions.assertEquals(2, projected.getFields().size());
+        Assertions.assertEquals("keepField", projected.getFields().get(0).name());
+        Assertions.assertEquals("alsoKeepField", projected.getFields().get(1).name());
+        Assertions.assertEquals(schema.getField("keepField").schema(), projected.getField("keepField").schema());
+
+        // names not present in the source schema are silently ignored (no error)
+        final Schema ignoredUnknown = AvroSchemaUtil
+                .toBuilder(schema, List.of("keepField", "noSuchField"))
+                .endRecord();
+        Assertions.assertEquals(1, ignoredUnknown.getFields().size());
+
+        // null field list keeps everything
+        final Schema all = AvroSchemaUtil.toBuilder(schema).endRecord();
+        Assertions.assertEquals(3, all.getFields().size());
+    }
+
+    @Test
     public void testSelectFields() {
         final GenericRecord record = TestDatum.generateRecord();
         final List<String> fields = Arrays.asList(
