@@ -155,6 +155,22 @@ public class Schema implements Serializable {
         return reference;
     }
 
+    /**
+     * True when this schema is only a pointer at the write destination's schema
+     * ({@code reference: {destination: true}} or the legacy {@code useDestinationSchema: true},
+     * with no fields of its own). Sink modules resolve the actual definition from the
+     * destination; such a schema carries no usable fields itself.
+     */
+    public boolean isDestinationReference() {
+        if(fields != null && !fields.isEmpty()) {
+            return false;
+        }
+        if(reference != null && Boolean.TRUE.equals(reference.getDestination())) {
+            return true;
+        }
+        return Boolean.TRUE.equals(useDestinationSchema);
+    }
+
     public int countFields() {
         return switch (type) {
             case ELEMENT, DOCUMENT, ENTITY -> this.fields.size();
@@ -220,14 +236,15 @@ public class Schema implements Serializable {
     }
 
     // Stage 3: fields derivation — the logical shape is filled from the first materialized
-    // representation when it was not declared directly.
+    // representation when it was not declared directly. Holders whose runtime schema is not
+    // materialized (e.g. a destination-only placeholder) are skipped.
     private void deriveFields() {
         if(fields == null || fields.isEmpty()) {
-            if(avro != null) {
+            if(avro != null && avro.schema != null) {
                 this.fields = AvroToElementConverter.convertFields(avro.schema.getFields());
-            } else if(protobuf != null) {
+            } else if(protobuf != null && protobuf.descriptors != null && protobuf.descriptors.containsKey(protobuf.messageName)) {
                 this.fields = ProtoToElementConverter.convertFields(protobuf.descriptors.get(protobuf.messageName));
-            } else if(row != null) {
+            } else if(row != null && row.schema != null) {
                 this.fields = RowToElementConverter.convertFields(row.schema.getFields());
             }
         }
@@ -1358,6 +1375,11 @@ public class Schema implements Serializable {
                     schema = Schema.of(avro.schema);
                     schema.avro.json = avro.json;
                     schema.avro.file = avro.file;
+                } else if(Boolean.TRUE.equals(useDestinationSchema)
+                        || (reference != null && Boolean.TRUE.equals(reference.getDestination()))) {
+                    // destination-only declaration (schema-redesign.md §2 reference.destination):
+                    // a placeholder whose actual definition the sink resolves from the destination
+                    schema = new Schema(null, new ArrayList<>(), null, null, null);
                 } else {
                     throw new IllegalArgumentException();
                 }

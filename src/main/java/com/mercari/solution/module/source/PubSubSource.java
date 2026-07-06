@@ -72,15 +72,18 @@ public class PubSubSource extends Source {
                     errorMessages.add("parameters.topic is illegal format: " + topic);
                 }
             }
+            if(schema != null && schema.isDestinationReference()) {
+                errorMessages.add("schema.reference.destination is not applicable to source modules");
+            }
             if(format != null) {
                 switch (format) {
                     case protobuf -> {
                         if(schema == null) {
                             errorMessages.add("schema is required if format is protobuf");
                         } else if(schema.getProtobuf() == null) {
-                            errorMessages.add("schema.protobuf is required if format is protobuf");
+                            errorMessages.add("schema.protobuf is required if format is protobuf (or declare schema.encoding format protobuf with schema.reference.uri)");
                         } else if(schema.getProtobuf().getMessageName() == null || schema.getProtobuf().getDescriptorFile() == null) {
-                            errorMessages.add("schema.protobuf.messageName and descriptorFile are required if format is protobuf");
+                            errorMessages.add("schema.protobuf.messageName and descriptorFile are required if format is protobuf (or declare schema.encoding.messageName and schema.reference.uri)");
                         }
                     }
                     case avro -> {
@@ -209,6 +212,7 @@ public class PubSubSource extends Source {
             final MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
+        parameters.format = Serialize.resolveFormat(parameters.format, getSchema());
         parameters.validate(begin, getSchema());
         parameters.setDefaults();
 

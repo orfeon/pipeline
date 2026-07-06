@@ -215,6 +215,64 @@ public class PubSubSourceTest {
     }
 
     @Test
+    public void testFormatDerivedFromEncoding() throws Exception {
+        // Phase 4: parameters.format omitted -> derived from schema.encoding.format.
+        // Without the derivation the default format would be `message`, whose output
+        // schema has fixed message fields instead of the declared ones.
+        setStreaming();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "pubsubinput",
+                      "module": "pubsub",
+                      "parameters": {
+                        "subscription": "projects/myproject/subscriptions/mysubscription",
+                        "schema": {
+                          "fields": [
+                            { "name": "stringField", "type": "string" },
+                            { "name": "longField", "type": "long" }
+                          ],
+                          "encoding": { "format": "avro" }
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        Assertions.assertTrue(outputs.get("pubsubinput").getSchema().hasField("stringField"));
+        Assertions.assertTrue(outputs.get("pubsubinput").getSchema().hasField("longField"));
+    }
+
+    @Test
+    public void testDestinationReferenceRejectedOnSource() throws Exception {
+        setStreaming();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "pubsubinput",
+                      "module": "pubsub",
+                      "parameters": {
+                        "subscription": "projects/myproject/subscriptions/mysubscription",
+                        "schema": {
+                          "reference": { "destination": true }
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("not applicable to source modules"),
+                "unexpected message: " + e.getMessage());
+    }
+
+    @Test
     public void testJsonFormatRegistersDeclaredSchema() throws Exception {
         setStreaming();
         final String configJson = """

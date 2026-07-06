@@ -37,7 +37,7 @@ The destination topic can be specified statically or dynamically using FreeMarke
 | parameter | optional | type   | description                                                                                                                                                                                                                                                                  |
 |-----------|----------|--------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | topic     | required | String | Pub/Sub topic to publish to. Format: `projects/{project}/topics/{topic}`. Supports FreeMarker template expressions for [dynamic topic routing](#dynamic-topic-routing) (e.g. `projects/myproject/topics/events_${region}`).                                                   |
-| format    | required | Enum   | Serialization format for the message payload. Values: `json`, `avro`, `protobuf`, `message`.                                                                                                                                                                                 |
+| format    | optional | Enum   | Serialization format for the message payload. Values: `json`, `avro`, `protobuf`, `message`. Required unless `schema.encoding.format` is declared (the format is then derived from it).                                                                                                                                                                                 |
 
 ### Message attribute parameters
 
@@ -69,20 +69,22 @@ The destination topic can be specified statically or dynamically using FreeMarke
 
 ### Schema parameters
 
-For Avro and Protobuf formats, a schema definition is required. This is specified at the source/module level using the `schema` parameter, not within `parameters`.
+For Avro and Protobuf formats, a schema definition is required, declared via `parameters.schema`
+(see [Schema](../common/schema.md)). To serialize using the schema attached to the destination
+topic, declare `schema.reference: {destination: true}`.
 
 | format   | schema requirement                                                                                                            |
 |----------|-------------------------------------------------------------------------------------------------------------------------------|
 | json     | No schema required. Uses the input schema for field serialization.                                                            |
-| avro     | Requires `schema.avro` with an Avro schema file path or inline schema definition.                                             |
-| protobuf | Requires `schema.protobufDescriptor` (GCS path to `.desc` file) and `schema.protobufMessageName` (fully qualified message name). |
+| avro     | Requires an Avro definition: `schema.encoding: {format: avro}` with `schema.reference` (uri or inline), or `schema.fields` (legacy spelling: `schema.avro`). |
+| protobuf | Requires `schema.encoding: {format: protobuf, messageName: ...}` with `schema.reference.uri` pointing at the descriptor file (legacy spelling: `schema.protobuf.descriptorFile` + `messageName`). |
 | message  | No schema required. Reads raw bytes from `payloadField`.                                                                      |
 
 ### Other parameters
 
 | parameter             | optional | type    | description                                                                                                                                                    |
 |-----------------------|----------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| useDestinationSchema  | optional | Boolean | If `true`, retrieves the schema from the destination Pub/Sub topic and uses it for serialization. Default: `false`.                                            |
+| useDestinationSchema  | optional | Boolean | Deprecated — declare `schema.reference: {destination: true}` instead. If `true`, retrieves the schema from the destination Pub/Sub topic and uses it for serialization. Default: `false`. |
 
 ## Attribute templates
 

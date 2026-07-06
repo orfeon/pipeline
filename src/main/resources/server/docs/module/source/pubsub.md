@@ -37,7 +37,7 @@ Supports four message deserialization formats:
 |--------------|--------------------|--------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | topic        | selective required | String | Pub/Sub topic to read from. Format: `projects/{project}/topics/{topic}`. Either `topic` or `subscription` must be specified, but not both. When using `topic`, a temporary subscription is auto-created. |
 | subscription | selective required | String | Pub/Sub subscription to read from. Format: `projects/{project}/subscriptions/{subscription}`. Either `topic` or `subscription` must be specified, but not both.                                         |
-| format       | optional           | Enum   | Deserialization format. Values: `json`, `avro`, `protobuf`, `message`. Default: `message`.                                                                                                             |
+| format       | optional           | Enum   | Deserialization format. Values: `json`, `avro`, `protobuf`, `message`. When omitted, derived from `schema.encoding.format` if declared; otherwise defaults to `message`.                                                                                                             |
 
 ### Message ID parameter
 
@@ -105,8 +105,24 @@ Route messages to multiple named outputs based on filter conditions. Each partit
 | format   | schema requirement                                                                                                             |
 |----------|--------------------------------------------------------------------------------------------------------------------------------|
 | json     | Required. Define fields via `schema.fields`.                                                                                   |
-| avro     | Optional. Can be defined via `schema.avro` or auto-inferred from the Pub/Sub topic/subscription schema.                        |
-| protobuf | Required. Must specify `schema.protobufDescriptor` (GCS path to `.desc` file) and `schema.protobufMessageName` (fully qualified message name). |
+| avro     | Optional. Declare `schema.encoding: {format: avro}` with `schema.reference` (or `schema.fields`), or let it be auto-inferred from the Pub/Sub topic/subscription schema. |
+| protobuf | Required. Declare `schema.encoding: {format: protobuf, messageName: ...}` with `schema.reference.uri` pointing at the descriptor file (legacy spelling: `schema.protobuf.descriptorFile` + `messageName`). |
+
+Example (protobuf, new-format schema declaration — `format` is derived from the encoding):
+
+```yaml
+sources:
+  - name: input
+    module: pubsub
+    parameters:
+      subscription: projects/myproject/subscriptions/mysubscription
+      schema:
+        encoding:
+          format: protobuf
+          messageName: com.example.Event
+        reference:
+          uri: gs://my-bucket/schemas/event.pb
+```
 | message  | Not required. Output uses a fixed schema (see [Message format output schema](#message-format-output-schema)).                  |
 
 ## Message format output schema

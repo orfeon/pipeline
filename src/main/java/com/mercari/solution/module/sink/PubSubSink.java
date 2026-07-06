@@ -74,10 +74,9 @@ public class PubSubSink extends Sink {
                 switch (format) {
                     case protobuf -> {
                         if(schema.getProtobuf() == null) {
-                            errorMessages.add("parameters.protobufDescriptor must not be null when set format `protobuf`");
-                        }
-                        if(schema.getProtobuf().getDescriptorFile() == null) {
-                            errorMessages.add("parameters.protobufMessageName must not be null when set format `protobuf`");
+                            errorMessages.add("schema.protobuf is required if format is protobuf (or declare schema.encoding format protobuf with schema.reference.uri)");
+                        } else if(schema.getProtobuf().getDescriptorFile() == null) {
+                            errorMessages.add("schema.protobuf.descriptorFile is required if format is protobuf (or declare schema.reference.uri)");
                         }
                     }
                 }
@@ -112,12 +111,19 @@ public class PubSubSink extends Sink {
             final MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
+        parameters.format = Serialize.resolveFormat(parameters.format, getSchema());
 
         final Schema inputSchema = Union.createUnionSchema(inputs);
+        final Schema declaredSchema = getSchema();
         final Schema outputSchema;
-        if(getSchema() != null) {
-            outputSchema = getSchema();
+        if(declaredSchema != null && declaredSchema.isDestinationReference()) {
+            // schema.reference.destination: resolve the actual schema from the topic
+            final org.apache.avro.Schema topicSchema = PubSubUtil.getSchemaFromTopic(parameters.topic);
+            outputSchema = Schema.of(topicSchema);
+        } else if(declaredSchema != null) {
+            outputSchema = declaredSchema;
         } else if(Optional.ofNullable(parameters.useDestinationSchema).orElse(false)) {
+            LOG.warn("parameters.useDestinationSchema is deprecated — declare schema.reference.destination instead (see docs module/common/schema.md)");
             final org.apache.avro.Schema topicSchema = PubSubUtil.getSchemaFromTopic(parameters.topic);
             outputSchema = Schema.of(topicSchema);
         } else {
