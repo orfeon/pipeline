@@ -155,6 +155,145 @@ public class BigtableSchemaUtilTest {
     }
 
     @Test
+    public void testCellEncodingAliasCascade() {
+        // Phase 4: encoding.format is the new spelling of the legacy format key,
+        // at every cascade level (family and qualifier here; top-level is module-side)
+        final List<BigtableSchemaUtil.ColumnFamilyProperties> families = parseFamilies("""
+                [
+                  { "family": "f1", "encoding": { "format": "text" },
+                    "qualifiers": [
+                      { "name": "qInherit", "field": "fieldInherit", "type": "long" },
+                      { "name": "qOverride", "field": "fieldOverride", "type": "long", "encoding": { "format": "bytes" } }
+                    ]
+                  }
+                ]
+                """);
+        for (final BigtableSchemaUtil.ColumnFamilyProperties family : families) {
+            Assertions.assertTrue(family.validate(0).isEmpty());
+            family.setDefaults(BigtableSchemaUtil.Format.bytes, BigtableSchemaUtil.CellType.last);
+            family.setupSource();
+        }
+
+        final Row row = Row.newBuilder()
+                .setKey(ByteString.copyFromUtf8("key1"))
+                .addFamilies(Family.newBuilder()
+                        .setName("f1")
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qInherit"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFromUtf8("7"))))
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qOverride"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFrom(Bytes.toBytes(9L))))))
+                .build();
+
+        final Map<String, Object> values = BigtableSchemaUtil.toPrimitiveValues(row, BigtableSchemaUtil.toMap(families));
+        // family-level encoding.format (text) cascades to its qualifiers
+        Assertions.assertEquals(7L, values.get("fieldInherit"));
+        // qualifier-level encoding.format overrides the family default
+        Assertions.assertEquals(9L, values.get("fieldOverride"));
+    }
+
+    @Test
+    public void testCellEncodingAvroReferenceInline() throws Exception {
+        // Phase 4: encoding.reference supplies the Avro schema document for an avro-encoded
+        // cell, replacing the need to declare nested fields on the qualifier
+        final String avsc = """
+                {
+                  "type": "record",
+                  "name": "profile",
+                  "fields": [
+                    { "name": "age", "type": "long" },
+                    { "name": "city", "type": "string" }
+                  ]
+                }
+                """;
+        final com.google.gson.JsonObject reference = new com.google.gson.JsonObject();
+        reference.addProperty("inline", avsc);
+        final com.google.gson.JsonObject encoding = new com.google.gson.JsonObject();
+        encoding.addProperty("format", "avro");
+        encoding.add("reference", reference);
+        final com.google.gson.JsonObject qualifier = new com.google.gson.JsonObject();
+        qualifier.addProperty("name", "qProfile");
+        qualifier.addProperty("field", "profile");
+        qualifier.add("encoding", encoding);
+        final com.google.gson.JsonObject family = new com.google.gson.JsonObject();
+        family.addProperty("family", "f1");
+        final com.google.gson.JsonArray qualifiers = new com.google.gson.JsonArray();
+        qualifiers.add(qualifier);
+        family.add("qualifiers", qualifiers);
+        final com.google.gson.JsonArray familiesArray = new com.google.gson.JsonArray();
+        familiesArray.add(family);
+
+        final List<BigtableSchemaUtil.ColumnFamilyProperties> families = parseFamilies(familiesArray.toString());
+        for (final BigtableSchemaUtil.ColumnFamilyProperties f : families) {
+            Assertions.assertTrue(f.validate(0).isEmpty(), () -> f.validate(0).toString());
+            f.setDefaults(BigtableSchemaUtil.Format.bytes, BigtableSchemaUtil.CellType.last);
+            f.setupSource();
+        }
+
+        // the output schema field derives from the referenced avsc
+        final Schema schema = BigtableSchemaUtil.createSchema(families);
+        Assertions.assertEquals(Schema.Type.element, schema.getField("profile").getFieldType().getType());
+        Assertions.assertTrue(schema.getField("profile").getFieldType().getElementSchema().hasField("age"));
+
+        // an avro-encoded cell decodes with the referenced schema:
+        // cell bytes = custom-encoding wrapper around a standard Avro binary record
+        final org.apache.avro.Schema avroSchema = new org.apache.avro.Schema.Parser().parse(avsc);
+        final org.apache.avro.generic.GenericRecord record = new org.apache.avro.generic.GenericData.Record(avroSchema);
+        record.put("age", 30L);
+        record.put("city", "tokyo");
+        final byte[] recordBytes = AvroSchemaUtil.encode(record);
+        final byte[] cellBytes = AvroSchemaUtil.encode(recordBytes);
+
+        final Row row = Row.newBuilder()
+                .setKey(ByteString.copyFromUtf8("key1"))
+                .addFamilies(Family.newBuilder()
+                        .setName("f1")
+                        .addColumns(Column.newBuilder()
+                                .setQualifier(ByteString.copyFromUtf8("qProfile"))
+                                .addCells(Cell.newBuilder().setTimestampMicros(2000L).setValue(ByteString.copyFrom(cellBytes)))))
+                .build();
+
+        final Map<String, Object> values = BigtableSchemaUtil.toPrimitiveValues(row, BigtableSchemaUtil.toMap(families));
+        // element cells decode into a GenericRecord backed by the referenced schema
+        final org.apache.avro.generic.GenericRecord profile = (org.apache.avro.generic.GenericRecord) values.get("profile");
+        Assertions.assertNotNull(profile);
+        Assertions.assertEquals(30L, profile.get("age"));
+        Assertions.assertEquals("tokyo", profile.get("city").toString());
+    }
+
+    @Test
+    public void testCellEncodingValidation() {
+        // conflicting legacy format and encoding.format is an assembly-time error
+        final List<BigtableSchemaUtil.ColumnFamilyProperties> conflicting = parseFamilies("""
+                [
+                  { "family": "f1",
+                    "qualifiers": [
+                      { "name": "q1", "type": "long", "format": "text", "encoding": { "format": "bytes" } }
+                    ]
+                  }
+                ]
+                """);
+        final List<String> errors = conflicting.getFirst().validate(0);
+        Assertions.assertFalse(errors.isEmpty());
+        Assertions.assertTrue(errors.getFirst().contains("conflicts with"), errors.toString());
+
+        // encoding.reference requires an avro format
+        final List<BigtableSchemaUtil.ColumnFamilyProperties> badReference = parseFamilies("""
+                [
+                  { "family": "f1",
+                    "qualifiers": [
+                      { "name": "q1", "encoding": { "format": "text", "reference": { "inline": "{}" } } }
+                    ]
+                  }
+                ]
+                """);
+        final List<String> referenceErrors = badReference.getFirst().validate(0);
+        Assertions.assertTrue(referenceErrors.stream().anyMatch(m -> m.contains("requires encoding.format avro")),
+                referenceErrors.toString());
+    }
+
+    @Test
     public void testToByteStringObject() {
         Assertions.assertEquals(ByteString.EMPTY, BigtableSchemaUtil.toByteString(null));
         Assertions.assertEquals("abc", BigtableSchemaUtil.toByteString("abc").toStringUtf8());

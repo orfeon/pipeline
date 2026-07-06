@@ -12,7 +12,9 @@ assembly-time validation — see the storage row in §3; pubsub done: `parameter
 from `schema.encoding.format`, `reference.destination` works on the sink — destination-only
 schema declarations parse into a placeholder resolved from the topic,
 `parameters.useDestinationSchema` deprecated, sink protobuf validation NPE fixed; Confluent
-runtime registry remains a separate PR)**
+runtime registry remains a separate PR; bigtable done: `CellEncoding` component — the shared
+encoding/reference vocabulary at cell granularity with the same cascade, legacy `format` keys
+aliased, `encoding.reference` supplies the avsc for avro cells)**
 Scope: the `schema` configuration block, its position in module config, and the internal `Schema` model
 (`com.mercari.solution.module.Schema`).
 

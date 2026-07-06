@@ -16,6 +16,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.FailureUtil;
 import com.mercari.solution.util.TemplateUtil;
+import com.mercari.solution.util.cloud.google.StorageUtil;
 import freemarker.template.Template;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.util.Utf8;
@@ -72,6 +73,49 @@ public class BigtableSchemaUtil {
         last
     }
 
+    /**
+     * Cell-level encoding declaration (schema-redesign.md P4): the shared encoding/reference
+     * vocabulary applied at bigtable's cell granularity, at any cascade level
+     * (parameters top level, column family, or qualifier). {@code format} is the new spelling
+     * of the legacy {@code format} key; {@code reference} supplies the Avro schema document
+     * (uri or inline) for avro-encoded cells, replacing the need to declare nested fields.
+     */
+    public static class CellEncoding implements Serializable {
+
+        private Format format;
+        private Schema.Reference reference;
+
+        public Format getFormat() {
+            return format;
+        }
+
+        public Schema.Reference getReference() {
+            return reference;
+        }
+
+        public List<String> validate(final String path) {
+            final List<String> errorMessages = new ArrayList<>();
+            if(reference != null) {
+                if(!Format.avro.equals(format) && !Format.avromap.equals(format)) {
+                    errorMessages.add(path + ".encoding.reference requires encoding.format avro");
+                }
+                if(reference.getUri() == null && reference.getInline() == null) {
+                    errorMessages.add(path + ".encoding.reference requires uri or inline");
+                }
+            }
+            return errorMessages;
+        }
+
+        public List<String> validateConflict(final Format declaredFormat, final String path) {
+            final List<String> errorMessages = new ArrayList<>(validate(path));
+            if(format != null && declaredFormat != null && !format.equals(declaredFormat)) {
+                errorMessages.add(path + ".format: " + declaredFormat + " conflicts with " + path + ".encoding.format: " + format);
+            }
+            return errorMessages;
+        }
+
+    }
+
     public enum ModType {
 
         SET_CELL(0),
@@ -95,6 +139,7 @@ public class BigtableSchemaUtil {
         private String family;
         private List<ColumnQualifierProperties> qualifiers;
         private Format format;
+        private CellEncoding encoding;
 
         // for sink
         private String mutationOp;
@@ -112,6 +157,9 @@ public class BigtableSchemaUtil {
             final List<String> errorMessages = new ArrayList<>();
             if(family == null) {
                 errorMessages.add("parameters.columns[" + i + "].family must not be null");
+            }
+            if(encoding != null) {
+                errorMessages.addAll(encoding.validateConflict(format, "parameters.columns[" + i + "]"));
             }
             // qualifiers may be absent or empty: setDefaults derives them from the input schema fields
             if(qualifiers != null) {
@@ -154,6 +202,9 @@ public class BigtableSchemaUtil {
                 final CellType defaultCellType,
                 final List<Schema.Field> fields) {
 
+            if(format == null && encoding != null && encoding.format != null) {
+                format = encoding.format;
+            }
             if(format == null) {
                 format = defaultFormat;
             }
@@ -301,6 +352,7 @@ public class BigtableSchemaUtil {
         private String name;
         private String field;
         private Format format;
+        private CellEncoding encoding;
 
         // for sink
         private String mutationOp;
@@ -371,6 +423,9 @@ public class BigtableSchemaUtil {
             if(name == null) {
                 errorMessages.add("parameters.columns[" + i + "].qualifiers[" + j + "].name must not be null");
             }
+            if(encoding != null) {
+                errorMessages.addAll(encoding.validateConflict(format, "parameters.columns[" + i + "].qualifiers[" + j + "]"));
+            }
             if(field == null && name == null) {
                 errorMessages.add("parameters.columns[" + i + "].qualifiers[" + j + "].field must not be empty");
             }
@@ -419,6 +474,9 @@ public class BigtableSchemaUtil {
             if(field == null) {
                 field = name;
             }
+            if(format == null && encoding != null && encoding.format != null) {
+                format = encoding.format;
+            }
             if(format == null) {
                 format = defaultFormat;
             }
@@ -451,7 +509,20 @@ public class BigtableSchemaUtil {
         }
 
         public void setupSource() {
-            this.fieldType = Schema.IField.toFieldType(this);
+            if(encoding != null && encoding.reference != null) {
+                // encoding.reference supplies the Avro schema document for this cell
+                // (schema-redesign.md P4); resolved once at assembly time
+                final String json;
+                if(encoding.reference.getInline() != null) {
+                    json = encoding.reference.getInline();
+                } else {
+                    json = StorageUtil.readString(encoding.reference.getUri());
+                }
+                final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(json);
+                this.fieldType = Schema.FieldType.element(Schema.of(avroSchema));
+            } else {
+                this.fieldType = Schema.IField.toFieldType(this);
+            }
             this.templateQualifier = TemplateUtil.createStrictTemplate("templateQualifier", name);
         }
 
