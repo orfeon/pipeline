@@ -41,6 +41,7 @@ public class BigtableSource extends Source {
         private JsonElement keyRange;
         private List<BigtableSchemaUtil.ColumnFamilyProperties> columns;
         private BigtableSchemaUtil.Format format;
+        private BigtableSchemaUtil.CellEncoding encoding;
         private BigtableSchemaUtil.CellType cellType;
         private AdditionalFieldsParameters additionalFields;
 
@@ -87,12 +88,24 @@ public class BigtableSource extends Source {
                 }
             }
 
+            if(encoding != null) {
+                errorMessages.addAll(encoding.validateConflict(format, "parameters"));
+            }
+            if(columns != null) {
+                for(int i=0; i<columns.size(); i++) {
+                    errorMessages.addAll(columns.get(i).validate(i));
+                }
+            }
+
             if (!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
         }
 
         private void setDefaults() {
+            if(format == null && encoding != null && encoding.getFormat() != null) {
+                format = encoding.getFormat();
+            }
             if(format == null) {
                 format = BigtableSchemaUtil.Format.bytes;
             }
