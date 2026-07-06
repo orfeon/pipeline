@@ -107,7 +107,10 @@ public class StorageSource extends Source {
                 final org.apache.avro.Schema outputAvroSchema;
                 switch (parameters.format) {
                     case avro -> {
-                        outputAvroSchema = getAvroSchema(parameters.input, getSchema(), parameters.s3);
+                        final org.apache.avro.Schema readSchema = getAvroSchema(parameters.input, getSchema(), parameters.s3);
+                        // fields projection (schema-redesign.md P3): the projected reader schema makes
+                        // Avro schema resolution skip unlisted writer fields during decode
+                        outputAvroSchema = createProjectionSchema(readSchema, parameters.fields);
                         if(parameters.inputs.size() > 1) {
                             PCollectionList<GenericRecord> list = PCollectionList.empty(begin.getPipeline());
                             int i = 0;
@@ -134,6 +137,10 @@ public class StorageSource extends Source {
                         if(parameters.fields.isEmpty()) {
                             outputAvroSchema = inputAvroSchema;
                         } else {
+                            validateProjectionFields(inputAvroSchema, parameters.fields);
+                            // parquet keeps the legacy output shape: all fields, non-selected ones
+                            // forced nullable (alignment with the avro subset-only output shape is a
+                            // Phase 5 item — changing it would alter existing output schemas)
                             outputAvroSchema = createNullableSchema(inputAvroSchema, parameters.fields);
                         }
                         if (parameters.inputs.size() > 1) {
@@ -236,6 +243,33 @@ public class StorageSource extends Source {
             read = read.withDelimiter(parameters.delimiter.getBytes(StandardCharsets.UTF_8));
         }
         return read;
+    }
+
+    private static org.apache.avro.Schema createProjectionSchema(
+            final org.apache.avro.Schema readSchema,
+            final List<String> fields) {
+
+        if(fields.isEmpty()) {
+            return readSchema;
+        }
+        validateProjectionFields(readSchema, fields);
+        return AvroSchemaUtil.toBuilder(readSchema, fields).endRecord();
+    }
+
+    // projection names must exist in the input schema (schema-redesign.md P3:
+    // a missing field is an assembly-time error, never a silent drop)
+    private static void validateProjectionFields(
+            final org.apache.avro.Schema schema,
+            final List<String> fields) {
+
+        final List<String> missing = fields.stream()
+                .filter(f -> schema.getField(f) == null)
+                .toList();
+        if(!missing.isEmpty()) {
+            throw new IllegalModuleException(
+                    "parameters.fields " + missing + " are not present in the input schema. available fields: "
+                            + schema.getFields().stream().map(org.apache.avro.Schema.Field::name).toList());
+        }
     }
 
     private static org.apache.avro.Schema createNullableSchema(
