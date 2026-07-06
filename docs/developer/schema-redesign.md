@@ -6,7 +6,9 @@ Phase 2 done (`encoding:`/`reference:` accepted by `Schema.parse`; old+new mixin
 user docs at `server/docs/module/common/schema.md`),
 Phase 3 done (`parameters.schema` canonical; top-level fallback warns; support declared via
 `@…Module(schema=true)`; `parameters.schema` on unsupported modules errors — top-level on
-unsupported modules stays a warning until Phase 5 for backward compatibility)**
+unsupported modules stays a warning until Phase 5 for backward compatibility),
+Phase 4 in progress (storage done: fields projection unified across avro/parquet with
+assembly-time validation; see the storage row in §3)**
 Scope: the `schema` configuration block, its position in module config, and the internal `Schema` model
 (`com.mercari.solution.module.Schema`).
 
@@ -165,7 +167,7 @@ model:
 | `schema.avroSchema` (deprecated) | as `avro.file` |
 | `schema.protobufDescriptor` (deprecated) | as `protobuf.descriptorFile` |
 | top-level `schema` on module config | `parameters.schema` (framework injects + deprecation warning; Phase 3) |
-| `storage` `parameters.fields` | `parameters.schema.fields` (alias; Phase 4) |
+| `storage` `parameters.fields` | kept as a name-only projection list (a full alias would need type-less `schema.fields`, which `Field.parse` rejects); Phase 4 unified its semantics: it now projects for avro too (was silently ignored), unknown names are assembly-time errors, and a declared `schema.fields` subset projects via the Avro reader schema. Parquet keeps its legacy output shape (all columns, non-selected forced nullable) — aligning it to subset-only would change existing output schemas, deferred to Phase 5 |
 | `bigtable` `format`/`type` per qualifier | `encoding.format` + field `type` (alias; Phase 4) |
 
 ## 4. Migration plan
