@@ -53,8 +53,11 @@ public final class UserDefinedFunctions {
 
     /**
      * Materializes the descriptors into Calcite functions (name → overloads),
-     * prepending the built-in functions ({@link DateTimeFunctions},
-     * {@link SequenceMatchFunctions SEQ_MATCH}).
+     * prepending the built-in functions ({@link DateTimeFunctions} and the
+     * {@code SEQ_*} sequence-pattern family: {@link SequenceMatchFunctions
+     * SEQ_MATCH / SEQ_MATCH_STEPS}, {@link SequenceFoldFunctions SEQ_FOLD /
+     * SEQ_FOLD_INT}, {@link SequenceCollectFunctions SEQ_COLLECT},
+     * {@link SequenceSplitFunctions SEQ_SPLIT}).
      */
     public static Map<String, List<Function>> build(List<FunctionSpec> specs) {
         final Map<String, List<Function>> functions = new LinkedHashMap<>();
@@ -62,8 +65,15 @@ public final class UserDefinedFunctions {
             functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
                     .add(entry.getValue());
         }
-        functions.computeIfAbsent("SEQ_MATCH", k -> new ArrayList<>())
-                .add(SequenceMatchFunctions.function());
+        final List<Map.Entry<String, Function>> sequenceFamily = new ArrayList<>();
+        sequenceFamily.addAll(SequenceMatchFunctions.builtIns());
+        sequenceFamily.addAll(SequenceFoldFunctions.builtIns());
+        sequenceFamily.addAll(SequenceCollectFunctions.builtIns());
+        sequenceFamily.addAll(SequenceSplitFunctions.builtIns());
+        for (final Map.Entry<String, Function> entry : sequenceFamily) {
+            functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                    .add(entry.getValue());
+        }
         for (final FunctionSpec spec : specs) {
             final Class<?> clazz;
             try {

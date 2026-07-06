@@ -236,16 +236,21 @@ Module-specific functions, registered for every query:
 | function | description |
 |----------|-------------|
 | `CURRENT_DATE_([timezone])` | Current date, optionally in a time zone (`CURRENT_DATE_('Asia/Tokyo')`). |
-| `SEQ_MATCH(rows, fields, pattern, define)` | Sequence-pattern matching over an array column — the bounded, per-element replacement for `MATCH_RECOGNIZE`. Returns `ARRAY<ROW(matchNo INT, startIdx INT, endIdx INT)>` with **1-based** indexes; expand with `UNNEST` (one row per match) and read matched values via array indexing. |
+| `SEQ_MATCH(rows, fields, pattern, define [, mode])` | Sequence-pattern matching over an array column — the bounded, per-element replacement for `MATCH_RECOGNIZE`. Returns `ARRAY<ROW(matchNo INT, startIdx INT, endIdx INT)>` with **1-based** indexes; expand with `UNNEST` (one row per match) and read matched values via array indexing. |
+| `SEQ_MATCH_STEPS(rows, fields, pattern, define [, mode])` | Like `SEQ_MATCH` but one row per **matched element**: `ARRAY<ROW(matchNo INT, idx INT, symbol VARCHAR)>` — exposes which pattern symbol each element matched, so `WHERE s.symbol = 'BUY'` aggregates exactly the matched purchases without re-filtering. |
+| `SEQ_FOLD(rows, from, to, field, op)` / `SEQ_FOLD_INT(...)` | Fold one field of an array slice into a scalar (`DOUBLE` / `BIGINT`) — range aggregation as a plain expression, usable in `SELECT`/`WHERE`/`HAVING`. `from`/`to` are 1-based inclusive (match indexes fit as-is, clamped); `op` is `sum`/`min`/`max`/`count` (+`avg` on `SEQ_FOLD`); SQL aggregate null semantics. `field` is a ROW field name (resolved at plan time), `''` for scalar arrays, or a 0-based ordinal for untyped arrays. |
+| `SEQ_COLLECT(sortKey [, v1 .. v6])` | **Aggregate**: collects `[key, v...]` rows **sorted by the key** — an order-independent sequence builder (unlike `COLLECT`, and unlike ordered `ARRAY_AGG` it also works when the aggregation feeds `SEQ_MATCH` inside expressions). Turns lookup-table history into a sequence: `SEQ_MATCH(SEQ_COLLECT(h.TS, h.ACTION), 'ts,action', ...)` under `GROUP BY`. The result is an opaque collection: consume with `SEQ_MATCH`/`SEQ_MATCH_STEPS`/`SEQ_FOLD` (ordinal field spec); it cannot be `UNNEST`ed or projected. |
+| `SEQ_SPLIT(rows, field, gap)` | Split an array into **sessions**: a new session starts when consecutive elements' `field` values differ by more than `gap` (or either is null). Returns one opaque row list per session — expand with `UNNEST ... WITH ORDINALITY AS s(sess, sessionNo)` and match per session (`SEQ_MATCH(s.sess, ...)`; indexes are session-relative). |
 
-`SEQ_MATCH` arguments:
+`SEQ_MATCH` / `SEQ_MATCH_STEPS` arguments:
 
-- `rows` — an `ARRAY<ROW>` (or array of scalars) column; array order is the sequence order.
+- `rows` — an `ARRAY<ROW>` (or array of scalars) column; array order is the sequence order (build with `SEQ_COLLECT` if it isn't).
 - `fields` — the row field names in row order (`'seq,amount'`), used by `$name` references (`$0`, `$1`, … work without it; for scalar arrays `$0` is the element itself).
 - `pattern` — a regex over symbols: sequence, alternation `|`, grouping `( )`, quantifiers `? * + {n} {n,} {n,m}`. Example: `'STRT UP{2,}'`.
-- `define` — per-symbol predicates, `;`-separated: `$field` refs, `PREV($f [, n])`, literals, `+ - * /`, comparisons, `AND OR NOT`, parentheses. A symbol without a definition always matches; comparisons with null are false. Example: `'UP: $amount > PREV($amount)'`.
+- `define` — per-symbol predicates, `;`-separated: `$field` refs, `PREV($f [, n])`, literals, `+ - * /`, comparisons, `AND OR NOT`, parentheses. A symbol without a definition always matches; comparisons with null are false. Example: `'UP: $amount > PREV($amount)'`. Tip: when a predicate contains string literals, write the define as a **double-quoted** SQL string (`"A: $action = 'promo'"`) — the module's BigQuery-style lexer does not use `''` escaping.
+- `mode` (optional) — how matches are selected: `'longest'` (default — longest per start, non-overlapping), `'shortest'` (pins the first occurrence), `'all'` (every distinct range), `'overlap'` (longest per start, overlaps allowed — every trigger evaluates).
 
-Matches are non-overlapping and longest-per-start (MATCH_RECOGNIZE defaults: after a match, scanning resumes past its last row). No match (or a null/empty array) yields an empty array, so `UNNEST` drops the element.
+Under the default mode, matches are non-overlapping and longest-per-start (MATCH_RECOGNIZE defaults: after a match, scanning resumes past its last row). No match (or a null/empty array) yields an empty array, so `UNNEST` drops the element.
 
 ```sql
 -- Intervals where the amount rose at least twice in a row, with their values
@@ -302,7 +307,7 @@ Timestamps compare at millisecond precision inside queries.
 
 ### Array / complex types
 
-`ARRAY[...]` constructor, `arr[i]` element access (**1-based**), `ARRAY_CONCAT` `ARRAY_LENGTH` `ARRAY_REVERSE` `ARRAY_TO_STRING` `CARDINALITY` `ELEMENT` `UNNEST` (+ `WITH ORDINALITY`), `ROW` constructor, `MAP` — plus the built-in `SEQ_MATCH` (above)
+`ARRAY[...]` constructor, `arr[i]` element access (**1-based**), `ARRAY_CONCAT` `ARRAY_LENGTH` `ARRAY_REVERSE` `ARRAY_TO_STRING` `CARDINALITY` `ELEMENT` `UNNEST` (+ `WITH ORDINALITY`), `ROW` constructor, `MAP` — plus the built-in `SEQ_*` family (`SEQ_MATCH` `SEQ_MATCH_STEPS` `SEQ_FOLD` `SEQ_FOLD_INT` `SEQ_COLLECT` `SEQ_SPLIT`, above)
 
 ### Type conversion & JSON
 
