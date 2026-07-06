@@ -10,7 +10,7 @@ timestamp: 2026-06-23T00:00:00Z
 
 Source Module for reading and parsing file contents from [Google Cloud Storage](https://cloud.google.com/storage/docs) (GCS), AWS S3, or local file systems. Supports four data formats:
 
-- **Avro** - Reads Apache Avro files. Schema is automatically inferred from the file; no `schema` parameter is needed.
+- **Avro** - Reads Apache Avro files. Schema is automatically inferred from the file; no `schema` parameter is needed. Supports column projection via `schema` (declare a subset of the fields) or `fields`.
 - **Parquet** - Reads Apache Parquet files. Schema is automatically inferred from the file. Supports column projection via `fields` to read only specific columns.
 - **CSV** - Reads CSV (comma-separated values) text files. When `schema` is provided, each line is parsed into typed fields. When `schema` is not provided, each line is output as raw text.
 - **JSON** - Reads JSON Lines (newline-delimited JSON) text files. When `schema` is provided, each line is parsed into typed fields. When `schema` is not provided, each line is output as raw text.
@@ -41,7 +41,7 @@ This module differs from the [Files Source Module](files.md): the Files module o
 
 | parameter | optional | type           | description                                                                                                                                                                                     |
 |-----------|----------|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| fields    | optional | Array<String\> | Field names to read from Parquet files (column projection). Only the specified columns are read, reducing I/O and memory usage. If not specified, all columns are read.                           |
+| fields    | optional | Array<String\> | Field names to read (column projection) for `avro` and `parquet` formats. Only the specified columns are read, reducing I/O and memory usage. Every name must exist in the input schema (a missing name is an assembly-time error). If not specified, all columns are read. |
 
 ### CSV/JSON-specific parameters
 
@@ -69,8 +69,17 @@ When reading from AWS S3, provide AWS credentials via the `s3` parameter block, 
 Schema is automatically inferred from the file metadata. No `schema` parameter is needed. The module reads the first matching file's embedded schema and uses it for all files.
 
 If a `schema` parameter is explicitly provided, it takes priority over the auto-inferred schema.
+For Avro it acts as the [reader schema](https://avro.apache.org/docs/current/specification/#schema-resolution):
+declaring a subset of the file's fields projects the output to that subset (unlisted columns are
+skipped during decode), and Avro schema resolution rules (default filling, type promotion) apply.
+Declaring an explicit schema also makes the pipeline robust against files whose schema evolves,
+and skips the sampling step entirely (which also enables reading from local file systems).
 
-For Parquet with `fields` specified, only the selected columns are read (column projection), and unselected columns are set to null in the output.
+For Avro with `fields` specified, the output contains only the selected columns.
+For Parquet with `fields` specified, only the selected columns are read (column projection), and
+unselected columns are set to null in the output (all columns remain in the output schema).
+In both cases every name in `fields` must exist in the input schema — an unknown name is an
+assembly-time error rather than a silent drop.
 
 ### CSV and JSON formats with schema
 
