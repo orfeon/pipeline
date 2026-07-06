@@ -18,6 +18,32 @@ public class CreateSourceTest {
     private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
     @Test
+    public void testDestinationReferenceRejectedOnAnySource() throws Exception {
+        // schema-redesign.md Phase 4: the Source base rejects destination references
+        // uniformly — a destination points at a write target and can never define a source
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0],
+                        "schema": { "reference": { "destination": true } }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("not applicable to source modules"),
+                "unexpected message: " + e.getMessage());
+    }
+
+    @Test
     public void testCreateRange() throws Exception {
 
         final String configJson = """

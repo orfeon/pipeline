@@ -84,7 +84,7 @@ Where the schema definition document lives. Exactly one of `uri` / `inline` / `d
 |-------------|-----------|---------|--------------------------------------------------------------------------|
 | uri         | selective | String  | Definition file location (`gs://…`): an `.avsc` file for avro, a descriptor file for protobuf. |
 | inline      | selective | String  | The definition document itself (e.g. Avro schema JSON).                  |
-| destination | selective | Boolean | If `true`, use the schema of the write destination (sink modules).       |
+| destination | selective | Boolean | If `true`, use the schema of the write destination. Sink modules only — declaring it on a source module is an assembly-time error. |
 
 ## Examples
 

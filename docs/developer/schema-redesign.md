@@ -14,7 +14,10 @@ schema declarations parse into a placeholder resolved from the topic,
 `parameters.useDestinationSchema` deprecated, sink protobuf validation NPE fixed; Confluent
 runtime registry remains a separate PR; bigtable done: `CellEncoding` component — the shared
 encoding/reference vocabulary at cell granularity with the same cascade, legacy `format` keys
-aliased, `encoding.reference` supplies the avsc for avro cells)**
+aliased, `encoding.reference` supplies the avsc for avro cells; fields-only group
+(datastore/firestore/create/jdbc) done: destination references rejected uniformly in the
+Source base, schemaless sources report a precise "schema is required" error instead of an NPE,
+declared jdbc schema confirmed to skip assembly-time DB inference)**
 Scope: the `schema` configuration block, its position in module config, and the internal `Schema` model
 (`com.mercari.solution.module.Schema`).
 

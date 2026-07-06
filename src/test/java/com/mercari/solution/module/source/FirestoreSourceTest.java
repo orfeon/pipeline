@@ -4,11 +4,71 @@ import com.google.firestore.v1.StructuredQuery;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.mercari.solution.MPipeline;
+import com.mercari.solution.config.Config;
+import com.mercari.solution.module.IllegalModuleException;
+import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.Schema;
+import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 public class FirestoreSourceTest {
+
+    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+
+    @Test
+    public void testParametersSchemaIsTheDefinition() throws Exception {
+        // schema-redesign.md Phase 4 (fields-only group): Firestore is schemaless,
+        // schema.fields is the sole definition
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "firestoreinput",
+                      "module": "firestore",
+                      "parameters": {
+                        "projectId": "myproject",
+                        "collection": "users",
+                        "schema": {
+                          "fields": [
+                            { "name": "stringField", "type": "string" }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        Assertions.assertTrue(outputs.get("firestoreinput").getSchema().hasField("stringField"));
+    }
+
+    @Test
+    public void testMissingSchemaThrows() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "firestoreinput",
+                      "module": "firestore",
+                      "parameters": {
+                        "projectId": "myproject",
+                        "collection": "users"
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("parameters.schema with fields is required"),
+                "unexpected message: " + e.getMessage());
+    }
 
     private static final Schema SCHEMA = Schema.builder()
             .withField("values", Schema.FieldType.INT64)

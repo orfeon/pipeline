@@ -72,9 +72,6 @@ public class PubSubSource extends Source {
                     errorMessages.add("parameters.topic is illegal format: " + topic);
                 }
             }
-            if(schema != null && schema.isDestinationReference()) {
-                errorMessages.add("schema.reference.destination is not applicable to source modules");
-            }
             if(format != null) {
                 switch (format) {
                     case protobuf -> {
