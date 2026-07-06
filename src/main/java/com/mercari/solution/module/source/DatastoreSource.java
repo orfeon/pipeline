@@ -75,6 +75,11 @@ public class DatastoreSource extends Source {
         parameters.validate();
         parameters.setDefaults();
 
+        if(getSchema() == null) {
+            // Datastore is schemaless: the declared fields are the sole definition (schema-redesign.md P5)
+            throw new IllegalModuleException("parameters.schema with fields is required for datastore source module");
+        }
+
         DatastoreV1.Read read = DatastoreIO.v1().read()
                 .withProjectId(Optional
                         .ofNullable(parameters.projectId)

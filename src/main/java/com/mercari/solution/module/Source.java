@@ -75,6 +75,10 @@ public abstract class Source extends Module<PBegin> {
 
         super.setup(config, options, waits, errorHandler);
         this.schema = resolveSchema(config, config.getSchema(), properties.schema());
+        if(this.schema != null && this.schema.isDestinationReference()) {
+            // a destination reference points at a write target: it can never define a source
+            throw new IllegalModuleException("schema.reference.destination is not applicable to source modules");
+        }
         this.timestampAttribute = config.getTimestampAttribute();
         this.timestampDefault = config.getTimestampDefault();
 

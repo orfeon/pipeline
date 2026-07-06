@@ -94,6 +94,11 @@ public class FirestoreSource extends Source {
         parameters.validate();
         parameters.setDefaults(begin);
 
+        if(getSchema() == null) {
+            // Firestore is schemaless: the declared fields are the sole definition (schema-redesign.md P5)
+            throw new IllegalModuleException("parameters.schema with fields is required for firestore source module");
+        }
+
         final String parent = createParent(parameters);
         final PCollection<MElement> output;
         if(parameters.filter == null) {
