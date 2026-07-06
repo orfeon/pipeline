@@ -101,14 +101,18 @@ public final class LookupJoinRule extends RelOptRule {
             boolean usable = true;
             for (int i = 0; i < keyCount; i++) {
                 int scanIndex = scanRowType.getFieldNames().indexOf(keyFields.get(i));
-                int projPos = scanIndex < 0 ? -1 : indexOf(rightProjects, scanIndex);
-                if (projPos < 0) {
+                if (scanIndex < 0) {
                     usable = false;
                     break;
                 }
+                // A key column pruned from the projection (by the field trimmer)
+                // cannot appear in the join condition, so it can only end up
+                // beyond the matched prefix — mark it unmatchable instead of
+                // rejecting the whole key.
+                int projPos = indexOf(rightProjects, scanIndex);
                 keyProjPos[i] = projPos;
                 keyTypes[i] = scanRowType.getFieldList().get(scanIndex).getType();
-                keyGlobalIndex[i] = leftCount + projPos;
+                keyGlobalIndex[i] = projPos < 0 ? -1 : leftCount + projPos;
             }
             if (!usable) {
                 continue;

@@ -200,6 +200,31 @@ public class JdbcLookupSourceTest {
     }
 
     @Test
+    public void testPrefixLookupWithTrailingKeyColumnPruned() {
+        // The projection uses no trailing key column (SEQ), so the field
+        // trimmer prunes it from the scan. The rule must still choose the
+        // lookup-join: a constrained key column is always projected, and
+        // unconstrained columns beyond the matched prefix are not needed.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        SELECT i.userId AS userId, e.CATEGORY AS category
+                        FROM INPUT AS i
+                        JOIN db.EVENTS AS e ON e.USER_ID = i.userId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, "-"), input(2L, 0L, "-")), TIMESTAMP);
+            Assertions.assertEquals(5, outputs.size());
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testAggregationOverLookupFanOut() {
         // Fan-out rows from the lookup can be folded per input row by GROUP BY.
         final Query2 query = Query2.builder()
