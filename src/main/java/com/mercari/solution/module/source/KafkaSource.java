@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-@Source.Module(name="kafka")
+@Source.Module(name="kafka", schema=true)
 public class KafkaSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaSource.class);

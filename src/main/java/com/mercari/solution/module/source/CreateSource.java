@@ -31,7 +31,7 @@ import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
-@Source.Module(name="create")
+@Source.Module(name="create", schema=true)
 public class CreateSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(CreateSource.class);

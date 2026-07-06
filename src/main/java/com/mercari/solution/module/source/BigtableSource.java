@@ -27,7 +27,7 @@ import java.util.Map;
 import java.util.Optional;
 
 
-@Source.Module(name="bigtable")
+@Source.Module(name="bigtable", schema=true)
 public class BigtableSource extends Source {
 
     private static class Parameters implements Serializable {

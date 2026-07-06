@@ -3,7 +3,10 @@
 Status: **Accepted — Phase 0 done (characterization tests; storage sampling IT pending),
 Phase 1 done (`Encoding`/`Reference` normalization + staged setup pipeline in `Schema`),
 Phase 2 done (`encoding:`/`reference:` accepted by `Schema.parse`; old+new mixing rejected;
-user docs at `server/docs/module/common/schema.md`)**
+user docs at `server/docs/module/common/schema.md`),
+Phase 3 done (`parameters.schema` canonical; top-level fallback warns; support declared via
+`@…Module(schema=true)`; `parameters.schema` on unsupported modules errors — top-level on
+unsupported modules stays a warning until Phase 5 for backward compatibility)**
 Scope: the `schema` configuration block, its position in module config, and the internal `Schema` model
 (`com.mercari.solution.module.Schema`).
 

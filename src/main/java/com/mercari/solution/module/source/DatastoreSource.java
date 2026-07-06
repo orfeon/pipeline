@@ -19,7 +19,7 @@ import java.io.Serializable;
 import java.util.*;
 
 
-@Source.Module(name="datastore")
+@Source.Module(name="datastore", schema=true)
 public class DatastoreSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(DatastoreSource.class);

@@ -21,7 +21,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-@Source.Module(name="pubsub")
+@Source.Module(name="pubsub", schema=true)
 public class PubSubSource extends Source {
 
     private static class Parameters {

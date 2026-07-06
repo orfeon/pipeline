@@ -29,6 +29,8 @@ public abstract class Source extends Module<PBegin> {
     @Target(ElementType.TYPE)
     public @interface Module {
         String name();
+        /** Whether this module consumes a schema declaration (schema-redesign.md Phase 3). */
+        boolean schema() default false;
     }
 
     public enum Mode {
@@ -72,7 +74,7 @@ public abstract class Source extends Module<PBegin> {
             final MErrorHandler errorHandler) {
 
         super.setup(config, options, waits, errorHandler);
-        this.schema = config.getSchema();
+        this.schema = resolveSchema(config, config.getSchema(), properties.schema());
         this.timestampAttribute = config.getTimestampAttribute();
         this.timestampDefault = config.getTimestampDefault();
 

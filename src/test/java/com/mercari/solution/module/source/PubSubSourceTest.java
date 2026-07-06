@@ -101,6 +101,120 @@ public class PubSubSourceTest {
     }
 
     @Test
+    public void testParametersSchemaLocation() throws Exception {
+        // Phase 3 (schema-redesign.md): parameters.schema is the canonical location.
+        setStreaming();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "pubsubinput",
+                      "module": "pubsub",
+                      "parameters": {
+                        "subscription": "projects/myproject/subscriptions/mysubscription",
+                        "format": "json",
+                        "schema": {
+                          "fields": [
+                            { "name": "stringField", "type": "string" },
+                            { "name": "longField", "type": "long" }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        Assertions.assertTrue(outputs.get("pubsubinput").getSchema().hasField("stringField"));
+        Assertions.assertTrue(outputs.get("pubsubinput").getSchema().hasField("longField"));
+    }
+
+    @Test
+    public void testParametersSchemaReachesModuleValidation() throws Exception {
+        // module validation reads the same resolved schema regardless of the location
+        setStreaming();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "pubsubinput",
+                      "module": "pubsub",
+                      "parameters": {
+                        "subscription": "projects/myproject/subscriptions/mysubscription",
+                        "format": "protobuf",
+                        "schema": {
+                          "fields": [ { "name": "stringField", "type": "string" } ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("schema.protobuf is required if format is protobuf"),
+                "unexpected message: " + e.getMessage());
+    }
+
+    @Test
+    public void testSchemaInBothLocationsThrows() throws Exception {
+        setStreaming();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "pubsubinput",
+                      "module": "pubsub",
+                      "schema": {
+                        "fields": [ { "name": "stringField", "type": "string" } ]
+                      },
+                      "parameters": {
+                        "subscription": "projects/myproject/subscriptions/mysubscription",
+                        "format": "json",
+                        "schema": {
+                          "fields": [ { "name": "stringField", "type": "string" } ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("must not be declared both"),
+                "unexpected message: " + e.getMessage());
+    }
+
+    @Test
+    public void testParametersSchemaOnUnsupportedModuleThrows() throws Exception {
+        // the files source does not consume a schema declaration
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "filesinput",
+                      "module": "files",
+                      "parameters": {
+                        "input": "/tmp/input/*.txt",
+                        "schema": {
+                          "fields": [ { "name": "stringField", "type": "string" } ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+        final Config config = Config.load(configJson);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("does not support schema"),
+                "unexpected message: " + e.getMessage());
+    }
+
+    @Test
     public void testJsonFormatRegistersDeclaredSchema() throws Exception {
         setStreaming();
         final String configJson = """

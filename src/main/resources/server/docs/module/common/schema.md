@@ -11,6 +11,30 @@ timestamp: 2026-07-06T00:00:00Z
 Several modules accept a `schema` block that declares the shape of the data and, when the module
 reads or writes encoded bytes (Pub/Sub messages, files, …), how to decode/encode them.
 
+## Location
+
+Write the schema block inside the module's `parameters`:
+
+```yaml
+sources:
+  - name: input
+    module: pubsub
+    parameters:
+      subscription: projects/myproject/subscriptions/mysubscription
+      format: json
+      schema:
+        fields:
+          - { name: user_id, type: string }
+```
+
+The older location — `schema` at the module top level, next to `parameters` — keeps working but is
+deprecated (a warning is logged). Declaring both locations is an error, and `parameters.schema` on
+a module that does not consume a schema is an error.
+
+Modules that accept a schema: sources `pubsub`, `kafka`, `storage`, `bigtable`, `datastore`,
+`firestore`, `iceberg`, `jdbc`, `create`; sinks `pubsub`, `storage`. Other modules infer their
+schema from the service or from their input and do not take a schema declaration.
+
 A schema block separates three concerns. All three keys are optional — use only the ones the
 module needs:
 
@@ -70,15 +94,15 @@ Protobuf-encoded Pub/Sub messages:
 sources:
   - name: input
     module: pubsub
-    schema:
-      encoding:
-        format: protobuf
-        messageName: com.example.Event
-      reference:
-        uri: gs://my-bucket/schemas/event.pb
     parameters:
       subscription: projects/myproject/subscriptions/mysubscription
       format: protobuf
+      schema:
+        encoding:
+          format: protobuf
+          messageName: com.example.Event
+        reference:
+          uri: gs://my-bucket/schemas/event.pb
 ```
 
 Avro with an inline definition:

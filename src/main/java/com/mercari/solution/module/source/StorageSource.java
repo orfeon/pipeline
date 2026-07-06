@@ -28,7 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 
-@Source.Module(name="storage")
+@Source.Module(name="storage", schema=true)
 public class StorageSource extends Source {
 
     private static final Logger LOG = LoggerFactory.getLogger(StorageSource.class);

@@ -150,6 +150,42 @@ public abstract class Module<T extends PInput> extends PTransform<T, MCollection
         this.pipelineErrorHandler = errorHandler;
     }
 
+    /**
+     * Resolves the module schema (schema-redesign.md Phase 3).
+     * {@code parameters.schema} is the canonical location; the module top-level {@code schema}
+     * remains as a deprecated fallback. Declaring both is an error, as is {@code parameters.schema}
+     * on a module that does not declare schema support (top-level on an unsupported module stays a
+     * warning for backward compatibility until Phase 5).
+     */
+    protected static Schema resolveSchema(
+            final ModuleConfig config,
+            final Schema topLevelSchema,
+            final boolean schemaSupported) {
+
+        final JsonObject parameters = config.getParameters();
+        if(parameters != null && parameters.has("schema")) {
+            if(!schemaSupported) {
+                throw new IllegalModuleException(
+                        "module: " + config.getModule() + " does not support schema. remove parameters.schema");
+            }
+            if(topLevelSchema != null) {
+                throw new IllegalModuleException(
+                        "schema must not be declared both at the module top level and in parameters.schema");
+            }
+            return Schema.parse(parameters.get("schema"));
+        }
+        if(topLevelSchema != null) {
+            if(schemaSupported) {
+                LOG.warn("module: {} declares schema at the module top level; this location is deprecated — move it into parameters.schema (see docs module/common/schema.md)",
+                        config.getName());
+            } else {
+                LOG.warn("module: {} declares schema but does not consume it; the declaration is ignored (this will become an error in a future version)",
+                        config.getName());
+            }
+        }
+        return topLevelSchema;
+    }
+
     protected <ParameterT> ParameterT getParameters(Class<ParameterT> clazz) {
         try {
             final JsonObject parametersJson = Config.convertConfigJson(parametersText, Config.Format.json);
