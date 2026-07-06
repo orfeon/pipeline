@@ -260,8 +260,30 @@ Query2.builder()
   the intended alternatives are ORDER BY/LIMIT/aggregation per key set, or a
   pattern-matching scalar UDF over the array column (the UDF registration
   hooks exist).
-- **Sequence patterns: use the built-in `SEQ_MATCH` UDF**
-  (`util/pipeline/udf/SequenceMatchFunctions` + `SequencePattern`), built on
+- **Sequence patterns: use the built-in `SEQ_*` family** (ported from / kept in
+  sync with orfeon/calcite-multi-engine, whose `sequence-patterns` skill is the
+  full query-authoring guide; tests here: `Query2SeqMatchTest`,
+  `Query2SeqFamilyTest`, `JdbcLookupSourceTest#testLookupHistoryToSequenceInOneQuery`):
+  - `SEQ_MATCH(rows, fields, pattern, define [, mode])` — match ranges;
+    optional mode `longest` (default) / `shortest` (pins the first occurrence)
+    / `all` / `overlap` (every trigger evaluates).
+  - `SEQ_MATCH_STEPS(...)` — one row per matched element with its **symbol**
+    (`WHERE s.symbol = 'BUY'` aggregates exactly the matched purchases).
+  - `SEQ_FOLD(_INT)(rows, from, to, field, op)` — range aggregation as an
+    expression (field names resolved at plan time from the array's ROW type;
+    `''` for scalar arrays, 0-based ordinal for untyped ones).
+  - `SEQ_COLLECT(sortKey [, v1..v6])` — key-ordered collection aggregate:
+    lookup fan-out + `GROUP BY` + `SEQ_COLLECT` = DB history as a sequence,
+    order-independent. Prefer it over ordered `ARRAY_AGG` for sequence
+    building (portable to the origin engine, and ordered ARRAY_AGG can't
+    round-trip LATERAL blocks). Result is opaque — consume via
+    SEQ_MATCH/STEPS/FOLD-with-ordinal, no UNNEST/projection.
+  - `SEQ_SPLIT(rows, field, gap)` — time-gap sessionizer; expand with
+    `UNNEST ... WITH ORDINALITY AS s(sess, sessionNo)` and match per session.
+  - **BigQuery-lex quoting trap**: a define containing string literals must be
+    a *double-quoted* SQL string (`"A: $action = 'promo'"`) — `''` escaping is
+    the origin engine's Lex.JAVA convention and fails to parse here.
+  The matcher core (`SequenceMatchFunctions` + `SequencePattern`) is built on
   the **vendored Calcite pattern runtime**
   (`...calcite.runtime.Pattern/Automaton/Matcher`, the standalone machinery
   behind EnumerableMatch): zero new dependencies, `matcher.match(rows)` is

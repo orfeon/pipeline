@@ -225,6 +225,41 @@ public class JdbcLookupSourceTest {
     }
 
     @Test
+    public void testLookupHistoryToSequenceInOneQuery() {
+        // Lookup fan-out -> SEQ_COLLECT (sorted by SEQ regardless of arrival
+        // order) -> SEQ_MATCH: sequence-pattern recognition over DB history in
+        // one statement.
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source().withTable("EVENTS").build())
+                .withSql("""
+                        SELECT i.userId AS userId,
+                               CARDINALITY(SEQ_MATCH(
+                                 SEQ_COLLECT(e.SEQ, e.CATEGORY), 'seq,category',
+                                 'A B C', "A: $category = 'a'; B: $category = 'b';
+                                          C: $category = 'c'")) AS hits
+                        FROM INPUT AS i
+                        JOIN db.EVENTS AS e ON e.USER_ID = i.userId
+                        GROUP BY i.userId
+                        """)
+                .build();
+        query.setup();
+        try {
+            // user 1 categories in SEQ order: a, b, c -> one match; user 2: x, y.
+            final List<MElement> outputs = query.execute(
+                    List.of(input(1L, 0L, "-"), input(2L, 0L, "-")), TIMESTAMP);
+            Assertions.assertEquals(2, outputs.size());
+            final Map<Long, MElement> byUser = collectByUser(outputs);
+            Assertions.assertEquals(1,
+                    ((Number) byUser.get(1L).getPrimitiveValue("hits")).intValue());
+            Assertions.assertEquals(0,
+                    ((Number) byUser.get(2L).getPrimitiveValue("hits")).intValue());
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testSerializedRoundTripLikeDoFn() throws Exception {
         // The Query2 instance must survive Java serialization (DoFn shipping):
         // metadata derived at construction, clients re-opened at setup().
