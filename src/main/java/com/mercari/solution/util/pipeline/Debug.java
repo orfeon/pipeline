@@ -18,6 +18,7 @@ import org.apache.avro.io.DatumReader;
 import org.apache.avro.io.DatumWriter;
 import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
 import org.apache.beam.sdk.extensions.avro.io.AvroIO;
+import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.WriteFilesResult;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -78,18 +79,21 @@ public class Debug {
 
             writeAvroSchemaFile(outputSinkDirPath + "/schema.avro", outputAvroSchema);
 
-            final FileIO.Write<Void, GenericRecord> write = FileIO
+            FileIO.Write<Void, GenericRecord> write = FileIO
                     .<GenericRecord>write()
                     .to(outputSinkDirPath)
                     .via(AvroIO.sink(outputAvroSchema))
                     .withTempDirectory(tempSinkDirPath);
-            errorHandler.apply(write);
 
             PCollection<GenericRecord> records = input
                     .apply("Format", ParDo.of(new FormatDoFn(inputSchema)))
                     .setCoder(AvroCoder.of(outputAvroSchema));
 
             if(OptionUtil.isUnbounded(input)) {
+                // The default windowed file naming embeds the window boundary ISO timestamps,
+                // which contain ':' characters that are illegal in Windows file names and make
+                // the write fail at the finalize (rename) step. Use a portable naming instead.
+                write = write.withNaming(new PortableWindowedNaming());
                 records = records
                         .apply("Window", Window
                                 .<GenericRecord>into(FixedWindows.of(Duration.standardSeconds(10L)))
@@ -103,7 +107,32 @@ public class Debug {
                                 .withAllowedLateness(Duration.ZERO)
                                 .discardingFiredPanes());
             }
+            errorHandler.apply(write);
             return records.apply("Write", write);
+        }
+
+        /**
+         * File naming for windowed (unbounded input) writes that avoids characters illegal on
+         * some filesystems (the default windowed naming embeds ':' from ISO timestamps, which
+         * fails on Windows).
+         */
+        private static class PortableWindowedNaming implements FileIO.Write.FileNaming {
+            @Override
+            public String getFilename(
+                    final BoundedWindow window,
+                    final PaneInfo pane,
+                    final int numShards,
+                    final int shardIndex,
+                    final Compression compression) {
+                final String windowString;
+                if(window instanceof GlobalWindow) {
+                    windowString = "global";
+                } else {
+                    windowString = Long.toString(window.maxTimestamp().getMillis());
+                }
+                return String.format("output-%s-%d-%05d-of-%05d.avro",
+                        windowString, pane.getIndex(), shardIndex, numShards);
+            }
         }
 
         private static class FormatDoFn extends DoFn<MElement, GenericRecord> {

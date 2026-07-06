@@ -3,7 +3,6 @@ package com.mercari.solution.module.source;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.cloud.google.PubSubUtil;
 import com.mercari.solution.util.pipeline.*;
 import com.mercari.solution.util.pipeline.select.SelectFunction;
 import org.apache.beam.sdk.io.kafka.KafkaIO;
@@ -21,6 +20,7 @@ import java.io.Serializable;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +44,7 @@ public class KafkaSource extends Source {
         private Boolean withoutMetadata;
 
         private String idAttribute;
+        private Map<String, String> consumerConfig;
 
         private Serialize.Format format;
         private Boolean outputOriginal;
@@ -62,12 +63,8 @@ public class KafkaSource extends Source {
 
             // check required parameters filled
             final List<String> errorMessages = new ArrayList<>();
-            if(topic == null && (topics == null || topics.isEmpty())) {
-                errorMessages.add("parameters.topic or subscription is required");
-            } else {
-                if(!PubSubUtil.isTopicResource(topic)) {
-                    errorMessages.add("parameters.topic is illegal format: " + topic);
-                }
+            if(topic == null && (topics == null || topics.isEmpty()) && topicPattern == null) {
+                errorMessages.add("parameters.topic, topics or topicPattern is required");
             }
             if(format != null) {
                 switch (format) {
@@ -141,7 +138,9 @@ public class KafkaSource extends Source {
                 .ofNullable(getOutputType())
                 .orElse(DataType.ELEMENT);
 
-        final Schema inputSchema = null;//createDeserializedInputSchema(parameters, getSchema());
+        final Schema inputSchema = Optional
+                .ofNullable(getSchema())
+                .orElseThrow(() -> new IllegalModuleException("kafka source module requires schema"));
         final Schema outputSchema;
         final List<SelectFunction> selectFunctions = SelectFunction.of(parameters.select, inputSchema.getFields());
         if (selectFunctions.isEmpty()) {
@@ -208,17 +207,18 @@ public class KafkaSource extends Source {
             read = read.withMaxReadTime(parameters.maxReadTime);
         }
 
-        if(parameters.withProcessingTime != null) {
-            read.withProcessingTime();
+        if(parameters.consumerConfig != null && !parameters.consumerConfig.isEmpty()) {
+            read = read.withConsumerConfigUpdates(new HashMap<>(parameters.consumerConfig));
         }
-        if(parameters.withReadCommitted != null) {
-            read.withReadCommitted();
+
+        if(Boolean.TRUE.equals(parameters.withProcessingTime)) {
+            read = read.withProcessingTime();
         }
-        if(parameters.withLogAppendTime != null) {
-            read.withLogAppendTime();
+        if(Boolean.TRUE.equals(parameters.withReadCommitted)) {
+            read = read.withReadCommitted();
         }
-        if(parameters.withoutMetadata != null) {
-            read.withoutMetadata();
+        if(Boolean.TRUE.equals(parameters.withLogAppendTime)) {
+            read = read.withLogAppendTime();
         }
 
         errorHandler.apply(read);
