@@ -16,6 +16,22 @@ import java.io.Serializable;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Unified schema representation (see docs/developer/schema-redesign.md).
+ *
+ * Internally the schema separates three concerns (Phase 1):
+ * <ul>
+ *   <li>{@code fields} — the logical shape of the data (canonical).</li>
+ *   <li>{@link Encoding} — the declared wire format (avro / protobuf) and its options.</li>
+ *   <li>{@link Reference} — where the schema definition document comes from
+ *       (inline / file URI / destination).</li>
+ * </ul>
+ * {@code encoding} and {@code reference} are normalized at build time from the declared config
+ * (old-format keys included) and are read-only declarations. The nested {@link RowSchema} /
+ * {@link AvroSchema} / {@link ProtobufSchema} holders are runtime materialization caches derived
+ * from them (or from {@code fields}); they keep the legacy accessor behavior pinned by
+ * {@code SchemaParseTest}.
+ */
 public class Schema implements Serializable {
 
     private static final Logger LOG = LoggerFactory.getLogger(Schema.class);
@@ -35,6 +51,11 @@ public class Schema implements Serializable {
     private ProtobufSchema protobuf;
 
     private Boolean useDestinationSchema;
+
+    // normalized declaration (schema-redesign.md Phase 1): what the config declared,
+    // independent of the runtime materialization caches above
+    private Encoding encoding;
+    private Reference reference;
 
     public String getName() {
         return name;
@@ -117,6 +138,23 @@ public class Schema implements Serializable {
         return useDestinationSchema;
     }
 
+    /**
+     * The declared wire format, normalized from the config (including old-format keys).
+     * Null when the config declared no encoding (fields-only schemas, programmatic schemas),
+     * or when the declaration was ambiguous in the legacy format (both avro and protobuf).
+     */
+    public Encoding getEncoding() {
+        return encoding;
+    }
+
+    /**
+     * Where the declared schema definition document comes from, normalized from the config.
+     * Null when the schema was defined inline via fields only.
+     */
+    public Reference getReference() {
+        return reference;
+    }
+
     public int countFields() {
         return switch (type) {
             case ELEMENT, DOCUMENT, ENTITY -> this.fields.size();
@@ -142,6 +180,19 @@ public class Schema implements Serializable {
     }
 
     public Schema setup(final DataType dataType) {
+        // one-way pipeline (schema-redesign.md Phase 1):
+        // resolve the declared reference and materialize the runtime representation for the
+        // requested data type, then derive the logical fields from whatever is materialized.
+        materialize(dataType);
+        deriveFields();
+        return this;
+    }
+
+    // Stages 1+2: reference resolution (loading the declared document) and encoding
+    // materialization (building the runtime schema object) for the requested data type.
+    // Loading is delegated to the holder's setup(), which reads AvroSchema.file /
+    // ProtobufSchema.descriptorFile when the document is not yet in memory.
+    private void materialize(final DataType dataType) {
         switch (dataType) {
             case AVRO -> {
                 if(avro == null || avro.schema == null) {
@@ -166,6 +217,11 @@ public class Schema implements Serializable {
                 }
             }
         }
+    }
+
+    // Stage 3: fields derivation — the logical shape is filled from the first materialized
+    // representation when it was not declared directly.
+    private void deriveFields() {
         if(fields == null || fields.isEmpty()) {
             if(avro != null) {
                 this.fields = AvroToElementConverter.convertFields(avro.schema.getFields());
@@ -175,7 +231,26 @@ public class Schema implements Serializable {
                 this.fields = RowToElementConverter.convertFields(row.schema.getFields());
             }
         }
-        return this;
+    }
+
+    // Normalization (schema-redesign.md §3): capture what the config declared as
+    // encoding + reference, before any runtime materialization mutates the holders.
+    // Called once from Builder.build().
+    private void normalize() {
+        final boolean avroDeclared = avro != null && (avro.json != null || avro.file != null);
+        final boolean protobufDeclared = protobuf != null
+                && (protobuf.descriptorFile != null || protobuf.messageName != null || protobuf.proto != null);
+        if(protobufDeclared && !avroDeclared) {
+            this.encoding = Encoding.of(Encoding.Format.protobuf, protobuf.messageName);
+            this.reference = Reference.of(protobuf.descriptorFile, null, useDestinationSchema);
+        } else if(avroDeclared && !protobufDeclared) {
+            this.encoding = Encoding.of(Encoding.Format.avro, null);
+            this.reference = Reference.of(avro.file, avro.json, useDestinationSchema);
+        } else if(useDestinationSchema != null) {
+            this.reference = Reference.of(null, null, useDestinationSchema);
+        }
+        // both avro and protobuf declared: ambiguous in the legacy format — left unnormalized
+        // (the new-format parser introduced in Phase 2 rejects the combination)
     }
 
     private Schema(
@@ -1021,6 +1096,80 @@ public class Schema implements Serializable {
     }
 
 
+    /**
+     * The declared wire format (schema-redesign.md P2): how bytes map to/from elements.
+     * Carries only the conversion spec, never the definition document (that is {@link Reference}).
+     */
+    public static class Encoding implements Serializable {
+
+        public enum Format {
+            avro,
+            protobuf
+        }
+
+        private Format format;
+        private String messageName;
+
+        public Format getFormat() {
+            return format;
+        }
+
+        public String getMessageName() {
+            return messageName;
+        }
+
+        static Encoding of(final Format format, final String messageName) {
+            final Encoding encoding = new Encoding();
+            encoding.format = format;
+            encoding.messageName = messageName;
+            return encoding;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("{ format: %s, messageName: %s }", format, messageName);
+        }
+
+    }
+
+    /**
+     * Where the declared schema definition document comes from (schema-redesign.md P2):
+     * an inline document, a file URI (gs:// etc.), or the write destination's schema.
+     */
+    public static class Reference implements Serializable {
+
+        private String uri;
+        private String inline;
+        private Boolean destination;
+
+        public String getUri() {
+            return uri;
+        }
+
+        public String getInline() {
+            return inline;
+        }
+
+        public Boolean getDestination() {
+            return destination;
+        }
+
+        static Reference of(final String uri, final String inline, final Boolean destination) {
+            final Reference reference = new Reference();
+            reference.uri = uri;
+            reference.inline = inline;
+            reference.destination = destination;
+            return reference;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("{ uri: %s, inline: %s, destination: %s }",
+                    uri, inline != null ? "(inline document)" : null, destination);
+        }
+
+    }
+
     public static class Builder implements Serializable {
 
         private String name;
@@ -1103,7 +1252,7 @@ public class Schema implements Serializable {
             if(type != null) {
                 schema.type = type;
             }
-            //schema.setup();
+            schema.normalize();
             return schema;
         }
 
