@@ -8,7 +8,11 @@ Phase 3 done (`parameters.schema` canonical; top-level fallback warns; support d
 `@…Module(schema=true)`; `parameters.schema` on unsupported modules errors — top-level on
 unsupported modules stays a warning until Phase 5 for backward compatibility),
 Phase 4 in progress (storage done: fields projection unified across avro/parquet with
-assembly-time validation; see the storage row in §3)**
+assembly-time validation — see the storage row in §3; pubsub done: `parameters.format` derived
+from `schema.encoding.format`, `reference.destination` works on the sink — destination-only
+schema declarations parse into a placeholder resolved from the topic,
+`parameters.useDestinationSchema` deprecated, sink protobuf validation NPE fixed; Confluent
+runtime registry remains a separate PR)**
 Scope: the `schema` configuration block, its position in module config, and the internal `Schema` model
 (`com.mercari.solution.module.Schema`).
 

@@ -67,6 +67,34 @@ public class Serialize implements Serializable {
         return new Serialize(format, inputSchema);
     }
 
+    /**
+     * Resolves the serialize format from the module parameter and the schema's declared
+     * encoding (schema-redesign.md Phase 4): when the parameter is omitted, the format is
+     * derived from {@code schema.encoding.format}; when both are declared and differ, the
+     * parameter wins with a warning (to be promoted to an error in Phase 5).
+     */
+    public static Format resolveFormat(
+            final Format declared,
+            final Schema schema) {
+
+        final Schema.Encoding encoding = schema == null ? null : schema.getEncoding();
+        if(encoding == null || encoding.getFormat() == null) {
+            return declared;
+        }
+        final Format encodingFormat = switch (encoding.getFormat()) {
+            case avro -> Format.avro;
+            case protobuf -> Format.protobuf;
+        };
+        if(declared == null) {
+            return encodingFormat;
+        }
+        if(!declared.equals(encodingFormat)) {
+            LOG.warn("parameters.format: {} differs from schema.encoding.format: {}; parameters.format wins (this mismatch will become an error in a future version)",
+                    declared, encoding.getFormat());
+        }
+        return declared;
+    }
+
     Serialize(
             final Format format,
             final Schema inputSchema) {

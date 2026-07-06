@@ -112,6 +112,32 @@ public class SchemaNewFormatTest {
     }
 
     @Test
+    public void testDestinationOnlyReference() {
+        // Phase 4: a destination-only declaration parses into a placeholder schema
+        // whose definition the sink resolves from the write destination
+        final Schema schema = Schema.parse("""
+                { "reference": { "destination": true } }
+                """);
+        Assertions.assertTrue(schema.isDestinationReference());
+        Assertions.assertTrue(schema.getFields() == null || schema.getFields().isEmpty());
+
+        // legacy spelling now parses too (it used to throw with no fields)
+        final Schema legacy = Schema.parse("""
+                { "useDestinationSchema": true }
+                """);
+        Assertions.assertTrue(legacy.isDestinationReference());
+
+        // a schema with its own fields is not a destination placeholder even when flagged
+        final Schema withFields = Schema.parse("""
+                {
+                  "useDestinationSchema": true,
+                  "fields": [ { "name": "stringField", "type": "string" } ]
+                }
+                """);
+        Assertions.assertFalse(withFields.isDestinationReference());
+    }
+
+    @Test
     public void testMixingOldAndNewKeysThrows() {
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class, () ->
                 Schema.parse("""
