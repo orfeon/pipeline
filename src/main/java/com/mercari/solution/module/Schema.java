@@ -286,6 +286,18 @@ public class Schema implements Serializable {
         final Schema.Builder builder = Schema.builder();
         final List<String> errorMessages = new ArrayList<>();
 
+        // new format (schema-redesign.md Phase 2): encoding / reference.
+        // Mixing with old-format keys is rejected to keep the declaration unambiguous.
+        final boolean hasNewKeys = jsonObject.has("encoding") || jsonObject.has("reference");
+        final boolean hasLegacyKeys = jsonObject.has("avro") || jsonObject.has("protobuf")
+                || jsonObject.has("useDestinationSchema")
+                || jsonObject.has("avroSchema") || jsonObject.has("protobufDescriptor");
+        if(hasNewKeys && hasLegacyKeys) {
+            errorMessages.add("schema must not mix new-format keys (encoding, reference) with old-format keys (avro, protobuf, useDestinationSchema, avroSchema, protobufDescriptor)");
+        } else if(hasNewKeys) {
+            parseEncodingAndReference(jsonObject, builder, errorMessages);
+        }
+
         if(jsonObject.has("fields")) {
             final JsonElement fieldsElement = jsonObject.get("fields");
             if(!fieldsElement.isJsonArray()) {
@@ -373,6 +385,110 @@ public class Schema implements Serializable {
         }
 
         return builder.build();
+    }
+
+    // Parses the new-format keys (schema-redesign.md §2) into the same internals as the old
+    // format: the declaration goes to Builder.encoding/reference verbatim, and the definition
+    // document (when supplied) is loaded through the same AvroSchema/ProtobufSchema holders.
+    private static void parseEncodingAndReference(
+            final JsonObject jsonObject,
+            final Builder builder,
+            final List<String> errorMessages) {
+
+        Encoding.Format format = null;
+        String messageName = null;
+        if(jsonObject.has("encoding")) {
+            final JsonElement encodingElement = jsonObject.get("encoding");
+            if(!encodingElement.isJsonObject()) {
+                errorMessages.add("schema.encoding must be object. but: " + encodingElement);
+                return;
+            }
+            final JsonObject encodingObject = encodingElement.getAsJsonObject();
+            if(!encodingObject.has("format")) {
+                errorMessages.add("schema.encoding.format is required");
+                return;
+            }
+            final String formatString = encodingObject.get("format").getAsString();
+            try {
+                format = Encoding.Format.valueOf(formatString.trim().toLowerCase());
+            } catch (IllegalArgumentException e) {
+                errorMessages.add("schema.encoding.format: " + formatString + " is not supported. supported formats: " + Arrays.toString(Encoding.Format.values()));
+                return;
+            }
+            if(encodingObject.has("messageName")) {
+                messageName = encodingObject.get("messageName").getAsString();
+            }
+            builder.withEncoding(Encoding.of(format, messageName));
+        }
+
+        String uri = null;
+        String inline = null;
+        Boolean destination = null;
+        if(jsonObject.has("reference")) {
+            final JsonElement referenceElement = jsonObject.get("reference");
+            if(!referenceElement.isJsonObject()) {
+                errorMessages.add("schema.reference must be object. but: " + referenceElement);
+                return;
+            }
+            final JsonObject referenceObject = referenceElement.getAsJsonObject();
+            if(referenceObject.has("uri")) {
+                uri = referenceObject.get("uri").getAsString();
+            }
+            if(referenceObject.has("inline")) {
+                inline = referenceObject.get("inline").getAsString();
+            }
+            if(referenceObject.has("destination")) {
+                destination = referenceObject.get("destination").getAsBoolean();
+            }
+            if(uri != null && inline != null) {
+                errorMessages.add("schema.reference must not have both uri and inline");
+                return;
+            }
+            builder.withReference(Reference.of(uri, inline, destination));
+        }
+
+        if(destination != null) {
+            // keep the legacy accessor working for existing module code
+            builder.withUseDestinationSchema(destination);
+        }
+
+        final boolean hasDocument = uri != null || inline != null;
+        if(format == null) {
+            if(hasDocument) {
+                errorMessages.add("schema.reference with uri or inline requires schema.encoding.format");
+            }
+            return;
+        }
+
+        switch (format) {
+            case avro -> {
+                if(!hasDocument && !jsonObject.has("fields")) {
+                    errorMessages.add("schema.encoding with format avro requires schema.reference or schema.fields");
+                    return;
+                }
+                if(hasDocument) {
+                    final AvroSchema avro = new AvroSchema();
+                    avro.json = inline;
+                    avro.file = uri;
+                    builder.withAvro(avro);
+                }
+            }
+            case protobuf -> {
+                if(messageName == null) {
+                    errorMessages.add("schema.encoding.messageName is required if format is protobuf");
+                }
+                if(uri == null) {
+                    errorMessages.add("schema.encoding with format protobuf requires schema.reference.uri (descriptor file)");
+                }
+                if(messageName == null || uri == null) {
+                    return;
+                }
+                final ProtobufSchema protobuf = new ProtobufSchema();
+                protobuf.descriptorFile = uri;
+                protobuf.messageName = messageName;
+                builder.withProtobuf(protobuf);
+            }
+        }
     }
 
     public Schema copy() {
@@ -1179,6 +1295,8 @@ public class Schema implements Serializable {
         private RowSchema row;
         private ProtobufSchema protobuf;
         private Boolean useDestinationSchema;
+        private Encoding encoding;
+        private Reference reference;
 
         private Builder() {
             this("", new ArrayList<>());
@@ -1218,6 +1336,8 @@ public class Schema implements Serializable {
                 this.row = new RowSchema();
                 this.row.schema = schema.row.schema;
             }
+            this.encoding = schema.encoding;
+            this.reference = schema.reference;
         }
 
         public Schema build() {
@@ -1252,7 +1372,13 @@ public class Schema implements Serializable {
             if(type != null) {
                 schema.type = type;
             }
-            schema.normalize();
+            if(this.encoding != null || this.reference != null) {
+                // explicit declaration (new-format parse, or carried over by copy())
+                schema.encoding = this.encoding;
+                schema.reference = this.reference;
+            } else {
+                schema.normalize();
+            }
             return schema;
         }
 
@@ -1284,6 +1410,16 @@ public class Schema implements Serializable {
 
         public Builder withUseDestinationSchema(Boolean useDestinationSchema) {
             this.useDestinationSchema = useDestinationSchema;
+            return this;
+        }
+
+        public Builder withEncoding(Encoding encoding) {
+            this.encoding = encoding;
+            return this;
+        }
+
+        public Builder withReference(Reference reference) {
+            this.reference = reference;
             return this;
         }
 

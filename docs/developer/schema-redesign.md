@@ -1,7 +1,9 @@
 # Schema Redesign (Design Document)
 
 Status: **Accepted — Phase 0 done (characterization tests; storage sampling IT pending),
-Phase 1 done (`Encoding`/`Reference` normalization + staged setup pipeline in `Schema`)**
+Phase 1 done (`Encoding`/`Reference` normalization + staged setup pipeline in `Schema`),
+Phase 2 done (`encoding:`/`reference:` accepted by `Schema.parse`; old+new mixing rejected;
+user docs at `server/docs/module/common/schema.md`)**
 Scope: the `schema` configuration block, its position in module config, and the internal `Schema` model
 (`com.mercari.solution.module.Schema`).
 
@@ -79,7 +81,7 @@ schema:
   reference:
     uri: gs://bucket/schemas/event.pb
     # uri: registry://sr.example.com/subjects/events-value/versions/12
-    # uri: data:...           (inline, base64)
+    # inline: "<the definition document itself>"   (implemented in Phase 2)
     # destination: true       (use the sink target's schema; replaces useDestinationSchema)
 ```
 
