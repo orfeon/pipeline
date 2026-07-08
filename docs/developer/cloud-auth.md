@@ -1,6 +1,8 @@
 # Cross-Cloud Authentication (Design Document)
 
-Status: **Accepted — Phase 0 in progress (AWS options wiring)**
+Status: **Accepted — Phase 0 done (AWS options wiring: `options.aws` region/endpoint/credentials
+mapped onto Beam `AwsOptions` with `default`/`static`/`assumeRole` providers; user docs at
+`docs/config/options/aws.md`)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
 Flink/Spark on AWS (EMR, EMR on EKS, Amazon Managed Service for Apache Flink) reading/writing GCP

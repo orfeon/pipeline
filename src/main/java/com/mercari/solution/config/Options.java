@@ -125,6 +125,7 @@ public class Options implements Serializable {
         }
 
         GCPOptions.setOptions(pipelineOptions, options.gcp);
+        AWSOptions.setOptions(pipelineOptions, options.aws);
 
         final MPipeline.Runner runner = OptionUtil.getRunner(pipelineOptions);
         switch (runner) {
