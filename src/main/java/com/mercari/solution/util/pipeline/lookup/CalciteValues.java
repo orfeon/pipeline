@@ -211,7 +211,18 @@ public final class CalciteValues {
             case List<?> list -> list;
             case java.sql.Array array -> {
                 try {
-                    yield java.util.Arrays.asList((Object[]) array.getArray());
+                    final Object values = array.getArray();
+                    if (values instanceof Object[] objects) {
+                        yield java.util.Arrays.asList(objects);
+                    }
+                    // A NOT NULL element type materializes as a primitive
+                    // array (e.g. boolean[] from ARRAY<BOOLEAN NOT NULL>).
+                    final int length = java.lang.reflect.Array.getLength(values);
+                    final List<Object> out = new ArrayList<>(length);
+                    for (int i = 0; i < length; i++) {
+                        out.add(java.lang.reflect.Array.get(values, i));
+                    }
+                    yield out;
                 } catch (final SQLException e) {
                     throw new IllegalStateException("failed to read array value", e);
                 }

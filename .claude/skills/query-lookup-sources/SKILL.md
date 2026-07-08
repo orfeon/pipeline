@@ -300,6 +300,20 @@ Query2.builder()
     SEQ_MATCH/STEPS/FOLD-with-ordinal, no UNNEST/projection.
   - `SEQ_SPLIT(rows, field, gap)` — time-gap sessionizer; expand with
     `UNNEST ... WITH ORDINALITY AS s(sess, sessionNo)` and match per session.
+  - `SEQ_FUNNEL(rows, fields, timeField, window, steps)` /
+    `SEQ_RETENTION(rows, fields, conditions)` — sliding-window funnel (max
+    step reached) and cohort retention (`ARRAY<BOOLEAN>`, projectable).
+    Conditions are positional `;`-separated DEFINE expressions without symbol
+    names (`SequencePattern.compileConditions`), double-quoted under the
+    BigQuery lex. `timeField` resolves against the *fields list* (ordinals
+    cover SEQ_COLLECT results). Tests: `Query2AnalyticsFunctionsTest`.
+  - Analytics companions (same origin sync): `QUANTILE(value, fraction)`
+    (exact interpolated quantile UDAF), `APPROX_DISTINCT(value)` (HLL 2^12 —
+    see the naming pitfall below), `ARRAY_DIFFERENCE(_INT)` /
+    `ARRAY_CUM_SUM(_INT)` / `ARRAY_COMPACT` / `ARRAY_DISTINCT` (scalar-array
+    transforms; `_INT`/DOUBLE variants project, COMPACT/DISTINCT are
+    `ARRAY<ANY>` like SEQ_COLLECT), `TIME_BUCKET(ts, size)` (fixed-width
+    timestamp floor; wrap in `UNIX_MILLIS` for a numeric key).
   - **BigQuery-lex quoting trap**: a define containing string literals must be
     a *double-quoted* SQL string (`"A: $action = 'promo'"`) — `''` escaping is
     the origin engine's Lex.JAVA convention and fails to parse here.
@@ -329,6 +343,23 @@ Query2.builder()
   matches spanning arrays (proven), so correctness requires create+shutdown
   per evaluation at ~1.1ms each, and it drags
   quartz/disruptor/log4j-core/guava/snakeyaml onto the worker classpath.
+
+- **Never register a UDAF under a standard-operator name, and never register
+  same-name same-arity overloads with heterogeneous parameter types.** Both
+  crash validation with `AssertionError: ANY` from
+  `SqlUtil.filterRoutinesByTypePrecedence` (once >1 candidate survives the
+  parameter filter, the precedence comparator asserts on a param type — like
+  our ANY — missing from the argument's precedence list). That is why the HLL
+  aggregate is `APPROX_DISTINCT`, not `APPROX_COUNT_DISTINCT` (a std name),
+  and why there is **no custom ARG_MAX/ARG_MIN** — the standard operators
+  execute natively on the vendored-1.40 enumerable runtime (value's own
+  return type, NULL keys ignored;
+  `Query2AnalyticsFunctionsTest#testStandardArgMaxArgMinRunNatively` pins
+  it). Arity-only overloads (SEQ_MATCH 4/5) remain fine.
+- `CalciteValues.asList` accepts `List`, `Object[]` and **primitive arrays**
+  — a NOT NULL element type (e.g. SEQ_RETENTION's `ARRAY<BOOLEAN NOT NULL>`)
+  crosses the JDBC boundary as `boolean[]`, which the previous
+  `(Object[]) array.getArray()` cast rejected.
 
 ## Reusing the sources from Beam SQL (`beamsql` module) — IMPLEMENTED
 
