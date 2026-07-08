@@ -10,7 +10,7 @@ import com.mercari.solution.util.domain.db.split.SeekSource;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
 import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
@@ -139,8 +139,8 @@ public class JdbcSource extends Source {
 
         public void replaceParameters(final Pipeline pipeline) {
 
-            if(query != null && query.startsWith("gs://")) {
-                query = StorageUtil.readString(query);
+            if(ResourceUtil.isStorageUri(query)) {
+                query = ResourceUtil.readString(query);
             }
 
             if(user == null) {

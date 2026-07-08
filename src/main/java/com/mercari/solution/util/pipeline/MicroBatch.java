@@ -1,7 +1,7 @@
 package com.mercari.solution.util.pipeline;
 
 import com.mercari.solution.module.MElement;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import freemarker.template.Configuration;
 import freemarker.template.Template;
 import freemarker.template.TemplateException;
@@ -190,11 +190,11 @@ public class MicroBatch {
                     LOG.error(errorMessage);
                     throw new IllegalArgumentException(errorMessage);
                 }
-                if(!StorageUtil.exists(parameter.outputCheckpoint)) {
+                if(!ResourceUtil.exists(parameter.outputCheckpoint)) {
                     LOG.warn(String.format("outputCheckpoint object %s does not exist", parameter.outputCheckpoint));
                     return null;
                 }
-                final String checkpointDatetimeString = StorageUtil.readString(parameter.outputCheckpoint).trim();
+                final String checkpointDatetimeString = ResourceUtil.readString(parameter.outputCheckpoint).trim();
                 try {
                     LOG.info(String.format("Start from checkpoint: %s", checkpointDatetimeString));
                     return Instant.parse(checkpointDatetimeString);
@@ -472,7 +472,7 @@ public class MicroBatch {
                     return;
                 }
                 final String checkpointDatetimeString = executedMinEventTime.toString();
-                StorageUtil.writeString(outputCheckpoint, checkpointDatetimeString);
+                ResourceUtil.writeString(outputCheckpoint, checkpointDatetimeString);
                 LOG.info(String.format("Checkpoint: %s", checkpointDatetimeString));
                 long checkpointLagMillis = Instant.now().getMillis() - executedMinEventTime.getMillis();
                 LOG.info(String.format("Checkpoint lag millis: %d", checkpointLagMillis));

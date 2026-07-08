@@ -2,7 +2,7 @@ package com.mercari.solution.util.domain.ml.onnx;
 
 import ai.onnxruntime.*;
 import com.google.gson.JsonObject;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.values.KV;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -212,7 +212,7 @@ public class OnnxRuntimeUtil {
                 LOG.warn("Skip to load extensions library");
             }
 
-            final byte[] bytes = StorageUtil.readBytes(model);
+            final byte[] bytes = ResourceUtil.readBytes(model);
             try(OrtSession session = environment.createSession(bytes, sessionOptions)) {
                 return KV.of(session.getInputInfo(), session.getOutputInfo());
             }

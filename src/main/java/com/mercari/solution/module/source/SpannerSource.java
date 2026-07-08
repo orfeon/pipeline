@@ -11,7 +11,7 @@ import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.UnionMapCoder;
 import com.mercari.solution.util.cloud.google.SpannerUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.MicroBatch;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.schema.StructSchemaUtil;
@@ -295,8 +295,8 @@ public class SpannerSource extends Source {
         public PCollection<Struct> expand(PBegin begin) {
 
             final String rawQuery;
-            if(parameters.query.startsWith("gs://")) {
-                rawQuery = StorageUtil.readString(parameters.query);
+            if(ResourceUtil.isStorageUri(parameters.query)) {
+                rawQuery = ResourceUtil.readString(parameters.query);
             } else {
                 rawQuery = parameters.query;
             }

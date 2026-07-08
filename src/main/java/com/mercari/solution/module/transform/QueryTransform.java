@@ -3,7 +3,7 @@ package com.mercari.solution.module.transform;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.Query2;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.lookup.source.LookupSourceConfig;
@@ -77,9 +77,9 @@ public class QueryTransform extends Transform {
                 return null;
             }
             String query;
-            if(sql.startsWith("gs://")) {
-                LOG.info("sql parameter is GCS path: {}", sql);
-                final String rawQuery = StorageUtil.readString(sql);
+            if(ResourceUtil.isStorageUri(sql)) {
+                LOG.info("sql parameter is storage path: {}", sql);
+                final String rawQuery = ResourceUtil.readString(sql);
                 query = TemplateUtil.executeStrictTemplate(rawQuery, templateArgs);
             } else if(ParameterManagerUtil.isParameterVersionResource(sql)) {
                 LOG.info("sql parameter is Parameter Manager resource: {}", sql);

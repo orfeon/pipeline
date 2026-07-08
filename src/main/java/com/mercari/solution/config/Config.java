@@ -7,7 +7,7 @@ import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.cloud.google.ArtifactRegistryUtil;
 import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
 import com.mercari.solution.util.cloud.google.PubSubUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.domain.file.JsonUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -322,9 +322,9 @@ public class Config implements Serializable {
         }
 
         final String content;
-        if(configParam.startsWith("gs://")) {
-            LOG.info("config parameter is GCS path: {}", configParam);
-            content = StorageUtil.readString(configParam);
+        if(ResourceUtil.isStorageUri(configParam)) {
+            LOG.info("config parameter is storage path: {}", configParam);
+            content = ResourceUtil.readString(configParam);
         } else if(ParameterManagerUtil.isParameterVersionResource(configParam)) {
             LOG.info("config parameter is Parameter Manager resource: {}", configParam);
             final ParameterManagerUtil.Version version = ParameterManagerUtil.getParameterVersion(configParam);

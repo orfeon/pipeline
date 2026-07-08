@@ -10,7 +10,7 @@ import com.google.type.Date;
 import com.google.type.TimeZone;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.cloud.google.ArtifactRegistryUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.extensions.protobuf.DynamicProtoCoder;
 import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType;
 import org.slf4j.Logger;
@@ -77,7 +77,7 @@ public class ProtoSchemaUtil {
             throw new IllegalArgumentException("fileDescriptorSet resource must not be null");
         }
         if(resource.startsWith("gs://")) {
-            return StorageUtil.readBytes(resource);
+            return ResourceUtil.readBytes(resource);
         } else if(ArtifactRegistryUtil.isArtifactRegistryResource(resource)) {
             return ArtifactRegistryUtil.download(resource);
         } else {

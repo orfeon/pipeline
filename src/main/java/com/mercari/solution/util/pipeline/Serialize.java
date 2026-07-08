@@ -6,7 +6,7 @@ import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.util.JsonFormat;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;
@@ -288,7 +288,7 @@ public class Serialize implements Serializable {
         }
 
         if(!descriptors.containsKey(messageName)) {
-            final byte[] bytes = StorageUtil.readBytes(descriptorPath);
+            final byte[] bytes = ResourceUtil.readBytes(descriptorPath);
             final Map<String, Descriptors.Descriptor> map = ProtoSchemaUtil.getDescriptors(bytes);
             if(!map.containsKey(messageName)) {
                 throw new IllegalArgumentException();
@@ -330,7 +330,7 @@ public class Serialize implements Serializable {
             return schema;
         }
 
-        final String schemaJson = StorageUtil.readString(avroSchema.getFile());
+        final String schemaJson = ResourceUtil.readString(avroSchema.getFile());
         final org.apache.avro.Schema schema = AvroSchemaUtil.convertSchema(schemaJson);
         avroSchemas.put(avroSchema.getFile(), schema);
         writers.put(avroSchema.getFile(), new GenericDatumWriter<>(schema));

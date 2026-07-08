@@ -10,7 +10,7 @@ import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.cloud.google.BigQueryUtil;
 import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.MicroBatch;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
@@ -202,8 +202,8 @@ public class BigQuerySource extends Source {
             }
             case view -> {
                 final String rawQuery;
-                if(parameters.query.startsWith("gs://")) {
-                    rawQuery = StorageUtil.readString(parameters.query);
+                if(ResourceUtil.isStorageUri(parameters.query)) {
+                    rawQuery = ResourceUtil.readString(parameters.query);
                 } else {
                     rawQuery = parameters.query;
                 }
@@ -249,9 +249,9 @@ public class BigQuerySource extends Source {
 
         if(parameters.query != null) {
             final String rawQuery;
-            if(parameters.query.startsWith("gs://")) {
-                LOG.info("query parameter is GCS path: {}", parameters.query);
-                rawQuery = StorageUtil.readString(parameters.query);
+            if(ResourceUtil.isStorageUri(parameters.query)) {
+                LOG.info("query parameter is storage path: {}", parameters.query);
+                rawQuery = ResourceUtil.readString(parameters.query);
             } else if(ParameterManagerUtil.isParameterVersionResource(parameters.query)) {
                 LOG.info("query parameter is Parameter Manager resource: {}", parameters.query);
                 final ParameterManagerUtil.Version version = ParameterManagerUtil.getParameterVersion(parameters.query);

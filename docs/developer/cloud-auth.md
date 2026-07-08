@@ -17,7 +17,11 @@ LocalStack IT stays scheduled for Phase 5),
 Phase 3 done (`SecretProvider`/`SecretProviders` with GCP SM / AWS SM / Vault backends,
 `software.amazon.awssdk:secretsmanager` dependency added, jdbc/postgres/tidb/jdbc-sink/Hash call
 sites migrated, `utils.secrets.get()` template function; Vault auth stays GCP-only until Phase 5,
-Secrets Manager LocalStack IT scheduled with Phase 5)**
+Secrets Manager LocalStack IT scheduled with Phase 5),
+Phase 4 done (`ResourceUtil` unified loader; `Config.load` and single-shot read sites across
+config/queries/schema files/descriptors/models/microbatch checkpoints migrated — configs,
+schemas and SQL now load from `s3://` as well as `gs://` and local paths; GCS-only
+streaming/listing loaders intentionally kept on `StorageUtil`, see §6.2 notes)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
 Flink/Spark on AWS (EMR, EMR on EKS, Amazon Managed Service for Apache Flink) reading/writing GCP
@@ -254,10 +258,23 @@ GCP-only alias.
 ### 6.2 Unified file loading over Beam `FileSystems`
 
 `Config.load` and the `StorageUtil.readString/readBytes` call sites (schema files, proto
-descriptors, queries — ~18 modules) move to a loader built on `FileSystems.open()`. Beam already
-abstracts `gs://` and `s3://` including credentials (via §4/§5 wiring), so both schemes work in
+descriptors, queries — ~18 modules) move to a loader built on `FileSystems.open()`
+(`util/domain/file/ResourceUtil`: read/write/exists over `gs://`, `s3://`, and local paths).
+Beam already abstracts the schemes including credentials (via §4/§5 wiring), so both work in
 both directions without new abstraction. GCP-only schemes (`ar://`, Parameter Manager resources,
 Pub/Sub subscription) remain explicit branches in `Config.load`.
+
+Implementation notes:
+- Beam's `FileSystems` statically registers only the local filesystem; `gs`/`s3` handlers appear
+  with `setDefaultPipelineOptions`. `Options.setOptions` registers the fully-wired options, but
+  `Config.load` runs earlier — `ResourceUtil` therefore registers default options once as a
+  fallback when a scheme is missing, and never clobbers an existing registration. Config loading
+  from `s3://` thus authenticates via the ambient default chain (env/role), not `options.aws`
+  (which lives inside the config being loaded).
+- Sites that stay on `StorageUtil` (GCS-only by design, not gated by `gs://`-vs-`s3://`):
+  directory-listing/streaming loaders (`MHuggingFaceTokenizer`, `TokenAnalyzer` dictionaries,
+  `OnnxModel`/`OnnxGenModel` client-based reads, `PDFExtractTransform` runtime reads) and GCS
+  write/list/copy operations in sinks.
 
 ### 6.3 Template functions
 
