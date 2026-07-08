@@ -49,6 +49,12 @@ public final class LookupSourceConfig {
         private List<String> allowedHosts;
         private Long timeoutMillis;
 
+        // grpc
+        private String target;
+        private Boolean plaintext;
+        private String descriptorSetPath;
+        private Integer maxInboundMessageBytes;
+
         private CacheParameters cache;
 
         private List<TableParameters> tables;
@@ -87,8 +93,22 @@ public final class LookupSourceConfig {
                 }
                 case "rest" -> {
                 }
+                case "grpc" -> {
+                    if(target == null || descriptorSetPath == null) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (grpc) requires target and descriptorSetPath");
+                    }
+                    for(int t = 0; t < tables.size(); t++) {
+                        final TableParameters table = tables.get(t);
+                        if(table.method == null || table.keyField == null) {
+                            throw new IllegalModuleException(
+                                    "parameters.sources[" + index + "].tables[" + t
+                                            + "] (grpc) requires method and keyField");
+                        }
+                    }
+                }
                 default -> throw new IllegalModuleException(
-                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest but was: " + type);
+                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest, grpc but was: " + type);
             }
         }
     }
@@ -156,6 +176,11 @@ public final class LookupSourceConfig {
         private List<String> keyFields;
         private String rowsFrom;
         private JsonElement fields;
+
+        // grpc (method = "package.Service/Method"; keyField / rowsFrom / fields shared)
+        private Boolean serverStreaming;
+        private String requestKeyField;
+        private String requestTemplate;
     }
 
     public static class ColumnParameters implements Serializable {
@@ -308,6 +333,45 @@ public final class LookupSourceConfig {
                     }
                     if(table.rowsFrom != null) {
                         tableBuilder.withRowsFrom(table.rowsFrom);
+                    }
+                    if(table.fields != null && !table.fields.isJsonNull()) {
+                        tableBuilder.withFields(parseFields(table.fields));
+                    }
+                    builder.withTable(tableBuilder.build());
+                }
+                yield builder.build();
+            }
+            case "grpc" -> {
+                final GrpcLookupSource.Builder builder = GrpcLookupSource.builder()
+                        .withName(source.name)
+                        .withTarget(source.target)
+                        .withPlaintext(Boolean.TRUE.equals(source.plaintext))
+                        .withDescriptorSetPath(source.descriptorSetPath);
+                if(source.headers != null) {
+                    for(final Map.Entry<String, String> header : source.headers.entrySet()) {
+                        builder.withHeader(header.getKey(), header.getValue());
+                    }
+                }
+                if(source.timeoutMillis != null) {
+                    builder.withDeadlineMillis(source.timeoutMillis);
+                }
+                if(source.maxInboundMessageBytes != null) {
+                    builder.withMaxInboundMessageBytes(source.maxInboundMessageBytes);
+                }
+                for(final TableParameters table : source.tables) {
+                    final GrpcLookupSource.TableBuilder tableBuilder = GrpcLookupSource.TableConfig.builder()
+                            .withName(table.name)
+                            .withMethod(table.method)
+                            .withKeyField(table.keyField)
+                            .withServerStreaming(Boolean.TRUE.equals(table.serverStreaming));
+                    if(table.requestKeyField != null) {
+                        tableBuilder.withRequestKeyField(table.requestKeyField);
+                    }
+                    if(table.rowsFrom != null) {
+                        tableBuilder.withRowsFrom(table.rowsFrom);
+                    }
+                    if(table.requestTemplate != null) {
+                        tableBuilder.withRequestTemplate(table.requestTemplate);
                     }
                     if(table.fields != null && !table.fields.isJsonNull()) {
                         tableBuilder.withFields(parseFields(table.fields));
