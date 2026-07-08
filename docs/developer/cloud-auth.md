@@ -13,7 +13,11 @@ token → STS `AssumeRoleWithWebIdentity` — delivered to workers via `S3Option
 = `GcpFederatedS3ClientFactory` + string `FederationOptions` (see the §5.2 amendment on why the
 Jackson-module approach was replaced); `S3Util.storage(PipelineOptions)` unifies schema-sampling
 and runtime credentials, `StorageSource.s3` static keys deprecated with warning; the STS-exchange
-LocalStack IT stays scheduled for Phase 5)**
+LocalStack IT stays scheduled for Phase 5),
+Phase 3 done (`SecretProvider`/`SecretProviders` with GCP SM / AWS SM / Vault backends,
+`software.amazon.awssdk:secretsmanager` dependency added, jdbc/postgres/tidb/jdbc-sink/Hash call
+sites migrated, `utils.secrets.get()` template function; Vault auth stays GCP-only until Phase 5,
+Secrets Manager LocalStack IT scheduled with Phase 5)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
 Flink/Spark on AWS (EMR, EMR on EKS, Amazon Managed Service for Apache Flink) reading/writing GCP
@@ -237,12 +241,15 @@ Implementations, dispatched by reference syntax:
 | Provider | Reference syntax | Notes |
 |---|---|---|
 | GCP Secret Manager | `projects/{p}/secrets/{s}/versions/{v}` | existing pattern, backward compatible |
-| AWS Secrets Manager | `arn:aws:secretsmanager:...` or `aws-sm://name` | new; adds `software.amazon.awssdk:secretsmanager` dependency |
-| HashiCorp Vault | `vault://path` | wraps existing `VaultClient` |
+| AWS Secrets Manager | `arn:aws:secretsmanager:...` (region from the ARN) or `aws-sm://name` (region from `options.aws.region`) | new; adds `software.amazon.awssdk:secretsmanager` dependency |
+| HashiCorp Vault | `vault://v1/{kv-path}#{field}` | wraps existing `VaultClient`; connection from `VAULT_ADDR`/`VAULT_NAMESPACE`/`VAULT_ROLE`/`VAULT_AUTH_SERVICE_ACCOUNT` env vars (GCP auth only until Phase 5) |
 
-Call sites to migrate: `JdbcSource`, `PostgresSource`, `TiDBSource` (password/user resolution),
-`util/pipeline/select/Hash` (HMAC key), template functions. A cloud-neutral `secret("...")`
-template function is added; `gcp.secret` stays as a deprecated alias.
+The registry (`SecretProviders`) is configured with the pipeline options by `Options.setOptions`,
+so launcher-side AWS resolution honors `options.aws` (region/endpoint/credentials incl.
+`gcpFederation`). Call sites migrated: `JdbcSource`, `JdbcSink`, `PostgresSource`, `TiDBSource`
+(user/password), `util/pipeline/select/Hash` (HMAC key). A cloud-neutral
+`utils.secrets.get("...")` template function is added; `utils.gcp.secret` stays as a deprecated
+GCP-only alias.
 
 ### 6.2 Unified file loading over Beam `FileSystems`
 
@@ -254,9 +261,9 @@ Pub/Sub subscription) remain explicit branches in `Config.load`.
 
 ### 6.3 Template functions
 
-Add cloud-neutral `secret()` (backed by 6.1). `gcp.*` namespace stays for compatibility;
-`gcp.project()`/`gcp.account()` gain the §4.2 guard so merely *registering* the functions never
-triggers GCP access off-cloud.
+Add cloud-neutral `utils.secrets.get()` (backed by 6.1). `gcp.*` namespace stays for
+compatibility; `gcp.project()`/`gcp.account()` gain the §4.2 guard so merely *registering* the
+functions never triggers GCP access off-cloud.
 
 ### 6.4 `VaultClient` auth methods
 

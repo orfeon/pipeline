@@ -5,7 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.cloud.google.SecretManagerUtil;
+import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import freemarker.template.Template;
 import org.joda.time.Instant;
@@ -167,12 +167,7 @@ public class Hash implements SelectFunction {
                 }
                 case ALGORITHM_HMAC_SHA256 -> {
                     this.mac = Mac.getInstance(algorithm);
-                    final String secret;
-                    if(SecretManagerUtil.isSecretName(this.secret)) {
-                        secret = SecretManagerUtil.getSecret(this.secret).toStringUtf8();
-                    } else {
-                        secret = this.secret;
-                    }
+                    final String secret = SecretProviders.resolveIfSecret(this.secret);
                     final SecretKeySpec secretKeySpec = new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), algorithm);
                     this.mac.init(secretKeySpec);
                 }

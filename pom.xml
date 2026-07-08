@@ -543,6 +543,13 @@
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-amazon-web-services2</artifactId>
     </dependency>
+    <!-- AWS Secrets Manager (SecretProviders, docs/developer/cloud-auth.md 6.1).
+         Keep the version in sync with the AWS SDK pulled transitively by beam aws2 above. -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>secretsmanager</artifactId>
+      <version>2.20.162</version>
+    </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-io-jdbc -->
     <dependency>

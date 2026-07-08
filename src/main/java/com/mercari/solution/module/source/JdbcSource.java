@@ -1,6 +1,6 @@
 package com.mercari.solution.module.source;
 
-import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
+import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
@@ -10,7 +10,6 @@ import com.mercari.solution.util.domain.db.split.SeekSource;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
 import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.cloud.google.SecretManagerUtil;
 import com.mercari.solution.util.cloud.google.StorageUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import org.apache.avro.Schema;
@@ -152,16 +151,10 @@ public class JdbcSource extends Source {
                 if(!url.contains("enableIamAuth")) {
                     url = url + "&enableIamAuth=true";
                 }
-            } else if(SecretManagerUtil.isSecretName(user) || SecretManagerUtil.isSecretName(password)) {
+            } else if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
                 LOG.info("parameters.user|password is secret resource.");
-                try(final SecretManagerServiceClient secretClient = SecretManagerUtil.createClient()) {
-                    if(SecretManagerUtil.isSecretName(user)) {
-                        user = SecretManagerUtil.getSecret(secretClient, user).toStringUtf8();
-                    }
-                    if(SecretManagerUtil.isSecretName(password)) {
-                        password = SecretManagerUtil.getSecret(secretClient, password).toStringUtf8();
-                    }
-                }
+                user = SecretProviders.resolveIfSecret(user);
+                password = SecretProviders.resolveIfSecret(password);
             } else {
                 LOG.info("The both parameters.user and password are plain text.");
             }

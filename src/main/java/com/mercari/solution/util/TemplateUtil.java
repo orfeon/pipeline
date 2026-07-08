@@ -21,7 +21,8 @@ public class TemplateUtil {
             "datetime", new DateTimeFunctions(),
             "bigtable", new BigtableFunctions(),
             "gcp", new GcpFunctions(),
-            "oauth", new OAuthFunctions()
+            "oauth", new OAuthFunctions(),
+            "secrets", new SecretFunctions()
     );
 
     public static Template createSafeTemplate(final String name, final String template) {

@@ -1,10 +1,9 @@
 package com.mercari.solution.module.sink;
 
-import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
+import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.schema.converter.ToStatementConverter;
 import com.mercari.solution.util.domain.db.JdbcUtil;
-import com.mercari.solution.util.cloud.google.SecretManagerUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.domain.db.stmt.PreparedStatementTemplate;
 import org.apache.beam.sdk.coders.ListCoder;
@@ -83,15 +82,9 @@ public class JdbcSink extends Sink {
         }
 
         public void replaceParameters() {
-            if(SecretManagerUtil.isSecretName(user) || SecretManagerUtil.isSecretName(password)) {
-                try(final SecretManagerServiceClient secretClient = SecretManagerUtil.createClient()) {
-                    if(SecretManagerUtil.isSecretName(user)) {
-                        user = SecretManagerUtil.getSecret(secretClient, user).toStringUtf8();
-                    }
-                    if(SecretManagerUtil.isSecretName(password)) {
-                        password = SecretManagerUtil.getSecret(secretClient, password).toStringUtf8();
-                    }
-                }
+            if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
+                user = SecretProviders.resolveIfSecret(user);
+                password = SecretProviders.resolveIfSecret(password);
             }
         }
     }

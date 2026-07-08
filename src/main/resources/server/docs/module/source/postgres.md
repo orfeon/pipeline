@@ -31,8 +31,8 @@ Each range is read with an efficient TID range scan (`WHERE ctid >= '(start,0)' 
 | parameter | optional | type | description |
 | --- | --- | --- | --- |
 | url | required | String | JDBC connection url such as `jdbc:postgresql://{host}:{port}/{database}`. |
-| user | conditional required | String | User name to access the database. You can also specify a Secret Manager resource name like `projects/{myproj}/secrets/{mysecret}/versions/latest`. If this parameter is not specified, the worker's service account will be used as the [database user](https://cloud.google.com/sql/docs/postgres/iam-logins). In that case, specify `enableIamAuth=true` as a parameter in the `url`. |
-| password | conditional required | String | User password to access the database. You can also specify a Secret Manager resource name like `projects/{myproj}/secrets/{mysecret}/versions/latest`. No need to specify if the service account will be used as `user`. |
+| user | conditional required | String | User name to access the database. Accepts a secret reference: GCP Secret Manager (`projects/{myproj}/secrets/{mysecret}/versions/latest`), AWS Secrets Manager (a secret ARN or `aws-sm://{name}`), or Vault (`vault://v1/{kv-path}#{field}`). If this parameter is not specified, the worker's service account will be used as the [database user](https://cloud.google.com/sql/docs/postgres/iam-logins). In that case, specify `enableIamAuth=true` as a parameter in the `url`. |
+| password | conditional required | String | User password to access the database. Accepts a secret reference: GCP Secret Manager (`projects/{myproj}/secrets/{mysecret}/versions/latest`), AWS Secrets Manager (a secret ARN or `aws-sm://{name}`), or Vault (`vault://v1/{kv-path}#{field}`). No need to specify if the service account will be used as `user`. |
 | table | required | String | Table name for reading data. |
 | select | optional | String | The text to be inserted into the SELECT clause to specify the columns to be retrieved. The default is `*`. |
 | where | optional | String | The condition text to be inserted into the WHERE clause to filter records. |

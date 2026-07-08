@@ -2,6 +2,7 @@ package com.mercari.solution.config;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.options.*;
+import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.options.ApplicationNameOptions;
@@ -141,10 +142,11 @@ public class Options implements Serializable {
         BeamSQLOptions.setOptions(pipelineOptions, options.beamsql);
         ExpansionOptions.setOptions(pipelineOptions, options.expansion);
 
-        // Register filesystems (gs://, s3://) with the fully-wired options so that
-        // assembly-time file access (schema files, GCP credentials source, ...) already
-        // sees the configured AWS region/endpoint/credentials.
+        // Register filesystems (gs://, s3://) and secret resolution with the fully-wired
+        // options so that assembly-time file/secret access (schema files, GCP credentials
+        // source, jdbc passwords, ...) already sees the configured AWS settings.
         FileSystems.setDefaultPipelineOptions(pipelineOptions);
+        SecretProviders.configure(pipelineOptions);
     }
 
 }

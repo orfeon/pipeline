@@ -31,8 +31,8 @@ The table is split into chunks and read in parallel by distributed workers, usin
 | parameter | optional | type | description |
 | --- | --- | --- | --- |
 | url | required | String | JDBC connection url such as `jdbc:mysql://{host}:4000/{database}`. (TiDB speaks the MySQL protocol) |
-| user | required | String | User name to access the database. You can also specify a Secret Manager resource name like `projects/{myproj}/secrets/{mysecret}/versions/latest`. |
-| password | optional | String | User password to access the database. You can also specify a Secret Manager resource name like `projects/{myproj}/secrets/{mysecret}/versions/latest`. |
+| user | required | String | User name to access the database. Accepts a secret reference: GCP Secret Manager (`projects/{myproj}/secrets/{mysecret}/versions/latest`), AWS Secrets Manager (a secret ARN or `aws-sm://{name}`), or Vault (`vault://v1/{kv-path}#{field}`). |
+| password | optional | String | User password to access the database. Accepts a secret reference: GCP Secret Manager (`projects/{myproj}/secrets/{mysecret}/versions/latest`), AWS Secrets Manager (a secret ARN or `aws-sm://{name}`), or Vault (`vault://v1/{kv-path}#{field}`). |
 | table | required | String | Table name for reading data. May be schema qualified like `mydb.mytable`. |
 | select | optional | String | The text to be inserted into the SELECT clause to specify the columns to be retrieved. The default is `*`. |
 | where | optional | String | The condition text to be inserted into the WHERE clause to filter records. |
