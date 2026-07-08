@@ -2,8 +2,11 @@ package com.mercari.solution.config.options;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mercari.solution.config.Options;
+import com.mercari.solution.util.cloud.amazon.GcpFederatedAwsCredentialsProvider;
+import com.mercari.solution.util.cloud.amazon.GcpFederatedS3ClientFactory;
 import com.mercari.solution.util.domain.file.JsonUtil;
 import org.apache.beam.sdk.io.aws2.options.AwsOptions;
+import org.apache.beam.sdk.io.aws2.options.S3Options;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.junit.jupiter.api.Assertions;
@@ -100,6 +103,49 @@ public class AWSOptionsTest {
     }
 
     @Test
+    public void testGcpFederation() {
+        final AwsOptions awsOptions = applyOptions("""
+                {
+                  "aws": {
+                    "region": "ap-northeast-1",
+                    "credentials": {
+                      "type": "gcpFederation",
+                      "roleArn": "arn:aws:iam::123456789012:role/pipeline-role",
+                      "audience": "my-audience"
+                    }
+                  }
+                }
+                """);
+        // the provider must NOT be set into AwsOptions (AwsModule cannot serialize it);
+        // federation rides as string options + the S3 client factory class
+        Assertions.assertInstanceOf(DefaultCredentialsProvider.class, awsOptions.getAwsCredentialsProvider());
+        Assertions.assertEquals(
+                GcpFederatedS3ClientFactory.class,
+                awsOptions.as(S3Options.class).getS3ClientFactoryClass());
+
+        final GcpFederatedAwsCredentialsProvider provider =
+                GcpFederatedAwsCredentialsProvider.fromOptions(awsOptions);
+        Assertions.assertEquals("arn:aws:iam::123456789012:role/pipeline-role", provider.getRoleArn());
+        Assertions.assertEquals("my-audience", provider.getAudience());
+    }
+
+    @Test
+    public void testGcpFederationMissingRoleArnThrows() {
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class, () ->
+                applyOptions("""
+                        {
+                          "aws": {
+                            "region": "ap-northeast-1",
+                            "credentials": {
+                              "type": "gcpFederation"
+                            }
+                          }
+                        }
+                        """));
+        Assertions.assertTrue(e.getMessage().contains("roleArn"));
+    }
+
+    @Test
     public void testExplicitDefaultType() {
         final AwsOptions awsOptions = applyOptions("""
                 {
@@ -120,7 +166,7 @@ public class AWSOptionsTest {
                         {
                           "aws": {
                             "credentials": {
-                              "type": "gcpFederation"
+                              "type": "unknownType"
                             }
                           }
                         }

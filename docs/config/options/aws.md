@@ -16,14 +16,24 @@ which is used by the `s3://` filesystem (storage/files modules) and AWS IOs.
 
 | parameter       | type    | description                                                                                                                          |
 |-----------------|---------|----------------------------------------------------------------------------------------------------------------------------------------|
-| type            | String  | One of `default`, `static`, `assumeRole`. If omitted, inferred: `assumeRole` when `roleArn` is set, `static` when `accessKey` is set, otherwise `default`. |
+| type            | String  | One of `default`, `static`, `assumeRole`, `gcpFederation`. If omitted, inferred: `assumeRole` when `roleArn` is set, `static` when `accessKey` is set, otherwise `default` (`gcpFederation` is never inferred). |
 | accessKey       | String  | (`static`) Access key ID. Prefer IAM roles or `assumeRole`; static keys are a fallback only.                                         |
 | secretKey       | String  | (`static`) Secret access key.                                                                                                        |
 | sessionToken    | String  | (`static`, optional) Session token for temporary credentials.                                                                        |
-| roleArn         | String  | (`assumeRole`) ARN of the IAM role to assume via STS.                                                                                |
-| roleSessionName | String  | (`assumeRole`, optional) Session name. Defaults to `mercari-pipeline`.                                                               |
+| roleArn         | String  | (`assumeRole`, `gcpFederation`) ARN of the IAM role to assume via STS.                                                               |
+| roleSessionName | String  | (`assumeRole`, `gcpFederation`, optional) Session name. Defaults to `mercari-pipeline`.                                              |
 | externalId      | String  | (`assumeRole`, optional) External ID required by the role's trust policy.                                                            |
-| durationSeconds | Integer | (`assumeRole`, optional) Session duration.                                                                                           |
+| durationSeconds | Integer | (`assumeRole`, `gcpFederation`, optional) Session duration.                                                                          |
+| audience        | String  | (`gcpFederation`, optional) OIDC audience of the GCP ID token; must match an audience configured on the AWS IAM OIDC identity provider for `accounts.google.com`. Defaults to `roleArn`. |
+
+### `gcpFederation` — access AWS from pipelines running on Google Cloud, without AWS keys
+
+The worker's GCP identity (e.g. the Dataflow worker service account) mints an OIDC ID token,
+which STS `AssumeRoleWithWebIdentity` exchanges for temporary credentials of `roleArn`.
+Setup on the AWS side: create an IAM OIDC identity provider for `accounts.google.com` with your
+chosen `audience`, and let the role's trust policy allow `sts:AssumeRoleWithWebIdentity` for that
+provider (optionally conditioned on `accounts.google.com:sub` = the service account's unique ID).
+Currently applied to `s3://` access (the storage/files modules).
 
 ## Example
 
@@ -40,4 +50,15 @@ options:
 options:
   aws:
     region: ap-northeast-1
+```
+
+```yaml
+# Running on Dataflow, reading/writing s3:// without AWS keys (GCP identity federation).
+options:
+  aws:
+    region: ap-northeast-1
+    credentials:
+      type: gcpFederation
+      roleArn: arn:aws:iam::123456789012:role/pipeline-role
+      audience: mercari-pipeline
 ```

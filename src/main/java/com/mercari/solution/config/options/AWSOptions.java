@@ -1,6 +1,9 @@
 package com.mercari.solution.config.options;
 
+import com.mercari.solution.util.cloud.amazon.GcpFederatedAwsCredentialsProvider;
+import com.mercari.solution.util.cloud.amazon.GcpFederatedS3ClientFactory;
 import org.apache.beam.sdk.io.aws2.options.AwsOptions;
+import org.apache.beam.sdk.io.aws2.options.S3Options;
 import org.apache.beam.sdk.options.PipelineOptions;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
@@ -45,7 +48,7 @@ public class AWSOptions implements Serializable {
             awsOptions.setEndpoint(URI.create(aws.endpoint));
         }
         if(aws.credentials != null) {
-            awsOptions.setAwsCredentialsProvider(aws.credentials.createProvider(aws));
+            aws.credentials.apply(pipelineOptions, awsOptions, aws);
         }
     }
 
@@ -56,11 +59,13 @@ public class AWSOptions implements Serializable {
         private String accessKey;
         private String secretKey;
         private String sessionToken;
-        // assumeRole
+        // assumeRole / gcpFederation
         private String roleArn;
         private String roleSessionName;
         private String externalId;
         private Integer durationSeconds;
+        // gcpFederation
+        private String audience;
 
         private String resolveType() {
             if(type != null) {
@@ -75,13 +80,41 @@ public class AWSOptions implements Serializable {
             return "default";
         }
 
+        private void apply(
+                final PipelineOptions pipelineOptions,
+                final AwsOptions awsOptions,
+                final AWSOptions aws) {
+
+            if("gcpFederation".equals(resolveType())) {
+                configureGcpFederation(pipelineOptions);
+            } else {
+                awsOptions.setAwsCredentialsProvider(createProvider(aws));
+            }
+        }
+
+        // Beam's AwsModule cannot serialize a custom provider set into AwsOptions (it would fail
+        // at job submission), so federation rides as plain string options + a factory class name.
+        private void configureGcpFederation(final PipelineOptions pipelineOptions) {
+            if(roleArn == null) {
+                throw new IllegalArgumentException(
+                        "options.aws.credentials with type 'gcpFederation' requires roleArn");
+            }
+            final GcpFederatedAwsCredentialsProvider.FederationOptions federation = pipelineOptions
+                    .as(GcpFederatedAwsCredentialsProvider.FederationOptions.class);
+            federation.setAwsFederationRoleArn(roleArn);
+            federation.setAwsFederationAudience(audience);
+            federation.setAwsFederationRoleSessionName(roleSessionName);
+            federation.setAwsFederationDurationSeconds(durationSeconds);
+            pipelineOptions.as(S3Options.class).setS3ClientFactoryClass(GcpFederatedS3ClientFactory.class);
+        }
+
         private AwsCredentialsProvider createProvider(final AWSOptions aws) {
             return switch (resolveType()) {
                 case "default" -> DefaultCredentialsProvider.create();
                 case "static" -> createStaticProvider();
                 case "assumeRole" -> createAssumeRoleProvider(aws);
                 default -> throw new IllegalArgumentException(
-                        "options.aws.credentials.type must be one of [default, static, assumeRole] but was: " + type);
+                        "options.aws.credentials.type must be one of [default, static, assumeRole, gcpFederation] but was: " + type);
             };
         }
 

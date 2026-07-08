@@ -7,7 +7,13 @@ Phase 1 done (`GcpCredentialsCache` central provider with `options.gcp.credentia
 `MERCARI_PIPELINE_GCP_CREDENTIALS` sources, `MCredentialFactory` for Beam GCP IOs, metadata-server
 guard `IAMUtil.isOnGcp()`, explicit-project error in `OptionUtil.getDefaultProject`; all direct
 `getApplicationDefault()` call sites migrated except the vertexai/tasks modules slated for
-removal; deploy guides remain scheduled for Phase 5)**
+removal; deploy guides remain scheduled for Phase 5),
+Phase 2 done (`credentials.type: gcpFederation`: `GcpFederatedAwsCredentialsProvider` — GCP ID
+token → STS `AssumeRoleWithWebIdentity` — delivered to workers via `S3Options.s3ClientFactoryClass`
+= `GcpFederatedS3ClientFactory` + string `FederationOptions` (see the §5.2 amendment on why the
+Jackson-module approach was replaced); `S3Util.storage(PipelineOptions)` unifies schema-sampling
+and runtime credentials, `StorageSource.s3` static keys deprecated with warning; the STS-exchange
+LocalStack IT stays scheduled for Phase 5)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
 Flink/Spark on AWS (EMR, EMR on EKS, Amazon Managed Service for Apache Flink) reading/writing GCP
@@ -182,23 +188,38 @@ SystemProperty/Container/AnonymousCredentialsProvider`, `StsAssumeRoleCredential
 
 A serializable `AwsCredentialsProvider` for Dataflow→AWS:
 
-1. On the worker, use ADC (always present on Dataflow) to call IAMCredentials
-   `generateIdToken` for the worker SA with the configured audience.
-2. Exchange it via STS `AssumeRoleWithWebIdentity` for the configured `roleArn`.
-3. Cache and refresh before expiry.
+1. On the worker, mint a GCP ID token from the worker credentials
+   (`GcpCredentialsCache.credentials()` as `IdTokenProvider` — compute-engine and
+   service-account credentials qualify) with the configured audience.
+2. Exchange it via STS `AssumeRoleWithWebIdentity` (an **unsigned** call — the STS client uses
+   `AnonymousCredentialsProvider`) for the configured `roleArn`.
+3. Cache and refresh before expiry (120s margin).
 
-Because of the §5.1 constraint, this custom provider ships with its own Jackson
-serializer/deserializer registered as `@AutoService(com.fasterxml.jackson.databind.Module.class)`
-so Beam's options ObjectMapper (which discovers modules via `ObjectMapper.findModules`) can
-round-trip it. Config surface: `credentials.type: gcpFederation` + `roleArn` (+ optional
-`audience`, defaulting to the role ARN).
+**How it reaches workers.** The original idea — a custom Jackson module so Beam's options
+ObjectMapper could round-trip the provider inside `AwsOptions` — does not work deterministically:
+`AwsModule`'s (de)serializer is attached to the `AwsCredentialsProvider` interface via a mixin,
+throws on unknown `@type`s, and a competing mixin registration wins or loses purely on module
+registration order. The provider must therefore **never be set into `AwsOptions`** (Dataflow
+serializes all set options at submission). Instead:
+
+- the federation parameters ride as plain string options
+  (`GcpFederatedAwsCredentialsProvider.FederationOptions`), and
+- `S3Options.s3ClientFactoryClass` — Beam's official extension point, serialized as a class
+  name — is set to `GcpFederatedS3ClientFactory`, which applies Beam's default builder wiring
+  and swaps in the federated provider on the worker.
+
+Config surface: `credentials.type: gcpFederation` + `roleArn` (+ optional `audience` defaulting
+to the role ARN, `roleSessionName`, `durationSeconds`). Coverage: Beam's `s3://` filesystem and
+`S3Util` — the entire AWS surface used by modules today. A future aws2 IO (Kinesis/SQS/...)
+would need per-IO wiring via its `ClientConfiguration`; noted in §8.
 
 ### 5.3 `S3Util` unification
 
 `S3Util.storage(accessKey, secretKey, region)` and `StorageSource.S3Parameters` static keys are
-deprecated. Construction-time schema sampling builds its client from the same resolved
-`AwsOptions` (region/endpoint/provider) as the runtime IO, removing the split-brain of §1.3.
-`S3Parameters` keeps working for one deprecation cycle (warning at assembly).
+deprecated. Construction-time schema sampling builds its client through the same
+`S3Options.s3ClientFactoryClass` chain as the runtime IO (`S3Util.storage(PipelineOptions)`),
+removing the split-brain of §1.3 and covering `gcpFederation` automatically. `S3Parameters`
+keeps working for one deprecation cycle (warning at assembly).
 
 ## 6. Common layers
 
@@ -265,8 +286,10 @@ referencing this document.
 - **`IAMUtil.signJwt`** off-GCP requires the WIF config to impersonate a service account (the
   federated identity itself cannot sign).
 - Cross-cloud data paths incur egress cost and latency; the deploy guides must say so.
-- Beam `AwsModule` limits which provider types survive options serialization (§5.1); any new
-  provider type must ship its own Jackson module.
+- Beam `AwsModule` limits which provider types survive options serialization (§5.1) and cannot
+  be extended deterministically; custom providers must flow through a factory-class option
+  (§5.2), which today covers the s3 filesystem only. Adding an aws2 IO module (Kinesis/SQS/...)
+  later requires wiring the federated provider into that IO's `ClientConfiguration`.
 
 ## 9. Testing
 

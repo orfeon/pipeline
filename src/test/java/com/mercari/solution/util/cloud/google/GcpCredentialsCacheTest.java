@@ -14,12 +14,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-// Serialized: GcpCredentialsCache holds static state shared across these tests.
+// Serialized: GcpCredentialsCache holds static state shared across these tests
+// (and with other @ResourceLock("GcpCredentialsCache") classes).
 @Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("GcpCredentialsCache")
 public class GcpCredentialsCacheTest {
 
     // A workload identity federation config contains no key material (audience/URL references
