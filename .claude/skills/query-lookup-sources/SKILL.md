@@ -1,6 +1,6 @@
 ---
 name: query-lookup-sources
-description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
+description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest/grpc), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
 ---
 
 # Query engine & lookup sources
@@ -57,9 +57,18 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
   - `CalciteValues` — primitive ↔ Calcite-internal value conversion (below).
   - `LookupKey` / `LookupRequest` / `LookupBatch` / `PerKeyLookup` — key model
     and the shared per-distinct-key loop for backends that can't array-bind.
-- `util/pipeline/lookup/source/` — the four adapters: `JdbcLookupSource`,
+- `util/pipeline/lookup/source/` — the five adapters: `JdbcLookupSource`,
   `SpannerLookupSource` (native tables + parameterized-query tables),
-  `BigtableLookupSource`, `RestLookupSource`.
+  `BigtableLookupSource`, `RestLookupSource`, `GrpcLookupSource`
+  (descriptor-set-driven dynamic client — no generated stubs; the grpc/protobuf
+  runtime is already on the classpath via Beam GCP IO, so it adds no
+  dependency. Serializes the descriptor-set **bytes** so only the launcher
+  needs the file; schema derived from the descriptor (float32 widened to
+  float64 per the value convention, nested message → element row, repeated →
+  array, `google.protobuf.Timestamp` → timestamp); one call per distinct key
+  via `PerKeyLookup`; unary / `rowsFrom` fan-out / server-streaming. Tests
+  run a descriptor-built in-JVM socket server, `DynamicGrpcTestServer` — no
+  protoc).
 - `util/pipeline/udf/` — `UserDefinedFunctions` (serializable UDF/UDAF
   descriptors) and the built-in `DateTimeFunctions` (`CURRENT_DATE_`).
 
@@ -159,6 +168,16 @@ each key's rows once and evaluates the rest of the block (aggregation,
 uncorrelated filters, ORDER BY / LIMIT) over that set in memory. How it works —
 and why it's wired the way it is:
 
+- **`Query2.prepare` deliberately does NOT call
+  `converter.flattenTypes(root.rel, true)`** (PlannerImpl does; stock JDBC
+  prepare does not): the structured-type flattener rewrites any reference to
+  a **nested ROW column of a lookup table** (`u.address.city`, or even
+  selecting `u.address` whole) into a field-access `Project` directly over
+  the scan, which `LookupJoinRule`'s InputRef-only projection matching cannot
+  claim — the join silently degrades to the rejected standalone scan. The
+  enumerable runtime executes unflattened `RexFieldAccess` fine, and removing
+  the flattener was pinned behavior-neutral by the full suite. If a nested
+  column of a lookup table ever stops joining, check this first.
 - **Upstream Calcite's `PlannerImpl.rel()` decorrelates unconditionally** (no
   flag; this is stock Calcite, not a vendoring artifact). Decorrelation
   rewrites equality-correlated blocks into join-of-aggregate-over-scan and
@@ -412,7 +431,7 @@ Ported 2026-07 from `orfeon/calcite-multi-engine` (regular Calcite 1.42,
 - graph/search are configuration patterns of the generic Spanner query table,
   not separate source types.
 
-Not ported (candidates for future work): the gRPC source (descriptor-set
-driven dynamic client), residual correlations in LATERAL blocks, multi-leaf
-LATERAL (UNION/INTERSECT of two sources), non-spanner parameterized-query
-sources.
+Not ported (candidates for future work): residual correlations in LATERAL
+blocks, multi-leaf LATERAL (UNION/INTERSECT of two sources), non-spanner
+parameterized-query sources. (The gRPC source was ported 2026-07 — zero new
+dependencies, since Beam GCP IO already ships grpc/protobuf.)

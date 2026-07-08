@@ -434,7 +434,13 @@ public class Query2 implements Serializable {
                 StandardConvertletTable.INSTANCE,
                 SqlToRelConverter.config().withTrimUnusedFields(false).withExpand(false));
         RelRoot root = converter.convertQuery(validated, false, true);
-        root = root.withRel(converter.flattenTypes(root.rel, true));
+        // Deliberately NOT flattenTypes(root.rel, true) (PlannerImpl does; stock
+        // JDBC prepare does not): the flattener rewrites any reference to a
+        // nested ROW column of a lookup table into a field-access Project
+        // directly over the scan, which LookupJoinRule cannot claim — the join
+        // degrades to the rejected standalone scan. The enumerable runtime
+        // executes unflattened RexFieldAccess fine (the origin engine runs
+        // without flattening).
         RelNode relNode = root.project();
 
         if (LOG.isDebugEnabled()) {

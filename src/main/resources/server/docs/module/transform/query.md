@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Query Transform Module
-description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST) can be joined on their keys as batched lookup-joins — the external table is never scanned. One element yields zero or more output rows.
-tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest]
+description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST / gRPC) can be joined on their keys as batched lookup-joins — the external table is never scanned. One element yields zero or more output rows.
+tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, grpc]
 timestamp: 2026-07-03T00:00:00Z
 ---
 
@@ -15,7 +15,7 @@ Unlike the [beamsql](beamsql.md) module — which plans SQL over whole PCollecti
 - **No shuffle, ever.** The query runs entirely inside the DoFn. Windowing, triggering, and element timestamps of the surrounding pipeline are preserved, so batch and streaming behave identically.
 - **Collections live inside the element.** Array-of-struct fields can be expanded with `UNNEST` (optionally with `LATERAL` subqueries), so aggregation (`COUNT`/`SUM`/`AVG`/…, `GROUP BY`, `HAVING`), ordering with `ORDER BY` / `LIMIT`, and set operations (`UNION` / `INTERSECT` / `EXCEPT`) all operate over the per-element collection.
 - **Fan-out or fold.** One input element yields zero or more output rows: a query without aggregation fans out (one row per unnested item), an aggregate query folds the element into one row, and a `WHERE` that matches nothing drops the element.
-- **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, REST APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
+- **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, REST/gRPC APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
 
 This is a good fit for enriching a stream with reference data held in a database or API, and for post-processing enrichment results with per-element SQL (aggregate or select over a fetched collection).
 
@@ -108,7 +108,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 | parameter | optional | type           | description                                                                    |
 |-----------|----------|----------------|--------------------------------------------------------------------------------|
 | name      | required | String         | Schema name the source's tables are referenced by in SQL (`name.table`).       |
-| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`.                                  |
+| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`, `grpc`.                          |
 | tables    | required | Array<Table\>  | Tables to expose. Per-type table parameters below.                             |
 | cache     | optional | Cache          | On-memory cache over the source's lookups (see below). Off unless the block is present. |
 
@@ -228,6 +228,46 @@ Table parameters:
 | fields    | optional | Array<Field\>       | Response columns (standard schema fields JSON: `name`, `type`, …). Use type `json` for nested objects. |
 
 Every `{column}` placeholder is a key column; binding a key column to a **literal** in SQL makes that request part static, binding it to an input column makes it dynamic. One HTTP call is made per distinct key tuple (point equality only). HTTP 404 is treated as "no row" — use a `LEFT JOIN` to keep the input element.
+
+### grpc source
+
+Exposes RPC methods of **any gRPC service** as lookup tables — no service-specific
+stubs: the contract is a protoc **descriptor set** file
+(`protoc --include_imports --descriptor_set_out=service.desc your_service.proto`),
+and requests/responses are built dynamically (the `grpcurl` mechanism). The
+descriptor set file only needs to be readable **on the launcher** (its bytes are
+shipped to the workers with the pipeline).
+
+| parameter              | optional | type                | description                                                        |
+|------------------------|----------|---------------------|----------------------------------------------------------------------|
+| target                 | required | String              | gRPC target: `host:port` or any name-resolver URI.                |
+| descriptorSetPath      | required | String              | Path to the protoc descriptor set (`--include_imports` required). |
+| plaintext              | optional | Boolean             | Use plaintext instead of TLS (default `false`).                    |
+| headers                | optional | Map<String,String\> | Static request headers sent on every call (e.g. an auth token).    |
+| timeoutMillis          | optional | Integer             | Per-call deadline (default 60000; `0` = none).                     |
+| maxInboundMessageBytes | optional | Integer             | Max inbound message size.                                          |
+
+Table parameters:
+
+| parameter       | optional | type           | description                                                                                      |
+|-----------------|----------|----------------|----------------------------------------------------------------------------------------------------|
+| name            | required | String         | SQL table name (avoid Calcite reserved words such as `stream`).                                 |
+| method          | required | String         | Fully-qualified RPC method: `package.Service/Method`.                                           |
+| keyField        | required | String         | Column carrying the request parameter — the join key (`ON t.keyField = i.someColumn`).          |
+| requestKeyField | optional | String         | Request field the key is bound to; dotted path for nested fields (default: same as `keyField`). |
+| serverStreaming | optional | Boolean        | Mark a server-streaming method: each streamed message becomes one row.                          |
+| rowsFrom        | optional | String         | Top-level *repeated message* response field to fan out over (unary only; one row per element).  |
+| requestTemplate | optional | String         | Constant request fields as protobuf JSON (the key is overlaid on top).                          |
+| fields          | optional | Array<Field\>  | Explicit response columns, overriding descriptor-set derivation.                                |
+
+The row schema is **derived from the descriptor set** when `fields` is omitted:
+scalars map naturally (float32 is widened to float64), enums become strings,
+`google.protobuf.Timestamp` becomes a timestamp, singular nested messages become
+nested rows (accessible as `t.address.city`), repeated fields become arrays. The
+key column is prepended when the response does not echo it. One gRPC call is made
+per distinct key (point equality only); a key with no result yields no row (use
+`LEFT JOIN` for a default). Only expose **read-only, idempotent** RPCs — lookups
+run many times, in arbitrary order, and bundle retries repeat them.
 
 ## Built-in functions
 
