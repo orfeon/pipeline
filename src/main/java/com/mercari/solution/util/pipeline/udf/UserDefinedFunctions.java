@@ -53,11 +53,19 @@ public final class UserDefinedFunctions {
 
     /**
      * Materializes the descriptors into Calcite functions (name → overloads),
-     * prepending the built-in functions ({@link DateTimeFunctions} and the
+     * prepending the built-in functions ({@link DateTimeFunctions}, the
      * {@code SEQ_*} sequence-pattern family: {@link SequenceMatchFunctions
      * SEQ_MATCH / SEQ_MATCH_STEPS}, {@link SequenceFoldFunctions SEQ_FOLD /
      * SEQ_FOLD_INT}, {@link SequenceCollectFunctions SEQ_COLLECT},
-     * {@link SequenceSplitFunctions SEQ_SPLIT}).
+     * {@link SequenceSplitFunctions SEQ_SPLIT},
+     * {@link SequenceFunnelFunctions SEQ_FUNNEL / SEQ_RETENTION}, and the
+     * analytics built-ins {@link QuantileFunctions QUANTILE},
+     * {@link ApproxDistinctFunctions APPROX_DISTINCT},
+     * {@link ArrayTransformFunctions ARRAY_DIFFERENCE(_INT) /
+     * ARRAY_CUM_SUM(_INT) / ARRAY_COMPACT / ARRAY_DISTINCT},
+     * {@link TimeBucketFunctions TIME_BUCKET}). For ARG_MAX / ARG_MIN use
+     * Calcite's standard operators (implemented natively by the enumerable
+     * runtime) — a same-name user aggregate would break overload resolution.
      */
     public static Map<String, List<Function>> build(List<FunctionSpec> specs) {
         final Map<String, List<Function>> functions = new LinkedHashMap<>();
@@ -70,6 +78,11 @@ public final class UserDefinedFunctions {
         sequenceFamily.addAll(SequenceFoldFunctions.builtIns());
         sequenceFamily.addAll(SequenceCollectFunctions.builtIns());
         sequenceFamily.addAll(SequenceSplitFunctions.builtIns());
+        sequenceFamily.addAll(SequenceFunnelFunctions.builtIns());
+        sequenceFamily.addAll(QuantileFunctions.builtIns());
+        sequenceFamily.addAll(ApproxDistinctFunctions.builtIns());
+        sequenceFamily.addAll(ArrayTransformFunctions.builtIns());
+        sequenceFamily.addAll(TimeBucketFunctions.builtIns());
         for (final Map.Entry<String, Function> entry : sequenceFamily) {
             functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
                     .add(entry.getValue());
