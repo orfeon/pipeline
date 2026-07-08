@@ -130,7 +130,8 @@ public class GcpFederatedAwsCredentialsProvider implements AwsCredentialsProvide
         }
     }
 
-    private String mintGcpIdToken() {
+    // protected: integration tests exchange a stub token against a local STS emulator
+    protected String mintGcpIdToken() {
         try {
             final GoogleCredentials credentials = GcpCredentialsCache.credentials();
             if(!(credentials instanceof IdTokenProvider idTokenProvider)) {

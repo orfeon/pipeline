@@ -21,7 +21,11 @@ Secrets Manager LocalStack IT scheduled with Phase 5),
 Phase 4 done (`ResourceUtil` unified loader; `Config.load` and single-shot read sites across
 config/queries/schema files/descriptors/models/microbatch checkpoints migrated — configs,
 schemas and SQL now load from `s3://` as well as `gs://` and local paths; GCS-only
-streaming/listing loaders intentionally kept on `StorageUtil`, see §6.2 notes)**
+streaming/listing loaders intentionally kept on `StorageUtil`, see §6.2 notes),
+Phase 5 done (Vault auth methods `VAULT_AUTH: gcp | aws-iam | token` with external tokens never
+revoked and the gcp login-endpoint URL bug fixed; deploy guide at
+`docs/deploy/cross-cloud-auth.md`; `AwsAuthIT` (LocalStack: s3 filesystem wiring, Secrets
+Manager, STS federated exchange) and `VaultIT` (token auth) — **all phases complete**)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
 Flink/Spark on AWS (EMR, EMR on EKS, Amazon Managed Service for Apache Flink) reading/writing GCP
@@ -284,8 +288,12 @@ functions never triggers GCP access off-cloud.
 
 ### 6.4 `VaultClient` auth methods
 
-`auth: gcp | aws-iam | token` (currently hard-coded to the GCP backend). `aws-iam` signs an STS
-`GetCallerIdentity` request; `token` accepts a pre-issued token (e.g. from the environment).
+`VAULT_AUTH: gcp | aws-iam | token` (env var / system property; previously hard-coded to the GCP
+backend). `aws-iam` logs into Vault's aws auth backend with a SigV4-signed STS
+`GetCallerIdentity` request (AWS default credentials chain; optional
+`VAULT_AWS_IAM_SERVER_ID` header); `token` accepts a pre-issued token from `VAULT_TOKEN` —
+externally supplied tokens are never revoked by the client (login tokens still are). When
+`VAULT_AUTH` is unset it is inferred from `VAULT_TOKEN` / `VAULT_AUTH_SERVICE_ACCOUNT`.
 
 ## 7. Phases
 
@@ -319,7 +327,10 @@ referencing this document.
 
 - Unit: options mapping (`AWSOptionsTest`) — region/endpoint/provider type per config shape,
   including a Jackson round-trip through discovered modules to catch "Unsupported provider" early.
-- IT (Testcontainers, `*IT.java`, skipped by default, `-DskipITs=false`): LocalStack for
-  S3 / STS / Secrets Manager, mirroring the existing emulator-IT pattern. GCP WIF cannot be
-  emulated locally; Direction A gets coverage via unit tests around resolution order plus a
-  documented manual verification checklist.
+- IT (Testcontainers, `*IT.java`, skipped by default, `-DskipITs=false`): `AwsAuthIT`
+  (LocalStack — s3:// read/write through the options-wired filesystem, Secrets Manager
+  resolution by ARN and `aws-sm://`, and the STS `AssumeRoleWithWebIdentity` exchange with a
+  stubbed ID token) and `VaultIT` (dev-mode Vault — `vault://` resolution with token auth,
+  non-revocation of external tokens). GCP WIF cannot be emulated locally; Direction A gets
+  coverage via unit tests around resolution order plus the setup guide
+  (`docs/deploy/cross-cloud-auth.md`).

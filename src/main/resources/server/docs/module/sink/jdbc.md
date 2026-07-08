@@ -82,7 +82,7 @@ construction time. Use this to avoid writing credentials into the config file. S
 
 - GCP [Secret Manager](https://cloud.google.com/secret-manager/docs): `projects/<project>/secrets/<secret>/versions/<version>`
 - AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/): a full secret ARN (`arn:aws:secretsmanager:...`) or `aws-sm://<name>` (region from `options.aws.region`)
-- HashiCorp [Vault](https://developer.hashicorp.com/vault) KV: `vault://v1/<kv-path>#<field>` (connection from the `VAULT_ADDR` / `VAULT_NAMESPACE` / `VAULT_ROLE` / `VAULT_AUTH_SERVICE_ACCOUNT` environment variables)
+- HashiCorp [Vault](https://developer.hashicorp.com/vault) KV: `vault://v1/<kv-path>#<field>` (connection from the `VAULT_ADDR` / `VAULT_NAMESPACE` environment variables; auth via `VAULT_AUTH` = `token` (`VAULT_TOKEN`), `gcp` (`VAULT_AUTH_SERVICE_ACCOUNT` + `VAULT_ROLE`), or `aws-iam` (`VAULT_ROLE`))
 
 ## Examples
 

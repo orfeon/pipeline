@@ -3,6 +3,10 @@
 Mercari Pipeline is a portable pipeline tool developed with Apache Beam.
 It is deployed as a Docker image (for Cloud Dataflow, local execution, and the Pipeline API server) or as a bundled jar (for Apache Flink and Apache Spark clusters).
 
+To run on AWS (EMR / Managed Service for Apache Flink) or to access the other cloud's
+resources from either side without distributing keys, see
+[Cross-Cloud Authentication Setup](cross-cloud-auth.md).
+
 ## Requirements
 
 * Java 21

@@ -7,10 +7,14 @@ import com.mercari.solution.util.cloud.SecretProvider;
  * HashiCorp Vault backend: {@code vault://v1/{kv-path}#{field}}
  * (e.g. {@code vault://v1/secret/data/myapp#password}).
  *
- * Connection settings come from the environment: {@code VAULT_ADDR} (required),
- * {@code VAULT_NAMESPACE}, {@code VAULT_ROLE}, and {@code VAULT_AUTH_SERVICE_ACCOUNT}
- * (the GCP service account for Vault's gcp auth backend — the only auth method
- * {@link VaultClient} supports today; alternatives are scheduled for Phase 5).
+ * Connection and auth settings come from the environment (or system properties):
+ * {@code VAULT_ADDR} (required), {@code VAULT_NAMESPACE}, and {@code VAULT_AUTH} —
+ * one of {@code token} ({@code VAULT_TOKEN}), {@code gcp}
+ * ({@code VAULT_AUTH_SERVICE_ACCOUNT} + {@code VAULT_ROLE}), or {@code aws-iam}
+ * ({@code VAULT_ROLE} + optional {@code VAULT_AWS_IAM_SERVER_ID}, signs with the AWS
+ * default credentials chain). When {@code VAULT_AUTH} is unset it is inferred:
+ * {@code token} if {@code VAULT_TOKEN} is set, {@code gcp} if
+ * {@code VAULT_AUTH_SERVICE_ACCOUNT} is set.
  */
 public class VaultSecretProvider implements SecretProvider {
 
@@ -34,8 +38,7 @@ public class VaultSecretProvider implements SecretProvider {
         final String path = sharp < 0 ? pathAndField : pathAndField.substring(0, sharp);
         final String field = sharp < 0 ? null : pathAndField.substring(sharp + 1);
 
-        final VaultClient client = new VaultClient(
-                addr, env("VAULT_AUTH_SERVICE_ACCOUNT"), env("VAULT_NAMESPACE"), env("VAULT_ROLE"), null);
+        final VaultClient client = createClient(addr);
         try {
             final JsonObject data = client.readKVSecret("/" + path);
             if(field != null) {
@@ -58,6 +61,39 @@ public class VaultSecretProvider implements SecretProvider {
         } finally {
             revokeQuietly(client);
         }
+    }
+
+    private static VaultClient createClient(final String addr) {
+        final String namespace = env("VAULT_NAMESPACE");
+        String auth = env("VAULT_AUTH");
+        if(auth == null) {
+            if(env("VAULT_TOKEN") != null) {
+                auth = "token";
+            } else if(env("VAULT_AUTH_SERVICE_ACCOUNT") != null) {
+                auth = "gcp";
+            } else {
+                throw new IllegalStateException(
+                        "Set VAULT_AUTH to one of [gcp, aws-iam, token] to resolve vault:// secret references"
+                                + " (or set VAULT_TOKEN / VAULT_AUTH_SERVICE_ACCOUNT to infer it)");
+            }
+        }
+        return switch (auth) {
+            case "token" -> VaultClient.withToken(addr, namespace, requireEnv("VAULT_TOKEN"));
+            case "gcp" -> VaultClient.withGcpAuth(
+                    addr, requireEnv("VAULT_AUTH_SERVICE_ACCOUNT"), namespace, env("VAULT_ROLE"), null);
+            case "aws-iam" -> VaultClient.withAwsIamAuth(
+                    addr, namespace, env("VAULT_ROLE"), env("VAULT_AWS_IAM_SERVER_ID"), null);
+            default -> throw new IllegalStateException(
+                    "VAULT_AUTH must be one of [gcp, aws-iam, token] but was: " + auth);
+        };
+    }
+
+    private static String requireEnv(final String name) {
+        final String value = env(name);
+        if(value == null) {
+            throw new IllegalStateException(name + " must be set to resolve vault:// secret references");
+        }
+        return value;
     }
 
     private static void revokeQuietly(final VaultClient client) {

@@ -862,6 +862,20 @@
       <version>${testcontainers.version}</version>
       <scope>test</scope>
     </dependency>
+    <!-- LocalStack (S3 / STS / Secrets Manager) and Vault integration tests for cross-cloud
+         auth (AwsAuthIT / VaultIT, docs/developer/cloud-auth.md 9) -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>localstack</artifactId>
+      <version>${testcontainers.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>vault</artifactId>
+      <version>${testcontainers.version}</version>
+      <scope>test</scope>
+    </dependency>
 
     <!-- The DirectRunner is needed for unit tests. -->
     <dependency>
