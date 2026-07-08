@@ -2,7 +2,12 @@
 
 Status: **Accepted — Phase 0 done (AWS options wiring: `options.aws` region/endpoint/credentials
 mapped onto Beam `AwsOptions` with `default`/`static`/`assumeRole` providers; user docs at
-`docs/config/options/aws.md`)**
+`docs/config/options/aws.md`),
+Phase 1 done (`GcpCredentialsCache` central provider with `options.gcp.credentials` /
+`MERCARI_PIPELINE_GCP_CREDENTIALS` sources, `MCredentialFactory` for Beam GCP IOs, metadata-server
+guard `IAMUtil.isOnGcp()`, explicit-project error in `OptionUtil.getDefaultProject`; all direct
+`getApplicationDefault()` call sites migrated except the vertexai/tasks modules slated for
+removal; deploy guides remain scheduled for Phase 5)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
 Flink/Spark on AWS (EMR, EMR on EKS, Amazon Managed Service for Apache Flink) reading/writing GCP
@@ -99,9 +104,10 @@ A single class replaces the scattered `getApplicationDefault()` calls:
 ```java
 public class GcpCredentialsCache {
     // Resolution order:
-    //   1. explicit options.gcp.credentials (file path, classpath:, gs://, s3://, or inline JSON)
-    //   2. GOOGLE_APPLICATION_CREDENTIALS env var (standard ADC)
-    //   3. ADC default (metadata server — only attempted when on GCP, see 4.2)
+    //   1. explicit options.gcp.credentials (inline JSON, classpath:, gs://, s3://, or file path)
+    //   2. MERCARI_PIPELINE_GCP_CREDENTIALS env var / system property (same source syntax;
+    //      for workers whose environment the user controls, e.g. EMR executors)
+    //   3. ADC — which itself honors GOOGLE_APPLICATION_CREDENTIALS, then the metadata server
     public static GoogleCredentials credentials();
     public static AccessToken accessToken();   // absorbs IAMUtil.getAccessToken()
 }

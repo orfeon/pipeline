@@ -37,7 +37,7 @@ public class PubSubUtil {
         final HttpTransport transport = new NetHttpTransport();
         final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
+            final Credentials credential = GcpCredentialsCache.credentials();
             final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
                     new HttpCredentialsAdapter(credential),
                     // Do not log 404. It clutters the output and is possibly even required by the caller.

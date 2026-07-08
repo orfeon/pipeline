@@ -58,6 +58,49 @@ public class IAMUtil {
         UNKNOWN
     }
 
+    private static volatile Boolean onGcp;
+
+    /**
+     * Whether the GCE metadata server is reachable (cached after one short probe).
+     * Off Google Cloud, metadata lookups are skipped immediately instead of hanging
+     * through retries (docs/developer/cloud-auth.md §4.2).
+     * Override with the MERCARI_PIPELINE_ON_GCP env var / system property.
+     */
+    public static boolean isOnGcp() {
+        Boolean cached = onGcp;
+        if(cached == null) {
+            synchronized (IAMUtil.class) {
+                if(onGcp == null) {
+                    onGcp = probeMetadataServer();
+                }
+                cached = onGcp;
+            }
+        }
+        return cached;
+    }
+
+    private static boolean probeMetadataServer() {
+        final String override = System
+                .getProperty("MERCARI_PIPELINE_ON_GCP", System.getenv("MERCARI_PIPELINE_ON_GCP"));
+        if(override != null) {
+            return Boolean.parseBoolean(override);
+        }
+        try(final HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofMillis(500))
+                .build()) {
+            final HttpResponse<Void> response = client.send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create("http://metadata.google.internal/"))
+                            .timeout(java.time.Duration.ofMillis(1000))
+                            .header("Metadata-Flavor", "Google")
+                            .build(),
+                    HttpResponse.BodyHandlers.discarding());
+            return "Google".equals(response.headers().firstValue("Metadata-Flavor").orElse(null));
+        } catch (final Throwable e) {
+            return false;
+        }
+    }
+
     public static String signJwt(final String serviceAccount, final int expiration) {
         final long exp = DateTime.now().plusSeconds(expiration).getMillis() / 1000;
         final JsonObject jsonObject = new JsonObject();
@@ -80,6 +123,9 @@ public class IAMUtil {
     }
 
     private static String getMetadataAttribute(final String endpoint, int retry, int intervalMillis) {
+        if(!isOnGcp()) {
+            return null;
+        }
         try(final HttpClient client = HttpClient.newHttpClient()) {
             final HttpResponse<String> response = client.send(
                     HttpRequest.newBuilder()
@@ -117,6 +163,9 @@ public class IAMUtil {
 
     public static String getMetadataIdToken(final HttpClient client, final String endpoint)
             throws IOException, URISyntaxException, InterruptedException {
+        if(!isOnGcp()) {
+            return null;
+        }
         final String metaserver = ENDPOINT_METADATA_ID_TOKEN + endpoint;
         final HttpRequest req = HttpRequest.newBuilder()
                 .uri(new URI(metaserver))
@@ -129,20 +178,11 @@ public class IAMUtil {
     }
 
     public static AccessToken getAccessToken() throws IOException {
-        final GoogleCredentials credentials = GoogleCredentials
-                .getApplicationDefault()
-                .createScoped("https://www.googleapis.com/auth/cloud-platform");
-        return credentials.refreshAccessToken();
+        return GcpCredentialsCache.accessToken();
     }
 
     public static String getTokenValue() throws IOException {
-        GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
-        if (credentials.createScopedRequired()) {
-            credentials = credentials.createScoped(Collections.singletonList("https://www.googleapis.com/auth/cloud-platform"));
-        }
-        credentials.refreshIfExpired();
-        final AccessToken token = credentials.getAccessToken();
-        return token.getTokenValue();
+        return GcpCredentialsCache.accessToken().getTokenValue();
     }
 
     public static String getAccessToken2() {
@@ -172,7 +212,7 @@ public class IAMUtil {
         final HttpTransport transport = new NetHttpTransport();
         final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
+            final Credentials credential = GcpCredentialsCache.credentials();
             final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
                     new HttpCredentialsAdapter(credential),
                     // Do not log 404. It clutters the output and is possibly even required by the caller.
@@ -198,7 +238,7 @@ public class IAMUtil {
         final HttpTransport transport = new NetHttpTransport();
         final JsonFactory jsonFactory = GsonFactory.getDefaultInstance();
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
+            final Credentials credential = GcpCredentialsCache.credentials();
             final HttpRequestInitializer initializer = new ChainingHttpRequestInitializer(
                     new HttpCredentialsAdapter(credential),
                     // Do not log 404. It clutters the output and is possibly even required by the caller.
@@ -233,8 +273,7 @@ public class IAMUtil {
 
     public static String getUserAccount() {
         try(final HttpClient client = HttpClient.newHttpClient()) {
-            final GoogleCredentials credentials = GoogleCredentials
-                    .getApplicationDefault()
+            final GoogleCredentials credentials = GcpCredentialsCache.credentials()
                     .createScoped(Collections.singletonList(SCOPE_USER_INFO));
             credentials.refreshIfExpired();
             final String accessToken = credentials.getAccessToken().getTokenValue();
@@ -294,7 +333,7 @@ public class IAMUtil {
 
     public static String getAccount() {
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
+            final Credentials credential = GcpCredentialsCache.credentials();
             return getAccount(credential);
         } catch (final IOException e) {
             throw new IllegalArgumentException("Failed to get service account", e);

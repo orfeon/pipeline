@@ -19,7 +19,7 @@ public class FirestoreUtil {
 
     public static Firestore getFirestore(final String projectId, final String databaseId) {
         try {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
+            final Credentials credential = GcpCredentialsCache.credentials();
             final FirestoreFactory factory = new FirestoreOptions.DefaultFirestoreFactory();
             final FirestoreOptions options = FirestoreOptions.newBuilder()
                     .setProjectId(projectId)

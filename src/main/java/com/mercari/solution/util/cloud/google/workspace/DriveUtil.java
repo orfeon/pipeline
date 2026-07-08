@@ -18,6 +18,7 @@ import com.google.auth.oauth2.ImpersonatedCredentials;
 import com.google.cloud.hadoop.util.ChainingHttpRequestInitializer;
 import com.google.common.collect.ImmutableList;
 import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import com.mercari.solution.util.cloud.google.IAMUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import org.apache.avro.SchemaBuilder;
@@ -68,7 +69,7 @@ public class DriveUtil {
         }
 
         try {
-            GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
+            GoogleCredentials credentials = GcpCredentialsCache.credentials();
             final String account = IAMUtil.getAccount();
             if (account != null && targetPrincipalAccount != null && !account.equals(targetPrincipalAccount)) {
                 credentials = ImpersonatedCredentials.create(
