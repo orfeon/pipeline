@@ -6,12 +6,17 @@ import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.Query2;
 import com.mercari.solution.util.pipeline.Union;
+import com.mercari.solution.util.pipeline.lookup.LookupSource;
 import com.mercari.solution.util.pipeline.lookup.source.LookupSourceConfig;
+import com.mercari.solution.util.pipeline.lookup.source.SideInputLookupSource;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 
@@ -23,12 +28,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Runs a Calcite SQL statement over each input element, inside a DoFn, optionally
- * joined against external lookup sources (JDBC / Spanner / Bigtable / REST).
+ * joined against external lookup sources (JDBC / Spanner / Bigtable / REST / gRPC)
+ * or other pipeline collections delivered as Beam side inputs ({@code sideinput}).
  *
  * <p>Unlike the {@code beamsql} module (which plans SQL over whole PCollections and may
  * shuffle), this module evaluates the SQL per element as a bounded in-memory query:
@@ -129,11 +136,29 @@ public class QueryTransform extends Transform {
                         .withStrategy(getStrategy()));
         final Schema inputSchema = Union.createUnionSchema(inputs);
 
+        // sideinput sources join against other MCollections delivered as Beam
+        // side inputs: resolve the referenced collections here (their schemas
+        // feed the planner; their views feed the DoFn).
+        final Map<String, Schema> sideInputSchemas = new LinkedHashMap<>();
+        final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews = new LinkedHashMap<>();
+        for(final String sideInputName : LookupSourceConfig.sideInputNames(parameters.sources)) {
+            final MCollection collection = getSideInputs().stream()
+                    .filter(c -> sideInputName.equals(c.getName()))
+                    .findAny()
+                    .orElseThrow(() -> new IllegalModuleException(
+                            "query transform module[" + getName() + "] sources references side input '"
+                                    + sideInputName + "' which is not listed in sideInputs: "
+                                    + getSideInputs().stream().map(MCollection::getName).toList()));
+            sideInputSchemas.put(sideInputName, collection.getSchema());
+            sideInputViews.put(sideInputName,
+                    collection.apply("AsSideInput_" + sideInputName, View.asIterable()));
+        }
+
         final Query2 query;
         try {
             query = Query2.builder()
                     .withInput(parameters.table, inputSchema)
-                    .withSources(LookupSourceConfig.createSources(parameters.sources))
+                    .withSources(LookupSourceConfig.createSources(parameters.sources, sideInputSchemas))
                     .withSql(parameters.sql)
                     .build();
         } catch (final Throwable e) {
@@ -149,7 +174,8 @@ public class QueryTransform extends Transform {
 
         final PCollectionTuple outputs = input
                 .apply("Query", ParDo
-                        .of(new QueryDoFn(query, parameters.table, getLoggings(), getFailFast(), failureTag))
+                        .of(new QueryDoFn(query, parameters.table, sideInputViews, getLoggings(), getFailFast(), failureTag))
+                        .withSideInputs(sideInputViews.values())
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
         errorHandler.addError(outputs.get(failureTag));
@@ -174,6 +200,7 @@ public class QueryTransform extends Transform {
 
         private final Query2 query;
         private final String table;
+        private final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews;
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failuresTag;
@@ -181,12 +208,14 @@ public class QueryTransform extends Transform {
         QueryDoFn(
                 final Query2 query,
                 final String table,
+                final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews,
                 final List<Logging> logs,
                 final boolean failFast,
                 final TupleTag<BadRecord> failuresTag) {
 
             this.query = query;
             this.table = table;
+            this.sideInputViews = sideInputViews;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
             this.failuresTag = failuresTag;
@@ -203,12 +232,24 @@ public class QueryTransform extends Transform {
         }
 
         @ProcessElement
-        public void processElement(ProcessContext c) {
+        public void processElement(ProcessContext c, BoundedWindow window) {
             final MElement input = c.element();
             if(input == null) {
                 return;
             }
             try {
+                // Feed the current window's side input contents to the sideinput
+                // sources; the window token makes indexing once-per-window.
+                if(!sideInputViews.isEmpty()) {
+                    for(final LookupSource source : query.getSources()) {
+                        if(source instanceof SideInputLookupSource sideInputSource) {
+                            for(final String inputName : sideInputSource.inputNames()) {
+                                sideInputSource.setData(inputName,
+                                        c.sideInput(sideInputViews.get(inputName)), window);
+                            }
+                        }
+                    }
+                }
                 Logging.log(LOG, logs, "input", input);
                 final List<MElement> results = query.execute(Map.of(table, List.of(input)), c.timestamp());
                 for(final MElement output : results) {

@@ -1,13 +1,14 @@
 ---
 name: query-lookup-sources
-description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest/grpc), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
+description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest/grpc/sideinput), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
 ---
 
 # Query engine & lookup sources
 
 The `query` transform module runs one Calcite SQL statement per input element
 inside a DoFn — no shuffle, windowing/timestamps inherited — optionally joining
-external tables (JDBC / Spanner / Bigtable / REST) **on their keys** as batched
+external tables (JDBC / Spanner / Bigtable / REST / gRPC) or other pipeline
+collections delivered as Beam side inputs **on their keys** as batched
 lookup-joins that never scan the external table. This subsystem was ported from
 [orfeon/calcite-multi-engine](https://github.com/orfeon/calcite-multi-engine)
 and is maintained independently here; this skill is the map plus the hard-won
@@ -57,7 +58,7 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
   - `CalciteValues` — primitive ↔ Calcite-internal value conversion (below).
   - `LookupKey` / `LookupRequest` / `LookupBatch` / `PerKeyLookup` — key model
     and the shared per-distinct-key loop for backends that can't array-bind.
-- `util/pipeline/lookup/source/` — the five adapters: `JdbcLookupSource`,
+- `util/pipeline/lookup/source/` — the six adapters: `JdbcLookupSource`,
   `SpannerLookupSource` (native tables + parameterized-query tables),
   `BigtableLookupSource`, `RestLookupSource`, `GrpcLookupSource`
   (descriptor-set-driven dynamic client — no generated stubs; the grpc/protobuf
@@ -68,7 +69,18 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
   array, `google.protobuf.Timestamp` → timestamp); one call per distinct key
   via `PerKeyLookup`; unary / `rowsFrom` fan-out / server-streaming. Tests
   run a descriptor-built in-JVM socket server, `DynamicGrpcTestServer` — no
-  protoc).
+  protoc), and `SideInputLookupSource` (another MCollection of the same
+  pipeline via a Beam side input — **query transform only**, rejected in the
+  beamsql/`createSources(List)` path. No clients, no launcher connectivity:
+  schema/keyFields come from config; the DoFn feeds the window's contents via
+  `setData(input, iterable, windowToken)` before each `execute` (same token →
+  no-op; QueryTransform passes the `BoundedWindow`), rows are converted with
+  `CalciteValues.toInternalRow` and hash-indexed lazily per constrained prefix
+  length, once per window. Point/prefix/range all supported (opts into
+  `supportsKeyPrefixLookup`); rows with null key columns are excluded from the
+  index; `LookupRequest.prefix()` is an immutable list — `contains(null)`
+  throws NPE, iterate to null-check. Don't add a `cache` block — data is
+  already on-heap).
 - `util/pipeline/udf/` — `UserDefinedFunctions` (serializable UDF/UDAF
   descriptors) and the built-in `DateTimeFunctions` (`CURRENT_DATE_`).
 

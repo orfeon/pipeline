@@ -233,6 +233,15 @@ public class Query2 implements Serializable {
         return outputSchema;
     }
 
+    /**
+     * The registered lookup sources (immutable). Lets the hosting {@code DoFn}
+     * reach sources that need per-element runtime state, e.g. feeding side input
+     * contents to a {@code SideInputLookupSource} before {@link #execute}.
+     */
+    public List<LookupSource> getSources() {
+        return sources;
+    }
+
     /** Plans the SQL (with sources set up) and reads the result schema, without executing. */
     private Schema deriveOutputSchema() {
         final List<LookupLateralRuntime> runtimes = new ArrayList<>();

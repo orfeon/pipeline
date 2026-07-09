@@ -86,7 +86,8 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
   - `pipeline/Query2.java` + `pipeline/lookup/` + `pipeline/udf/` — the per-element SQL engine behind the
     `query` transform: Calcite SQL inside a DoFn (plan once per worker, no shuffle) with key-driven
     lookup-joins to external sources (jdbc / spanner incl. parameterized GoogleSQL/GQL query tables /
-    bigtable / rest), correlated LATERAL blocks evaluated per key set, and UDF/UDAF registration.
+    bigtable / rest / grpc / sideinput — other MCollections via Beam side inputs), correlated LATERAL
+    blocks evaluated per key set, and UDF/UDAF registration.
     Built on the Beam-vendored Calcite 1.40 — never add a regular `org.apache.calcite` dependency.
     Maintain via the **`query-lookup-sources` skill** (`.claude/skills/query-lookup-sources/`).
 - `cloud/` — cloud service clients (`google/`, `amazon/`, `hashicorp/`, `crm/`).
