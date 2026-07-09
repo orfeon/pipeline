@@ -2,6 +2,10 @@ package com.mercari.solution.util.cloud.amazon;
 
 import com.mercari.solution.util.cloud.google.StorageUtil;
 import org.apache.avro.Schema;
+import org.apache.beam.sdk.io.aws2.options.S3ClientBuilderFactory;
+import org.apache.beam.sdk.io.aws2.options.S3Options;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.util.InstanceBuilder;
 import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
@@ -29,6 +33,24 @@ import java.util.Map;
 
 public class S3Util {
 
+    /**
+     * Builds the client through the same factory chain as Beam's s3 filesystem
+     * ({@code S3Options.s3ClientFactoryClass}), so construction-time access (schema sampling)
+     * and runtime IO share one credential source — including {@code gcpFederation}
+     * (docs/developer/cloud-auth.md §5.3).
+     */
+    public static S3Client storage(final PipelineOptions pipelineOptions) {
+        final S3Options s3Options = pipelineOptions.as(S3Options.class);
+        return InstanceBuilder
+                .ofType(S3ClientBuilderFactory.class)
+                .fromClass(s3Options.getS3ClientFactoryClass())
+                .build()
+                .createBuilder(s3Options)
+                .build();
+    }
+
+    /** @deprecated static keys are a fallback only — configure {@code options.aws} and use {@link #storage(PipelineOptions)}. */
+    @Deprecated
     public static S3Client storage(final String accessKey, final String secretKey, final String region) {
         if(accessKey == null || secretKey == null) {
             return S3Client.builder()

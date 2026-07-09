@@ -2,7 +2,9 @@ package com.mercari.solution.config;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.options.*;
+import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.util.pipeline.OptionUtil;
+import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.options.ApplicationNameOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.StreamingOptions;
@@ -125,6 +127,7 @@ public class Options implements Serializable {
         }
 
         GCPOptions.setOptions(pipelineOptions, options.gcp);
+        AWSOptions.setOptions(pipelineOptions, options.aws);
 
         final MPipeline.Runner runner = OptionUtil.getRunner(pipelineOptions);
         switch (runner) {
@@ -138,6 +141,12 @@ public class Options implements Serializable {
 
         BeamSQLOptions.setOptions(pipelineOptions, options.beamsql);
         ExpansionOptions.setOptions(pipelineOptions, options.expansion);
+
+        // Register filesystems (gs://, s3://) and secret resolution with the fully-wired
+        // options so that assembly-time file/secret access (schema files, GCP credentials
+        // source, jdbc passwords, ...) already sees the configured AWS settings.
+        FileSystems.setDefaultPipelineOptions(pipelineOptions);
+        SecretProviders.configure(pipelineOptions);
     }
 
 }

@@ -443,7 +443,7 @@ public class BigQueryUtil {
             // (and application default credentials may not exist in test environments)
             initializer = new RetryHttpRequestInitializer(ImmutableList.of(404));
         } else {
-            final Credentials credential = GoogleCredentials.getApplicationDefault();
+            final Credentials credential = GcpCredentialsCache.credentials();
             initializer = new ChainingHttpRequestInitializer(
                     new HttpCredentialsAdapter(credential),
                     // Do not log 404. It clutters the output and is possibly even required by the caller.

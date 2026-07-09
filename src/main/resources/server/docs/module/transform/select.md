@@ -257,7 +257,7 @@ Computes a hash of field value(s).
 | fields    | selective  | Array<String\>      | Multiple fields to hash (concatenated with delimiter). Mutually exclusive with `field` and `text`.           |
 | text      | selective  | String              | FreeMarker template string to hash. Mutually exclusive with `field` and `fields`.                            |
 | algorithm | optional   | String              | Hash algorithm. Values: `SHA256`, `HmacSHA256`. Default: `SHA256`.                                           |
-| secret    | optional   | String              | Secret key for `HmacSHA256`. Supports Google Secret Manager resource names.                                  |
+| secret    | optional   | String              | Secret key for `HmacSHA256`. Supports secret references: GCP Secret Manager resource names, AWS Secrets Manager ARNs / `aws-sm://{name}`, or Vault `vault://v1/{kv-path}#{field}`. |
 | size      | optional   | Integer             | Truncate the hash to the first N characters.                                                                 |
 | delimiter | optional   | String              | Separator when hashing multiple fields.                                                                      |
 

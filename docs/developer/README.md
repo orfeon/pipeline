@@ -10,6 +10,9 @@ Guides for working on the Mercari Pipeline codebase itself (extending modules, u
 * [Server Frontend](server/frontend.md) — Pipeline Server web UI.
 * [Schema Redesign (Design Document)](schema-redesign.md) — accepted design for restructuring the `schema`
   block (fields / encoding / reference), moving it into `parameters`, and the phased migration plan.
+* [Cross-Cloud Authentication (Design Document)](cloud-auth.md) — accepted design for running pipelines on
+  GCP or AWS with transparent access to the other cloud's resources: bidirectional workload identity
+  federation, `SecretProvider`, unified file loading, and the phased plan.
 
 ## Quick reference
 

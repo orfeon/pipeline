@@ -16,7 +16,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.FailureUtil;
 import com.mercari.solution.util.TemplateUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import freemarker.template.Template;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.util.Utf8;
@@ -516,7 +516,7 @@ public class BigtableSchemaUtil {
                 if(encoding.reference.getInline() != null) {
                     json = encoding.reference.getInline();
                 } else {
-                    json = StorageUtil.readString(encoding.reference.getUri());
+                    json = ResourceUtil.readString(encoding.reference.getUri());
                 }
                 final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(json);
                 this.fieldType = Schema.FieldType.element(Schema.of(avroSchema));

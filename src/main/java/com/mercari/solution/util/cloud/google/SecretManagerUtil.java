@@ -1,5 +1,6 @@
 package com.mercari.solution.util.cloud.google;
 
+import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.cloud.secretmanager.v1.AccessSecretVersionResponse;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
 import com.google.cloud.secretmanager.v1.SecretManagerServiceSettings;
@@ -17,7 +18,7 @@ public class SecretManagerUtil {
     public static SecretManagerServiceClient createClient() {
         try {
             return SecretManagerServiceClient.create(SecretManagerServiceSettings.newBuilder()
-                    .setCredentialsProvider(SecretManagerServiceSettings.defaultCredentialsProviderBuilder().build())
+                    .setCredentialsProvider(FixedCredentialsProvider.create(GcpCredentialsCache.credentials()))
                     .build());
         } catch (IOException e) {
             throw new RuntimeException(e);
@@ -26,7 +27,7 @@ public class SecretManagerUtil {
 
     public static ByteString getSecret(final String project, final String secret, final String version) {
         try(final SecretManagerServiceClient client = SecretManagerServiceClient.create(SecretManagerServiceSettings.newBuilder()
-                .setCredentialsProvider(SecretManagerServiceSettings.defaultCredentialsProviderBuilder().build())
+                .setCredentialsProvider(FixedCredentialsProvider.create(GcpCredentialsCache.credentials()))
                 .build())) {
             return getSecret(client, project, secret, version);
         } catch (IOException e) {
@@ -36,7 +37,7 @@ public class SecretManagerUtil {
 
     public static ByteString getSecret(final String secretName) {
         try(final SecretManagerServiceClient client = SecretManagerServiceClient.create(SecretManagerServiceSettings.newBuilder()
-                .setCredentialsProvider(SecretManagerServiceSettings.defaultCredentialsProviderBuilder().build())
+                .setCredentialsProvider(FixedCredentialsProvider.create(GcpCredentialsCache.credentials()))
                 .build())) {
             return getSecret(client, secretName);
         } catch (IOException e) {

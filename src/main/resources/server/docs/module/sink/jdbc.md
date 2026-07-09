@@ -40,8 +40,8 @@ Any other driver class name causes the module to fail with a "Not supported JDBC
 |-----------|----------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | url       | required | String | JDBC connection URL, e.g. `jdbc:postgresql://<host>:<port>/<database>` or `jdbc:mysql://<host>:<port>/<database>`.                                          |
 | driver    | required | String | JDBC driver class name, e.g. `org.postgresql.Driver` or `com.mysql.cj.jdbc.Driver`. Determines the target database type. See [Supported databases](#jdbc-sink-module). |
-| user      | required | String | Database user name. Accepts a [Secret Manager](#credentials-from-secret-manager) resource name.                                                             |
-| password  | required | String | Database password. Accepts a [Secret Manager](#credentials-from-secret-manager) resource name.                                                              |
+| user      | required | String | Database user name. Accepts a [secret reference](#credentials-from-a-secret-store).                                                                          |
+| password  | required | String | Database password. Accepts a [secret reference](#credentials-from-a-secret-store).                                                                           |
 
 ### Write parameters
 
@@ -75,9 +75,14 @@ When `createTable` or `emptyTable` is `true`, the module executes the correspond
 - `createTable: true` — builds a `CREATE TABLE IF NOT EXISTS` statement from the input schema. Nullable fields become nullable columns, other fields get `NOT NULL`, and `keyFields` become the `PRIMARY KEY`.
 - `emptyTable: true` — executes `DELETE FROM <table>` to remove all existing rows.
 
-## Credentials from Secret Manager
+## Credentials from a secret store
 
-If `user` or `password` is given as a [Secret Manager](https://cloud.google.com/secret-manager/docs) secret version resource name in the form `projects/<project>/secrets/<secret>/versions/<version>`, the value is resolved from Secret Manager at pipeline construction time. Use this to avoid writing credentials into the config file.
+If `user` or `password` is given as a secret reference, the value is resolved at pipeline
+construction time. Use this to avoid writing credentials into the config file. Supported forms:
+
+- GCP [Secret Manager](https://cloud.google.com/secret-manager/docs): `projects/<project>/secrets/<secret>/versions/<version>`
+- AWS [Secrets Manager](https://docs.aws.amazon.com/secretsmanager/): a full secret ARN (`arn:aws:secretsmanager:...`) or `aws-sm://<name>` (region from `options.aws.region`)
+- HashiCorp [Vault](https://developer.hashicorp.com/vault) KV: `vault://v1/<kv-path>#<field>` (connection from the `VAULT_ADDR` / `VAULT_NAMESPACE` environment variables; auth via `VAULT_AUTH` = `token` (`VAULT_TOKEN`), `gcp` (`VAULT_AUTH_SERVICE_ACCOUNT` + `VAULT_ROLE`), or `aws-iam` (`VAULT_ROLE`))
 
 ## Examples
 

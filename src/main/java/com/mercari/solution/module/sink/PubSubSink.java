@@ -6,7 +6,7 @@ import com.google.protobuf.DynamicMessage;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.cloud.google.PubSubUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.Serialize;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
@@ -681,7 +681,7 @@ public class PubSubSink extends Sink {
             return schema;
         }
 
-        final String schemaJson = StorageUtil.readString(avroSchema.getFile());
+        final String schemaJson = ResourceUtil.readString(avroSchema.getFile());
         final org.apache.avro.Schema schema = AvroSchemaUtil.convertSchema(schemaJson);
         avroSchemas.put(avroSchema.getFile(), schema);
         writers.put(avroSchema.getFile(), new GenericDatumWriter<>(schema));
@@ -714,7 +714,7 @@ public class PubSubSink extends Sink {
         }
 
         if(!descriptors.containsKey(protobufSchema.getMessageName())) {
-            final byte[] bytes = StorageUtil.readBytes(protobufSchema.getDescriptorFile());
+            final byte[] bytes = ResourceUtil.readBytes(protobufSchema.getDescriptorFile());
             final Map<String, Descriptors.Descriptor> map = ProtoSchemaUtil.getDescriptors(bytes);
             if(!map.containsKey(protobufSchema.getMessageName())) {
                 throw new IllegalArgumentException();

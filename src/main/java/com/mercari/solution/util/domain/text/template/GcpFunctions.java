@@ -1,9 +1,9 @@
 package com.mercari.solution.util.domain.text.template;
 
 import com.google.auth.oauth2.AccessToken;
-import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.ServiceOptions;
 import com.google.gson.JsonObject;
+import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import com.mercari.solution.util.cloud.google.IAMUtil;
 import com.mercari.solution.util.cloud.google.SecretManagerUtil;
 import org.slf4j.Logger;
@@ -54,14 +54,7 @@ public class GcpFunctions {
 
     public String accessToken() {
         try {
-            final GoogleCredentials credential = GoogleCredentials.getApplicationDefault();
-            if(credential == null) {
-                return "";
-            }
-            AccessToken accessToken = credential.getAccessToken();
-            if(accessToken == null) {
-                accessToken = credential.refreshAccessToken();
-            }
+            final AccessToken accessToken = GcpCredentialsCache.accessToken();
             if(accessToken == null) {
                 return "";
             }

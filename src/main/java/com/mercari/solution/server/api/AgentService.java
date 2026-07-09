@@ -4,6 +4,7 @@ import com.google.auth.oauth2.GoogleCredentials;
 import com.google.cloud.ServiceOptions;
 import com.google.gson.*;
 import com.mercari.solution.server.agent.PipelineAgent;
+import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.google.genai.GoogleGenAiChatModel;
@@ -32,7 +33,7 @@ public class AgentService {
 
     private static ChatModel createChatModel() {
         try {
-            final GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
+            final GoogleCredentials credentials = GcpCredentialsCache.credentials();
             credentials.refreshIfExpired();
             final String project = ServiceOptions.getDefaultProjectId();
             return GoogleGenAiChatModel.builder()

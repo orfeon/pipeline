@@ -6,7 +6,14 @@ import com.mercari.solution.util.cloud.google.IAMUtil;
 import org.apache.beam.sdk.values.KV;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.signer.Aws4Signer;
+import software.amazon.awssdk.auth.signer.params.Aws4SignerParams;
+import software.amazon.awssdk.http.SdkHttpFullRequest;
+import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.regions.Region;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -24,68 +31,166 @@ public class VaultClient {
     private static final String HEADER_TOKEN = "X-Vault-Token";
     private static final String HEADER_NAMESPACE = "X-Vault-Namespace";
 
-    private static final String DEFAULT_ENDPOINT_GCP_AUTH = "%s/v1/auth/gcp/login";
+    private static final String DEFAULT_ENDPOINT_GCP_AUTH = "/v1/auth/gcp/login";
+    private static final String DEFAULT_ENDPOINT_AWS_AUTH = "/v1/auth/aws/login";
     private static final String ENDPOINT_VAULT_REVOKE = "/v1/auth/token/revoke-self";
 
     private final String vaultHost;
-    private final String serviceAccount;
     private final String namespace;
-    private final String role;
     private final HttpClient client;
 
-    private final String endpointToken;
+    private final String token;
+    // true when this client performed a login and owns the token lifecycle;
+    // false when the token was supplied externally (must not be revoked here)
+    private final boolean loginToken;
 
-    private String token;
-
+    /** Vault gcp auth backend: login with a GCP-signed JWT. */
     public VaultClient(final String vaultHost,
                        final String serviceAccount,
                        final String namespace,
                        final String role,
                        final String endpointToken) {
 
+        this(vaultHost, namespace, loginGcp(vaultHost, serviceAccount, namespace, role, endpointToken), true);
+    }
+
+    public static VaultClient withGcpAuth(
+            final String vaultHost,
+            final String serviceAccount,
+            final String namespace,
+            final String role,
+            final String endpointOverride) {
+
+        return new VaultClient(vaultHost, serviceAccount, namespace, role, endpointOverride);
+    }
+
+    /** Vault aws auth backend (iam method): login with a SigV4-signed sts:GetCallerIdentity request. */
+    public static VaultClient withAwsIamAuth(
+            final String vaultHost,
+            final String namespace,
+            final String role,
+            final String iamServerId,
+            final String endpointOverride) {
+
+        final JsonObject payload = createAwsIamLoginPayload(role, iamServerId);
+        final String token = login(
+                vaultHost, namespace,
+                endpointOverride == null ? DEFAULT_ENDPOINT_AWS_AUTH : endpointOverride,
+                payload);
+        return new VaultClient(vaultHost, namespace, token, true);
+    }
+
+    /** A pre-issued token (e.g. from the VAULT_TOKEN environment variable); never revoked by this client. */
+    public static VaultClient withToken(
+            final String vaultHost,
+            final String namespace,
+            final String token) {
+
+        return new VaultClient(vaultHost, namespace, token, false);
+    }
+
+    private VaultClient(final String vaultHost,
+                        final String namespace,
+                        final String token,
+                        final boolean loginToken) {
+
         if(!vaultHost.startsWith("http://") && !vaultHost.startsWith("https://")) {
             throw new IllegalArgumentException("host must be start with http:// or https://, got: " + vaultHost);
         }
-
         this.vaultHost = vaultHost;
-        this.serviceAccount = serviceAccount;
         this.namespace = namespace;
-        this.role = role;
         this.client = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(Duration.ofSeconds(60))
                 .build();
-
-        this.endpointToken = endpointToken == null ? DEFAULT_ENDPOINT_GCP_AUTH : endpointToken;
-
-        final String jwt = IAMUtil.signJwt(serviceAccount, 60);
-        this.token = getToken(jwt);
+        this.token = token;
+        this.loginToken = loginToken;
     }
 
     // Calling Vault API: https://www.vaultproject.io/api/auth/gcp#login
-    private String getToken(final String jwt) {
+    private static String loginGcp(
+            final String vaultHost,
+            final String serviceAccount,
+            final String namespace,
+            final String role,
+            final String endpointOverride) {
 
-        final JsonObject jsonObject = new JsonObject();
-        jsonObject.addProperty("jwt", jwt);
-        jsonObject.addProperty("role", role);
-        final String jwtString = jsonObject.toString();
+        final String jwt = IAMUtil.signJwt(serviceAccount, 60);
+        final JsonObject payload = new JsonObject();
+        payload.addProperty("jwt", jwt);
+        payload.addProperty("role", role);
+        return login(
+                vaultHost, namespace,
+                endpointOverride == null ? DEFAULT_ENDPOINT_GCP_AUTH : endpointOverride,
+                payload);
+    }
 
-        final String url = createUrl(vaultHost, endpointToken);
+    // Calling Vault API: https://developer.hashicorp.com/vault/api-docs/auth/aws#login
+    private static JsonObject createAwsIamLoginPayload(final String role, final String iamServerId) {
+        final String stsUrl = "https://sts.amazonaws.com/";
+        final byte[] body = "Action=GetCallerIdentity&Version=2011-06-15".getBytes(StandardCharsets.UTF_8);
 
-        final HttpRequest request = HttpRequest.newBuilder()
+        final SdkHttpFullRequest.Builder requestBuilder = SdkHttpFullRequest.builder()
+                .method(SdkHttpMethod.POST)
+                .uri(URI.create(stsUrl))
+                .putHeader("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+                .contentStreamProvider(() -> new ByteArrayInputStream(body));
+        if(iamServerId != null) {
+            requestBuilder.putHeader("X-Vault-AWS-IAM-Server-ID", iamServerId);
+        }
+        final SdkHttpFullRequest signed = Aws4Signer.create().sign(
+                requestBuilder.build(),
+                Aws4SignerParams.builder()
+                        .awsCredentials(DefaultCredentialsProvider.create().resolveCredentials())
+                        .signingName("sts")
+                        .signingRegion(Region.US_EAST_1)
+                        .build());
+
+        final JsonObject headers = new JsonObject();
+        signed.headers().forEach((name, values) -> {
+            final JsonArray array = new JsonArray();
+            values.forEach(array::add);
+            headers.add(name, array);
+        });
+
+        final JsonObject payload = new JsonObject();
+        if(role != null) {
+            payload.addProperty("role", role);
+        }
+        payload.addProperty("iam_http_request_method", "POST");
+        payload.addProperty("iam_request_url", Base64.getEncoder().encodeToString(stsUrl.getBytes(StandardCharsets.UTF_8)));
+        payload.addProperty("iam_request_body", Base64.getEncoder().encodeToString(body));
+        payload.addProperty("iam_request_headers", Base64.getEncoder().encodeToString(headers.toString().getBytes(StandardCharsets.UTF_8)));
+        return payload;
+    }
+
+    private static String login(
+            final String vaultHost,
+            final String namespace,
+            final String endpoint,
+            final JsonObject payload) {
+
+        final String url = createUrl(vaultHost, endpoint);
+        final HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header(HEADER_NAMESPACE, namespace)
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(jwtString))
-                .build();
+                .POST(HttpRequest.BodyPublishers.ofString(payload.toString()));
+        if(namespace != null) {
+            requestBuilder.header(HEADER_NAMESPACE, namespace);
+        }
 
-        try {
-            final HttpResponse response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            final JsonObject responseJson = new Gson().fromJson(response.body().toString(), JsonObject.class);
+        try(final HttpClient loginClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .connectTimeout(Duration.ofSeconds(60))
+                .build()) {
+            final HttpResponse<String> response = loginClient
+                    .send(requestBuilder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            final JsonObject responseJson = new Gson().fromJson(response.body(), JsonObject.class);
 
-            if (responseJson.has("errors")) {
-                throw new RuntimeException(String.format("Vault token errors: %s", responseJson.toString() + " jwt: " + jwt));
+            if (responseJson != null && responseJson.has("errors")) {
+                throw new RuntimeException(String.format("Vault login errors: %s", responseJson));
             } else if (response.statusCode() != 200) {
                 throw new RuntimeException(String.format("Failed to access to %s, cause: %s", url, response.body()));
             }
@@ -136,7 +241,11 @@ public class VaultClient {
 
     // Calling Vault API: https://www.vaultproject.io/api-docs/auth/token#revoke-a-token-self
     public void revokeToken() throws IOException, InterruptedException {
-        final JsonObject response = call(ENDPOINT_VAULT_REVOKE, "POST", "", 3);
+        if(!loginToken) {
+            // externally supplied token (withToken): its lifecycle is not ours to end
+            return;
+        }
+        call(ENDPOINT_VAULT_REVOKE, "POST", "", 3);
     }
 
     // Calling Vault API: https://www.vaultproject.io/api/secret/kv/kv-v2.html#read-secret-version

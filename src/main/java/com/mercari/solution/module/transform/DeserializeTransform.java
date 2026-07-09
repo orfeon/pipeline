@@ -8,7 +8,7 @@ import com.mercari.solution.module.*;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.schema.converter.JsonToMapConverter;
 import com.mercari.solution.util.schema.converter.AvroToMapConverter;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.Select;
 import com.mercari.solution.util.pipeline.Union;
@@ -183,12 +183,12 @@ public class DeserializeTransform extends Transform {
 
         final List<Schema.Field> deserializedFields = switch (parameters.format) {
             case avro -> {
-                final String avroJson = StorageUtil.readString(parameters.avroFile);
+                final String avroJson = ResourceUtil.readString(parameters.avroFile);
                 final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(avroJson);
                 yield AvroToElementConverter.convertFields(avroSchema.getFields());
             }
             case protobuf -> {
-                final byte[] bytes = StorageUtil.readBytes(parameters.descriptorFile);
+                final byte[] bytes = ResourceUtil.readBytes(parameters.descriptorFile);
                 final Map<String, Descriptors.Descriptor> descriptors = ProtoSchemaUtil.getDescriptors(bytes);
                 final Descriptors.Descriptor descriptor = descriptors.get(parameters.messageName);
                 if(descriptor == null) {
@@ -266,7 +266,7 @@ public class DeserializeTransform extends Transform {
             this.flatten = parameters.flatten;
 
             if(parameters.avroFile != null) {
-                this.avroJson = StorageUtil.readString(parameters.avroFile);
+                this.avroJson = ResourceUtil.readString(parameters.avroFile);
             } else {
                 this.avroJson = null;
             }
@@ -385,7 +385,7 @@ public class DeserializeTransform extends Transform {
             final String descriptorPath) {
 
         final long start = Instant.now().toEpochMilli();
-        final byte[] bytes = StorageUtil.readBytes(descriptorPath);
+        final byte[] bytes = ResourceUtil.readBytes(descriptorPath);
         final long end = Instant.now().toEpochMilli();
         LOG.info("DeserializeTransform load descriptor file took {} ms, with descriptors: {}", (end - start), bytes.length);
         final Map<String, Descriptors.Descriptor> map = ProtoSchemaUtil.getDescriptors(bytes);

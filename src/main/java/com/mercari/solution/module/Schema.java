@@ -4,7 +4,7 @@ import com.google.api.services.bigquery.model.TableSchema;
 import com.google.gson.*;
 import com.google.protobuf.Descriptors;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
@@ -1125,7 +1125,7 @@ public class Schema implements Serializable {
         private void setup() {
             if(this.json == null) {
                 if(this.file != null) {
-                    this.json = StorageUtil.readString(file);
+                    this.json = ResourceUtil.readString(file);
                 }
             }
             if(this.schema == null && this.json != null) {
@@ -1208,7 +1208,7 @@ public class Schema implements Serializable {
 
         private void setup() {
             if(this.descriptorFile != null) {
-                final byte[] bytes = StorageUtil.readBytes(this.descriptorFile);
+                final byte[] bytes = ResourceUtil.readBytes(this.descriptorFile);
                 final Map<String, Descriptors.Descriptor> descriptors = ProtoSchemaUtil.getDescriptors(bytes);
                 if(messageName != null) {
                     this.descriptors = new HashMap<>();

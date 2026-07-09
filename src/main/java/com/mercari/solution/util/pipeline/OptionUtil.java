@@ -94,7 +94,13 @@ public class OptionUtil {
     }
 
     public static String getDefaultProject() {
-        return ServiceOptions.getDefaultProjectId();
+        final String project = ServiceOptions.getDefaultProjectId();
+        if(project == null) {
+            throw new IllegalArgumentException(
+                    "Could not resolve a default GCP project (not running on Google Cloud?). "
+                            + "Set the module's projectId parameter or the GOOGLE_CLOUD_PROJECT environment variable.");
+        }
+        return project;
     }
 
     public static boolean isDirectRunner(final PInput input) {

@@ -1,5 +1,7 @@
 package com.mercari.solution.config.options;
 
+import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
+import com.mercari.solution.util.cloud.google.MCredentialFactory;
 import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
 
@@ -9,6 +11,7 @@ import java.util.List;
 public class GCPOptions implements Serializable {
 
     private String project;
+    private String credentials;
     private String impersonateServiceAccount;
     private String workerRegion;
     private String workerZone;
@@ -38,6 +41,14 @@ public class GCPOptions implements Serializable {
 
         if(gcp.project != null) {
             pipelineOptions.as(GcpOptions.class).setProject(gcp.project);
+        }
+        if(gcp.credentials != null) {
+            // Propagated to workers with the pipeline options; consumed by MCredentialFactory
+            // (Beam GCP IOs) and GcpCredentialsCache (this project's client utils).
+            pipelineOptions.as(MCredentialFactory.CredentialsSourceOptions.class)
+                    .setGcpCredentialsSource(gcp.credentials);
+            pipelineOptions.as(GcpOptions.class).setCredentialFactoryClass(MCredentialFactory.class);
+            GcpCredentialsCache.setSource(gcp.credentials);
         }
         if(gcp.workerRegion != null) {
             pipelineOptions.as(GcpOptions.class).setWorkerRegion(gcp.workerRegion);
