@@ -79,7 +79,12 @@ public class QueryTransform extends Transform {
 
         private String sql;
         private String table;
+        private com.google.gson.JsonElement filter;
         private List<LookupSourceConfig.SourceParameters> sources;
+
+        private String filterJson() {
+            return filter == null || filter.isJsonNull() ? null : filter.toString();
+        }
 
         private void validate() {
             if(this.sql == null) {
@@ -201,7 +206,8 @@ public class QueryTransform extends Transform {
                             .withStrategy(getStrategy()));
             outputs = input
                     .apply("Query", ParDo
-                            .of(new QueryDoFn(query, parameters.table, sideInputViews, getLoggings(), getFailFast(), failureTag))
+                            .of(new QueryDoFn(query, parameters.table, parameters.filterJson(), inputSchema,
+                                    sideInputViews, getLoggings(), getFailFast(), failureTag))
                             .withSideInputs(sideInputViews.values())
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
         } else {
@@ -263,7 +269,7 @@ public class QueryTransform extends Transform {
         final Coder<MElement> stateCoder = ElementCoder.of(Schema.of(stateFields));
 
         final BufferQueryProcessor processor = new BufferQueryProcessor(
-                query, parameters.table, bufferConfig, storedFields,
+                query, parameters.table, parameters.filterJson(), bufferConfig, storedFields,
                 new ArrayList<>(inputs.getAll().keySet()), inputSchema,
                 sideInputViews, getLoggings(), getFailFast(), failureTag);
 
@@ -339,14 +345,20 @@ public class QueryTransform extends Transform {
 
         private final Query2 query;
         private final String table;
+        private final String filterJson;
+        private final Schema inputSchema;
         private final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews;
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failuresTag;
 
+        private transient Filter.ConditionNode filterCondition;
+
         QueryDoFn(
                 final Query2 query,
                 final String table,
+                final String filterJson,
+                final Schema inputSchema,
                 final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews,
                 final List<Logging> logs,
                 final boolean failFast,
@@ -354,6 +366,8 @@ public class QueryTransform extends Transform {
 
             this.query = query;
             this.table = table;
+            this.filterJson = filterJson;
+            this.inputSchema = inputSchema;
             this.sideInputViews = sideInputViews;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
@@ -363,6 +377,7 @@ public class QueryTransform extends Transform {
         @Setup
         public void setup() {
             query.setup();
+            this.filterCondition = filterJson == null ? null : Filter.parse(filterJson);
         }
 
         @Teardown
@@ -374,6 +389,11 @@ public class QueryTransform extends Transform {
         public void processElement(ProcessContext c, BoundedWindow window) {
             final MElement input = c.element();
             if(input == null) {
+                return;
+            }
+            // The cheap pre-filter: elements not matching are dropped before
+            // the (far more expensive) SQL evaluation.
+            if(filterCondition != null && !Filter.filter(filterCondition, inputSchema, input)) {
                 return;
             }
             try {
@@ -426,6 +446,7 @@ public class QueryTransform extends Transform {
 
         private final Query2 query;
         private final String table;
+        private final String filterJson;
         private final List<String> groupFields;
         private final List<String> storedFields;
         private final List<String> inputNames;
@@ -442,12 +463,14 @@ public class QueryTransform extends Transform {
         private final TupleTag<BadRecord> failuresTag;
 
         private transient BufferLookupSource bufferSource;
+        private transient Filter.ConditionNode filterCondition;
         private transient Filter.ConditionNode bufferCondition;
         private transient Filter.ConditionNode triggerCondition;
 
         BufferQueryProcessor(
                 final Query2 query,
                 final String table,
+                final String filterJson,
                 final LookupSourceConfig.BufferConfig bufferConfig,
                 final List<String> storedFields,
                 final List<String> inputNames,
@@ -459,6 +482,7 @@ public class QueryTransform extends Transform {
 
             this.query = query;
             this.table = table;
+            this.filterJson = filterJson;
             this.groupFields = bufferConfig.groupFields();
             this.storedFields = storedFields;
             this.inputNames = inputNames;
@@ -488,6 +512,7 @@ public class QueryTransform extends Transform {
             if(this.bufferSource == null) {
                 throw new IllegalStateException("buffer source is not registered in the query");
             }
+            this.filterCondition = filterJson == null ? null : Filter.parse(filterJson);
             this.bufferCondition = bufferFilterJson == null ? null : Filter.parse(bufferFilterJson);
             this.triggerCondition = triggerFilterJson == null ? null : Filter.parse(triggerFilterJson);
         }
@@ -506,6 +531,12 @@ public class QueryTransform extends Transform {
 
             final MElement input = c.element() == null ? null : c.element().getValue();
             if(input == null) {
+                return;
+            }
+            // The module-level pre-filter drops the element entirely: it is
+            // neither buffered nor evaluated (unlike bufferFilter/triggerFilter,
+            // which split those two concerns).
+            if(filterCondition != null && !Filter.filter(filterCondition, inputSchema, input)) {
                 return;
             }
             try {

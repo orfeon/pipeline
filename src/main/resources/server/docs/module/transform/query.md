@@ -103,6 +103,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 |-----------|----------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | sql       | required | String | SQL query text. Also accepts a GCS path (`gs://...`), a local file path, a Parameter Manager resource path, or a base64-encoded string (`data:...`), same as the `beamsql` module.                        |
 | table     | optional | String | Table name under which the input element is visible in the SQL. Defaults to `INPUT`.                                                                                                                     |
+| filter    | optional | Filter | Filter-DSL condition over the input element (same syntax as the `filter` module). Elements not matching are dropped **before** the SQL evaluation — the filter costs ~100ns per element, an order of magnitude less than even a simple SQL evaluation, so use it to skip elements the query would discard anyway. With a `buffer` source, non-matching elements are neither buffered nor evaluated (contrast with `bufferFilter`/`triggerFilter`, which split those concerns). |
 | sources   | optional | Array<Source\> | External lookup sources. Each source's tables are referenced in the SQL as `sourceName.tableName` and joined on their keys (see the contract above).                                              |
 
 ### Source common parameters
