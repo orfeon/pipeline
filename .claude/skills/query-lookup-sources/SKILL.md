@@ -345,6 +345,19 @@ Query2.builder()
     transforms; `_INT`/DOUBLE variants project, COMPACT/DISTINCT are
     `ARRAY<ANY>` like SEQ_COLLECT), `TIME_BUCKET(ts, size)` (fixed-width
     timestamp floor; wrap in `UNIX_MILLIS` for a numeric key).
+  - Linear-algebra built-ins (`MatrixFunctions`, thin adapters over the shared
+    ojalgo core `util/domain/math/MatrixOps` — same core as the select
+    module's matrix functions): `COSINE_SIMILARITY(a, b)`,
+    `MATRIX_MULTIPLY(matrix, vector)` / `MATRIX_SOLVE(matrix, rhs)` (matrices
+    are nested arrays — `ARRAY[ARRAY[…], …]` literals work; each also has a
+    trailing-`columns` arity overload reading a **flat row-major** array —
+    the SQL surface of `matrix`-typed fields, whose Calcite schema/value
+    conversion maps them to flat `ARRAY<DOUBLE>` via `getMatrixValueType`,
+    fixed in `CalciteSchemaUtil.createRelDataType` / `CalciteValues.toInternal`),
+    `MAHALANOBIS(x, mean, precision [, columns])`, `POLY_FIT(xs, ys, degree)`, and the
+    `LINEAR_REG(y, xs)` UDAF (Gram-matrix accumulator, mergeable; result is
+    an opaque List like SEQ_COLLECT — wrap in `AS_DOUBLE_ARRAY(v)` to project
+    an `ARRAY<DOUBLE>`). Tests: `Query2MatrixFunctionsTest`.
   - **BigQuery-lex quoting trap**: a define containing string literals must be
     a *double-quoted* SQL string (`"A: $action = 'promo'"`) — `''` escaping is
     the origin engine's Lex.JAVA convention and fails to parse here.

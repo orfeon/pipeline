@@ -63,7 +63,10 @@ public final class UserDefinedFunctions {
      * {@link ApproxDistinctFunctions APPROX_DISTINCT},
      * {@link ArrayTransformFunctions ARRAY_DIFFERENCE(_INT) /
      * ARRAY_CUM_SUM(_INT) / ARRAY_COMPACT / ARRAY_DISTINCT},
-     * {@link TimeBucketFunctions TIME_BUCKET}). For ARG_MAX / ARG_MIN use
+     * {@link TimeBucketFunctions TIME_BUCKET}, and the linear-algebra
+     * built-ins {@link MatrixFunctions COSINE_SIMILARITY / MATRIX_MULTIPLY /
+     * MATRIX_SOLVE / MAHALANOBIS / POLY_FIT / LINEAR_REG /
+     * AS_DOUBLE_ARRAY}). For ARG_MAX / ARG_MIN use
      * Calcite's standard operators (implemented natively by the enumerable
      * runtime) — a same-name user aggregate would break overload resolution.
      */
@@ -83,6 +86,7 @@ public final class UserDefinedFunctions {
         sequenceFamily.addAll(ApproxDistinctFunctions.builtIns());
         sequenceFamily.addAll(ArrayTransformFunctions.builtIns());
         sequenceFamily.addAll(TimeBucketFunctions.builtIns());
+        sequenceFamily.addAll(MatrixFunctions.builtIns());
         for (final Map.Entry<String, Function> entry : sequenceFamily) {
             functions.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
                     .add(entry.getValue());

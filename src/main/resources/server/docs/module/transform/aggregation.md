@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Aggregation Transform Module
-description: Performs aggregation processing on multiple inputs with grouping, filtering, and field selection. Supports 12 aggregation functions (count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, array_agg) with per-record conditions, expression-based fields, weighted calculations, and configurable output limiting. Works consistently in both batch and streaming modes.
+description: Performs aggregation processing on multiple inputs with grouping, filtering, and field selection. Supports 13 aggregation functions (count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, regression, array_agg) with per-record conditions, expression-based fields, weighted calculations, and configurable output limiting. Works consistently in both batch and streaming modes.
 tags: [transform, aggregation, batch, streaming, groupby]
 timestamp: 2026-06-23T00:00:00Z
 ---
@@ -10,13 +10,13 @@ timestamp: 2026-06-23T00:00:00Z
 
 Transform Module for performing aggregation processing on multiple inputs. Records are grouped by specified fields and aggregated using one or more aggregation functions.
 
-The same aggregate processing works consistently in both batch and streaming modes. Compared to the `beamsql` module, the `aggregation` module specializes in aggregate processing with simpler configuration but better performance. It also provides functions not available in `beamsql`, such as `last`, `first`, `arg_max`, `arg_min`, `std`, and `simple_regression`.
+The same aggregate processing works consistently in both batch and streaming modes. Compared to the `beamsql` module, the `aggregation` module specializes in aggregate processing with simpler configuration but better performance. It also provides functions not available in `beamsql`, such as `last`, `first`, `arg_max`, `arg_min`, `std`, `simple_regression`, and `regression` (multivariate).
 
 Supports:
 
 - **Multiple inputs** - Aggregate data from multiple input sources in a single step.
 - **Grouping** - Group records by one or more fields before aggregation.
-- **12 aggregation functions** - count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, array_agg.
+- **13 aggregation functions** - count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, regression, array_agg.
 - **Per-record conditions** - Each aggregation field can specify a filter condition to include/exclude records.
 - **Expression-based fields** - Use mathematical expressions (exp4j) instead of direct field references.
 - **Weighted calculations** - avg, std, and simple_regression support weighted computations.
@@ -67,9 +67,9 @@ All aggregation functions share these common parameters.
 | parameter | optional | type    | description                                                                                                                                                                                |
 |-----------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | name      | required | String  | Output field name for the aggregation result. Must be unique within the aggregation definition.                                                                                            |
-| op        | required | Enum    | Aggregation function. Values: `count`, `sum`, `avg`, `max`, `min`, `last`, `first`, `arg_max`, `arg_min`, `std`, `simple_regression`, `array_agg`. Can also be specified as `func`.        |
+| op        | required | Enum    | Aggregation function. Values: `count`, `sum`, `avg`, `max`, `min`, `last`, `first`, `arg_max`, `arg_min`, `std`, `simple_regression`, `regression`, `array_agg`. Can also be specified as `func`.        |
 | field     | selective | String | Input field name to aggregate. Required for most functions (except `count`). Mutually exclusive with `expression` for functions that support expressions.                                  |
-| expression| optional | String  | Mathematical expression (exp4j syntax) to compute the value to aggregate. Available for `sum`, `avg`, `max`, `min`, `std`, `simple_regression`. Uses input field names as variables.       |
+| expression| optional | String  | Mathematical expression (exp4j syntax) to compute the value to aggregate. Available for `sum`, `avg`, `max`, `min`, `std`, `simple_regression`, `regression`. Uses input field names as variables.       |
 | condition | optional | Filter  | Filter condition applied per record. Only records matching the condition are included in the aggregation. Uses the same [Filter](../common/filter.md) syntax.                              |
 | ignore    | optional | Boolean | If `true`, this aggregation field is computed internally but excluded from the output schema. Default: `false`.                                                                            |
 
@@ -187,6 +187,32 @@ Performs simple linear regression (y = a + bx) and outputs regression statistics
 | output type | description                                                                              |
 |-------------|------------------------------------------------------------------------------------------|
 | Element     | Nested element with fields: `Slope` (FLOAT64), `Intercept` (FLOAT64), `RMSE` (FLOAT64), `N` (INT64). |
+
+#### regression
+
+Performs multivariate linear regression (y = b0 + b1·x1 + … + bk·xk) — the multiple-explanatory-variable extension of `simple_regression`. The accumulator holds only the Gram matrix (constant size per group regardless of row count), so it works in streaming windows; an optional ridge penalty stabilizes correlated features. Rows where y or any x is null are skipped.
+
+| parameter    | optional  | type           | description                                                                                             |
+|--------------|-----------|----------------|----------------------------------------------------------------------------------------------------------|
+| field        | selective | String         | Input field name for the dependent variable (y). Mutually exclusive with `expression`.                  |
+| expression   | selective | String         | Expression for the dependent variable (y).                                                               |
+| xFields      | required  | Array<String\> | Input field names of the explanatory variables (x1 … xk).                                                |
+| hasIntercept | optional  | Boolean        | If `true`, an intercept term is prepended to the coefficients. Default: `true`.                          |
+| ridge        | optional  | Number         | L2 (ridge) regularization strength (>= 0). Default: `0`.                                                 |
+
+| output type | description                                                                                                                           |
+|-------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| Element     | Nested element with fields: `Coefficients` (ARRAY<FLOAT64\> — `[intercept, b1, …, bk]` in `xFields` order when `hasIntercept`, otherwise `[b1, …, bk]`), `RMSE` (FLOAT64), `N` (INT64). |
+
+```yaml
+- name: demandModel
+  op: regression
+  field: sales
+  xFields:
+    - price
+    - temperature
+  ridge: 0.1
+```
 
 #### array_agg
 

@@ -52,6 +52,11 @@ public interface SelectFunction extends Serializable {
         reshape,
         tokenize_encode,
         tokenize_decode,
+        cosine_similarity,
+        matrix_multiply,
+        matrix_solve,
+        mahalanobis,
+        poly_fit,
         panic;
 
         public static Func is(String value) {
@@ -163,6 +168,11 @@ public interface SelectFunction extends Serializable {
             case reshape -> Reshape.of(name, jsonObject, inputFields, ignore);
             case tokenize_encode -> Tokenize.of(name, jsonObject, inputFields, true, ignore);
             case tokenize_decode -> Tokenize.of(name, jsonObject, inputFields, false, ignore);
+            case cosine_similarity -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.cosine_similarity, ignore);
+            case matrix_multiply -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.matrix_multiply, ignore);
+            case matrix_solve -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.matrix_solve, ignore);
+            case mahalanobis -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.mahalanobis, ignore);
+            case poly_fit -> Matrix.of(name, jsonObject, inputFields, Matrix.Op.poly_fit, ignore);
             case panic -> Panic.of(name, jsonObject, inputFields, ignore);
             case null, default -> StatefulFunction.of(jsonObject, inputFields);
         };

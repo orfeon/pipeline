@@ -24,6 +24,7 @@ public interface AggregateFunction extends StatefulFunction {
         avg,
         std,
         simple_regression,
+        regression,
         array_agg,
         any
     }
@@ -99,6 +100,7 @@ public interface AggregateFunction extends StatefulFunction {
             case avg -> Avg.of(name, inputFields, field, expression, condition, range, ignore, params);
             case std -> Std.of(name, inputFields, field, expression, condition, range, ignore, params);
             case simple_regression -> SimpleRegression.of(name, inputFields, field, expression, condition, range, ignore, params);
+            case regression -> Regression.of(name, inputFields, field, expression, condition, range, ignore, params);
             case array_agg -> ArrayAgg.of(name, inputFields, condition, range, ignore, params);
             default -> throw new IllegalArgumentException("Not supported aggregation op: " + op);
         };

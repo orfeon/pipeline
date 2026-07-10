@@ -160,12 +160,12 @@ public class ElementToAvroConverter {
                     arrayElementSchema = AvroSchemaUtil.unnestUnion(arrayElementSchema);
                 }
                 final org.apache.avro.Schema matrixSchema = org.apache.avro.Schema.createArray(arrayElementSchema);
-                matrixSchema.addProp(LogicalType.LOGICAL_TYPE_PROP, "matrix");
+                matrixSchema.addProp(LogicalType.LOGICAL_TYPE_PROP, AvroSchemaUtil.LOGICAL_TYPE_MATRIX);
                 final JsonArray shapeArray = new JsonArray();
                 for(final Integer s : fieldType.getShape()) {
                     shapeArray.add(s);
                 }
-                matrixSchema.addProp("shape", shapeArray.toString());
+                matrixSchema.addProp(AvroSchemaUtil.PROP_MATRIX_SHAPE, shapeArray.toString());
                 yield matrixSchema;
             }
             default -> throw new IllegalArgumentException(fieldType.getType() + " type is not supported for avro.");

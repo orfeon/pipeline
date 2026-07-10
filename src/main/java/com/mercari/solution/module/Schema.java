@@ -711,6 +711,14 @@ public class Schema implements Serializable {
                 case array -> {
                     jsonObject.add("arrayValueType", type.getArrayValueType().toJsonObject());
                 }
+                case matrix -> {
+                    jsonObject.addProperty("valueType", type.getMatrixValueType().getType().name());
+                    final JsonArray shapeArray = new JsonArray();
+                    for(final Integer dim : type.getShape()) {
+                        shapeArray.add(dim);
+                    }
+                    jsonObject.add("shape", shapeArray);
+                }
             }
 
             return jsonObject;
@@ -899,6 +907,39 @@ public class Schema implements Serializable {
                             final FieldType valueFieldType = parse(name, valueType, mode, jsonObject);
                             fieldType = FieldType.map(valueFieldType);
                         }
+                    }
+                    case matrix -> {
+                        if(!jsonObject.has("shape") || !jsonObject.get("shape").isJsonArray()) {
+                            throw new IllegalArgumentException("field: " + name + " requires 'shape' parameter (a json array of positive integers) for matrix type");
+                        }
+                        final List<Integer> shape = new ArrayList<>();
+                        for(final JsonElement shapeElement : jsonObject.getAsJsonArray("shape")) {
+                            if(!shapeElement.isJsonPrimitive() || !shapeElement.getAsJsonPrimitive().isNumber()) {
+                                throw new IllegalArgumentException("field: " + name + ".shape must contain integers. actual value is: " + shapeElement);
+                            }
+                            final int dim = shapeElement.getAsInt();
+                            if(dim <= 0) {
+                                throw new IllegalArgumentException("field: " + name + ".shape dimensions must be positive integers, but got " + dim);
+                            }
+                            shape.add(dim);
+                        }
+                        if(shape.isEmpty()) {
+                            throw new IllegalArgumentException("field: " + name + ".shape must not be empty");
+                        }
+                        final Type matrixValueType = jsonObject.has("valueType")
+                                ? Type.of(jsonObject.get("valueType").getAsString())
+                                : Type.float64;
+                        final FieldType matrixValueFieldType = switch (matrixValueType) {
+                            case int8, int16, int32, int64, float16, float32, float64 -> FieldType.type(matrixValueType);
+                            default -> throw new IllegalArgumentException("field: " + name + ".valueType for matrix type must be a numeric type, but got " + matrixValueType);
+                        };
+                        // A matrix is inherently repeated (a flat row-major array):
+                        // mode=repeated (also what toJsonObject echoes) is not wrapped in another array.
+                        final FieldType matrixType = FieldType.matrix(matrixValueFieldType, shape);
+                        return switch (mode) {
+                            case required -> matrixType.withNullable(false);
+                            case nullable, repeated -> matrixType.withNullable(true);
+                        };
                     }
                     case array -> throw new IllegalArgumentException("use mode=repeated instead of type=array");
                     default -> throw new IllegalArgumentException();
@@ -1529,7 +1570,7 @@ public class Schema implements Serializable {
 
         public static boolean isPrimitiveType(final Type type) {
             return switch (type) {
-                case element, array, map, enumeration, decimal, geography -> false;
+                case element, array, map, enumeration, decimal, geography, matrix -> false;
                 default -> true;
             };
         }

@@ -551,6 +551,109 @@ Decodes token IDs back to text using a tokenizer.
 
 Output type: STRING.
 
+### cosine_similarity
+
+Cosine similarity of two numeric array fields of equal length (embedding similarity). Returns null when either field is null or has zero norm.
+
+| parameter | optional | type   | description                                     |
+|-----------|----------|--------|-------------------------------------------------|
+| left      | required | String | First vector field (`array<float64>`-shaped).   |
+| right     | required | String | Second vector field.                             |
+
+```yaml
+- name: similarity
+  func: cosine_similarity
+  left: embedding1
+  right: embedding2
+```
+
+Output type: FLOAT64.
+
+### matrix_multiply
+
+Matrix-vector product: projects a vector field through a matrix — e.g. dimension reduction of an embedding through fixed PCA components, or applying linear-model weights. The matrix is a constant in the config or a field: a `matrix`-typed field (flat row-major values with the 2D shape in the schema — an ONNX tensor or `reshape` output, no extra parameter needed), a flat numeric array with the `columns` parameter, or an array of arrays.
+
+| parameter   | optional  | type                    | description                                                              |
+|-------------|-----------|-------------------------|--------------------------------------------------------------------------|
+| field       | required  | String                  | Vector field (`array<float64>`-shaped).                                  |
+| matrix      | selective | Array<Array<Number\>\>  | Constant matrix (rows of equal length). Mutually exclusive with `matrixField`. |
+| matrixField | selective | String                  | Field holding the matrix: `matrix` type (shape from schema), flat array (+ `columns`), or array of arrays. |
+| columns     | optional  | Integer                 | Column count for splitting a flat (row-major) array field into rows. Not needed for `matrix`-typed or nested fields. |
+
+```yaml
+- name: projected
+  func: matrix_multiply
+  matrix: [[0.12, -0.5, 0.33], [0.8, 0.1, -0.2]]
+  field: embedding
+```
+
+Output type: ARRAY<FLOAT64\>.
+
+### matrix_solve
+
+Solves the linear system `A x = b` by SVD: the exact solution for a full-rank square matrix, the least-squares solution when overdetermined, the minimum-norm solution when rank-deficient.
+
+| parameter   | optional  | type                    | description                                                              |
+|-------------|-----------|-------------------------|--------------------------------------------------------------------------|
+| field       | required  | String                  | Right-hand-side vector field.                                            |
+| matrix      | selective | Array<Array<Number\>\>  | Constant coefficient matrix. Mutually exclusive with `matrixField`.      |
+| matrixField | selective | String                  | Field holding the coefficient matrix: `matrix` type (shape from schema), flat array (+ `columns`), or array of arrays. |
+| columns     | optional  | Integer                 | Column count for splitting a flat (row-major) array field into rows.     |
+
+```yaml
+- name: coefficients
+  func: matrix_solve
+  matrixField: designMatrix
+  field: target
+```
+
+Output type: ARRAY<FLOAT64\>.
+
+### mahalanobis
+
+Mahalanobis distance of a vector field from a distribution — an anomaly score. Give the distribution as a mean vector plus either a `precision` (inverse covariance) matrix or a `covariance` matrix (inverted internally; a constant covariance is inverted once per worker).
+
+| parameter       | optional  | type                    | description                                                          |
+|-----------------|-----------|-------------------------|----------------------------------------------------------------------|
+| field           | required  | String                  | Vector field to score.                                               |
+| mean            | selective | Array<Number\>          | Constant mean vector. Mutually exclusive with `meanField`.           |
+| meanField       | selective | String                  | Field holding the mean vector.                                       |
+| precision       | selective | Array<Array<Number\>\>  | Constant precision (inverse covariance) matrix.                      |
+| precisionField  | selective | String                  | Field holding the precision matrix (`matrix` type, flat array + `columns`, or array of arrays). |
+| covariance      | selective | Array<Array<Number\>\>  | Constant covariance matrix (used when no precision is given).        |
+| covarianceField | selective | String                  | Field holding the covariance matrix (same field forms as `precisionField`). |
+| columns         | optional  | Integer                 | Column count for splitting a flat (row-major) matrix field into rows. |
+
+```yaml
+- name: anomaly_score
+  func: mahalanobis
+  field: features
+  mean: [12.5, 3.2, 0.8]
+  covariance: [[4.0, 0.5, 0.0], [0.5, 1.0, 0.1], [0.0, 0.1, 0.3]]
+```
+
+Output type: FLOAT64.
+
+### poly_fit
+
+Least-squares polynomial fit over array fields held by one record (e.g. a price history array): returns `degree + 1` coefficients in ascending order (`c[0] + c[1]·x + …`), so a degree-1 fit's second coefficient is the slope/trend.
+
+| parameter | optional | type    | description                                                              |
+|-----------|----------|---------|--------------------------------------------------------------------------|
+| y         | required | String  | Values field (numeric array).                                            |
+| x         | optional | String  | X-coordinates field (same length as `y`). Default: `0, 1, 2, …`.         |
+| degree    | optional | Integer | Polynomial degree (>= 0). Default: `1`.                                  |
+
+```yaml
+- name: price_trend
+  func: poly_fit
+  x: timestamps
+  y: prices
+  degree: 1
+```
+
+Output type: ARRAY<FLOAT64\>.
+
 ### lag (stateful)
 
 Accesses previous row values using array-indexed variable syntax. Requires `groupFields` to be specified. Records are ordered by event time within each group.
