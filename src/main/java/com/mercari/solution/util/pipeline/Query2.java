@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline;
 
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.lookup.BindableQuery;
 import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.pipeline.lookup.LookupJoinRule;
 import com.mercari.solution.util.pipeline.lookup.LookupLateralJoin;
@@ -63,8 +64,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -124,7 +123,8 @@ public class Query2 implements Serializable {
     private final List<UserDefinedFunctions.FunctionSpec> functions;
     private final Schema outputSchema;
 
-    private transient PreparedStatement statement;
+    private transient BindableQuery bindableQuery;
+    private transient List<String> outputFieldNames;
     private transient Map<String, List<MElement>> elements;
     private transient List<LookupLateralRuntime> lateralRuntimes;
 
@@ -261,13 +261,16 @@ public class Query2 implements Serializable {
         }
     }
 
-    /** Prepares the statement once per worker. Call from {@code DoFn @Setup}. */
+    /** Plans and compiles the query once per worker. Call from {@code DoFn @Setup}. */
     public void setup() {
         setupSources();
         this.elements = createBuffers();
         this.lateralRuntimes = new ArrayList<>();
         try {
-            this.statement = prepare(createRootSchema(this.elements), this.lateralRuntimes);
+            final SchemaPlus rootSchema = createRootSchema(this.elements);
+            final Planned planned = plan(rootSchema, this.lateralRuntimes);
+            this.bindableQuery = BindableQuery.compile(planned.relNode(), rootSchema);
+            this.outputFieldNames = planned.fieldNames();
         } catch (final Throwable e) {
             closeLateralRuntimes(this.lateralRuntimes);
             this.lateralRuntimes = null;
@@ -276,17 +279,9 @@ public class Query2 implements Serializable {
         }
     }
 
-    /** Releases the statement, lateral evaluators and source clients. Call from {@code DoFn @Teardown}. */
+    /** Releases the compiled plan, lateral evaluators and source clients. Call from {@code DoFn @Teardown}. */
     public void teardown() {
-        try {
-            if (this.statement != null && !this.statement.isClosed()) {
-                this.statement.close();
-            }
-        } catch (final SQLException e) {
-            LOG.error("failed to close statement for sql: {}", sql, e);
-        } finally {
-            this.statement = null;
-        }
+        this.bindableQuery = null;
         if (this.lateralRuntimes != null) {
             closeLateralRuntimes(this.lateralRuntimes);
             this.lateralRuntimes = null;
@@ -327,7 +322,7 @@ public class Query2 implements Serializable {
      * are {@code DataType.ELEMENT} rows carrying the given timestamp as event time.
      */
     public List<MElement> execute(final Map<String, List<MElement>> inputs, final Instant timestamp) {
-        if (statement == null) {
+        if (bindableQuery == null) {
             throw new IllegalStateException("query is not set up (call setup() first)");
         }
         for (final Map.Entry<String, List<MElement>> entry : inputs.entrySet()) {
@@ -337,10 +332,12 @@ public class Query2 implements Serializable {
                 buffer.addAll(entry.getValue());
             }
         }
-        try (final ResultSet resultSet = statement.executeQuery()) {
-            final List<Map<String, Object>> valuesList = CalciteValues.convertResultSet(resultSet);
+        try {
+            final List<Object[]> rows = bindableQuery.executeInternalRows();
+            final List<Map<String, Object>> valuesList = CalciteValues
+                    .convertInternalRows(outputFieldNames, bindableQuery.rowType(), rows);
             return MElement.ofList(valuesList, timestamp);
-        } catch (final SQLException e) {
+        } catch (final RuntimeException e) {
             throw new IllegalStateException("failed to execute query: " + sql, e);
         }
     }
@@ -386,7 +383,39 @@ public class Query2 implements Serializable {
     }
 
     /**
-     * Parses, validates, converts and prepares the SQL.
+     * The logical plan, the source rules installed for its volcano phase, and
+     * the SQL output field names (aliases) from the validated root.
+     */
+    private record Planned(RelNode relNode, List<RelOptRule> rules, List<String> fieldNames) {
+    }
+
+    /**
+     * Prepares the SQL as a JDBC statement — used only at construction time to
+     * derive the output schema from the statement metadata (workers execute
+     * through {@link BindableQuery} instead). The lookup rules are installed
+     * both on the rel cluster's planner and via the thread-local
+     * {@code Hook.PLANNER} (covering whichever planner the JDBC runner uses),
+     * keeping concurrent instances isolated.
+     */
+    private PreparedStatement prepare(final SchemaPlus rootSchema,
+            final List<LookupLateralRuntime> runtimes) throws Exception {
+        final Planned planned = plan(rootSchema, runtimes);
+        if (planned.rules().isEmpty()) {
+            return RelRunners.run(planned.relNode());
+        }
+        final Consumer<RelOptPlanner> registrar = plannerToConfigure -> {
+            for (final RelOptRule rule : planned.rules()) {
+                plannerToConfigure.addRule(rule);
+            }
+        };
+        try (Hook.Closeable ignored = Hook.PLANNER.addThread(registrar)) {
+            return RelRunners.run(planned.relNode());
+        }
+    }
+
+    /**
+     * Parses, validates and converts the SQL, claims lookup LATERAL blocks and
+     * installs the lookup rules on the cluster's planner.
      *
      * <p>The SQL→rel front-end is hand-assembled (rather than the Frameworks
      * {@code Planner}) so that <b>no decorrelation runs before our rules</b>:
@@ -396,14 +425,9 @@ public class Query2 implements Serializable {
      * the external table). Here {@link LookupLateralJoinRule} claims those
      * {@code Correlate}s first, in a Hep pre-pass; any remaining correlations
      * (e.g. {@code UNNEST} over input arrays) are decorrelated later by the
-     * runner's standard program, as before.
-     *
-     * <p>The plain lookup-join rules of every registered source are installed
-     * both on the rel cluster's planner and via the thread-local
-     * {@code Hook.PLANNER} (covering whichever planner the runner uses),
-     * keeping concurrent instances isolated.
+     * standard program, as before.
      */
-    private PreparedStatement prepare(final SchemaPlus rootSchema,
+    private Planned plan(final SchemaPlus rootSchema,
             final List<LookupLateralRuntime> runtimes) throws Exception {
 
         final RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
@@ -451,6 +475,15 @@ public class Query2 implements Serializable {
         // executes unflattened RexFieldAccess fine (the origin engine runs
         // without flattening).
         RelNode relNode = root.project();
+        // The SQL output aliases live in RelRoot.fields, not (reliably) in the
+        // physical row type — a trivial rename projection is removed by the
+        // planner (ProjectRemoveRule ignores names). The JDBC layer renames at
+        // the metadata level; the direct BindableQuery path applies these names
+        // at result conversion.
+        final List<String> fieldNames = new ArrayList<>();
+        for (final var field : root.fields) {
+            fieldNames.add(field.getValue());
+        }
 
         if (LOG.isDebugEnabled()) {
             LOG.debug("query plan for sql: {}\n{}", sql,
@@ -458,7 +491,7 @@ public class Query2 implements Serializable {
         }
 
         if (sources.isEmpty()) {
-            return RelRunners.run(relNode);
+            return new Planned(relNode, List.of(), fieldNames);
         }
 
         // Hep pre-pass: claim correlated LATERAL blocks over lookup tables
@@ -480,14 +513,7 @@ public class Query2 implements Serializable {
         for (final RelOptRule rule : rules) {
             relNode.getCluster().getPlanner().addRule(rule);
         }
-        final Consumer<RelOptPlanner> registrar = plannerToConfigure -> {
-            for (final RelOptRule rule : rules) {
-                plannerToConfigure.addRule(rule);
-            }
-        };
-        try (Hook.Closeable ignored = Hook.PLANNER.addThread(registrar)) {
-            return RelRunners.run(relNode);
-        }
+        return new Planned(relNode, rules, fieldNames);
     }
 
     private static RelOptTable.ViewExpander noopViewExpander() {

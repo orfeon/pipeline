@@ -22,13 +22,10 @@ import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.sql.parser.SqlP
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.FrameworkConfig;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.Frameworks;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.Planner;
-import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.tools.RelRunners;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Date;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.time.ZoneOffset;
@@ -81,7 +78,7 @@ public final class LookupLateralRuntime implements AutoCloseable {
 
     private List<Object[]> buffer;
     private Planner planner;
-    private PreparedStatement statement;
+    private BindableQuery bindableQuery;
 
     private LookupLateralRuntime(String schemaName, String tableName, Schema leafSchema,
             String innerSql, List<String> innerColumnTypes,
@@ -125,17 +122,17 @@ public final class LookupLateralRuntime implements AutoCloseable {
      * as Calcite-internal values.
      */
     public List<Object[]> evaluate(List<Object[]> leafRows) {
-        if (statement == null) {
+        if (bindableQuery == null) {
             init();
         }
         buffer.clear();
         buffer.addAll(leafRows);
-        try (ResultSet resultSet = statement.executeQuery()) {
+        try {
             final List<Object[]> rows = new ArrayList<>();
-            while (resultSet.next()) {
+            for (final Object[] raw : bindableQuery.executeInternalRows()) {
                 final Object[] row = new Object[innerColumnTypes.size()];
                 for (int i = 0; i < row.length; i++) {
-                    row[i] = toInternal(innerColumnTypes.get(i), resultSet.getObject(i + 1));
+                    row[i] = toInternal(innerColumnTypes.get(i), raw[i]);
                 }
                 rows.add(row);
             }
@@ -184,7 +181,7 @@ public final class LookupLateralRuntime implements AutoCloseable {
             final SqlNode parsed = planner.parse(innerSql);
             final SqlNode validated = planner.validate(parsed);
             final RelNode relNode = planner.rel(validated).project();
-            this.statement = RelRunners.run(relNode);
+            this.bindableQuery = BindableQuery.compile(relNode, rootSchema);
         } catch (Exception e) {
             close();
             throw new IllegalStateException(
@@ -195,15 +192,7 @@ public final class LookupLateralRuntime implements AutoCloseable {
     @Override
     public void close() {
         RUNTIMES.remove(id);
-        try {
-            if (statement != null && !statement.isClosed()) {
-                statement.close();
-            }
-        } catch (Exception ignore) {
-            // closing best-effort
-        } finally {
-            statement = null;
-        }
+        bindableQuery = null;
         try {
             if (planner != null) {
                 planner.close();

@@ -143,6 +143,41 @@ public final class CalciteValues {
         }
     }
 
+    /**
+     * Converts directly-executed result rows (Calcite-internal values, see
+     * {@link BindableQuery}) into the same per-row primitive maps
+     * {@link #convertResultSet} produces — {@link #toPrimitive} handles both
+     * the Avatica-rendered and the internal representations.
+     *
+     * @param fieldNames the SQL output aliases ({@code RelRoot.fields}); the
+     *        physical row type's own names are not reliable — a trivial rename
+     *        projection is removed during planning. {@code null} falls back to
+     *        the row type's names.
+     */
+    public static List<Map<String, Object>> convertInternalRows(
+            final List<String> fieldNames,
+            final org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType rowType,
+            final List<Object[]> rows) {
+        final int fieldCount = rowType.getFieldCount();
+        final String[] names = new String[fieldCount];
+        final int[] sqlTypes = new int[fieldCount];
+        for (int i = 0; i < fieldCount; i++) {
+            final var field = rowType.getFieldList().get(i);
+            names[i] = fieldNames != null && i < fieldNames.size()
+                    ? fieldNames.get(i) : field.getName();
+            sqlTypes[i] = field.getType().getSqlTypeName().getJdbcOrdinal();
+        }
+        final List<Map<String, Object>> results = new ArrayList<>(rows.size());
+        for (final Object[] row : rows) {
+            final Map<String, Object> values = new HashMap<>();
+            for (int i = 0; i < fieldCount; i++) {
+                values.put(names[i], toPrimitive(sqlTypes[i], row[i]));
+            }
+            results.add(values);
+        }
+        return results;
+    }
+
     private static Object toPrimitive(final int sqlType, final Object value) {
         if (value == null) {
             return null;
