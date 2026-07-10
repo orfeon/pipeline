@@ -30,9 +30,18 @@ public class LinearModelUtilTest {
         Assertions.assertEquals(3, lasso.getWeights().get(0).size());
         Assertions.assertEquals(3, pls.getWeights().get(0).size());
 
-        Assertions.assertEquals(Arrays.asList(0.3634706488178612, 0.41624871282274356, -0.3467759307908499), ols.getWeights().get(0));
-        Assertions.assertEquals(Arrays.asList(0.3398400247536521, 0.37935912658459536, -0.3847992027403095), ridge.getWeights().get(0));
-        Assertions.assertEquals(Arrays.asList(0.33835661051283145, 0.3691038639153049, -0.4089846505801048), pls.getWeights().get(0));
+        // The values are pinned from the original commons-math3 implementation;
+        // the ojalgo Cholesky/SVD solvers agree to well below this tolerance.
+        assertWeights(Arrays.asList(0.3634706488178612, 0.41624871282274356, -0.3467759307908499), ols.getWeights().get(0));
+        assertWeights(Arrays.asList(0.3398400247536521, 0.37935912658459536, -0.3847992027403095), ridge.getWeights().get(0));
+        assertWeights(Arrays.asList(0.33835661051283145, 0.3691038639153049, -0.4089846505801048), pls.getWeights().get(0));
+    }
+
+    private static void assertWeights(final List<Double> expected, final List<Double> actual) {
+        Assertions.assertEquals(expected.size(), actual.size());
+        for (int i = 0; i < expected.size(); i++) {
+            Assertions.assertEquals(expected.get(i), actual.get(i), 1e-9);
+        }
     }
 
     @Test

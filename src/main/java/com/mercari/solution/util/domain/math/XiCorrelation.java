@@ -1,9 +1,5 @@
 package com.mercari.solution.util.domain.math;
 
-import org.apache.commons.math3.stat.ranking.NaNStrategy;
-import org.apache.commons.math3.stat.ranking.NaturalRanking;
-import org.apache.commons.math3.stat.ranking.TiesStrategy;
-
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Random;
@@ -12,7 +8,7 @@ import java.util.Random;
 public class XiCorrelation {
 
     /**
-     * Calculate Chatterjee Xi correlation by Apache Commons Math
+     * Calculate Chatterjee Xi correlation
      * Ref (arXiv:1909.10140v4)
      * @param xArray Array of X (double[])
      * @param yArray Array of Y (double[])
@@ -42,10 +38,8 @@ public class XiCorrelation {
             yNegated[i] = -val;
         }
 
-        final NaturalRanking ranking = new NaturalRanking(NaNStrategy.FAILED, TiesStrategy.MAXIMUM);
-
-        final double[] r = ranking.rank(yOrdered);
-        final double[] l = ranking.rank(yNegated);
+        final double[] r = rankMaximum(yOrdered);
+        final double[] l = rankMaximum(yNegated);
 
         double sumDiff = 0;
         for (int i = 0; i < n - 1; i++) {
@@ -60,6 +54,39 @@ public class XiCorrelation {
         if (sumL == 0) return 0.0;
 
         return 1.0 - (n * sumDiff) / (2.0 * sumL);
+    }
+
+    /**
+     * 1-based natural ranking where every member of a tie group receives the
+     * group's <em>maximum</em> rank (commons-math's
+     * {@code NaturalRanking(NaNStrategy.FAILED, TiesStrategy.MAXIMUM)} —
+     * exactly what the xi statistic's {@code r_i = #{j : y_j <= y_i}} needs).
+     * NaN values are rejected.
+     */
+    static double[] rankMaximum(final double[] values) {
+        final int n = values.length;
+        final Integer[] order = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            if (Double.isNaN(values[i])) {
+                throw new IllegalArgumentException("NaN is not allowed at position " + i);
+            }
+            order[i] = i;
+        }
+        Arrays.sort(order, Comparator.comparingDouble(i -> values[i]));
+
+        final double[] ranks = new double[n];
+        int i = 0;
+        while (i < n) {
+            int j = i;
+            while (j + 1 < n && values[order[j + 1]] == values[order[i]]) {
+                j++;
+            }
+            for (int k = i; k <= j; k++) {
+                ranks[order[k]] = j + 1;
+            }
+            i = j + 1;
+        }
+        return ranks;
     }
 
     // Helper: shuffle array (Fisher-Yates)

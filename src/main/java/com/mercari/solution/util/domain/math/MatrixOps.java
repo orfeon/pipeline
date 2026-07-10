@@ -76,19 +76,51 @@ public final class MatrixOps {
      * minimum-norm solution when rank-deficient.
      */
     public static double[] solve(final double[][] a, final double[] b) {
+        final double[][] solution = solve(a, columns(b));
+        final double[] out = new double[solution.length];
+        for (int i = 0; i < solution.length; i++) {
+            out[i] = solution[i][0];
+        }
+        return out;
+    }
+
+    /** Multi-RHS {@link #solve(double[][], double[])}: one decomposition solves every column of {@code b}. */
+    public static double[][] solve(final double[][] a, final double[][] b) {
         checkMatrix("solve", a);
+        checkMatrix("solve", b);
         if (a.length != b.length) {
-            throw new IllegalArgumentException("solve requires matrix rows == rhs length,"
-                    + " but got " + a.length + " rows and " + b.length + " elements");
+            throw new IllegalArgumentException("solve requires matrix rows == rhs rows,"
+                    + " but got " + a.length + " and " + b.length);
         }
         final R064Store matrix = R064Store.FACTORY.rows(a);
-        final R064Store rhs = columnStore(b);
+        final R064Store rhs = R064Store.FACTORY.rows(b);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
         if (!svd.decompose(matrix)) {
             throw new IllegalStateException("solve failed to decompose the "
                     + a.length + "x" + a[0].length + " matrix");
         }
-        return column(svd.getSolution(rhs));
+        return toArray(svd.getSolution(rhs));
+    }
+
+    /**
+     * The first right singular vector of {@code m} — the direction of its
+     * largest singular value (the PLS weight vector of a cross-product
+     * matrix).
+     */
+    public static double[] firstRightSingularVector(final double[][] m) {
+        checkMatrix("firstRightSingularVector", m);
+        final R064Store matrix = R064Store.FACTORY.rows(m);
+        final SingularValue<Double> svd = SingularValue.R064.make(matrix);
+        if (!svd.decompose(matrix)) {
+            throw new IllegalStateException("firstRightSingularVector failed to decompose the "
+                    + m.length + "x" + m[0].length + " matrix");
+        }
+        final MatrixStore<Double> v = svd.getV();
+        final double[] out = new double[(int) v.countRows()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = v.doubleValue(i, 0);
+        }
+        return out;
     }
 
     /** Moore–Penrose pseudo-inverse via SVD (exact inverse when non-singular). */
@@ -100,14 +132,7 @@ public final class MatrixOps {
             throw new IllegalStateException("inverse failed to decompose the "
                     + a.length + "x" + a[0].length + " matrix");
         }
-        final MatrixStore<Double> inverse = svd.getInverse();
-        final double[][] out = new double[(int) inverse.countRows()][(int) inverse.countColumns()];
-        for (int i = 0; i < out.length; i++) {
-            for (int j = 0; j < out[i].length; j++) {
-                out[i][j] = inverse.doubleValue(i, j);
-            }
-        }
-        return out;
+        return toArray(svd.getInverse());
     }
 
     /**
@@ -164,11 +189,22 @@ public final class MatrixOps {
      * solution.
      */
     public static double[] solveGram(final double[][] xtx, final double[] xty, final double ridge) {
+        final double[][] solution = solveGram(xtx, columns(xty), ridge);
+        final double[] out = new double[solution.length];
+        for (int i = 0; i < solution.length; i++) {
+            out[i] = solution[i][0];
+        }
+        return out;
+    }
+
+    /** Multi-RHS {@link #solveGram(double[][], double[], double)}: {@code xty} is {@code n×k}. */
+    public static double[][] solveGram(final double[][] xtx, final double[][] xty, final double ridge) {
         checkMatrix("solveGram", xtx);
+        checkMatrix("solveGram", xty);
         if (xtx.length != xtx[0].length || xtx.length != xty.length) {
             throw new IllegalArgumentException("solveGram requires a square matrix matching the"
-                    + " rhs length, but got " + xtx.length + "x" + xtx[0].length
-                    + " and " + xty.length + " elements");
+                    + " rhs rows, but got " + xtx.length + "x" + xtx[0].length
+                    + " and " + xty.length + " rows");
         }
         if (ridge < 0) {
             throw new IllegalArgumentException("solveGram ridge must be >= 0, but was " + ridge);
@@ -184,10 +220,10 @@ public final class MatrixOps {
             regularized = xtx;
         }
         final R064Store matrix = R064Store.FACTORY.rows(regularized);
-        final R064Store rhs = columnStore(xty);
+        final R064Store rhs = R064Store.FACTORY.rows(xty);
         final Cholesky<Double> cholesky = Cholesky.R064.make(matrix);
         if (cholesky.decompose(matrix) && cholesky.isSolvable()) {
-            return column(cholesky.getSolution(rhs));
+            return toArray(cholesky.getSolution(rhs));
         }
         return solve(regularized, xty);
     }
@@ -291,18 +327,20 @@ public final class MatrixOps {
         return out;
     }
 
-    private static R064Store columnStore(final double[] values) {
-        final R064Store store = R064Store.FACTORY.make(values.length, 1);
+    private static double[][] columns(final double[] values) {
+        final double[][] out = new double[values.length][1];
         for (int i = 0; i < values.length; i++) {
-            store.set(i, 0, values[i]);
+            out[i][0] = values[i];
         }
-        return store;
+        return out;
     }
 
-    private static double[] column(final MatrixStore<Double> store) {
-        final double[] out = new double[(int) store.countRows()];
+    private static double[][] toArray(final MatrixStore<Double> store) {
+        final double[][] out = new double[(int) store.countRows()][(int) store.countColumns()];
         for (int i = 0; i < out.length; i++) {
-            out[i] = store.doubleValue(i, 0);
+            for (int j = 0; j < out[i].length; j++) {
+                out[i][j] = store.doubleValue(i, j);
+            }
         }
         return out;
     }
