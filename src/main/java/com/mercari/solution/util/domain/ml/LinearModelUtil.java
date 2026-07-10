@@ -92,6 +92,201 @@ public class LinearModelUtil implements Serializable {
         return transpose(beta);
     }
 
+    public static LogisticModel logisticBinaryModel(double[][] X, double[][] Y,
+                                                    double l2, int maxIteration, double tolerance) {
+        return LogisticModel.of(logisticRegressionBinary(X, Y, l2, maxIteration, tolerance));
+    }
+
+    /**
+     * Binary logistic regression by IRLS (Newton-Raphson): each step solves
+     * {@code (X^T W X + l2·I) Δβ = X^T (y − p) − l2·β} with
+     * {@code W = diag(p(1−p))} through {@link MatrixOps#solveGram}. {@code Y}
+     * is n×1 of 0/1 labels; the result is (features × 1). β starts at zero
+     * (deterministic); use {@code l2 > 0} on separable data, where the
+     * unpenalized MLE diverges.
+     */
+    public static double[][] logisticRegressionBinary(double[][] X, double[][] Y,
+                                                      double l2, int maxIteration, double tolerance) {
+        final int n = X.length;
+        final int d = X[0].length;
+        if (Y.length != n || Y[0].length != 1) {
+            throw new IllegalArgumentException("Y must be n x 1 of 0/1 labels, but was "
+                    + Y.length + " x " + Y[0].length);
+        }
+        final double[] y = new double[n];
+        for (int i = 0; i < n; i++) {
+            if (Y[i][0] != 0D && Y[i][0] != 1D) {
+                throw new IllegalArgumentException("Y must contain only 0/1, but row "
+                        + i + " holds " + Y[i][0]);
+            }
+            y[i] = Y[i][0];
+        }
+        checkPenalty(l2);
+
+        final double[] beta = new double[d];
+        for (int iteration = 0; iteration < maxIteration; iteration++) {
+            final double[][] hessian = new double[d][d];
+            final double[] gradient = new double[d];
+            for (int i = 0; i < n; i++) {
+                final double p = sigmoid(MatrixOps.dot(X[i], beta));
+                final double w = Math.max(p * (1 - p), PROBABILITY_CLAMP);
+                final double residual = y[i] - p;
+                for (int a = 0; a < d; a++) {
+                    gradient[a] += X[i][a] * residual;
+                    for (int b = 0; b < d; b++) {
+                        hessian[a][b] += X[i][a] * w * X[i][b];
+                    }
+                }
+            }
+            for (int a = 0; a < d; a++) {
+                gradient[a] -= l2 * beta[a];
+                hessian[a][a] += l2;
+            }
+            final double[] delta = MatrixOps.solveGram(hessian, gradient, 0D);
+            double epsilon = 0;
+            for (int a = 0; a < d; a++) {
+                beta[a] += delta[a];
+                epsilon += delta[a] * delta[a];
+            }
+            if (Math.sqrt(epsilon) < tolerance) {
+                break;
+            }
+        }
+
+        final double[][] out = new double[d][1];
+        for (int a = 0; a < d; a++) {
+            out[a][0] = beta[a];
+        }
+        return out;
+    }
+
+    public static LogisticModel logisticMultiModel(double[][] X, double[][] Y,
+                                                   double l2, int maxIteration, double tolerance) {
+        return LogisticModel.of(logisticRegressionMulti(X, Y, l2, maxIteration, tolerance));
+    }
+
+    /**
+     * Multinomial (softmax) logistic regression by the block-Newton method:
+     * {@code Y} is n×K one-hot, the last class is the reference, and each step
+     * solves the full (K−1)d Hessian system — blocks
+     * {@code H_kl = X^T diag(p_k(δ_kl − p_l)) X + l2·I} — through
+     * {@link MatrixOps#solveGram}. The result is (features × K−1); the
+     * reference class's coefficients are implicitly zero.
+     */
+    public static double[][] logisticRegressionMulti(double[][] X, double[][] Y,
+                                                     double l2, int maxIteration, double tolerance) {
+        final int n = X.length;
+        final int d = X[0].length;
+        final int numClasses = Y[0].length;
+        if (numClasses < 2) {
+            throw new IllegalArgumentException("Y must be n x K one-hot with K >= 2, but K was " + numClasses);
+        }
+        if (Y.length != n) {
+            throw new IllegalArgumentException("X and Y row counts must match, but got "
+                    + n + " and " + Y.length);
+        }
+        for (int i = 0; i < n; i++) {
+            double sum = 0;
+            for (final double value : Y[i]) {
+                if (value != 0D && value != 1D) {
+                    throw new IllegalArgumentException("Y must be one-hot, but row " + i
+                            + " holds " + value);
+                }
+                sum += value;
+            }
+            if (sum != 1D) {
+                throw new IllegalArgumentException("Y must be one-hot (exactly one 1 per row),"
+                        + " but row " + i + " sums to " + sum);
+            }
+        }
+        checkPenalty(l2);
+
+        final int m = numClasses - 1;
+        // Stacked coefficients: theta[k * d + a] = beta_k[a].
+        final double[] theta = new double[m * d];
+        final double[] probabilities = new double[m];
+        for (int iteration = 0; iteration < maxIteration; iteration++) {
+            final double[][] hessian = new double[m * d][m * d];
+            final double[] gradient = new double[m * d];
+            for (int i = 0; i < n; i++) {
+                softmax(X[i], theta, d, probabilities);
+                for (int k = 0; k < m; k++) {
+                    final double residual = Y[i][k] - probabilities[k];
+                    for (int a = 0; a < d; a++) {
+                        gradient[k * d + a] += X[i][a] * residual;
+                    }
+                    for (int l = 0; l < m; l++) {
+                        final double w = k == l
+                                ? Math.max(probabilities[k] * (1 - probabilities[k]), PROBABILITY_CLAMP)
+                                : -probabilities[k] * probabilities[l];
+                        for (int a = 0; a < d; a++) {
+                            final double xw = X[i][a] * w;
+                            for (int b = 0; b < d; b++) {
+                                hessian[k * d + a][l * d + b] += xw * X[i][b];
+                            }
+                        }
+                    }
+                }
+            }
+            for (int j = 0; j < m * d; j++) {
+                gradient[j] -= l2 * theta[j];
+                hessian[j][j] += l2;
+            }
+            final double[] delta = MatrixOps.solveGram(hessian, gradient, 0D);
+            double epsilon = 0;
+            for (int j = 0; j < m * d; j++) {
+                theta[j] += delta[j];
+                epsilon += delta[j] * delta[j];
+            }
+            if (Math.sqrt(epsilon) < tolerance) {
+                break;
+            }
+        }
+
+        final double[][] out = new double[d][m];
+        for (int k = 0; k < m; k++) {
+            for (int a = 0; a < d; a++) {
+                out[a][k] = theta[k * d + a];
+            }
+        }
+        return out;
+    }
+
+    private static final double PROBABILITY_CLAMP = 1e-10;
+
+    private static double sigmoid(final double z) {
+        final double p = 1 / (1 + Math.exp(-z));
+        return Math.min(1 - PROBABILITY_CLAMP, Math.max(PROBABILITY_CLAMP, p));
+    }
+
+    /** Softmax over the m non-reference scores and the implicit 0 of the reference class. */
+    private static void softmax(final double[] x, final double[] theta, final int d, final double[] out) {
+        final int m = out.length;
+        double max = 0;  // the reference class's score
+        for (int k = 0; k < m; k++) {
+            double score = 0;
+            for (int a = 0; a < d; a++) {
+                score += x[a] * theta[k * d + a];
+            }
+            out[k] = score;
+            max = Math.max(max, score);
+        }
+        double denominator = Math.exp(-max);  // the reference class
+        for (int k = 0; k < m; k++) {
+            out[k] = Math.exp(out[k] - max);
+            denominator += out[k];
+        }
+        for (int k = 0; k < m; k++) {
+            out[k] = Math.min(1 - PROBABILITY_CLAMP, Math.max(PROBABILITY_CLAMP, out[k] / denominator));
+        }
+    }
+
+    private static void checkPenalty(final double l2) {
+        if (l2 < 0) {
+            throw new IllegalArgumentException("l2 must be >= 0, but was " + l2);
+        }
+    }
+
     public static double[][] pls1(double[][] X, double[] y, int components) {
         final double[][] Y = new double[y.length][1];
         for (int i = 0; i < y.length; i++) {
@@ -361,6 +556,105 @@ public class LinearModelUtil implements Serializable {
         @Override
         public String toString() {
             return "input size: " + inputSize + ", output size: " + outputSize + ", weights: " + weights.toString();
+        }
+
+    }
+
+    /**
+     * A fitted logistic classifier: holds the (features × K−1) coefficients of
+     * {@code logisticRegressionBinary} / {@code logisticRegressionMulti} and —
+     * unlike {@link LinearModel}, whose inference is linear — returns
+     * <em>class probabilities</em>: softmax over the K−1 scored classes plus
+     * the implicit reference class (last element). A binary model yields
+     * {@code [P(y=1), P(y=0)]}.
+     */
+    public static class LogisticModel implements Model {
+
+        private final int inputSize;
+        private final int numClasses;
+        private final List<List<Double>> weights;
+
+        public int getInputSize() {
+            return inputSize;
+        }
+
+        public int getNumClasses() {
+            return numClasses;
+        }
+
+        /** Per non-reference class: {@code weights.get(k)} over inputs. */
+        public List<List<Double>> getWeights() {
+            return weights;
+        }
+
+        /** From a (features × K−1) coefficient matrix. */
+        LogisticModel(double[][] beta) {
+            this.inputSize = beta.length;
+            this.numClasses = beta[0].length + 1;
+            this.weights = new ArrayList<>();
+            for(int k=0; k<beta[0].length; k++) {
+                final List<Double> b = new ArrayList<>();
+                for(int input=0; input<this.inputSize; input++) {
+                    b.add(beta[input][k]);
+                }
+                weights.add(b);
+            }
+        }
+
+        public static LogisticModel of(final double[][] beta) {
+            return new LogisticModel(beta);
+        }
+
+        @Override
+        public void update(List<String> fields, Map<String, Double> values) {
+
+        }
+
+        @Override
+        public List<Double> inference(double[] x) {
+            final double[] scores = new double[weights.size()];
+            for(int k=0; k<weights.size(); k++) {
+                final List<Double> b = weights.get(k);
+                double score = 0;
+                for(int i=0; i<x.length; i++) {
+                    score += (b.get(i) * x[i]);
+                }
+                scores[k] = score;
+            }
+            return probabilities(scores);
+        }
+
+        @Override
+        public List<Double> inference(List<String> fields, Map<String, Double> values) {
+            final double[] x = new double[fields.size()];
+            for(int i=0; i<fields.size(); i++) {
+                x[i] = values.get(fields.get(i));
+            }
+            return inference(x);
+        }
+
+        private static List<Double> probabilities(final double[] scores) {
+            double max = 0;  // the reference class's score
+            for(final double score : scores) {
+                max = Math.max(max, score);
+            }
+            final double[] exps = new double[scores.length];
+            double denominator = Math.exp(-max);
+            for(int k=0; k<scores.length; k++) {
+                exps[k] = Math.exp(scores[k] - max);
+                denominator += exps[k];
+            }
+            final List<Double> results = new ArrayList<>();
+            for(int k=0; k<scores.length; k++) {
+                results.add(exps[k] / denominator);
+            }
+            results.add(Math.exp(-max) / denominator);
+            return results;
+        }
+
+        @Override
+        public String toString() {
+            return "input size: " + inputSize + ", classes: " + numClasses + ", weights: " + weights.toString();
         }
 
     }
