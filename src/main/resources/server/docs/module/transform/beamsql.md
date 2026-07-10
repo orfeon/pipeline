@@ -38,7 +38,7 @@ A variety of built-in [UDFs and UDAFs](#built-in-udfs) are also available.
 | namedParameters      | optional | Map<String,String\> | Named parameters for the SQL query. Cannot be used together with `positionalParameters`.                                                                                                                                                         |
 | positionalParameters | optional | Array<String\>      | Positional parameters for the SQL query. Cannot be used together with `namedParameters`.                                                                                                                                                         |
 | autoLoading          | optional | Boolean             | Enable auto-loading of Beam SQL table providers.                                                                                                                                                                                                 |
-| sources              | optional | Array<Source\>      | External lookup sources (jdbc / spanner / bigtable / rest). Each source's tables are referenced as `sourceName.tableName` and joined as inline lookups — see below. Same per-type parameters as the [query](query.md) module.                     |
+| sources              | optional | Array<Source\>      | External lookup sources (jdbc / spanner / bigtable / rest / grpc; `sideinput` is query-module only — beamsql joins PCollections natively). Each source's tables are referenced as `sourceName.tableName` and joined as inline lookups — see below. Same per-type parameters as the [query](query.md) module. |
 
 ### SQL loading
 

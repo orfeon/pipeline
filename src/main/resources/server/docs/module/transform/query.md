@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Query Transform Module
-description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST / gRPC) can be joined on their keys as batched lookup-joins — the external table is never scanned. One element yields zero or more output rows.
-tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, grpc]
+description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST / gRPC) or other pipeline collections delivered as side inputs can be joined on their keys as batched lookup-joins — the external table is never scanned. One element yields zero or more output rows.
+tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, grpc, sideinput]
 timestamp: 2026-07-03T00:00:00Z
 ---
 
@@ -16,6 +16,7 @@ Unlike the [beamsql](beamsql.md) module — which plans SQL over whole PCollecti
 - **Collections live inside the element.** Array-of-struct fields can be expanded with `UNNEST` (optionally with `LATERAL` subqueries), so aggregation (`COUNT`/`SUM`/`AVG`/…, `GROUP BY`, `HAVING`), ordering with `ORDER BY` / `LIMIT`, and set operations (`UNION` / `INTERSECT` / `EXCEPT`) all operate over the per-element collection.
 - **Fan-out or fold.** One input element yields zero or more output rows: a query without aggregation fans out (one row per unnested item), an aggregate query folds the element into one row, and a `WHERE` that matches nothing drops the element.
 - **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, REST/gRPC APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
+- **In-pipeline lookup-joins.** A `sideinput` source exposes **another collection of the same pipeline** (declared in the module's `sideInputs`) as a lookup table — no external store: the data is broadcast to the workers as a Beam side input and hash-indexed by the declared key once per window.
 
 This is a good fit for enriching a stream with reference data held in a database or API, and for post-processing enrichment results with per-element SQL (aggregate or select over a fetched collection).
 
@@ -81,7 +82,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 - The SQL sees exactly **one element per evaluation**. Aggregation across elements is out of scope — use the [aggregation](aggregation.md) or [beamsql](beamsql.md) module for cross-element grouping. (Aggregation over the rows fetched *for* one element — e.g. `GROUP BY` over a lookup fan-out — is fine.)
 - Every expression in the select list must have an **explicit alias** (`AS name`); auto-generated column names such as `EXPR$0` are rejected at pipeline construction.
 - Reserved words used as field names (e.g. `value`) must be quoted with backticks.
-- Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata.
+- Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata. (`sideinput` sources take their schema from the pipeline itself and need no connectivity.)
 - Lookups must be **read-only and idempotent** — a lookup may run many times, in any order, and per-bundle retries repeat it. Never point a REST table at a side-effecting endpoint.
 - `MATCH_RECOGNIZE` is **not supported** (the underlying Calcite enumerable runtime cannot execute it). For per-element sequence patterns, use the built-in `SEQ_MATCH` function (below), or `ORDER BY`/`LIMIT`/aggregation over the collection (optionally in a LATERAL block).
 - `float32` external columns are surfaced as `float64` in SQL; timestamps are compared at millisecond precision inside the SQL engine.
@@ -108,7 +109,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 | parameter | optional | type           | description                                                                    |
 |-----------|----------|----------------|--------------------------------------------------------------------------------|
 | name      | required | String         | Schema name the source's tables are referenced by in SQL (`name.table`).       |
-| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`, `grpc`.                          |
+| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`, `grpc`, `sideinput`.             |
 | tables    | required | Array<Table\>  | Tables to expose. Per-type table parameters below.                             |
 | cache     | optional | Cache          | On-memory cache over the source's lookups (see below). Off unless the block is present. |
 
@@ -268,6 +269,58 @@ key column is prepended when the response does not echo it. One gRPC call is mad
 per distinct key (point equality only); a key with no result yields no row (use
 `LEFT JOIN` for a default). Only expose **read-only, idempotent** RPCs — lookups
 run many times, in arbitrary order, and bundle retries repeat them.
+
+### sideinput source
+
+Exposes **another collection of the same pipeline** as a lookup table, with no
+external store: list the collection in the module's common `sideInputs` field, and
+reference it from a `sideinput` source. The collection is delivered to every worker
+as a Beam side input and **hash-indexed by the declared key once per window** (not
+per element); lookups are then in-memory map reads. Point, key-prefix and
+prefix+bounded-range joins are all supported (the source behaves like an
+ordered-key store), including correlated LATERAL blocks.
+
+The source itself has no parameters beyond the common ones. Table parameters:
+
+| parameter | optional | type           | description                                                        |
+|-----------|----------|----------------|----------------------------------------------------------------------|
+| name      | optional | String         | SQL table name (defaults to `input`).                              |
+| input     | optional | String         | Side input collection name, as listed in `sideInputs` (defaults to `name`). |
+| keyFields | required | Array<String\> | Key columns in key order — the (composite) key joins constrain.     |
+
+Notes:
+
+- **Memory**: the whole side input is broadcast to and indexed on every worker —
+  intended for dimension-sized reference data. For data that does not fit in
+  memory, use a jdbc/spanner/bigtable source instead. The `cache` block is
+  pointless here (the data is already on-heap) — leave it off.
+- **Windowing / streaming**: standard Beam side-input semantics. In batch the
+  side input is read once. In streaming, the side input collection must be
+  windowed (or triggered) so its panes are available to the main input's windows;
+  the index is rebuilt when the window changes — the "slowly-changing reference
+  data" pattern (periodic refresh into a global-window side input) works as-is.
+  Within one window the data is read once; later trigger firings of the *same*
+  window are not re-read.
+- Rows with a `null` in a key column never match (SQL equality semantics).
+
+```yaml
+transforms:
+  - name: enriched
+    module: query
+    inputs: [orders]
+    sideInputs: [members]
+    parameters:
+      sql: |
+        SELECT o.orderId AS orderId, o.amount AS amount, m.userName AS userName
+        FROM INPUT AS o
+        LEFT JOIN side.members AS m ON m.userId = o.userId
+      sources:
+        - name: side
+          type: sideinput
+          tables:
+            - name: members
+              keyFields: [userId]
+```
 
 ## Built-in functions
 
@@ -701,4 +754,41 @@ transforms:
               fields:
                 - { name: orderId, type: string }
                 - { name: amount, type: int64 }
+```
+
+### Enrich from another pipeline collection (side input lookup-join)
+
+Joins the stream against a collection produced elsewhere in the same pipeline —
+no external store. `members` is read once per window as a Beam side input and
+hash-indexed by `userId` on each worker; the composite-key / prefix / range forms
+of the contract work the same way as for database sources.
+
+```yaml
+sources:
+  - name: members
+    module: bigquery
+    parameters:
+      query: "SELECT userId, userName, grade FROM `myproject.mydataset.members`"
+
+transforms:
+  - name: enriched
+    module: query
+    inputs: [orders]
+    sideInputs: [members]
+    parameters:
+      sql: |
+        SELECT
+          o.orderId AS orderId,
+          o.amount AS amount,
+          m.userName AS userName,
+          m.grade AS grade
+        FROM
+          INPUT AS o
+        LEFT JOIN side.members AS m ON m.userId = o.userId
+      sources:
+        - name: side
+          type: sideinput
+          tables:
+            - name: members
+              keyFields: [userId]
 ```

@@ -93,6 +93,21 @@ public final class LookupSourceConfig {
                 }
                 case "rest" -> {
                 }
+                case "sideinput" -> {
+                    for(int t = 0; t < tables.size(); t++) {
+                        final TableParameters table = tables.get(t);
+                        if(table.name == null && table.input == null) {
+                            throw new IllegalModuleException(
+                                    "parameters.sources[" + index + "].tables[" + t
+                                            + "] (sideinput) requires name or input");
+                        }
+                        if(table.keyFields == null || table.keyFields.isEmpty()) {
+                            throw new IllegalModuleException(
+                                    "parameters.sources[" + index + "].tables[" + t
+                                            + "] (sideinput) requires keyFields");
+                        }
+                    }
+                }
                 case "grpc" -> {
                     if(target == null || descriptorSetPath == null) {
                         throw new IllegalModuleException(
@@ -108,7 +123,7 @@ public final class LookupSourceConfig {
                     }
                 }
                 default -> throw new IllegalModuleException(
-                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest, grpc but was: " + type);
+                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest, grpc, sideinput but was: " + type);
             }
         }
     }
@@ -181,6 +196,9 @@ public final class LookupSourceConfig {
         private Boolean serverStreaming;
         private String requestKeyField;
         private String requestTemplate;
+
+        // sideinput (keyFields shared with rest)
+        private String input;
     }
 
     public static class ColumnParameters implements Serializable {
@@ -200,26 +218,66 @@ public final class LookupSourceConfig {
         }
     }
 
+    /**
+     * The distinct side input collection names referenced by {@code sideinput}
+     * sources — what the hosting module must resolve and pass to
+     * {@link #createSources(List, Map)}.
+     */
+    public static List<String> sideInputNames(final List<SourceParameters> sources) {
+        final List<String> names = new ArrayList<>();
+        if(sources == null) {
+            return names;
+        }
+        for(final SourceParameters source : sources) {
+            if(!"sideinput".equals(source.type)) {
+                continue;
+            }
+            for(final TableParameters table : source.tables) {
+                final String input = table.input != null ? table.input : table.name;
+                if(!names.contains(input)) {
+                    names.add(input);
+                }
+            }
+        }
+        return names;
+    }
+
     public static List<LookupSource> createSources(final List<SourceParameters> sources) {
+        return createSources(sources, null);
+    }
+
+    /**
+     * @param sideInputSchemas side input name → schema, for {@code sideinput}
+     *        sources ({@code null} when the module does not support them)
+     */
+    public static List<LookupSource> createSources(
+            final List<SourceParameters> sources,
+            final Map<String, Schema> sideInputSchemas) {
+
         final List<LookupSource> lookupSources = new ArrayList<>();
         if(sources == null) {
             return lookupSources;
         }
         for(final SourceParameters source : sources) {
-            lookupSources.add(createSource(source));
+            lookupSources.add(createSource(source, sideInputSchemas));
         }
         return lookupSources;
     }
 
-    private static LookupSource createSource(final SourceParameters source) {
-        final LookupSource lookupSource = createSourceInternal(source);
+    private static LookupSource createSource(
+            final SourceParameters source,
+            final Map<String, Schema> sideInputSchemas) {
+
+        final LookupSource lookupSource = createSourceInternal(source, sideInputSchemas);
         if(source.cache != null && source.cache.isEnabled()) {
             lookupSource.setCacheSpec(source.cache.toSpec());
         }
         return lookupSource;
     }
 
-    private static LookupSource createSourceInternal(final SourceParameters source) {
+    private static LookupSource createSourceInternal(
+            final SourceParameters source,
+            final Map<String, Schema> sideInputSchemas) {
         return switch (source.type) {
             case "jdbc" -> {
                 final JdbcLookupSource.Builder builder = JdbcLookupSource.builder()
@@ -377,6 +435,31 @@ public final class LookupSourceConfig {
                         tableBuilder.withFields(parseFields(table.fields));
                     }
                     builder.withTable(tableBuilder.build());
+                }
+                yield builder.build();
+            }
+            case "sideinput" -> {
+                if(sideInputSchemas == null) {
+                    throw new IllegalModuleException(
+                            "sideinput lookup sources are only supported by the query transform module");
+                }
+                final SideInputLookupSource.Builder builder = SideInputLookupSource.builder()
+                        .withName(source.name);
+                for(final TableParameters table : source.tables) {
+                    final String input = table.input != null ? table.input : table.name;
+                    final Schema schema = sideInputSchemas.get(input);
+                    if(schema == null) {
+                        throw new IllegalModuleException(
+                                "sideinput source '" + source.name + "' table references side input '"
+                                        + input + "' which is not listed in the module's sideInputs: "
+                                        + sideInputSchemas.keySet());
+                    }
+                    builder.withTable(SideInputLookupSource.table()
+                            .withName(table.name)
+                            .withInput(input)
+                            .withKeyFields(table.keyFields)
+                            .withSchema(schema)
+                            .build());
                 }
                 yield builder.build();
             }

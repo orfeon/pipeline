@@ -547,4 +547,230 @@ public class QueryTransformTest {
         }
     }
 
+    private static final String CREATE_ORDERS_SOURCE = """
+            {
+              "name": "orders",
+              "module": "create",
+              "parameters": {
+                "type": "element",
+                "elements": [
+                  { "userId": "u1", "amount": 100 },
+                  { "userId": "u2", "amount": 200 },
+                  { "userId": "u9", "amount": 300 }
+                ]
+              },
+              "schema": {
+                "fields": [
+                  { "name": "userId", "type": "string" },
+                  { "name": "amount", "type": "int64" }
+                ]
+              }
+            }
+            """;
+
+    private static final String CREATE_MEMBERS_SOURCE = """
+            {
+              "name": "members",
+              "module": "create",
+              "parameters": {
+                "type": "element",
+                "elements": [
+                  { "userId": "u1", "userName": "alice" },
+                  { "userId": "u2", "userName": "bob" }
+                ]
+              },
+              "schema": {
+                "fields": [
+                  { "name": "userId", "type": "string" },
+                  { "name": "userName", "type": "string" }
+                ]
+              }
+            }
+            """;
+
+    @Test
+    public void testSideInputLookupJoin() throws Exception {
+        // Another MCollection delivered as a Beam side input joined as a lookup
+        // table: no external store, indexed once per window on the worker.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s,
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["orders"],
+                      "sideInputs": ["members"],
+                      "parameters": {
+                        "sql": "SELECT o.userId AS userId, o.amount AS amount, m.userName AS userName FROM INPUT AS o LEFT JOIN side.members AS m ON m.userId = o.userId",
+                        "sources": [
+                          {
+                            "name": "side",
+                            "type": "sideinput",
+                            "tables": [
+                              { "name": "members", "keyFields": ["userId"] }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_ORDERS_SOURCE, CREATE_MEMBERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+        Assertions.assertNotNull(output.getSchema().getField("userName"));
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Map<String, MElement> byUser = new HashMap<>();
+            for(final MElement element : elements) {
+                byUser.put(element.getAsString("userId"), element);
+            }
+            Assertions.assertEquals(3, byUser.size());
+            Assertions.assertEquals("alice", byUser.get("u1").getAsString("userName"));
+            Assertions.assertEquals(100L, byUser.get("u1").getAsLong("amount"));
+            Assertions.assertEquals("bob", byUser.get("u2").getAsString("userName"));
+            // unknown user: LEFT JOIN keeps the input row with nulls
+            Assertions.assertNull(byUser.get("u9").getPrimitiveValue("userName"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testMultipleSideInputLookupJoin() throws Exception {
+        final String createCategories = """
+                {
+                  "name": "categories",
+                  "module": "create",
+                  "parameters": {
+                    "type": "element",
+                    "elements": [
+                      { "categoryId": "c1", "label": "food" }
+                    ]
+                  },
+                  "schema": {
+                    "fields": [
+                      { "name": "categoryId", "type": "string" },
+                      { "name": "label", "type": "string" }
+                    ]
+                  }
+                }
+                """;
+        final String createPurchases = """
+                {
+                  "name": "purchases",
+                  "module": "create",
+                  "parameters": {
+                    "type": "element",
+                    "elements": [
+                      { "userId": "u1", "categoryId": "c1" },
+                      { "userId": "u2", "categoryId": "c9" }
+                    ]
+                  },
+                  "schema": {
+                    "fields": [
+                      { "name": "userId", "type": "string" },
+                      { "name": "categoryId", "type": "string" }
+                    ]
+                  }
+                }
+                """;
+        final String configJson = """
+                {
+                  "sources": [
+                    %s,
+                    %s,
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["purchases"],
+                      "sideInputs": ["members", "categories"],
+                      "parameters": {
+                        "sql": "SELECT p.userId AS userId, m.userName AS userName, c.label AS label FROM INPUT AS p JOIN side.members AS m ON m.userId = p.userId LEFT JOIN side.categories AS c ON c.categoryId = p.categoryId",
+                        "sources": [
+                          {
+                            "name": "side",
+                            "type": "sideinput",
+                            "tables": [
+                              { "name": "members", "keyFields": ["userId"] },
+                              { "name": "categories", "keyFields": ["categoryId"] }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """.formatted(createPurchases, CREATE_MEMBERS_SOURCE, createCategories);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Map<String, MElement> byUser = new HashMap<>();
+            for(final MElement element : elements) {
+                byUser.put(element.getAsString("userId"), element);
+            }
+            Assertions.assertEquals(2, byUser.size());
+            Assertions.assertEquals("alice", byUser.get("u1").getAsString("userName"));
+            Assertions.assertEquals("food", byUser.get("u1").getAsString("label"));
+            Assertions.assertEquals("bob", byUser.get("u2").getAsString("userName"));
+            Assertions.assertNull(byUser.get("u2").getPrimitiveValue("label"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testSideInputSourceRequiresDeclaredSideInput() throws Exception {
+        // The sideinput source references a collection missing from the module's
+        // sideInputs list: rejected at pipeline construction.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s,
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["orders"],
+                      "parameters": {
+                        "sql": "SELECT o.userId AS userId, m.userName AS userName FROM INPUT AS o JOIN side.members AS m ON m.userId = o.userId",
+                        "sources": [
+                          {
+                            "name": "side",
+                            "type": "sideinput",
+                            "tables": [
+                              { "name": "members", "keyFields": ["userId"] }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_ORDERS_SOURCE, CREATE_MEMBERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+    }
+
 }
