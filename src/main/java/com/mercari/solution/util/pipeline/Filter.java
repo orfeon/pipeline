@@ -483,6 +483,9 @@ public class Filter implements Serializable {
         }
     }
 
+    // Comparison sentinel for values no op should match (NaN/Infinity).
+    private static final int INCOMPARABLE = Integer.MIN_VALUE;
+
     static boolean is(final Object value, final ConditionLeaf leaf) {
         if(value == null) {
             if(leaf.getValue() == null || leaf.getValue().isJsonNull()) {
@@ -514,9 +517,9 @@ public class Filter implements Serializable {
                 case Short s -> s.compareTo(leaf.getValue().getAsShort());
                 case Integer i -> i.compareTo(leaf.getValue().getAsInt());
                 case Long l -> l.compareTo(leaf.getValue().getAsLong());
-                case Float f when Float.isNaN(f) || Float.isInfinite(f) -> -2;
+                case Float f when Float.isNaN(f) || Float.isInfinite(f) -> INCOMPARABLE;
                 case Float f-> f.compareTo(leaf.getValue().getAsFloat());
-                case Double d when Double.isNaN(d) || Double.isInfinite(d) -> -2;
+                case Double d when Double.isNaN(d) || Double.isInfinite(d) -> INCOMPARABLE;
                 case Double d -> d.compareTo(leaf.getValue().getAsDouble());
                 case String s -> s.compareTo(leaf.getValue().getAsString());
                 case java.time.Instant i -> i.compareTo(DateTimeUtil.toInstant(leaf.getValue().getAsString()));
@@ -530,8 +533,11 @@ public class Filter implements Serializable {
                 }
             };
 
-            if(Math.abs(c) > 1) {
-                return c > 0;
+            // NaN/Infinity never matches any op. (Only the sentinel takes this
+            // branch: compareTo results are used by sign only — String and
+            // BigDecimal legitimately return magnitudes greater than 1.)
+            if(c == INCOMPARABLE) {
+                return false;
             }
 
             return switch (leaf.getOp()) {

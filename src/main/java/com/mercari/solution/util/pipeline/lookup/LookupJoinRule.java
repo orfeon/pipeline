@@ -122,6 +122,20 @@ public final class LookupJoinRule extends RelOptRule {
             if (analysis == null) {
                 continue;
             }
+            // Offer the matched binding to the source (key-affine sources like
+            // buffer reject bindings they cannot answer) and report the scan
+            // columns this lookup uses (for stored-fields narrowing).
+            List<String> boundFieldNames = new ArrayList<>();
+            for (RexNode expr : analysis.prefixExprs) {
+                boundFieldNames.add(leftFieldName(expr, join.getLeft().getRowType()));
+            }
+            source.validateLookupBinding(tableName, candidate.indexName(),
+                    analysis.prefixExprs.size(), boundFieldNames);
+            List<String> usedColumns = new ArrayList<>();
+            for (int rightProject : rightProjects) {
+                usedColumns.add(scanRowType.getFieldNames().get(rightProject));
+            }
+            source.markLookupUsage(tableName, usedColumns);
             call.transformTo(buildLookupJoin(call, join, tableName, candidate.indexName(),
                     analysis, keyTypes, keyProjPos, rightProjects, leftCount,
                     joinType == JoinRelType.LEFT));
@@ -344,6 +358,18 @@ public final class LookupJoinRule extends RelOptRule {
             ordinals[i] = ref;
         }
         return ordinals;
+    }
+
+    /**
+     * The left-input field name a bound expression directly references (a
+     * column ref or a cast of one), or {@code null} for computed expressions.
+     */
+    private static String leftFieldName(RexNode expr, RelDataType leftRowType) {
+        int column = underlyingColumn(expr);
+        if (column < 0 || column >= leftRowType.getFieldCount()) {
+            return null;
+        }
+        return leftRowType.getFieldNames().get(column);
     }
 
     /** Scan column index of a projection expr that is a column ref or a cast of one. */

@@ -1,6 +1,6 @@
 ---
 name: query-lookup-sources
-description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest/grpc/sideinput), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
+description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest/grpc/sideinput/buffer), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, the buffer source's stateful DoFn in QueryTransform, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
 ---
 
 # Query engine & lookup sources
@@ -58,7 +58,7 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
   - `CalciteValues` — primitive ↔ Calcite-internal value conversion (below).
   - `LookupKey` / `LookupRequest` / `LookupBatch` / `PerKeyLookup` — key model
     and the shared per-distinct-key loop for backends that can't array-bind.
-- `util/pipeline/lookup/source/` — the six adapters: `JdbcLookupSource`,
+- `util/pipeline/lookup/source/` — the seven adapters: `JdbcLookupSource`,
   `SpannerLookupSource` (native tables + parameterized-query tables),
   `BigtableLookupSource`, `RestLookupSource`, `GrpcLookupSource`
   (descriptor-set-driven dynamic client — no generated stubs; the grpc/protobuf
@@ -80,7 +80,9 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
   `supportsKeyPrefixLookup`); rows with null key columns are excluded from the
   index; `LookupRequest.prefix()` is an immutable list — `contains(null)`
   throws NPE, iterate to null-check. Don't add a `cache` block — data is
-  already on-heap).
+  already on-heap), and `BufferLookupSource` (the transform's own past input
+  elements accumulated per group key in Beam state — see the buffer section
+  below).
 - `util/pipeline/udf/` — `UserDefinedFunctions` (serializable UDF/UDAF
   descriptors) and the built-in `DateTimeFunctions` (`CURRENT_DATE_`).
 
@@ -404,6 +406,83 @@ Query2.builder()
   — a NOT NULL element type (e.g. SEQ_RETENTION's `ARRAY<BOOLEAN NOT NULL>`)
   crosses the JDBC boundary as `boolean[]`, which the previous
   `(Object[]) array.getArray()` cast rejected.
+
+## Buffer source (state-backed input history) — IMPLEMENTED 2026-07
+
+`BufferLookupSource` + the `buffer` config type expose the query transform's
+**own past input elements** as a lookup table: the input is keyed by
+`groupFields` (`Union.withKeys`) and the query runs in a **stateful DoFn**
+(`QueryTransform.BufferQueryProcessor` + a batch/streaming DoFn pair) that
+accumulates each group's history in `OrderedListState<MElement>`. Design facts
+that cost real thought:
+
+- **setData-per-element**: like sideinput but with no window token — the DoFn
+  feeds `setData(visibleRows, currentBufferElement)` before *every* evaluation
+  (the buffer changes with every element). The `cache` block is **rejected in
+  validation** — a cache over per-element-mutable data returns wrong rows.
+- **Key affinity is the core correctness constraint.** Beam state is keyed per
+  DoFn, so the source can only answer the current element's own group. Three
+  layers enforce it: (1) `LookupSource.validateLookupBinding` — a planner hook
+  both rules call with the input-side field name of each matched equality
+  (rule-side extraction: plain join → unwrap CAST → `RexInputRef` into the left
+  row type; LATERAL → unwrap CAST → `RexFieldAccess` over `RexCorrelVariable`);
+  the buffer overrides it to require equality on **all** groupFields bound to
+  same-named input columns, throwing an explanatory error at planning; (2) a
+  runtime backstop in `lookup()` comparing each request prefix to the current
+  element's key; (3) prefix-only lookups shorter than groupFields are rejected
+  (state has no data for sibling groups — a silent miss otherwise).
+- **Candidate key = `groupFields + __timestamp`** (synthetic TIMESTAMP column,
+  the buffered element's event time; `__input` STRING = which `inputs` entry it
+  came from — `MElement.getIndex()` set by Union). Keeping the synthetic
+  columns **flat** (not nested under a `_` struct) is deliberate: nested
+  columns can't be key columns (the rules match top-level InputRefs), SEQ_*
+  `fields`/`timeField` parameters resolve flat names only, and nested access
+  adds LATERAL SQL round-trip risk.
+- **Stored-fields narrowing**: `LookupSource.markLookupUsage` — the rules
+  report the scan columns a matched lookup uses (plain join: the projected
+  columns; LATERAL: constrained key columns + leaf-coordinate references
+  walked bottom-up until the first Project/Aggregate closes the demand). The
+  buffer accumulates these during construction-time planning (serialized with
+  the instance), and `QueryTransform.resolveStoredFields` persists only those
+  input fields in state (explicit `fields` must cover them). The SQL-visible
+  table schema stays full-width; unstored columns read as null — safe because
+  the plan provably never reads them.
+- **Ordering**: batch DoFn carries `@RequiresTimeSortedInput` (without it
+  "past" is meaningless in batch); streaming processes in arrival order but
+  the buffer *contents* stay event-time-ordered via OrderedListState (late
+  elements insert at their correct position for later evaluations).
+  `PCollection.isBounded()` picks the DoFn variant at expand time.
+- **Retention**: approximate at write (`clearRange` works on timestamp
+  boundaries — ties survive; the count-eviction boundary is capped at the
+  current element's timestamp so a pending add is never range-cleared), exact
+  at read (`visibleRows` trims duration first, then newest maxCount, current
+  element included in the count when `includeCurrent`). A `count` ValueState
+  avoids reading the buffer on non-trigger elements; it may drift up when
+  duration eviction runs blind and self-corrects on the next overflow read.
+- **State GC**: event-time TTL timer (`stateTtl` defaults to maxDuration) set
+  to `maxTs + ttl` with **`withNoOutputTimestamp()`** — without it the timer
+  holds the output watermark back by the whole TTL. `onTtl` re-checks
+  `maxTs + ttl` against the firing timestamp to ignore stale firings. Batch
+  variant declares no timer.
+- **Write-before-evaluate**: the element is persisted before the SQL runs, so
+  a failing evaluation still buffers (the failure goes to failureSinks).
+  Elements with a null group-key component evaluate but don't persist (SQL
+  null-equality could never look them up). Merging windows are rejected at
+  construction; state (and therefore the buffer) is per key × window.
+- **beamsql path**: rejected — `createSources(List, Map)` passes a null
+  buffer input schema; only `QueryTransform` passes the union input schema.
+- Runner note: needs OrderedListState (+ RequiresTimeSortedInput in batch) —
+  Direct and Dataflow verified via tests; Flink/Spark unverified.
+- Found while testing filters: `Filter.is()` compared strings via raw
+  `compareTo` magnitude (`Math.abs(c) > 1 → return c > 0`, meant as the
+  Float/Double NaN sentinel), so string equality silently passed for distant
+  strings — fixed with a dedicated `INCOMPARABLE` sentinel (`Filter.java`).
+- Tests: `BufferLookupSourceTest` (plan validation, range on `__timestamp`,
+  runtime backstop, serialization round trip, narrowing) and
+  `QueryTransformBufferTest` (batch cumulative via RequiresTimeSortedInput,
+  streaming + TTL via TestStream driving the package-private DoFn directly —
+  anonymous `TupleTag`s must be *static* fields in tests or they capture the
+  non-serializable test instance, filters, maxCount eviction, `__input`).
 
 ## Reusing the sources from Beam SQL (`beamsql` module) — IMPLEMENTED
 

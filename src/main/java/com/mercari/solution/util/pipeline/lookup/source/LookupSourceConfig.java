@@ -55,6 +55,15 @@ public final class LookupSourceConfig {
         private String descriptorSetPath;
         private Integer maxInboundMessageBytes;
 
+        // buffer (state-backed history of the transform's own input)
+        private List<String> groupFields;
+        private Integer maxCount;
+        private Long maxDurationSeconds;
+        private Boolean includeCurrent;
+        private Long stateTtlSeconds;
+        private JsonElement bufferFilter;
+        private JsonElement triggerFilter;
+
         private CacheParameters cache;
 
         private List<TableParameters> tables;
@@ -122,8 +131,39 @@ public final class LookupSourceConfig {
                         }
                     }
                 }
+                case "buffer" -> {
+                    if(groupFields == null || groupFields.isEmpty()) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (buffer) requires groupFields");
+                    }
+                    if(tables.size() != 1) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (buffer) requires exactly one table");
+                    }
+                    if(tables.get(0).name == null) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "].tables[0] (buffer) requires name");
+                    }
+                    if(cache != null) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (buffer) does not support cache"
+                                        + " (the buffer changes with every element)");
+                    }
+                    if(maxCount != null && maxCount <= 0) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "].maxCount must be positive");
+                    }
+                    if(maxDurationSeconds != null && maxDurationSeconds <= 0) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "].maxDurationSeconds must be positive");
+                    }
+                    if(stateTtlSeconds != null && stateTtlSeconds <= 0) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "].stateTtlSeconds must be positive");
+                    }
+                }
                 default -> throw new IllegalModuleException(
-                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest, grpc, sideinput but was: " + type);
+                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest, grpc, sideinput, buffer but was: " + type);
             }
         }
     }
@@ -242,33 +282,119 @@ public final class LookupSourceConfig {
         return names;
     }
 
+    /**
+     * The {@code buffer} source's parameters in one serializable value, for the
+     * hosting transform (which owns the stateful DoFn the buffer lives in).
+     * {@code fields} is the explicit stored-fields list ({@code null} = derive
+     * from the planned SQL); the filter JSONs are the filter DSL conditions as
+     * text ({@code null} = match everything).
+     */
+    public record BufferConfig(
+            String sourceName,
+            String tableName,
+            List<String> groupFields,
+            List<String> fields,
+            Integer maxCount,
+            Long maxDurationSeconds,
+            boolean includeCurrent,
+            Long stateTtlSeconds,
+            String bufferFilterJson,
+            String triggerFilterJson) implements Serializable {
+    }
+
+    /**
+     * The single {@code buffer} source's parameters, or {@code null} when none
+     * is configured. At most one buffer source is allowed per module (Beam
+     * state is keyed per {@code DoFn}, so one transform has one buffer key).
+     */
+    public static BufferConfig bufferConfig(final List<SourceParameters> sources) {
+        if(sources == null) {
+            return null;
+        }
+        BufferConfig config = null;
+        for(final SourceParameters source : sources) {
+            if(!"buffer".equals(source.type)) {
+                continue;
+            }
+            if(config != null) {
+                throw new IllegalModuleException(
+                        "parameters.sources may contain at most one buffer source"
+                                + " (Beam state allows one buffer key per transform)");
+            }
+            config = new BufferConfig(
+                    source.name,
+                    source.tables.get(0).name,
+                    List.copyOf(source.groupFields),
+                    parseFieldNames(source.tables.get(0).fields),
+                    source.maxCount,
+                    source.maxDurationSeconds,
+                    !Boolean.FALSE.equals(source.includeCurrent),
+                    source.stateTtlSeconds != null ? source.stateTtlSeconds : source.maxDurationSeconds,
+                    source.bufferFilter == null || source.bufferFilter.isJsonNull()
+                            ? null : source.bufferFilter.toString(),
+                    source.triggerFilter == null || source.triggerFilter.isJsonNull()
+                            ? null : source.triggerFilter.toString());
+        }
+        return config;
+    }
+
+    /** A plain string array ({@code ["field1", ...]}), or {@code null}. */
+    private static List<String> parseFieldNames(final JsonElement fields) {
+        if(fields == null || fields.isJsonNull()) {
+            return null;
+        }
+        if(!fields.isJsonArray()) {
+            throw new IllegalModuleException(
+                    "buffer table fields must be an array of field names but was: " + fields);
+        }
+        final List<String> names = new ArrayList<>();
+        for(final JsonElement field : fields.getAsJsonArray()) {
+            if(!field.isJsonPrimitive()) {
+                throw new IllegalModuleException(
+                        "buffer table fields must be an array of field names but was: " + fields);
+            }
+            names.add(field.getAsString());
+        }
+        return names;
+    }
+
     public static List<LookupSource> createSources(final List<SourceParameters> sources) {
         return createSources(sources, null);
+    }
+
+    public static List<LookupSource> createSources(
+            final List<SourceParameters> sources,
+            final Map<String, Schema> sideInputSchemas) {
+        return createSources(sources, sideInputSchemas, null);
     }
 
     /**
      * @param sideInputSchemas side input name → schema, for {@code sideinput}
      *        sources ({@code null} when the module does not support them)
+     * @param bufferInputSchema the module's (union) input schema, for {@code buffer}
+     *        sources ({@code null} when the module does not support them)
      */
     public static List<LookupSource> createSources(
             final List<SourceParameters> sources,
-            final Map<String, Schema> sideInputSchemas) {
+            final Map<String, Schema> sideInputSchemas,
+            final Schema bufferInputSchema) {
 
         final List<LookupSource> lookupSources = new ArrayList<>();
         if(sources == null) {
             return lookupSources;
         }
         for(final SourceParameters source : sources) {
-            lookupSources.add(createSource(source, sideInputSchemas));
+            lookupSources.add(createSource(source, sideInputSchemas, bufferInputSchema));
         }
         return lookupSources;
     }
 
     private static LookupSource createSource(
             final SourceParameters source,
-            final Map<String, Schema> sideInputSchemas) {
+            final Map<String, Schema> sideInputSchemas,
+            final Schema bufferInputSchema) {
 
-        final LookupSource lookupSource = createSourceInternal(source, sideInputSchemas);
+        final LookupSource lookupSource = createSourceInternal(source, sideInputSchemas, bufferInputSchema);
         if(source.cache != null && source.cache.isEnabled()) {
             lookupSource.setCacheSpec(source.cache.toSpec());
         }
@@ -277,7 +403,8 @@ public final class LookupSourceConfig {
 
     private static LookupSource createSourceInternal(
             final SourceParameters source,
-            final Map<String, Schema> sideInputSchemas) {
+            final Map<String, Schema> sideInputSchemas,
+            final Schema bufferInputSchema) {
         return switch (source.type) {
             case "jdbc" -> {
                 final JdbcLookupSource.Builder builder = JdbcLookupSource.builder()
@@ -437,6 +564,18 @@ public final class LookupSourceConfig {
                     builder.withTable(tableBuilder.build());
                 }
                 yield builder.build();
+            }
+            case "buffer" -> {
+                if(bufferInputSchema == null) {
+                    throw new IllegalModuleException(
+                            "buffer lookup sources are only supported by the query transform module");
+                }
+                yield BufferLookupSource.builder()
+                        .withName(source.name)
+                        .withTable(source.tables.get(0).name)
+                        .withGroupFields(source.groupFields)
+                        .withInputSchema(bufferInputSchema)
+                        .build();
             }
             case "sideinput" -> {
                 if(sideInputSchemas == null) {
