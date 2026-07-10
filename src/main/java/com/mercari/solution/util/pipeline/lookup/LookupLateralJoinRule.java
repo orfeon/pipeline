@@ -6,7 +6,9 @@ import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptRule
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.RelOptUtil;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.plan.hep.HepRelVertex;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelFieldCollation;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.AggregateCall;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.CorrelationId;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.JoinRelType;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.core.TableScan;
@@ -181,6 +183,17 @@ public final class LookupLateralJoinRule extends RelOptRule {
             if (analysis == null) {
                 continue;
             }
+            // Offer the matched binding to the source (key-affine sources like
+            // buffer reject bindings they cannot answer) and report the leaf
+            // columns this block uses (for stored-fields narrowing).
+            final List<String> boundFieldNames = new ArrayList<>();
+            for (final RexNode expr : analysis.prefixExprs) {
+                boundFieldNames.add(corFieldName(expr));
+            }
+            source.validateLookupBinding(tableName, candidate.indexName(),
+                    analysis.prefixExprs.size(), boundFieldNames);
+            source.markLookupUsage(tableName,
+                    usedLeafColumns(chain, scan, keyLeafIndex, analysis));
             transform(call, correlate, chain, scan, tableName, leafSchema, candidate,
                     keyLeafIndex, analysis, leftCount, joinType == JoinRelType.LEFT);
             return;
@@ -508,6 +521,90 @@ public final class LookupLateralJoinRule extends RelOptRule {
             }
         });
         return ok[0];
+    }
+
+    /**
+     * The correlation (left-input) field name a bound expression directly
+     * references (a correlation field access or a cast of one), or {@code null}
+     * for computed expressions and literals.
+     */
+    private static String corFieldName(RexNode node) {
+        RexNode current = node;
+        while (current instanceof RexCall call && call.getKind() == SqlKind.CAST
+                && call.operands.size() == 1) {
+            current = call.operands.get(0);
+        }
+        if (current instanceof RexFieldAccess fieldAccess
+                && fieldAccess.getReferenceExpr() instanceof RexCorrelVariable) {
+            return fieldAccess.getField().getName();
+        }
+        return null;
+    }
+
+    /**
+     * The scan columns the block uses: the constrained key columns (the fetch)
+     * plus every column referenced in leaf coordinates — filters and sorts up
+     * to the first Project/Aggregate (whose own references close the demand:
+     * everything above it references its outputs, which are built from the
+     * recorded columns). A chain without a Project/Aggregate outputs the scan
+     * row as-is, so all columns are used.
+     */
+    private static List<String> usedLeafColumns(List<RelNode> chain, TableScan scan,
+            int[] keyLeafIndex, Analysis analysis) {
+        final List<String> names = scan.getRowType().getFieldNames();
+        final Set<Integer> used = new java.util.LinkedHashSet<>();
+        final int constrained = analysis.prefixExprs.size() + (analysis.range ? 1 : 0);
+        for (int i = 0; i < constrained && i < keyLeafIndex.length; i++) {
+            used.add(keyLeafIndex[i]);
+        }
+        boolean leafCoords = true;
+        // chain is top-first; walk bottom-up (from directly above the scan).
+        for (int i = chain.size() - 1; i >= 0 && leafCoords; i--) {
+            final RelNode node = chain.get(i);
+            if (node instanceof LogicalFilter filter) {
+                collectInputRefs(filter.getCondition(), used);
+            } else if (node instanceof LogicalProject project) {
+                for (final RexNode expr : project.getProjects()) {
+                    collectInputRefs(expr, used);
+                }
+                leafCoords = false;
+            } else if (node instanceof LogicalAggregate aggregate) {
+                used.addAll(aggregate.getGroupSet().asList());
+                for (final AggregateCall aggregateCall : aggregate.getAggCallList()) {
+                    used.addAll(aggregateCall.getArgList());
+                    if (aggregateCall.filterArg >= 0) {
+                        used.add(aggregateCall.filterArg);
+                    }
+                }
+                leafCoords = false;
+            } else if (node instanceof LogicalSort sort) {
+                for (final RelFieldCollation collation
+                        : sort.getCollation().getFieldCollations()) {
+                    used.add(collation.getFieldIndex());
+                }
+            }
+        }
+        if (leafCoords) {
+            // No Project/Aggregate in the chain: the scan row is the block output.
+            for (int i = 0; i < names.size(); i++) {
+                used.add(i);
+            }
+        }
+        final List<String> columns = new ArrayList<>();
+        for (final int ordinal : used) {
+            columns.add(names.get(ordinal));
+        }
+        return columns;
+    }
+
+    private static void collectInputRefs(RexNode node, Set<Integer> used) {
+        node.accept(new RexVisitorImpl<Void>(true) {
+            @Override
+            public Void visitInputRef(RexInputRef inputRef) {
+                used.add(inputRef.getIndex());
+                return null;
+            }
+        });
     }
 
     /** Correlation field accesses → left input refs (the cor row type is the left row type). */

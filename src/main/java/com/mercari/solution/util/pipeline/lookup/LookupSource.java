@@ -175,6 +175,33 @@ public abstract class LookupSource implements Serializable, AutoCloseable {
     }
 
     /**
+     * Planner hook: called by the lookup-join rules when a join/LATERAL block
+     * over {@code table} has matched the key contract, before the rewrite.
+     * {@code boundFieldNames} holds, for each matched equality-prefix key
+     * column (in key order), the name of the left-input field its bound
+     * expression directly references — or {@code null} when the bound
+     * expression is not a simple field reference. Sources whose data is
+     * partitioned by the processing element's own key (e.g. {@code buffer})
+     * override this to reject bindings they cannot answer, with an
+     * explanatory error at planning time instead of wrong results at runtime.
+     */
+    public void validateLookupBinding(
+            String table, String indexName, int prefixLength, List<String> boundFieldNames) {
+    }
+
+    /**
+     * Planner hook: called by the lookup-join rules with the {@code table}
+     * columns a matched lookup actually uses (projected / referenced in a
+     * LATERAL block / constrained key columns). Sources may accumulate these
+     * to let the host narrow what it materializes (e.g. the {@code buffer}
+     * source's stored-fields auto-derivation). Called during planning at
+     * pipeline construction and again on worker setup; implementations must
+     * be idempotent.
+     */
+    public void markLookupUsage(String table, java.util.Collection<String> columns) {
+    }
+
+    /**
      * Fetches rows of {@code table} matching the batch via the chosen key.
      * {@code indexName} is {@code null} for the primary key, or a unique index
      * name. May return a superset; the lookup-join operator filters to exact

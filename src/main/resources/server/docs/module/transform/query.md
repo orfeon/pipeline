@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Query Transform Module
-description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST / gRPC) or other pipeline collections delivered as side inputs can be joined on their keys as batched lookup-joins — the external table is never scanned. One element yields zero or more output rows.
-tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, grpc, sideinput]
+description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST / gRPC) or other pipeline collections delivered as side inputs can be joined on their keys as batched lookup-joins — the external table is never scanned. A buffer source additionally exposes the transform's own past input elements, accumulated per key in Beam state, as a lookup table — per-key history, sequences and funnels with no external store. One element yields zero or more output rows.
+tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, grpc, sideinput, buffer, state, history, cep]
 timestamp: 2026-07-03T00:00:00Z
 ---
 
@@ -17,6 +17,7 @@ Unlike the [beamsql](beamsql.md) module — which plans SQL over whole PCollecti
 - **Fan-out or fold.** One input element yields zero or more output rows: a query without aggregation fans out (one row per unnested item), an aggregate query folds the element into one row, and a `WHERE` that matches nothing drops the element.
 - **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, REST/gRPC APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
 - **In-pipeline lookup-joins.** A `sideinput` source exposes **another collection of the same pipeline** (declared in the module's `sideInputs`) as a lookup table — no external store: the data is broadcast to the workers as a Beam side input and hash-indexed by the declared key once per window.
+- **Per-key history joins.** A `buffer` source exposes **this transform's own past input elements**, accumulated per group key in Beam state, as a lookup table — sequence detection, funnels and per-key aggregates over recent events with no external store. This is the one source type that changes the pipeline shape: the input is keyed by `groupFields` and the query runs in a stateful DoFn (see below).
 
 This is a good fit for enriching a stream with reference data held in a database or API, and for post-processing enrichment results with per-element SQL (aggregate or select over a fetched collection).
 
@@ -109,7 +110,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 | parameter | optional | type           | description                                                                    |
 |-----------|----------|----------------|--------------------------------------------------------------------------------|
 | name      | required | String         | Schema name the source's tables are referenced by in SQL (`name.table`).       |
-| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`, `grpc`, `sideinput`.             |
+| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`, `grpc`, `sideinput`, `buffer`.   |
 | tables    | required | Array<Table\>  | Tables to expose. Per-type table parameters below.                             |
 | cache     | optional | Cache          | On-memory cache over the source's lookups (see below). Off unless the block is present. |
 
@@ -321,6 +322,97 @@ transforms:
             - name: members
               keyFields: [userId]
 ```
+
+### buffer source
+
+Exposes **this transform's own past input elements**, accumulated per group key in
+Beam state (`OrderedListState`), as a lookup table — per-key history with no
+external store: sequence detection (`SEQ_MATCH` / `SEQ_FUNNEL` over the history),
+"how many times did this user do X recently", per-key running aggregates.
+
+Unlike every other source type, a `buffer` source **changes the pipeline shape**:
+the input is keyed by `groupFields` (a shuffle) and the query runs in a **stateful
+DoFn**, so parallelism is bounded by key cardinality and hot keys concentrate load.
+Because Beam state is keyed per DoFn, **at most one buffer source per transform**.
+
+The buffer table's schema is the (union) input schema plus two synthetic columns:
+
+| column        | type      | description                                             |
+|---------------|-----------|---------------------------------------------------------|
+| `__timestamp` | Timestamp | The buffered element's event time.                      |
+| `__input`     | String    | The name of the `inputs` entry the element came from (useful when multiple inputs share the buffer). |
+
+**Key contract**: state only holds the *current element's own group*, so a join
+must constrain **every** `groupFields` column by equality **to the input column of
+the same name** (`WHERE b.userId = i.userId`); optionally add a bounded range or
+equality on `__timestamp` (`groupFields + __timestamp` is the candidate key). Any
+other binding — a different column, an expression, a partial key — is rejected at
+pipeline construction with an explanatory error.
+
+Source parameters (the single table has `name` and optional `fields`):
+
+| parameter          | optional | type            | description                                                                                                          |
+|--------------------|----------|-----------------|------------------------------------------------------------------------------------------------------------------------|
+| groupFields        | required | Array<String\>  | Input fields forming the state key, in key order. Elements with a null key component are evaluated but not buffered.  |
+| maxCount           | optional | Integer         | Maximum buffer rows an evaluation sees (including the current element when `includeCurrent`); older rows are evicted. |
+| maxDurationSeconds | optional | Integer         | Event-time retention window relative to the current element's timestamp; older rows are invisible and evicted.        |
+| includeCurrent     | optional | Boolean         | Whether the current element itself appears in the buffer table during its own evaluation (default `true` — e.g. the triggering event is part of the matched sequence). Independent of `bufferFilter`. |
+| stateTtlSeconds    | optional | Integer         | Streaming state GC: a group's state is cleared when no element arrived for this long (event time). Defaults to `maxDurationSeconds`; omit both and state is kept indefinitely. |
+| bufferFilter       | optional | Filter          | Filter-DSL condition selecting which elements are **persisted** (default: all).                                        |
+| triggerFilter      | optional | Filter          | Filter-DSL condition selecting which elements **evaluate the SQL** and produce output (default: all). Elements matching neither filter are dropped without state access. |
+| tables[0].name     | required | String          | SQL table name (`sourceName.name`).                                                                                     |
+| tables[0].fields   | optional | Array<String\>  | Input fields persisted per buffered element. Defaults to **the columns the SQL references** (derived from the plan), so state size follows the query automatically; when set explicitly, it must cover every referenced column. `groupFields` are always stored. |
+
+```yaml
+transforms:
+  - name: funnel
+    module: query
+    inputs: [events]
+    parameters:
+      sql: |
+        SELECT i.userId AS userId, i.amount AS amount, s.viewCnt AS viewCnt
+        FROM INPUT AS i
+        JOIN LATERAL (
+          SELECT COUNT(*) AS viewCnt
+          FROM buf.history AS b
+          WHERE b.userId = i.userId
+        ) AS s ON TRUE
+      sources:
+        - name: buf
+          type: buffer
+          groupFields: [userId]
+          maxCount: 1000
+          maxDurationSeconds: 604800
+          bufferFilter:
+            - { key: action, op: "=", value: view }
+          triggerFilter:
+            - { key: action, op: "=", value: purchase }
+          tables:
+            - name: history
+```
+
+Notes:
+
+- **Batch vs streaming order**: in batch the DoFn requires **time-sorted input**
+  (`@RequiresTimeSortedInput`), so each element's "past" is exactly the
+  earlier-timestamped elements of its group — deterministic. In streaming,
+  elements are processed in **arrival order**: the buffer's *contents* are always
+  event-time-ordered (late elements are inserted at their correct position for
+  later evaluations), but which elements are visible at evaluation time depends
+  on arrival. Meaningful event timestamps on the input are a prerequisite (batch
+  sources often assign a constant timestamp — set `timestampAttribute` or assign
+  timestamps upstream).
+- **Retention**: eviction works on state timestamp boundaries and is approximate
+  under identical timestamps; what an evaluation *sees* is trimmed exactly
+  (`maxDurationSeconds` first, then the newest `maxCount`).
+- **Windowing**: state is per key **and window** — with non-global windows the
+  buffer resets at window boundaries. Merging windows (sessions) are rejected.
+- A failing SQL evaluation still buffers the element (the failure goes to the
+  module's error handling as usual).
+- The `cache` block is not supported (the buffer changes with every element).
+- **Runner support**: requires `OrderedListState` and (batch)
+  `@RequiresTimeSortedInput` — supported on Dataflow and the Direct runner;
+  check the Beam capability matrix before using Flink/Spark.
 
 ## Built-in functions
 
