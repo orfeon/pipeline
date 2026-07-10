@@ -351,6 +351,43 @@ public class AvroSchemaUtil {
         return "JSON".equals(sqlType);
     }
 
+    /** Marker props on an Avro array schema identifying a matrix field (written by ElementToAvroConverter). */
+    public static final String LOGICAL_TYPE_MATRIX = "matrix";
+    public static final String PROP_MATRIX_SHAPE = "shape";
+
+    /**
+     * The matrix shape carried by an Avro array schema's marker props
+     * ({@code logicalType: matrix} + {@code shape}), or {@code null} when the
+     * schema is a plain array (missing or malformed props degrade gracefully).
+     */
+    public static List<Integer> getMatrixShape(Schema schema) {
+        if(schema.getType().equals(Schema.Type.UNION)) {
+            return getMatrixShape(unnestUnion(schema));
+        }
+        if(!Schema.Type.ARRAY.equals(schema.getType())
+                || !LOGICAL_TYPE_MATRIX.equals(schema.getProp(org.apache.avro.LogicalType.LOGICAL_TYPE_PROP))) {
+            return null;
+        }
+        final String shapeJson = schema.getProp(PROP_MATRIX_SHAPE);
+        if(shapeJson == null) {
+            return null;
+        }
+        try {
+            final JsonArray shapeArray = new Gson().fromJson(shapeJson, JsonArray.class);
+            final List<Integer> shape = new ArrayList<>();
+            for(final JsonElement shapeElement : shapeArray) {
+                final int dim = shapeElement.getAsInt();
+                if(dim <= 0) {
+                    return null;
+                }
+                shape.add(dim);
+            }
+            return shape.isEmpty() ? null : shape;
+        } catch (final Exception e) {
+            return null;
+        }
+    }
+
     /**
      * Extract child Avro schema from nullable union Avro {@link Schema}.
      *

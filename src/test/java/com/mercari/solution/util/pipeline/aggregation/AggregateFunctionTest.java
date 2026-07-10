@@ -68,6 +68,7 @@ public class AggregateFunctionTest {
         Assertions.assertInstanceOf(Avg.class, create("{ \"name\": \"f\", \"op\": \"avg\", \"field\": \"longField\" }"));
         Assertions.assertInstanceOf(Std.class, create("{ \"name\": \"f\", \"op\": \"std\", \"field\": \"longField\" }"));
         Assertions.assertInstanceOf(SimpleRegression.class, create("{ \"name\": \"f\", \"op\": \"simple_regression\", \"field\": \"doubleField\" }"));
+        Assertions.assertInstanceOf(Regression.class, create("{ \"name\": \"f\", \"op\": \"regression\", \"field\": \"doubleField\", \"xFields\": [\"longField\"] }"));
         Assertions.assertInstanceOf(ArrayAgg.class, create("{ \"name\": \"f\", \"op\": \"array_agg\", \"field\": \"longField\" }"));
     }
 

@@ -74,9 +74,12 @@ public final class CalciteValues {
                         "Unsupported bytes value: " + primitive.getClass());
             };
             case array, matrix -> {
+                // A matrix value is a flat list; its element type accessor differs.
+                final Schema.FieldType valueType = Schema.Type.matrix.equals(fieldType.getType())
+                        ? fieldType.getMatrixValueType() : fieldType.getArrayValueType();
                 final List<Object> values = new ArrayList<>();
                 for (final Object v : (Iterable<?>) primitive) {
-                    values.add(toInternal(fieldType.getArrayValueType(), v));
+                    values.add(toInternal(valueType, v));
                 }
                 yield values;
             }

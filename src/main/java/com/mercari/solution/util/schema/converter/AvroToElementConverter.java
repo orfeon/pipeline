@@ -65,7 +65,17 @@ public class AvroToElementConverter {
                 }
             }
             case RECORD -> Schema.FieldType.element(convertFields(avroFieldSchema.getFields(), nullable));
-            case ARRAY -> Schema.FieldType.array(convertFieldType(avroFieldSchema.getElementType(), nullable));
+            case ARRAY -> {
+                // An array carrying the matrix marker props (logicalType: matrix + shape,
+                // written by ElementToAvroConverter) restores as a matrix field, so the
+                // shape survives an Avro/Parquet round trip (values stay flat row-major).
+                final List<Integer> matrixShape = AvroSchemaUtil.getMatrixShape(avroFieldSchema);
+                if(matrixShape != null) {
+                    yield Schema.FieldType.matrix(
+                            convertFieldType(avroFieldSchema.getElementType(), nullable), matrixShape);
+                }
+                yield Schema.FieldType.array(convertFieldType(avroFieldSchema.getElementType(), nullable));
+            }
             case UNION -> convertFieldType(AvroSchemaUtil.unnestUnion(avroFieldSchema), true);
             default -> throw new IllegalArgumentException();
         };

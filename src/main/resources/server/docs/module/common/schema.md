@@ -56,15 +56,31 @@ schema:
     - { name: tags,    type: string, mode: repeated }
     - { name: details, type: element, fields:
         [ { name: key, type: string } ] }
+    - { name: weights, type: matrix, shape: [2, 3] }
 ```
 
 | parameter | optional | type   | description                                                                   |
 |-----------|----------|--------|-------------------------------------------------------------------------------|
 | name      | required | String | Field name.                                                                   |
-| type      | required | Enum   | `bool`,`string`,`json`,`bytes`,`int32` (`int`),`int64` (`long`),`float32` (`float`),`float64` (`double`),`decimal`,`date`,`time`,`timestamp`,`enum`,`map`,`element`, … |
+| type      | required | Enum   | `bool`,`string`,`json`,`bytes`,`int32` (`int`),`int64` (`long`),`float32` (`float`),`float64` (`double`),`decimal`,`date`,`time`,`timestamp`,`enum`,`map`,`element`,`matrix`, … |
 | mode      | optional | Enum   | `nullable` (default), `required`, `repeated`.                                 |
 | fields    | selective | Array | Nested fields (for `element` type).                                           |
 | symbols   | selective | Array<String\> | Enum symbols (for `enum` type).                                       |
+| shape     | selective | Array<Integer\> | Dimensions (for `matrix` type). Required; positive integers.         |
+| valueType | selective | Enum   | Element type (for `matrix` type): a numeric type. Default: `float64`.         |
+
+A `matrix` field holds its values **flat in row-major order**; the shape lives in the schema
+(the same representation as ONNX tensor outputs and the select module's `reshape` function).
+JSON input accepts both nested rows (`[[2, 1], [1, 3]]`) and the flat form (`[2, 1, 1, 3]`);
+the element count must match the shape. The select module's matrix functions
+(`matrix_solve` etc. via `matrixField`) read the 2D shape from the schema automatically; in the
+query module the field surfaces as a flat `ARRAY<DOUBLE>` — pass the column count explicitly
+(`MATRIX_SOLVE(mat, vec, 2)`).
+
+The shape survives Avro round trips: matrix fields are written as flat arrays whose Avro schema
+carries `logicalType: matrix` and `shape` props, and the `storage` source restores the matrix
+type automatically when reading such files (avro, or parquet with the declared/embedded Avro
+schema). Files written by other systems without these props read as plain flat arrays.
 
 ## encoding
 

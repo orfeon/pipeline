@@ -193,8 +193,11 @@ public class CalciteSchemaUtil {
             case map -> relDataTypeFactory.createMapType(
                         relDataTypeFactory.createSqlType(SqlTypeName.VARCHAR),
                         relDataTypeFactory.createSqlType(convertSqlTypeName(fieldType.getMapValueType())));
-            case array, matrix -> relDataTypeFactory.createArrayType(
+            case array -> relDataTypeFactory.createArrayType(
                         createRelDataType(fieldType.getArrayValueType(), relDataTypeFactory), -1L);
+            // A matrix field surfaces as a flat ARRAY (row-major; the shape lives in the schema).
+            case matrix -> relDataTypeFactory.createArrayType(
+                        createRelDataType(fieldType.getMatrixValueType(), relDataTypeFactory), -1L);
             case element -> convertSchema(fieldType.getElementSchema(), relDataTypeFactory);
             default -> relDataTypeFactory.createSqlType(convertSqlTypeName(fieldType));
         };

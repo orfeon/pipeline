@@ -194,8 +194,43 @@ public class JsonToElementConverter {
                 }
                 yield childValues;
             }
+            case matrix -> {
+                // A matrix value is held flat (row-major) with its shape in the schema.
+                // Accept both a flat JSON array and nested JSON arrays (flattened here),
+                // validating the total element count against the shape.
+                if (!jsonElement.isJsonArray()) {
+                    throw new IllegalStateException(String.format("FieldType: %s's type is matrix, but jsonElement is %s",
+                            fieldType.getType(), jsonElement.toString()));
+                }
+                final List<Object> flatValues = new ArrayList<>();
+                flattenMatrixValue(fieldType.getMatrixValueType(), jsonElement.getAsJsonArray(), flatValues);
+                long expectedSize = 1;
+                for (final Integer dim : fieldType.getShape()) {
+                    expectedSize *= dim;
+                }
+                if (flatValues.size() != expectedSize) {
+                    throw new IllegalStateException(String.format(
+                            "matrix value has %d elements, but shape %s requires %d: %s",
+                            flatValues.size(), fieldType.getShape(), expectedSize, jsonElement));
+                }
+                yield flatValues;
+            }
             default -> null;
         };
+    }
+
+    private static void flattenMatrixValue(
+            final Schema.FieldType matrixValueType,
+            final com.google.gson.JsonArray jsonArray,
+            final List<Object> flatValues) {
+
+        for (final JsonElement child : jsonArray) {
+            if (child.isJsonArray()) {
+                flattenMatrixValue(matrixValueType, child.getAsJsonArray(), flatValues);
+            } else {
+                flatValues.add(convertValue(matrixValueType, child));
+            }
+        }
     }
 
 }
