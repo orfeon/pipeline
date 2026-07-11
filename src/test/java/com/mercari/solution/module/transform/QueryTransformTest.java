@@ -183,6 +183,55 @@ public class QueryTransformTest {
     }
 
     @Test
+    public void testCommonFilterSkipsEvaluation() throws Exception {
+        // parameters.filter (filter DSL) drops elements before the SQL runs.
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "numbers",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0, 1, 2, 3]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["numbers"],
+                      "parameters": {
+                        "filter": [
+                          { "key": "value", "op": ">=", "value": 2 }
+                        ],
+                        "sql": "SELECT `value` AS id, `value` * 10 AS scaled FROM INPUT"
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Set<Long> scaled = new HashSet<>();
+            for(final MElement element : elements) {
+                scaled.add(element.getAsLong("scaled"));
+            }
+            Assertions.assertEquals(Set.of(20L, 30L), scaled);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
     public void testValidationError() throws Exception {
         final String configJson = """
                 {

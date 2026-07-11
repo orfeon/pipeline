@@ -293,6 +293,84 @@ public class QueryTransformBufferTest {
         pipeline.run();
     }
 
+    /**
+     * The module-level filter drops elements entirely — neither buffered nor
+     * evaluated — before any state access.
+     */
+    @Test
+    public void testCommonFilterSkipsBufferAndEvaluation() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "timestampAttribute": "eventTime",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "userId": "u1", "action": "view",   "amount": 1, "eventTime": "2025-05-01T00:00:01Z" },
+                          { "userId": "u1", "action": "ignore", "amount": 2, "eventTime": "2025-05-01T00:00:02Z" },
+                          { "userId": "u1", "action": "view",   "amount": 3, "eventTime": "2025-05-01T00:00:03Z" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "userId", "type": "string" },
+                          { "name": "action", "type": "string" },
+                          { "name": "amount", "type": "int64" },
+                          { "name": "eventTime", "type": "timestamp" }
+                        ]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "filter": [
+                          { "key": "action", "op": "!=", "value": "ignore" }
+                        ],
+                        "sql": "SELECT i.amount AS amount, s.cnt AS cnt FROM INPUT AS i JOIN LATERAL (SELECT COUNT(*) AS cnt FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE",
+                        "sources": [
+                          {
+                            "name": "buf",
+                            "type": "buffer",
+                            "groupFields": ["userId"],
+                            "tables": [
+                              { "name": "history" }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Map<Long, Long> countByAmount = new HashMap<>();
+            for(final MElement element : elements) {
+                countByAmount.put(element.getAsLong("amount"), element.getAsLong("cnt"));
+            }
+            // the "ignore" element neither evaluated nor buffered
+            Assertions.assertEquals(2, countByAmount.size());
+            Assertions.assertEquals(1L, countByAmount.get(1L));
+            Assertions.assertEquals(2L, countByAmount.get(3L));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
     /** Multiple inputs share one buffer; __input tells them apart. */
     @Test
     public void testMultipleInputsWithInputColumn() throws Exception {
@@ -412,7 +490,7 @@ public class QueryTransformBufferTest {
                 "buf", "history", List.of("userId"), null,
                 null, null, true, 5L, null, null); // stateTtlSeconds = 5
         final QueryTransform.BufferQueryProcessor processor = new QueryTransform.BufferQueryProcessor(
-                query, "INPUT", bufferConfig, List.of("userId", "amount"), List.of("events"),
+                query, "INPUT", null, bufferConfig, List.of("userId", "amount"), List.of("events"),
                 inputSchema, Map.of(), List.of(), false, FAILURE_TAG);
 
         final List<Schema.Field> stateFields = new ArrayList<>(inputSchema.getFields());

@@ -518,6 +518,66 @@ Semantics & pitfalls (tests: `LookupSeekableTableTest`,
   (`CAST` in SQL when needed); TIMESTAMP is Beam's primitive DATETIME and
   passes through. Row values are `attachValues`'d in input form.
 
+## Direct Bindable execution (`BindableQuery`) — IMPLEMENTED 2026-07
+
+Per-element evaluation no longer goes through JDBC. `Query2.setup()` (and the
+lateral runtime's `init()`) compile the plan once to a Calcite `Bindable` via
+`util/pipeline/lookup/BindableQuery`; `execute()` binds a fresh `DataContext`
+and drains the enumerable. Measured: simple filter+project **35µs → 0.8µs**
+per evaluation (~44x); GROUP BY over 100 in-memory rows 44µs → 10µs (now
+dominated by real work). Construction-time `deriveOutputSchema` still uses
+the JDBC prepare (`RelRunners`) — schema derivation from `ResultSetMetaData`
+is behavior we deliberately did not touch; only the worker execution path
+moved. Hard-won facts:
+
+- **The old 35µs fixed cost was NOT Avatica statement machinery.** RelRunners
+  rewrites scans of `ScannableTable`s into `BindableTableScan`s, which plan to
+  an `EnumerableInterpreter` whose generated `bind()` builds an `Interpreter`
+  — including a HepPlanner optimization pass over the scan subtree — on
+  *every execution*.
+- **Scans use our own `InternalEnumerableScan`** (nested in BindableQuery), a
+  physical rel whose generated code is the bare
+  `Schemas.enumerable(table, root)` call (works because our
+  `DataContext.getRootSchema()` returns the planning root schema — RelRunners
+  can't assume that, hence its bindable rewrite). Two traps ruled out the
+  stock alternatives: (1) leaving `EnumerableTableScan` to claim the scans
+  generates a per-field conversion into synthesized record classes for
+  array-of-ROW columns, which neither compiles (`Linq4j.asEnumerable(Object)`)
+  nor matches our Object[]-based internal values; (2) the scan's PhysType
+  must be built with `PhysTypeImpl.of(..., JavaRowFormat.ARRAY, false)` —
+  optimize=true silently flips a single-column table to SCALAR format while
+  the scan still emits Object[] rows → CCE in downstream generated code.
+  Also: `RelOptTable.getExpression(ScannableTable.class)` already returns the
+  full `Schemas.enumerable(...)` call expression — wrapping it again
+  generates uncompilable nested calls.
+- The pipeline mirrors the JDBC runner: `Programs.standard()` (sub-query
+  removal — needed because `Query2` converts with `withExpand(false)` —
+  decorrelate, trim, volcano, calc) run on the **cluster's own planner**.
+  `RelOptUtil.registerDefaultRules(planner, false, false)` already includes
+  the enumerable rules + `TO_INTERPRETER`; `BindableQuery.compile` re-invokes
+  it defensively (idempotent) because the lateral runtime's Frameworks
+  planner starts bare. The `Hook.PLANNER` dance is only needed on the JDBC
+  path (where planning happens in the connection's own planner) and is gone
+  from the worker path.
+- **`EnumerableInterpretable.toBindable(internalParameters, ...)` stashes
+  runtime objects into the passed map** (e.g. an interpreter's RelNode) and
+  the generated code reads them back via `DataContext.get(name)` — the
+  custom DataContext must serve that map or bind() NPEs. It must also supply
+  the standard variables (`utcTimestamp`/`currentTimestamp`/`localTimestamp`/
+  `timeZone`/`locale`/`cancelFlag`/`timeFrameSet`) or time functions break.
+- **SQL output aliases live in `RelRoot.fields`, not the physical row type**:
+  a trivial rename projection is removed by `ProjectRemoveRule` (it ignores
+  names — `root.project(true)` does NOT survive planning). The JDBC layer
+  renames at the metadata level; `Query2` threads `root.fields` into
+  `CalciteValues.convertInternalRows`. Symptom when this is wrong: chained/
+  derived-table queries silently return null for re-aliased columns.
+- Single-column results may come out of the bindable as bare values or
+  one-element arrays depending on the chosen PhysType (`Prefer.ARRAY` is a
+  preference, not a guarantee) — `BindableQuery.toArray` normalizes.
+- Values now arrive Calcite-internal (no Avatica local-wallclock rendering);
+  `CalciteValues.toPrimitive`'s Number branches and the lateral runtime's
+  `toInternal` already handled both forms, so conversions stayed shared.
+
 ## Origin & design rationale (for archaeology)
 
 Ported 2026-07 from `orfeon/calcite-multi-engine` (regular Calcite 1.42,
