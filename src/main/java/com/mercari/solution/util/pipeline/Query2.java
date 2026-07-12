@@ -37,7 +37,11 @@ import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelNode;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.RelRoot;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataType;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeFieldImpl;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.RelRecordType;
+import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rel.type.StructKind;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.rex.RexBuilder;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.runtime.Hook;
 import org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.ScannableTable;
@@ -66,14 +70,16 @@ import java.io.Serializable;
 import java.sql.PreparedStatement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.function.Consumer;
 
 /**
- * Executes a Calcite SQL statement over bounded, in-memory {@link MElement} lists,
+ * Executes Calcite SQL over bounded, in-memory {@link MElement} lists,
  * optionally joined against external {@link LookupSource}s (JDBC / Spanner /
  * Bigtable / REST) via <em>key-driven lookup-joins</em>.
  *
@@ -95,17 +101,28 @@ import java.util.function.Consumer;
  *       condition) fails at execution with an explanatory error.</li>
  * </ul>
  *
+ * <p><b>Sessions</b>: an instance holds one or more named statements evaluated in
+ * order per {@link #executeAll} call, all sharing the same input tables, lookup
+ * sources (and their caches / lateral runtimes) and UDFs. Every statement's
+ * result is additionally registered as an in-memory table under the statement's
+ * name, so later statements can reference earlier results (CTE-like reuse — the
+ * rows are passed as raw Calcite-internal values with no conversion). Statements
+ * marked {@code output} contribute a named entry to the session result; with
+ * {@code exclusive}, evaluation stops after the first output statement that
+ * produced at least one row (non-output statements always run).
+ *
  * <p>Lifecycle:
  * <ol>
  *   <li>Construct via {@link #of}/{@link #builder()} at pipeline construction time —
  *       this sets up the sources (deriving external table metadata once), validates
- *       the SQL and derives {@link #getOutputSchema()} without executing, then
+ *       the SQL and derives {@link #getOutputSchemas()} without executing, then
  *       releases the sources' clients.</li>
  *   <li>The instance is {@link Serializable} (derived metadata included); ship it
  *       to workers inside a {@code DoFn}.</li>
  *   <li>Call {@link #setup()} in {@code @Setup} — re-opens source clients, plans and
- *       prepares the statement once.</li>
- *   <li>Call {@link #execute} per element/bundle as often as needed.</li>
+ *       compiles the statements once.</li>
+ *   <li>Call {@link #execute}/{@link #executeAll} per element/bundle as often as
+ *       needed.</li>
  *   <li>Call {@link #teardown()} in {@code @Teardown}.</li>
  * </ol>
  *
@@ -117,34 +134,147 @@ public class Query2 implements Serializable {
     private static final String DEFAULT_TABLE_NAME = "INPUT";
     private static final Logger LOG = LoggerFactory.getLogger(Query2.class);
 
-    private final String sql;
+    /**
+     * One named statement of the session. {@code output} statements contribute
+     * a named entry to the session result; a {@code bufferInsert} statement's
+     * rows are returned separately (the host persists them into Beam state).
+     * Every statement's result is referenceable as a table by later statements.
+     */
+    public record Statement(String name, String sql, boolean output, boolean bufferInsert)
+            implements Serializable {
+
+        public Statement {
+            if (sql == null || sql.isEmpty()) {
+                throw new IllegalArgumentException("statement sql must not be null or empty");
+            }
+            if (name == null) {
+                name = "";
+            }
+        }
+
+        public static Statement of(String name, String sql, boolean output) {
+            return new Statement(name, sql, output, false);
+        }
+    }
+
+    /** The per-element result of a session: output name → rows, plus buffer-insert rows. */
+    public record SessionResult(
+            Map<String, List<MElement>> outputs,
+            List<MElement> bufferRows) {
+    }
+
+    private final List<Statement> statements;
+    private final boolean exclusive;
     private final Map<String, Schema> inputSchemas;
     private final List<LookupSource> sources;
     private final List<UserDefinedFunctions.FunctionSpec> functions;
-    private final Schema outputSchema;
+    private final Map<String, Schema> outputSchemas;   // output statements only
+    private final Schema bufferInsertSchema;           // null when no bufferInsert statement
 
-    private transient BindableQuery bindableQuery;
-    private transient List<String> outputFieldNames;
+    private transient List<CompiledStatement> compiled;
     private transient Map<String, List<MElement>> elements;
     private transient List<LookupLateralRuntime> lateralRuntimes;
+
+    private static final class CompiledStatement {
+        final Statement statement;
+        final BindableQuery bindableQuery;
+        final List<String> fieldNames;
+        final IntermediateTable intermediate;
+
+        CompiledStatement(Statement statement, BindableQuery bindableQuery,
+                List<String> fieldNames, IntermediateTable intermediate) {
+            this.statement = statement;
+            this.bindableQuery = bindableQuery;
+            this.fieldNames = fieldNames;
+            this.intermediate = intermediate;
+        }
+    }
 
     private Query2(
             final Map<String, Schema> inputSchemas,
             final List<LookupSource> sources,
             final List<UserDefinedFunctions.FunctionSpec> functions,
-            final String sql) {
+            final List<Statement> statements,
+            final boolean exclusive) {
 
-        if (sql == null || sql.isEmpty()) {
-            throw new IllegalArgumentException("sql must not be null or empty");
+        if (statements == null || statements.isEmpty()) {
+            throw new IllegalArgumentException("at least one statement (sql) is required");
         }
         if (inputSchemas == null || inputSchemas.isEmpty()) {
             throw new IllegalArgumentException("at least one input schema is required");
         }
-        this.sql = sql;
+        this.statements = List.copyOf(statements);
+        this.exclusive = exclusive;
         this.inputSchemas = new LinkedHashMap<>(inputSchemas);
         this.sources = sources == null ? List.of() : List.copyOf(sources);
         this.functions = functions == null ? List.of() : List.copyOf(functions);
-        this.outputSchema = deriveOutputSchema();
+        validateStatements();
+        // keyed by statement index: names may repeat across the bufferInsert
+        // statement and the legacy unnamed single statement (both "")
+        final Map<Integer, Schema> derivedSchemas = deriveOutputSchemas();
+        this.outputSchemas = new LinkedHashMap<>();
+        Schema insertSchema = null;
+        for (int i = 0; i < this.statements.size(); i++) {
+            final Statement statement = this.statements.get(i);
+            final Schema schema = derivedSchemas.get(i);
+            if (statement.bufferInsert()) {
+                insertSchema = schema;
+            } else if (statement.output()) {
+                this.outputSchemas.put(statement.name(), schema);
+            }
+        }
+        this.bufferInsertSchema = insertSchema;
+    }
+
+    private void validateStatements() {
+        final Set<String> names = new HashSet<>();
+        int outputCount = 0;
+        int bufferInsertCount = 0;
+        for (int i = 0; i < statements.size(); i++) {
+            final Statement statement = statements.get(i);
+            if (statement.bufferInsert()) {
+                bufferInsertCount++;
+                if (i != 0) {
+                    throw new IllegalArgumentException(
+                            "the bufferInsert statement must be the first statement");
+                }
+                continue;
+            }
+            if (statement.output()) {
+                outputCount++;
+            }
+            if (statement.name().isEmpty()) {
+                if (statements.size() > (bufferInsertCount + 1)) {
+                    throw new IllegalArgumentException(
+                            "statements require a name when more than one is defined");
+                }
+                continue;
+            }
+            if (!names.add(statement.name().toUpperCase())) {
+                throw new IllegalArgumentException(
+                        "duplicate statement name: " + statement.name());
+            }
+            for (final String inputName : inputSchemas.keySet()) {
+                if (inputName.equalsIgnoreCase(statement.name())) {
+                    throw new IllegalArgumentException(
+                            "statement name '" + statement.name()
+                                    + "' collides with an input table name");
+                }
+            }
+            for (final LookupSource source : sources) {
+                if (source.getName().equalsIgnoreCase(statement.name())) {
+                    throw new IllegalArgumentException(
+                            "statement name '" + statement.name()
+                                    + "' collides with a lookup source name");
+                }
+            }
+        }
+        if (bufferInsertCount > 1) {
+            throw new IllegalArgumentException("at most one bufferInsert statement is allowed");
+        }
+        if (outputCount == 0) {
+            throw new IllegalArgumentException("at least one output statement is required");
+        }
     }
 
     public static Query2 of(final String name, final Schema inputSchema, final String sql) {
@@ -160,20 +290,23 @@ public class Query2 implements Serializable {
     }
 
     public static Query2 of(final Map<String, Schema> inputSchemas, final String sql) {
-        return new Query2(inputSchemas, List.of(), List.of(), sql);
+        return new Query2(inputSchemas, List.of(), List.of(),
+                List.of(Statement.of("", sql, true)), false);
     }
 
     public static Builder builder() {
         return new Builder();
     }
 
-    /** Assembles inputs, lookup sources and the SQL; {@link #build()} plans and validates. */
+    /** Assembles inputs, lookup sources and the statements; {@link #build()} plans and validates. */
     public static class Builder {
 
         private final Map<String, Schema> inputSchemas = new LinkedHashMap<>();
         private final List<LookupSource> sources = new ArrayList<>();
         private final List<UserDefinedFunctions.FunctionSpec> functions = new ArrayList<>();
-        private String sql;
+        private final List<Statement> statements = new ArrayList<>();
+        private String bufferInsertSql;
+        private boolean exclusive;
 
         public Builder withInput(final String name, final Schema schema) {
             this.inputSchemas.put(name, schema);
@@ -219,18 +352,68 @@ public class Query2 implements Serializable {
             return this;
         }
 
+        /** The single-statement form: equivalent to one unnamed output statement. */
         public Builder withSql(final String sql) {
-            this.sql = sql;
+            return withQuery("", sql, true);
+        }
+
+        /** Appends a named statement (see {@link Statement}). */
+        public Builder withQuery(final String name, final String sql, final boolean output) {
+            this.statements.add(Statement.of(name, sql, output));
+            return this;
+        }
+
+        public Builder withQueries(final List<Statement> statements) {
+            this.statements.addAll(statements);
+            return this;
+        }
+
+        /**
+         * A statement whose result rows the host persists into the buffer state
+         * (evaluated first, not an output). See the query module's buffer source.
+         */
+        public Builder withBufferInsert(final String sql) {
+            this.bufferInsertSql = sql;
+            return this;
+        }
+
+        /**
+         * Stop evaluating after the first output statement that produced rows
+         * (non-output statements always run).
+         */
+        public Builder withExclusive(final boolean exclusive) {
+            this.exclusive = exclusive;
             return this;
         }
 
         public Query2 build() {
-            return new Query2(inputSchemas, sources, functions, sql);
+            final List<Statement> all = new ArrayList<>();
+            if (bufferInsertSql != null) {
+                all.add(new Statement("", bufferInsertSql, false, true));
+            }
+            all.addAll(statements);
+            return new Query2(inputSchemas, sources, functions, all, exclusive);
         }
     }
 
+    /** The single output statement's schema (sessions with one output only). */
     public Schema getOutputSchema() {
-        return outputSchema;
+        if (outputSchemas.size() != 1) {
+            throw new IllegalStateException(
+                    "the session has " + outputSchemas.size()
+                            + " output statements; use getOutputSchemas()");
+        }
+        return outputSchemas.values().iterator().next();
+    }
+
+    /** Output statement name → result schema, in statement order. */
+    public Map<String, Schema> getOutputSchemas() {
+        return outputSchemas;
+    }
+
+    /** The bufferInsert statement's result schema, or null when none is defined. */
+    public Schema getBufferInsertSchema() {
+        return bufferInsertSchema;
     }
 
     /**
@@ -242,46 +425,105 @@ public class Query2 implements Serializable {
         return sources;
     }
 
-    /** Plans the SQL (with sources set up) and reads the result schema, without executing. */
-    private Schema deriveOutputSchema() {
+    /** A visitor over the sequentially planned statements. */
+    private interface StatementVisitor {
+        void visit(int index, Statement statement, Planned planned, SchemaPlus rootSchema,
+                IntermediateTable intermediate) throws Exception;
+    }
+
+    /**
+     * Plans the statements in order against a root schema that grows with each
+     * statement's result table, so later statements can reference earlier ones.
+     */
+    private void forEachStatement(
+            final Map<String, List<MElement>> buffers,
+            final List<LookupLateralRuntime> runtimes,
+            final StatementVisitor visitor) throws Exception {
+
+        final Map<String, Table> intermediates = new LinkedHashMap<>();
+        for (int i = 0; i < statements.size(); i++) {
+            final Statement statement = statements.get(i);
+            final SchemaPlus rootSchema = createRootSchema(buffers, intermediates);
+            final Planned planned;
+            try {
+                planned = plan(rootSchema, runtimes, statement.sql());
+            } catch (final Exception e) {
+                throw new IllegalArgumentException(
+                        "failed to plan query" + describeStatement(statement)
+                                + ": " + statement.sql(), e);
+            }
+            final IntermediateTable intermediate =
+                    IntermediateTable.of(planned.relNode().getRowType(), planned.fieldNames());
+            visitor.visit(i, statement, planned, rootSchema, intermediate);
+            if (!statement.name().isEmpty()) {
+                intermediates.put(statement.name(), intermediate);
+            }
+        }
+    }
+
+    private static String describeStatement(final Statement statement) {
+        if (statement.bufferInsert()) {
+            return " (bufferInsert)";
+        }
+        return statement.name().isEmpty() ? "" : " '" + statement.name() + "'";
+    }
+
+    /** Plans every statement (with sources set up) and reads the result schemas, without executing. */
+    private Map<Integer, Schema> deriveOutputSchemas() {
         final List<LookupLateralRuntime> runtimes = new ArrayList<>();
+        final Map<Integer, Schema> schemas = new LinkedHashMap<>();
         try {
             setupSources();
             final Map<String, List<MElement>> buffers = createBuffers();
-            try (final PreparedStatement s = prepare(createRootSchema(buffers), runtimes)) {
-                return CalciteSchemaUtil.convertSchema(s.getMetaData());
-            }
+            forEachStatement(buffers, runtimes, (index, statement, planned, rootSchema, intermediate) -> {
+                if (statement.output() || statement.bufferInsert()) {
+                    try (final PreparedStatement s = prepare(planned)) {
+                        schemas.put(index, CalciteSchemaUtil.convertSchema(s.getMetaData()));
+                    }
+                }
+            });
+            return schemas;
         } catch (final RuntimeException e) {
             throw e;
         } catch (final Throwable e) {
-            throw new IllegalArgumentException("failed to plan sql: " + sql, e);
+            throw new IllegalArgumentException("failed to plan sql", e);
         } finally {
             closeLateralRuntimes(runtimes);
             closeSources();
         }
     }
 
-    /** Plans and compiles the query once per worker. Call from {@code DoFn @Setup}. */
+    /** Plans and compiles the statements once per worker. Call from {@code DoFn @Setup}. */
     public void setup() {
         setupSources();
         this.elements = createBuffers();
         this.lateralRuntimes = new ArrayList<>();
+        final List<CompiledStatement> compiledStatements = new ArrayList<>();
         try {
-            final SchemaPlus rootSchema = createRootSchema(this.elements);
-            final Planned planned = plan(rootSchema, this.lateralRuntimes);
-            this.bindableQuery = BindableQuery.compile(planned.relNode(), rootSchema);
-            this.outputFieldNames = planned.fieldNames();
+            forEachStatement(this.elements, this.lateralRuntimes,
+                    (index, statement, planned, rootSchema, intermediate) ->
+                            compiledStatements.add(new CompiledStatement(
+                                    statement,
+                                    BindableQuery.compile(planned.relNode(), rootSchema),
+                                    planned.fieldNames(),
+                                    intermediate)));
+            this.compiled = compiledStatements;
+        } catch (final RuntimeException e) {
+            closeLateralRuntimes(this.lateralRuntimes);
+            this.lateralRuntimes = null;
+            closeSources();
+            throw e;
         } catch (final Throwable e) {
             closeLateralRuntimes(this.lateralRuntimes);
             this.lateralRuntimes = null;
             closeSources();
-            throw new IllegalArgumentException("failed to prepare query: " + sql, e);
+            throw new IllegalArgumentException("failed to prepare query", e);
         }
     }
 
-    /** Releases the compiled plan, lateral evaluators and source clients. Call from {@code DoFn @Teardown}. */
+    /** Releases the compiled plans, lateral evaluators and source clients. Call from {@code DoFn @Teardown}. */
     public void teardown() {
-        this.bindableQuery = null;
+        this.compiled = null;
         if (this.lateralRuntimes != null) {
             closeLateralRuntimes(this.lateralRuntimes);
             this.lateralRuntimes = null;
@@ -317,12 +559,40 @@ public class Query2 implements Serializable {
     }
 
     /**
-     * Evaluates the prepared statement against the given per-table inputs.
-     * Table names must match the schema names given at construction; the outputs
-     * are {@code DataType.ELEMENT} rows carrying the given timestamp as event time.
+     * Evaluates the session and returns the <em>first</em> output statement's
+     * rows — the single-statement form's result.
      */
     public List<MElement> execute(final Map<String, List<MElement>> inputs, final Instant timestamp) {
-        if (bindableQuery == null) {
+        final SessionResult result = executeAll(inputs, timestamp);
+        if (result.outputs().isEmpty()) {
+            return List.of();
+        }
+        return result.outputs().values().iterator().next();
+    }
+
+    /** Evaluates every statement of the session. */
+    public SessionResult executeAll(final Map<String, List<MElement>> inputs, final Instant timestamp) {
+        return executeAll(inputs, timestamp, true, true);
+    }
+
+    /**
+     * Evaluates the session against the given per-table inputs. Statements run
+     * in order; every statement's rows are registered under its name for later
+     * statements; {@code output} statements contribute to the result map (in
+     * statement order). With {@code exclusive}, evaluation stops after the
+     * first output statement that produced rows.
+     *
+     * @param evaluateBufferInsert whether to evaluate the bufferInsert statement
+     * @param evaluateStatements   whether to evaluate the regular statements
+     *        (false = persistence-only evaluation for non-trigger elements)
+     */
+    public SessionResult executeAll(
+            final Map<String, List<MElement>> inputs,
+            final Instant timestamp,
+            final boolean evaluateBufferInsert,
+            final boolean evaluateStatements) {
+
+        if (compiled == null) {
             throw new IllegalStateException("query is not set up (call setup() first)");
         }
         for (final Map.Entry<String, List<MElement>> entry : inputs.entrySet()) {
@@ -332,14 +602,42 @@ public class Query2 implements Serializable {
                 buffer.addAll(entry.getValue());
             }
         }
-        try {
-            final List<Object[]> rows = bindableQuery.executeInternalRows();
-            final List<Map<String, Object>> valuesList = CalciteValues
-                    .convertInternalRows(outputFieldNames, bindableQuery.rowType(), rows);
-            return MElement.ofList(valuesList, timestamp);
-        } catch (final RuntimeException e) {
-            throw new IllegalStateException("failed to execute query: " + sql, e);
+        final Map<String, List<MElement>> outputs = new LinkedHashMap<>();
+        List<MElement> bufferRows = null;
+        for (final CompiledStatement statement : compiled) {
+            if (statement.statement.bufferInsert()) {
+                if (!evaluateBufferInsert) {
+                    continue;
+                }
+            } else if (!evaluateStatements) {
+                continue;
+            }
+            try {
+                final List<Object[]> rows = statement.bindableQuery.executeInternalRows();
+                statement.intermediate.setRows(rows);
+                if (statement.statement.bufferInsert()) {
+                    bufferRows = toElements(statement, rows, timestamp);
+                } else if (statement.statement.output()) {
+                    final List<MElement> results = toElements(statement, rows, timestamp);
+                    outputs.put(statement.statement.name(), results);
+                    if (exclusive && !results.isEmpty()) {
+                        break;
+                    }
+                }
+            } catch (final RuntimeException e) {
+                throw new IllegalStateException(
+                        "failed to execute query" + describeStatement(statement.statement)
+                                + ": " + statement.statement.sql(), e);
+            }
         }
+        return new SessionResult(outputs, bufferRows);
+    }
+
+    private static List<MElement> toElements(final CompiledStatement statement,
+            final List<Object[]> rows, final Instant timestamp) {
+        final List<Map<String, Object>> valuesList = CalciteValues.convertInternalRows(
+                statement.fieldNames, statement.bindableQuery.rowType(), rows);
+        return MElement.ofList(valuesList, timestamp);
     }
 
     private void setupSources() {
@@ -366,10 +664,12 @@ public class Query2 implements Serializable {
         return buffers;
     }
 
-    private SchemaPlus createRootSchema(final Map<String, List<MElement>> buffers) {
+    private SchemaPlus createRootSchema(
+            final Map<String, List<MElement>> buffers,
+            final Map<String, Table> intermediates) {
         final SchemaPlus rootSchema = Frameworks.createRootSchema(true);
         final SchemaPlus defaultSchema =
-                rootSchema.add("DefaultSchema", new InputSchema(inputSchemas, buffers));
+                rootSchema.add("DefaultSchema", new InputSchema(inputSchemas, buffers, intermediates));
         for (final Map.Entry<String, List<org.apache.beam.vendor.calcite.v1_40_0.org.apache.calcite.schema.Function>> entry
                 : UserDefinedFunctions.build(functions).entrySet()) {
             for (final var function : entry.getValue()) {
@@ -390,16 +690,14 @@ public class Query2 implements Serializable {
     }
 
     /**
-     * Prepares the SQL as a JDBC statement — used only at construction time to
-     * derive the output schema from the statement metadata (workers execute
-     * through {@link BindableQuery} instead). The lookup rules are installed
-     * both on the rel cluster's planner and via the thread-local
+     * Prepares a planned statement as a JDBC statement — used only at
+     * construction time to derive the output schema from the statement metadata
+     * (workers execute through {@link BindableQuery} instead). The lookup rules
+     * are installed both on the rel cluster's planner and via the thread-local
      * {@code Hook.PLANNER} (covering whichever planner the JDBC runner uses),
      * keeping concurrent instances isolated.
      */
-    private PreparedStatement prepare(final SchemaPlus rootSchema,
-            final List<LookupLateralRuntime> runtimes) throws Exception {
-        final Planned planned = plan(rootSchema, runtimes);
+    private PreparedStatement prepare(final Planned planned) throws Exception {
         if (planned.rules().isEmpty()) {
             return RelRunners.run(planned.relNode());
         }
@@ -414,8 +712,8 @@ public class Query2 implements Serializable {
     }
 
     /**
-     * Parses, validates and converts the SQL, claims lookup LATERAL blocks and
-     * installs the lookup rules on the cluster's planner.
+     * Parses, validates and converts one statement, claims lookup LATERAL
+     * blocks and installs the lookup rules on the cluster's planner.
      *
      * <p>The SQL→rel front-end is hand-assembled (rather than the Frameworks
      * {@code Planner}) so that <b>no decorrelation runs before our rules</b>:
@@ -428,7 +726,8 @@ public class Query2 implements Serializable {
      * standard program, as before.
      */
     private Planned plan(final SchemaPlus rootSchema,
-            final List<LookupLateralRuntime> runtimes) throws Exception {
+            final List<LookupLateralRuntime> runtimes,
+            final String sql) throws Exception {
 
         final RelDataTypeFactory typeFactory = new JavaTypeFactoryImpl(RelDataTypeSystem.DEFAULT);
 
@@ -522,20 +821,22 @@ public class Query2 implements Serializable {
         };
     }
 
-    /** Calcite schema holding the mutable in-memory input tables. */
+    /** Calcite schema holding the mutable in-memory input and intermediate tables. */
     private static class InputSchema extends AbstractSchema {
 
         private final Map<String, Table> tableMap;
 
         private InputSchema(
                 final Map<String, Schema> schemas,
-                final Map<String, List<MElement>> buffers) {
+                final Map<String, List<MElement>> buffers,
+                final Map<String, Table> intermediates) {
 
             this.tableMap = new LinkedHashMap<>();
             for (final Map.Entry<String, Schema> entry : schemas.entrySet()) {
                 tableMap.put(entry.getKey(),
                         new InputTable(entry.getValue(), buffers.get(entry.getKey())));
             }
+            tableMap.putAll(intermediates);
         }
 
         @Override
@@ -587,6 +888,63 @@ public class Query2 implements Serializable {
         public Enumerable<Object[]> scan(final DataContext root) {
             return Linq4j.asEnumerable(elements)
                     .select(element -> CalciteValues.toInternalRow(schema, element));
+        }
+    }
+
+    /**
+     * A mutable in-memory table over one statement's current result rows
+     * (raw Calcite-internal {@code Object[]}, no conversion), letting later
+     * statements of the session reference earlier results by name. The row
+     * type is captured from the producing statement's plan (with the SQL
+     * output aliases applied) and re-materialized per planning type factory.
+     */
+    private static final class IntermediateTable extends AbstractTable implements ScannableTable {
+
+        private static final double SMALL_ROW_COUNT = 100d;
+
+        private final RelDataType sourceRowType;
+        private final List<Object[]> rows = new ArrayList<>();
+
+        private IntermediateTable(final RelDataType sourceRowType) {
+            this.sourceRowType = sourceRowType;
+        }
+
+        private static IntermediateTable of(final RelDataType rowType, final List<String> fieldNames) {
+            final List<RelDataTypeField> fields = new ArrayList<>(rowType.getFieldCount());
+            for (int i = 0; i < rowType.getFieldCount(); i++) {
+                final String name = i < fieldNames.size()
+                        ? fieldNames.get(i) : rowType.getFieldList().get(i).getName();
+                fields.add(new RelDataTypeFieldImpl(name, i,
+                        rowType.getFieldList().get(i).getType()));
+            }
+            return new IntermediateTable(new RelRecordType(StructKind.PEEK_FIELDS, fields, true));
+        }
+
+        private void setRows(final List<Object[]> newRows) {
+            rows.clear();
+            rows.addAll(newRows);
+        }
+
+        @Override
+        public RelDataType getRowType(final RelDataTypeFactory typeFactory) {
+            // The captured type belongs to the producing statement's type
+            // factory; re-materialize it in the requesting one.
+            return typeFactory.copyType(sourceRowType);
+        }
+
+        @Override
+        public Statistic getStatistic() {
+            return new Statistic() {
+                @Override
+                public Double getRowCount() {
+                    return SMALL_ROW_COUNT;
+                }
+            };
+        }
+
+        @Override
+        public Enumerable<Object[]> scan(final DataContext root) {
+            return Linq4j.asEnumerable(rows);
         }
     }
 }

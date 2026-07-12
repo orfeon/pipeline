@@ -63,6 +63,7 @@ public final class LookupSourceConfig {
         private Long stateTtlSeconds;
         private JsonElement bufferFilter;
         private JsonElement triggerFilter;
+        private String insertSql;
 
         private CacheParameters cache;
 
@@ -160,6 +161,13 @@ public final class LookupSourceConfig {
                     if(stateTtlSeconds != null && stateTtlSeconds <= 0) {
                         throw new IllegalModuleException(
                                 "parameters.sources[" + index + "].stateTtlSeconds must be positive");
+                    }
+                    if(insertSql != null && tables.get(0).fields != null
+                            && !tables.get(0).fields.isJsonNull()) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (buffer) insertSql and"
+                                        + " tables[0].fields are exclusive (the insert query's"
+                                        + " select list defines the buffered columns)");
                     }
                 }
                 default -> throw new IllegalModuleException(
@@ -299,7 +307,8 @@ public final class LookupSourceConfig {
             boolean includeCurrent,
             Long stateTtlSeconds,
             String bufferFilterJson,
-            String triggerFilterJson) implements Serializable {
+            String triggerFilterJson,
+            String insertSql) implements Serializable {
     }
 
     /**
@@ -333,7 +342,8 @@ public final class LookupSourceConfig {
                     source.bufferFilter == null || source.bufferFilter.isJsonNull()
                             ? null : source.bufferFilter.toString(),
                     source.triggerFilter == null || source.triggerFilter.isJsonNull()
-                            ? null : source.triggerFilter.toString());
+                            ? null : source.triggerFilter.toString(),
+                    source.insertSql);
         }
         return config;
     }
@@ -358,6 +368,14 @@ public final class LookupSourceConfig {
         return names;
     }
 
+    /** The sources without the buffer entry (e.g. for planning the buffer's insert query). */
+    public static List<SourceParameters> nonBufferSources(final List<SourceParameters> sources) {
+        if(sources == null) {
+            return List.of();
+        }
+        return sources.stream().filter(s -> !"buffer".equals(s.type)).toList();
+    }
+
     public static List<LookupSource> createSources(final List<SourceParameters> sources) {
         return createSources(sources, null);
     }
@@ -371,20 +389,22 @@ public final class LookupSourceConfig {
     /**
      * @param sideInputSchemas side input name → schema, for {@code sideinput}
      *        sources ({@code null} when the module does not support them)
-     * @param bufferInputSchema the module's (union) input schema, for {@code buffer}
-     *        sources ({@code null} when the module does not support them)
+     * @param bufferRowSchema the schema of the rows the {@code buffer} source
+     *        holds — the module's (union) input schema, or the insert query's
+     *        result schema when {@code insertSql} is set ({@code null} when the
+     *        module does not support buffer sources)
      */
     public static List<LookupSource> createSources(
             final List<SourceParameters> sources,
             final Map<String, Schema> sideInputSchemas,
-            final Schema bufferInputSchema) {
+            final Schema bufferRowSchema) {
 
         final List<LookupSource> lookupSources = new ArrayList<>();
         if(sources == null) {
             return lookupSources;
         }
         for(final SourceParameters source : sources) {
-            lookupSources.add(createSource(source, sideInputSchemas, bufferInputSchema));
+            lookupSources.add(createSource(source, sideInputSchemas, bufferRowSchema));
         }
         return lookupSources;
     }
@@ -392,9 +412,9 @@ public final class LookupSourceConfig {
     private static LookupSource createSource(
             final SourceParameters source,
             final Map<String, Schema> sideInputSchemas,
-            final Schema bufferInputSchema) {
+            final Schema bufferRowSchema) {
 
-        final LookupSource lookupSource = createSourceInternal(source, sideInputSchemas, bufferInputSchema);
+        final LookupSource lookupSource = createSourceInternal(source, sideInputSchemas, bufferRowSchema);
         if(source.cache != null && source.cache.isEnabled()) {
             lookupSource.setCacheSpec(source.cache.toSpec());
         }
@@ -404,7 +424,7 @@ public final class LookupSourceConfig {
     private static LookupSource createSourceInternal(
             final SourceParameters source,
             final Map<String, Schema> sideInputSchemas,
-            final Schema bufferInputSchema) {
+            final Schema bufferRowSchema) {
         return switch (source.type) {
             case "jdbc" -> {
                 final JdbcLookupSource.Builder builder = JdbcLookupSource.builder()
@@ -566,7 +586,7 @@ public final class LookupSourceConfig {
                 yield builder.build();
             }
             case "buffer" -> {
-                if(bufferInputSchema == null) {
+                if(bufferRowSchema == null) {
                     throw new IllegalModuleException(
                             "buffer lookup sources are only supported by the query transform module");
                 }
@@ -574,7 +594,7 @@ public final class LookupSourceConfig {
                         .withName(source.name)
                         .withTable(source.tables.get(0).name)
                         .withGroupFields(source.groupFields)
-                        .withInputSchema(bufferInputSchema)
+                        .withRowSchema(bufferRowSchema)
                         .build();
             }
             case "sideinput" -> {

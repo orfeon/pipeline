@@ -61,7 +61,7 @@ public class BufferLookupSource extends LookupSource {
         private String name;
         private String table;
         private List<String> groupFields;
-        private Schema inputSchema;
+        private Schema rowSchema;
 
         public Builder withName(String name) {
             this.name = name;
@@ -80,9 +80,13 @@ public class BufferLookupSource extends LookupSource {
             return this;
         }
 
-        /** The (union) schema of the transform's input elements. */
-        public Builder withInputSchema(Schema inputSchema) {
-            this.inputSchema = inputSchema;
+        /**
+         * The schema of the buffered rows (without the synthetic columns):
+         * the transform's (union) input schema, or the insert query's result
+         * schema when the buffer rows are SQL-defined.
+         */
+        public Builder withRowSchema(Schema rowSchema) {
+            this.rowSchema = rowSchema;
             return this;
         }
 
@@ -94,29 +98,29 @@ public class BufferLookupSource extends LookupSource {
                 throw new IllegalArgumentException(
                         "buffer source '" + name + "' requires groupFields");
             }
-            if (inputSchema == null) {
+            if (rowSchema == null) {
                 throw new IllegalArgumentException(
-                        "buffer source '" + name + "' requires the input schema");
+                        "buffer source '" + name + "' requires the row schema");
             }
-            final List<String> inputFieldNames = inputSchema.getFields().stream()
+            final List<String> rowFieldNames = rowSchema.getFields().stream()
                     .map(Schema.Field::getName).toList();
             for (final String groupField : groupFields) {
-                if (!inputFieldNames.contains(groupField)) {
+                if (!rowFieldNames.contains(groupField)) {
                     throw new IllegalArgumentException(
                             "buffer source '" + name + "' groupField '" + groupField
-                                    + "' is not a field of the input schema: " + inputFieldNames);
+                                    + "' is not a field of the buffered row schema: " + rowFieldNames);
                 }
             }
             for (final String reserved : List.of(TIMESTAMP_FIELD, INPUT_FIELD)) {
-                if (inputFieldNames.contains(reserved)) {
+                if (rowFieldNames.contains(reserved)) {
                     throw new IllegalArgumentException(
-                            "buffer source '" + name + "' cannot be used with an input schema"
-                                    + " that already has a field named '" + reserved
+                            "buffer source '" + name + "' cannot buffer rows whose schema"
+                                    + " already has a field named '" + reserved
                                     + "' (reserved for the synthetic buffer column);"
-                                    + " rename the input field first");
+                                    + " rename the field first");
                 }
             }
-            final List<Schema.Field> fields = new ArrayList<>(inputSchema.getFields());
+            final List<Schema.Field> fields = new ArrayList<>(rowSchema.getFields());
             fields.add(Schema.Field.of(TIMESTAMP_FIELD, Schema.FieldType.TIMESTAMP));
             fields.add(Schema.Field.of(INPUT_FIELD, Schema.FieldType.STRING.withNullable(true)));
             return new BufferLookupSource(name, table, groupFields, Schema.of(fields));

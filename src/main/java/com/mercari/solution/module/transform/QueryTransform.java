@@ -45,10 +45,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -78,6 +80,8 @@ public class QueryTransform extends Transform {
     private static class Parameters implements Serializable {
 
         private String sql;
+        private List<QueryParameters> queries;
+        private Boolean exclusive;
         private String table;
         private com.google.gson.JsonElement filter;
         private List<LookupSourceConfig.SourceParameters> sources;
@@ -86,15 +90,64 @@ public class QueryTransform extends Transform {
             return filter == null || filter.isJsonNull() ? null : filter.toString();
         }
 
+        private boolean isExclusive() {
+            return Boolean.TRUE.equals(exclusive);
+        }
+
+        /** The session statements: the single {@code sql} or the {@code queries} list. */
+        private List<Query2.Statement> statements() {
+            if(queries == null) {
+                return List.of(Query2.Statement.of("", sql, true));
+            }
+            final List<Query2.Statement> statements = new ArrayList<>();
+            for(final QueryParameters query : queries) {
+                statements.add(Query2.Statement.of(
+                        query.name, query.sql, !Boolean.FALSE.equals(query.output)));
+            }
+            return statements;
+        }
+
         private void validate() {
-            if(this.sql == null) {
-                throw new IllegalModuleException("parameters.sql must not be null");
+            if(this.sql == null && (this.queries == null || this.queries.isEmpty())) {
+                throw new IllegalModuleException("parameters requires sql or queries");
+            }
+            if(this.sql != null && this.queries != null) {
+                throw new IllegalModuleException("parameters.sql and parameters.queries are exclusive; specify one");
+            }
+            if(this.queries != null) {
+                final Set<String> names = new HashSet<>();
+                boolean hasOutput = false;
+                for(int i = 0; i < queries.size(); i++) {
+                    final QueryParameters query = queries.get(i);
+                    if(query.name == null || query.name.isEmpty()) {
+                        throw new IllegalModuleException("parameters.queries[" + i + "].name must not be null");
+                    }
+                    if(query.sql == null) {
+                        throw new IllegalModuleException("parameters.queries[" + i + "].sql must not be null");
+                    }
+                    if(!names.add(query.name.toUpperCase())) {
+                        throw new IllegalModuleException(
+                                "parameters.queries[" + i + "].name is duplicated: " + query.name);
+                    }
+                    if(!Boolean.FALSE.equals(query.output)) {
+                        hasOutput = true;
+                    }
+                }
+                if(!hasOutput) {
+                    throw new IllegalModuleException(
+                            "parameters.queries requires at least one query with output: true");
+                }
             }
             LookupSourceConfig.validate(this.sources);
         }
 
         private void setDefaults(Map<String, String> templateArgs) {
             sql = loadQuery(sql, templateArgs);
+            if(queries != null) {
+                for(final QueryParameters query : queries) {
+                    query.sql = loadQuery(query.sql, templateArgs);
+                }
+            }
             if(table == null) {
                 table = "INPUT";
             }
@@ -103,7 +156,7 @@ public class QueryTransform extends Transform {
             }
         }
 
-        private String loadQuery(String sql, Map<String, String> templateArgs) {
+        private static String loadQuery(String sql, Map<String, String> templateArgs) {
             if(sql == null) {
                 return null;
             }
@@ -145,6 +198,14 @@ public class QueryTransform extends Transform {
         }
     }
 
+    /** One session statement of the {@code queries} form. */
+    private static class QueryParameters implements Serializable {
+
+        private String name;
+        private String sql;
+        private Boolean output;
+    }
+
     @Override
     public MCollectionTuple expand(
             final MCollectionTuple inputs,
@@ -179,24 +240,69 @@ public class QueryTransform extends Transform {
                     collection.apply("AsSideInput_" + sideInputName, View.asIterable()));
         }
 
-        final Query2 query;
-        try {
-            query = Query2.builder()
-                    .withInput(parameters.table, inputSchema)
-                    .withSources(LookupSourceConfig.createSources(parameters.sources, sideInputSchemas,
-                            bufferConfig == null ? null : inputSchema))
-                    .withSql(parameters.sql)
-                    .build();
-        } catch (final Throwable e) {
-            throw new IllegalModuleException(
-                    "query transform module[" + getName() + "] failed to plan sql: " + parameters.sql + ", cause: " + e.getMessage());
+        // The schema of the buffered rows: with insertSql the buffer holds the
+        // insert query's result rows — derive its schema first, planned WITHOUT
+        // the buffer source (so an insert query referencing the buffer itself
+        // fails naturally at construction).
+        final String bufferInsertSql = bufferConfig == null ? null
+                : Parameters.loadQuery(bufferConfig.insertSql(), getTemplateArgs());
+        Schema bufferRowSchema = null;
+        if(bufferConfig != null) {
+            if(bufferInsertSql != null) {
+                try {
+                    bufferRowSchema = Query2.builder()
+                            .withInput(parameters.table, inputSchema)
+                            .withSources(LookupSourceConfig.createSources(
+                                    LookupSourceConfig.nonBufferSources(parameters.sources),
+                                    sideInputSchemas, null))
+                            .withSql(bufferInsertSql)
+                            .build()
+                            .getOutputSchema();
+                } catch (final Throwable e) {
+                    throw new IllegalModuleException(
+                            "query transform module[" + getName()
+                                    + "] failed to plan buffer insertSql, cause: " + e.getMessage());
+                }
+            } else {
+                bufferRowSchema = inputSchema;
+            }
         }
 
-        final Schema outputSchema = query.getOutputSchema();
-        validateOutputSchema(outputSchema);
+        final Query2 query;
+        try {
+            final Query2.Builder builder = Query2.builder()
+                    .withInput(parameters.table, inputSchema)
+                    .withSources(LookupSourceConfig.createSources(parameters.sources, sideInputSchemas,
+                            bufferRowSchema))
+                    .withQueries(parameters.statements())
+                    .withExclusive(parameters.isExclusive());
+            if(bufferInsertSql != null) {
+                builder.withBufferInsert(bufferInsertSql);
+            }
+            query = builder.build();
+        } catch (final Throwable e) {
+            throw new IllegalModuleException(
+                    "query transform module[" + getName() + "] failed to plan sql, cause: " + e.getMessage());
+        }
 
-        final TupleTag<MElement> outputTag = new TupleTag<>() {};
+        final Map<String, Schema> outputSchemas = query.getOutputSchemas();
+        // One tag per output statement (the legacy single-sql form uses the
+        // default unnamed tag); the first output statement is the main output.
+        final Map<String, TupleTag<MElement>> outputTags = new LinkedHashMap<>();
+        for(final Map.Entry<String, Schema> entry : outputSchemas.entrySet()) {
+            validateOutputSchema(entry.getValue());
+            outputTags.put(entry.getKey(),
+                    new TupleTag<>(entry.getKey().isEmpty() ? "output" : entry.getKey()));
+        }
         final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
+        final List<TupleTag<?>> additionalTags = new ArrayList<>();
+        final TupleTag<MElement> mainTag = outputTags.values().iterator().next();
+        for(final TupleTag<MElement> tag : outputTags.values()) {
+            if(tag != mainTag) {
+                additionalTags.add(tag);
+            }
+        }
+        additionalTags.add(failureTag);
 
         final PCollectionTuple outputs;
         if(bufferConfig == null) {
@@ -207,18 +313,24 @@ public class QueryTransform extends Transform {
             outputs = input
                     .apply("Query", ParDo
                             .of(new QueryDoFn(query, parameters.table, parameters.filterJson(), inputSchema,
-                                    sideInputViews, getLoggings(), getFailFast(), failureTag))
+                                    outputTags, sideInputViews, getLoggings(), getFailFast(), failureTag))
                             .withSideInputs(sideInputViews.values())
-                            .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                            .withOutputTags(mainTag, TupleTagList.of(additionalTags)));
         } else {
             outputs = expandWithBuffer(inputs, inputSchema, bufferConfig, query, parameters,
-                    sideInputViews, outputTag, failureTag);
+                    sideInputViews, outputTags, mainTag, additionalTags, failureTag);
         }
 
         errorHandler.addError(outputs.get(failureTag));
 
-        return MCollectionTuple
-                .of(outputs.get(outputTag), outputSchema);
+        MCollectionTuple tuple = null;
+        for(final Map.Entry<String, Schema> entry : outputSchemas.entrySet()) {
+            final PCollection<MElement> collection = outputs.get(outputTags.get(entry.getKey()));
+            tuple = tuple == null
+                    ? MCollectionTuple.of(entry.getKey(), collection, entry.getValue())
+                    : tuple.and(entry.getKey(), collection, entry.getValue());
+        }
+        return tuple;
     }
 
     /**
@@ -236,7 +348,9 @@ public class QueryTransform extends Transform {
             final Query2 query,
             final Parameters parameters,
             final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews,
-            final TupleTag<MElement> outputTag,
+            final Map<String, TupleTag<MElement>> outputTags,
+            final TupleTag<MElement> mainTag,
+            final List<TupleTag<?>> additionalTags,
             final TupleTag<BadRecord> failureTag) {
 
         final PCollection<KV<String, MElement>> keyed = inputs
@@ -256,12 +370,22 @@ public class QueryTransform extends Transform {
                 .findAny()
                 .orElseThrow(() -> new IllegalModuleException(
                         "query transform module[" + getName() + "] buffer source was not created"));
-        final List<String> storedFields = resolveStoredFields(bufferConfig, bufferSource, inputSchema);
 
+        // With insertSql the buffered rows are the insert query's results: its
+        // select list defines the stored columns (no narrowing to derive).
+        final boolean insertMode = bufferConfig.insertSql() != null;
+        final List<String> storedFields;
         final List<Schema.Field> stateFields = new ArrayList<>();
-        for(final Schema.Field field : inputSchema.getFields()) {
-            if(storedFields.contains(field.getName())) {
-                stateFields.add(field);
+        if(insertMode) {
+            final Schema insertSchema = query.getBufferInsertSchema();
+            storedFields = insertSchema.getFields().stream().map(Schema.Field::getName).toList();
+            stateFields.addAll(insertSchema.getFields());
+        } else {
+            storedFields = resolveStoredFields(bufferConfig, bufferSource, inputSchema);
+            for(final Schema.Field field : inputSchema.getFields()) {
+                if(storedFields.contains(field.getName())) {
+                    stateFields.add(field);
+                }
             }
         }
         stateFields.add(Schema.Field.of(BufferLookupSource.TIMESTAMP_FIELD, Schema.FieldType.TIMESTAMP));
@@ -271,7 +395,7 @@ public class QueryTransform extends Transform {
         final BufferQueryProcessor processor = new BufferQueryProcessor(
                 query, parameters.table, parameters.filterJson(), bufferConfig, storedFields,
                 new ArrayList<>(inputs.getAll().keySet()), inputSchema,
-                sideInputViews, getLoggings(), getFailFast(), failureTag);
+                outputTags, sideInputViews, getLoggings(), getFailFast(), failureTag);
 
         final boolean bounded = PCollection.IsBounded.BOUNDED.equals(keyed.isBounded());
         final DoFn<KV<String, MElement>, MElement> doFn = bounded
@@ -280,7 +404,7 @@ public class QueryTransform extends Transform {
         return keyed
                 .apply("Query", ParDo.of(doFn)
                         .withSideInputs(sideInputViews.values())
-                        .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                        .withOutputTags(mainTag, TupleTagList.of(additionalTags)));
     }
 
     /**
@@ -341,12 +465,28 @@ public class QueryTransform extends Transform {
         }
     }
 
+    /** Emits every output statement's rows to its tag (after the whole session succeeded). */
+    private static void emitOutputs(
+            final DoFn<?, MElement>.ProcessContext c,
+            final Map<String, TupleTag<MElement>> outputTags,
+            final Map<String, Logging> logs,
+            final Query2.SessionResult result) {
+        for(final Map.Entry<String, List<MElement>> entry : result.outputs().entrySet()) {
+            final TupleTag<MElement> tag = outputTags.get(entry.getKey());
+            for(final MElement output : entry.getValue()) {
+                Logging.log(LOG, logs, "output", output);
+                c.output(tag, output);
+            }
+        }
+    }
+
     private static class QueryDoFn extends DoFn<MElement, MElement> {
 
         private final Query2 query;
         private final String table;
         private final String filterJson;
         private final Schema inputSchema;
+        private final Map<String, TupleTag<MElement>> outputTags;
         private final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews;
         private final Map<String, Logging> logs;
         private final boolean failFast;
@@ -359,6 +499,7 @@ public class QueryTransform extends Transform {
                 final String table,
                 final String filterJson,
                 final Schema inputSchema,
+                final Map<String, TupleTag<MElement>> outputTags,
                 final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews,
                 final List<Logging> logs,
                 final boolean failFast,
@@ -368,6 +509,7 @@ public class QueryTransform extends Transform {
             this.table = table;
             this.filterJson = filterJson;
             this.inputSchema = inputSchema;
+            this.outputTags = outputTags;
             this.sideInputViews = sideInputViews;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
@@ -410,11 +552,9 @@ public class QueryTransform extends Transform {
                     }
                 }
                 Logging.log(LOG, logs, "input", input);
-                final List<MElement> results = query.execute(Map.of(table, List.of(input)), c.timestamp());
-                for(final MElement output : results) {
-                    Logging.log(LOG, logs, "output", output);
-                    c.output(output);
-                }
+                final Query2.SessionResult result =
+                        query.executeAll(Map.of(table, List.of(input)), c.timestamp());
+                emitOutputs(c, outputTags, logs, result);
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed to execute query", input, e, failFast);
                 c.output(failuresTag, badRecord);
@@ -457,6 +597,8 @@ public class QueryTransform extends Transform {
         private final Long ttlMillis;
         private final String bufferFilterJson;
         private final String triggerFilterJson;
+        private final boolean insertMode;
+        private final Map<String, TupleTag<MElement>> outputTags;
         private final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews;
         private final Map<String, Logging> logs;
         private final boolean failFast;
@@ -475,6 +617,7 @@ public class QueryTransform extends Transform {
                 final List<String> storedFields,
                 final List<String> inputNames,
                 final Schema inputSchema,
+                final Map<String, TupleTag<MElement>> outputTags,
                 final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews,
                 final List<Logging> logs,
                 final boolean failFast,
@@ -483,6 +626,7 @@ public class QueryTransform extends Transform {
             this.query = query;
             this.table = table;
             this.filterJson = filterJson;
+            this.outputTags = outputTags;
             this.groupFields = bufferConfig.groupFields();
             this.storedFields = storedFields;
             this.inputNames = inputNames;
@@ -495,6 +639,7 @@ public class QueryTransform extends Transform {
                     ? null : bufferConfig.stateTtlSeconds() * 1000L;
             this.bufferFilterJson = bufferConfig.bufferFilterJson();
             this.triggerFilterJson = bufferConfig.triggerFilterJson();
+            this.insertMode = bufferConfig.insertSql() != null;
             this.sideInputViews = sideInputViews;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
@@ -569,26 +714,48 @@ public class QueryTransform extends Transform {
 
                 final String inputName = input.getIndex() < inputNames.size()
                         ? inputNames.get(input.getIndex()) : null;
-                final MElement bufferElement = BufferLookupSource
-                        .createBufferElement(input, timestamp, inputName, storedFields);
+
+                // The current element's buffer contribution: with insertSql the
+                // insert query's result rows (0..N, evaluated first in the same
+                // session), otherwise the element itself.
+                List<MElement> currentRows = List.of();
+                if(persist || (trigger && includeCurrent)) {
+                    if(insertMode) {
+                        final Query2.SessionResult insertResult = query.executeAll(
+                                Map.of(table, List.of(input)), timestamp, true, false);
+                        final List<MElement> insertRows = insertResult.bufferRows() == null
+                                ? List.of() : insertResult.bufferRows();
+                        final List<MElement> converted = new ArrayList<>(insertRows.size());
+                        for(final MElement row : insertRows) {
+                            validateGroupKey(row, input);
+                            converted.add(BufferLookupSource
+                                    .createBufferElement(row, timestamp, inputName, storedFields));
+                        }
+                        currentRows = converted;
+                    } else {
+                        currentRows = List.of(BufferLookupSource
+                                .createBufferElement(input, timestamp, inputName, storedFields));
+                    }
+                }
 
                 final List<TimestampedValue<MElement>> buffered =
                         trigger ? readSorted(buffer) : null;
-                if(persist) {
+                if(persist && !currentRows.isEmpty()) {
                     writeAndEvict(buffer, count, maxTsState, ttlTimer,
-                            bufferElement, timestamp, buffered, window);
+                            currentRows, timestamp, buffered, window);
                 }
                 if(trigger) {
                     final List<MElement> visible = visibleRows(buffered, timestamp,
-                            includeCurrent ? bufferElement : null);
-                    bufferSource.setData(visible, bufferElement);
+                            includeCurrent ? currentRows : List.of());
+                    // The key carrier: lookups may only use the current element's
+                    // own group values (built from the input's groupFields).
+                    final MElement keyElement = BufferLookupSource
+                            .createBufferElement(input, timestamp, inputName, groupFields);
+                    bufferSource.setData(visible, keyElement);
                     Logging.log(LOG, logs, "input", input);
-                    final List<MElement> results =
-                            query.execute(Map.of(table, List.of(input)), timestamp);
-                    for(final MElement output : results) {
-                        Logging.log(LOG, logs, "output", output);
-                        c.output(output);
-                    }
+                    final Query2.SessionResult result = query.executeAll(
+                            Map.of(table, List.of(input)), timestamp, false, true);
+                    emitOutputs(c, outputTags, logs, result);
                 }
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed to execute query", input, e, failFast);
@@ -597,8 +764,26 @@ public class QueryTransform extends Transform {
         }
 
         /**
-         * Persists the element and applies retention. Count-based eviction
-         * computes a timestamp boundary from the pre-add buffer contents
+         * The insert query must select the group fields unchanged: state is
+         * partitioned by the input element's key, so a row whose key columns
+         * differ could never be looked up (and would poison the key affinity).
+         */
+        private void validateGroupKey(final MElement row, final MElement input) {
+            for(final String groupField : groupFields) {
+                final Object rowValue = row.getPrimitiveValue(groupField);
+                final Object inputValue = input.getPrimitiveValue(groupField);
+                if(!Objects.equals(rowValue, inputValue)) {
+                    throw new IllegalStateException(
+                            "buffer insertSql row has groupField '" + groupField + "' = " + rowValue
+                                    + " but the input element's key value is " + inputValue
+                                    + "; the insert query must select the groupFields unchanged");
+                }
+            }
+        }
+
+        /**
+         * Persists the element's buffer rows and applies retention. Count-based
+         * eviction computes a timestamp boundary from the pre-add buffer contents
          * (entries at the boundary timestamp survive — retention may briefly
          * exceed maxCount under identical timestamps; read-time trimming is
          * exact), and never clears at or past the current element's timestamp.
@@ -608,11 +793,12 @@ public class QueryTransform extends Transform {
                 final ValueState<Long> count,
                 final ValueState<Long> maxTsState,
                 final Timer ttlTimer,
-                final MElement bufferElement,
+                final List<MElement> bufferElements,
                 final Instant timestamp,
                 List<TimestampedValue<MElement>> buffered,
                 final BoundedWindow window) {
 
+            final int adding = bufferElements.size();
             Instant durationCutoff = maxDurationMillis == null
                     ? null : timestamp.minus(Duration.millis(maxDurationMillis));
             if(durationCutoff != null && !durationCutoff.isAfter(BoundedWindow.TIMESTAMP_MIN_VALUE)) {
@@ -623,7 +809,7 @@ public class QueryTransform extends Transform {
             if(maxCount != null) {
                 final Long read = count.read();
                 final long knownCount = read == null ? 0L : read;
-                if(knownCount + 1 > maxCount) {
+                if(knownCount + adding > maxCount) {
                     if(buffered == null) {
                         buffered = readSorted(buffer);
                     }
@@ -633,7 +819,7 @@ public class QueryTransform extends Transform {
                             survivors.add(entry);
                         }
                     }
-                    final int keep = maxCount - 1; // the current element takes one slot
+                    final int keep = Math.max(0, maxCount - adding); // the new rows take their slots
                     if(survivors.size() > keep) {
                         Instant countBoundary = keep == 0
                                 ? timestamp : survivors.get(survivors.size() - keep).getTimestamp();
@@ -650,15 +836,17 @@ public class QueryTransform extends Transform {
                             retained++;
                         }
                     }
-                    newCount = retained + 1;
+                    newCount = retained + adding;
                 } else {
-                    newCount = knownCount + 1;
+                    newCount = knownCount + adding;
                 }
             }
             if(boundary != null) {
                 buffer.clearRange(BoundedWindow.TIMESTAMP_MIN_VALUE, boundary);
             }
-            buffer.add(TimestampedValue.of(bufferElement, timestamp));
+            for(final MElement bufferElement : bufferElements) {
+                buffer.add(TimestampedValue.of(bufferElement, timestamp));
+            }
             if(newCount != null) {
                 count.write(newCount);
             }
@@ -676,14 +864,15 @@ public class QueryTransform extends Transform {
         }
 
         /**
-         * Exact read-time visibility: duration cutoff, plus the current element
-         * when {@code includeCurrent}, trimmed to the newest {@code maxCount} —
-         * the query never sees more than maxCount buffer rows per evaluation.
+         * Exact read-time visibility: duration cutoff, plus the current
+         * element's buffer rows when {@code includeCurrent}, trimmed to the
+         * newest {@code maxCount} — the query never sees more than maxCount
+         * buffer rows per evaluation.
          */
         private List<MElement> visibleRows(
                 final List<TimestampedValue<MElement>> buffered,
                 final Instant timestamp,
-                final MElement current) {
+                final List<MElement> currentRows) {
             final List<MElement> visible = new ArrayList<>();
             final Instant cutoff = maxDurationMillis == null
                     ? null : timestamp.minus(Duration.millis(maxDurationMillis));
@@ -694,9 +883,7 @@ public class QueryTransform extends Transform {
                     }
                 }
             }
-            if(current != null) {
-                visible.add(current);
-            }
+            visible.addAll(currentRows);
             if(maxCount != null && visible.size() > maxCount) {
                 return new ArrayList<>(visible.subList(visible.size() - maxCount, visible.size()));
             }

@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class QueryTransformBufferTest {
 
@@ -476,7 +477,7 @@ public class QueryTransformBufferTest {
                 .withName("buf")
                 .withTable("history")
                 .withGroupFields(List.of("userId"))
-                .withInputSchema(inputSchema)
+                .withRowSchema(inputSchema)
                 .build();
         final Query2 query = Query2.builder()
                 .withInput("INPUT", inputSchema)
@@ -488,10 +489,10 @@ public class QueryTransformBufferTest {
 
         final LookupSourceConfig.BufferConfig bufferConfig = new LookupSourceConfig.BufferConfig(
                 "buf", "history", List.of("userId"), null,
-                null, null, true, 5L, null, null); // stateTtlSeconds = 5
+                null, null, true, 5L, null, null, null); // stateTtlSeconds = 5
         final QueryTransform.BufferQueryProcessor processor = new QueryTransform.BufferQueryProcessor(
                 query, "INPUT", null, bufferConfig, List.of("userId", "amount"), List.of("events"),
-                inputSchema, Map.of(), List.of(), false, FAILURE_TAG);
+                inputSchema, Map.of("", OUTPUT_TAG), Map.of(), List.of(), false, FAILURE_TAG);
 
         final List<Schema.Field> stateFields = new ArrayList<>(inputSchema.getFields());
         stateFields.add(Schema.Field.of(BufferLookupSource.TIMESTAMP_FIELD, Schema.FieldType.TIMESTAMP));
@@ -691,6 +692,213 @@ public class QueryTransformBufferTest {
 
         final Config config = Config.load(configJson);
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+    }
+
+    /**
+     * insertSql defines the buffered rows by SQL: the WHERE selects what
+     * persists (bufferFilter equivalent) and the select list transforms it.
+     */
+    @Test
+    public void testInsertSqlSelectivePersistAndProjection() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "timestampAttribute": "eventTime",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "userId": "u1", "action": "view",     "amount": 1,   "eventTime": "2025-05-01T00:00:01Z" },
+                          { "userId": "u1", "action": "purchase", "amount": 100, "eventTime": "2025-05-01T00:00:02Z" },
+                          { "userId": "u1", "action": "view",     "amount": 3,   "eventTime": "2025-05-01T00:00:03Z" },
+                          { "userId": "u1", "action": "purchase", "amount": 200, "eventTime": "2025-05-01T00:00:04Z" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "userId", "type": "string" },
+                          { "name": "action", "type": "string" },
+                          { "name": "amount", "type": "int64" },
+                          { "name": "eventTime", "type": "timestamp" }
+                        ]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "sql": "SELECT i.amount AS amount, s.total AS total FROM INPUT AS i JOIN LATERAL (SELECT SUM(b.doubled) AS total FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE",
+                        "sources": [
+                          {
+                            "name": "buf",
+                            "type": "buffer",
+                            "groupFields": ["userId"],
+                            "includeCurrent": false,
+                            "insertSql": "SELECT userId, amount * 2 AS doubled FROM INPUT WHERE action = 'view'",
+                            "tables": [
+                              { "name": "history" }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Map<Long, MElement> byAmount = new HashMap<>();
+            for(final MElement element : elements) {
+                byAmount.put(element.getAsLong("amount"), element);
+            }
+            Assertions.assertEquals(4, byAmount.size());
+            // only views persist, transformed to amount*2; strict past visibility
+            Assertions.assertNull(byAmount.get(1L).getPrimitiveValue("total"));
+            Assertions.assertEquals(2L, byAmount.get(100L).getAsLong("total"));
+            Assertions.assertEquals(2L, byAmount.get(3L).getAsLong("total"));
+            Assertions.assertEquals(8L, byAmount.get(200L).getAsLong("total"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    /** insertSql may fan out: one element persists 0..N buffer rows (UNNEST). */
+    @Test
+    public void testInsertSqlFanOutPersist() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "carts",
+                      "module": "create",
+                      "timestampAttribute": "eventTime",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "userId": "u1", "eventTime": "2025-05-01T00:00:01Z",
+                            "items": [ { "category": "a", "qty": 1 }, { "category": "b", "qty": 2 } ] },
+                          { "userId": "u1", "eventTime": "2025-05-01T00:00:02Z",
+                            "items": [ { "category": "c", "qty": 3 } ] }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "userId", "type": "string" },
+                          { "name": "eventTime", "type": "timestamp" },
+                          { "name": "items", "type": "element", "mode": "repeated", "fields": [
+                            { "name": "category", "type": "string" },
+                            { "name": "qty", "type": "int64" }
+                          ]}
+                        ]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["carts"],
+                      "parameters": {
+                        "sql": "SELECT i.userId AS userId, s.cnt AS cnt FROM INPUT AS i JOIN LATERAL (SELECT COUNT(*) AS cnt FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE",
+                        "sources": [
+                          {
+                            "name": "buf",
+                            "type": "buffer",
+                            "groupFields": ["userId"],
+                            "insertSql": "SELECT i.userId AS userId, e.category AS category FROM INPUT AS i, UNNEST(i.items) AS e",
+                            "tables": [
+                              { "name": "history" }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("query");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Set<Long> counts = new java.util.HashSet<>();
+            for(final MElement element : elements) {
+                counts.add(element.getAsLong("cnt"));
+            }
+            // first cart: its own 2 items visible (includeCurrent default);
+            // second cart: 2 past + 1 current = 3
+            Assertions.assertEquals(Set.of(2L, 3L), counts);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    /** The insert query cannot read the buffer itself (planned without it). */
+    @Test
+    public void testInsertSqlReferencingBufferRejected() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ { "userId": "u1", "amount": 1 } ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "userId", "type": "string" },
+                          { "name": "amount", "type": "int64" }
+                        ]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "sql": "SELECT i.userId AS userId FROM INPUT AS i",
+                        "sources": [
+                          {
+                            "name": "buf",
+                            "type": "buffer",
+                            "groupFields": ["userId"],
+                            "insertSql": "SELECT b.userId AS userId FROM buf.history AS b",
+                            "tables": [
+                              { "name": "history" }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final IllegalModuleException thrown = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(thrown.getMessage().contains("insertSql"),
+                "unexpected error: " + thrown.getMessage());
     }
 
     private static MElement element(String userId, long amount, Instant timestamp) {
