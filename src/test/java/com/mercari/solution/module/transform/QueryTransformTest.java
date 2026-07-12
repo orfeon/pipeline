@@ -231,6 +231,190 @@ public class QueryTransformTest {
         pipeline.run();
     }
 
+    /**
+     * The queries form: named statements evaluated per element in one session;
+     * intermediates (output: false) are referenceable by later statements, and
+     * each output statement becomes a named module output consumable downstream
+     * as {@code transformName.queryName}.
+     */
+    @Test
+    public void testQueriesMultipleOutputs() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "numbers",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [1, 5, 20, 40]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["numbers"],
+                      "parameters": {
+                        "queries": [
+                          { "name": "scaled", "sql": "SELECT `value` AS id, `value` * 10 AS score FROM INPUT", "output": false },
+                          { "name": "high", "sql": "SELECT id, score FROM scaled WHERE score >= 100" },
+                          { "name": "low", "sql": "SELECT id, score FROM scaled WHERE score < 100" }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "highOnly",
+                      "module": "filter",
+                      "inputs": ["query.high"],
+                      "parameters": {
+                        "filter": [
+                          { "key": "score", "op": ">", "value": 0 }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection high = outputs.get("query.high");
+        final MCollection low = outputs.get("query.low");
+        Assertions.assertNotNull(high);
+        Assertions.assertNotNull(low);
+        Assertions.assertNotNull(high.getSchema().getField("score"));
+
+        PAssert.that(high.getCollection()).satisfies(elements -> {
+            final Set<Long> scores = new HashSet<>();
+            for(final MElement element : elements) {
+                scores.add(element.getAsLong("score"));
+            }
+            Assertions.assertEquals(Set.of(200L, 400L), scores);
+            return null;
+        });
+        PAssert.that(low.getCollection()).satisfies(elements -> {
+            final Set<Long> scores = new HashSet<>();
+            for(final MElement element : elements) {
+                scores.add(element.getAsLong("score"));
+            }
+            Assertions.assertEquals(Set.of(10L, 50L), scores);
+            return null;
+        });
+        // the downstream module consumed the named output
+        PAssert.that(outputs.get("highOnly").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement ignored : elements) {
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    /** exclusive: evaluation stops after the first output query that produced rows. */
+    @Test
+    public void testQueriesExclusiveRouting() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "numbers",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [1, 5, 20, 40]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["numbers"],
+                      "parameters": {
+                        "exclusive": true,
+                        "queries": [
+                          { "name": "high",   "sql": "SELECT `value` AS id FROM INPUT WHERE `value` >= 20" },
+                          { "name": "medium", "sql": "SELECT `value` AS id FROM INPUT WHERE `value` >= 5" },
+                          { "name": "rest",   "sql": "SELECT `value` AS id FROM INPUT" }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        // 20, 40 → high only; 5 → medium (high produced nothing); 1 → rest
+        PAssert.that(outputs.get("query.high").getCollection()).satisfies(elements -> {
+            final Set<Long> ids = new HashSet<>();
+            for(final MElement element : elements) {
+                ids.add(element.getAsLong("id"));
+            }
+            Assertions.assertEquals(Set.of(20L, 40L), ids);
+            return null;
+        });
+        PAssert.that(outputs.get("query.medium").getCollection()).satisfies(elements -> {
+            final Set<Long> ids = new HashSet<>();
+            for(final MElement element : elements) {
+                ids.add(element.getAsLong("id"));
+            }
+            Assertions.assertEquals(Set.of(5L), ids);
+            return null;
+        });
+        PAssert.that(outputs.get("query.rest").getCollection()).satisfies(elements -> {
+            final Set<Long> ids = new HashSet<>();
+            for(final MElement element : elements) {
+                ids.add(element.getAsLong("id"));
+            }
+            Assertions.assertEquals(Set.of(1L), ids);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testSqlAndQueriesAreExclusive() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "numbers",
+                      "module": "create",
+                      "parameters": {
+                        "type": "int64",
+                        "elements": [0]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["numbers"],
+                      "parameters": {
+                        "sql": "SELECT `value` AS id FROM INPUT",
+                        "queries": [
+                          { "name": "a", "sql": "SELECT `value` AS id FROM INPUT" }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+    }
+
     @Test
     public void testValidationError() throws Exception {
         final String configJson = """

@@ -518,6 +518,49 @@ Semantics & pitfalls (tests: `LookupSeekableTableTest`,
   (`CAST` in SQL when needed); TIMESTAMP is Beam's primitive DATETIME and
   passes through. Row values are `attachValues`'d in input form.
 
+## Multi-statement sessions (`queries` / `exclusive` / buffer `insertSql`) — IMPLEMENTED 2026-07
+
+`Query2` holds a list of named `Statement`s evaluated in order per
+`executeAll()` (the transform's `queries` parameter; the single `sql` form is
+a one-statement session). Facts that matter when touching it:
+
+- **Every statement's result registers as an `IntermediateTable`** (raw
+  `Object[]` rows, no MElement round-trip) in the next statements' root
+  schema — output and non-output statements alike, so `output: true` results
+  are also referenceable. The table's row type is captured from the producing
+  statement's *logical* root rowType + `RelRoot.fields` names (identical on
+  the construction/JDBC and worker/Bindable paths — the physical type is not
+  needed) and re-materialized per planning type factory via
+  `typeFactory.copyType` with `StructKind.PEEK_FIELDS`.
+- **Schema derivation is keyed by statement index, not name**: the
+  bufferInsert statement and the legacy unnamed single statement both have
+  name `""` — keying by name silently hands the main statement's schema to
+  `getBufferInsertSchema()`, which then poisons the stored fields (all-null
+  buffer rows). Cost a debugging session.
+- `exclusive` stops after the first **output** statement with rows (empty
+  output does not stop; intermediates always run). Emission is
+  collect-then-emit per element — no partial outputs on failure.
+- The transform's named outputs ride the partition module's plumbing:
+  `MCollectionTuple.and(name, ...)` → downstream `transformName.queryName`;
+  the legacy single-sql form keeps the default unnamed tag.
+- **buffer `insertSql`**: two-pass construction — pass 1 plans it *without*
+  the buffer source (self-reference fails naturally with "not found") to get
+  the row schema, then the real session includes it as a flagged first
+  statement (`Builder.withBufferInsert`). Per element the processor runs
+  `executeAll(…, insert=true, main=false)` first, persists the returned rows
+  (multi-row `writeAndEvict`; `keep = maxCount - N`), then
+  `executeAll(…, insert=false, main=true)` for the outputs — two calls
+  because state write and `setData` must happen between them. Each insert
+  row's groupFields values are validated equal to the input element's key
+  (a transformed key would poison the key affinity). The key carrier passed
+  to `setData` is built from the *input's* groupFields, since insert rows
+  may be empty.
+- Calcite validator quirk hit in tests: `UNNEST(arrayOfRow) AS e` where the
+  element ROW has exactly **one field** does not resolve `e.field` ("Column
+  not found in table 'e'") — with two or more fields it works. Not specific
+  to sessions; keep test fixtures' element rows ≥ 2 fields or alias columns
+  explicitly.
+
 ## Direct Bindable execution (`BindableQuery`) — IMPLEMENTED 2026-07
 
 Per-element evaluation no longer goes through JDBC. `Query2.setup()` (and the

@@ -52,7 +52,7 @@ public class BufferLookupSourceTest {
                 .withName("buf")
                 .withTable("history")
                 .withGroupFields(List.of("userId"))
-                .withInputSchema(inputSchema())
+                .withRowSchema(inputSchema())
                 .build();
     }
 
@@ -226,7 +226,7 @@ public class BufferLookupSourceTest {
                 .withName("buf")
                 .withTable("history")
                 .withGroupFields(List.of("userId", "category"))
-                .withInputSchema(inputSchema())
+                .withRowSchema(inputSchema())
                 .build();
         // Only the first of two groupFields is constrained: a prefix lookup
         // would silently miss the other categories' data (state only holds the
@@ -287,7 +287,7 @@ public class BufferLookupSourceTest {
                         .withName("buf")
                         .withTable("history")
                         .withGroupFields(List.of("userId"))
-                        .withInputSchema(colliding)
+                        .withRowSchema(colliding)
                         .build());
         Assertions.assertTrue(thrown.getMessage().contains("__timestamp"));
     }

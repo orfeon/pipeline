@@ -101,10 +101,65 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 
 | parameter | optional | type   | description                                                                                                                                                                                              |
 |-----------|----------|--------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| sql       | required | String | SQL query text. Also accepts a GCS path (`gs://...`), a local file path, a Parameter Manager resource path, or a base64-encoded string (`data:...`), same as the `beamsql` module.                        |
+| sql       | one of sql/queries | String | SQL query text. Also accepts a GCS path (`gs://...`), a local file path, a Parameter Manager resource path, or a base64-encoded string (`data:...`), same as the `beamsql` module.                        |
+| queries   | one of sql/queries | Array<Query\> | Multiple named SQL statements evaluated **per element in one session** (see below). Exclusive with `sql`.                                                                                        |
+| exclusive | optional | Boolean | With `queries`: stop evaluating after the first output query that produced at least one row — front-to-back routing, like the partition module's exclusive mode (default `false`). Non-output queries always run. |
 | table     | optional | String | Table name under which the input element is visible in the SQL. Defaults to `INPUT`.                                                                                                                     |
 | filter    | optional | Filter | Filter-DSL condition over the input element (same syntax as the `filter` module). Elements not matching are dropped **before** the SQL evaluation — the filter costs ~100ns per element, an order of magnitude less than even a simple SQL evaluation, so use it to skip elements the query would discard anyway. With a `buffer` source, non-matching elements are neither buffered nor evaluated (contrast with `bufferFilter`/`triggerFilter`, which split those concerns). |
 | sources   | optional | Array<Source\> | External lookup sources. Each source's tables are referenced in the SQL as `sourceName.tableName` and joined on their keys (see the contract above).                                              |
+
+## Multiple queries per element (`queries` / `exclusive`)
+
+The `queries` form runs several named statements per element in **one session**:
+all statements share the input tables, every lookup source (with its caches and
+LATERAL evaluators) and the UDFs, and **every statement's result is registered
+as an in-memory table under its name** — later statements reference earlier
+results directly (raw rows, no conversion), so an expensive shared prefix (a
+lookup fan-out, a `SEQ_COLLECT` over the buffer) is computed once and consumed
+by several outputs. Since the direct-execution engine's fixed cost is well under
+a microsecond per statement, a handful of statements per element is cheap.
+
+| parameter | optional | type    | description                                                            |
+|-----------|----------|---------|--------------------------------------------------------------------------|
+| name      | required | String  | Statement name: the table name later statements reference it by, and the module output name. Unique; must not collide with the input `table` name or a source name. |
+| sql       | required | String  | The statement (same loading options as the top-level `sql`).            |
+| output    | optional | Boolean | Whether this statement's rows are emitted as a module output (default `true`). `false` = intermediate, referenceable only. |
+
+Each output query becomes a **named module output**: downstream modules consume
+it as `transformName.queryName`. Statements may only reference earlier
+statements (forward references fail at construction). All outputs of an element
+are emitted only after the whole session succeeded (a failure sends the element
+to the error handling with no partial output).
+
+```yaml
+transforms:
+  - name: detect
+    module: query
+    inputs: [events]
+    parameters:
+      queries:
+        - name: enriched          # computed once per element
+          output: false
+          sql: |
+            SELECT i.userId AS userId, s.events AS events
+            FROM INPUT AS i
+            JOIN LATERAL (SELECT SEQ_COLLECT(UNIX_MILLIS(b.__timestamp), b.action) AS events
+                          FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE
+        - name: alerts            # → referenced downstream as "detect.alerts"
+          sql: SELECT userId FROM enriched WHERE SEQ_FUNNEL(events, '0', 0, 3600000, "...") >= 3
+        - name: metrics           # → "detect.metrics"
+          sql: SELECT userId, CARDINALITY(...) AS cnt FROM enriched
+      sources:
+        - name: buf
+          type: buffer
+          groupFields: [userId]
+          tables: [{ name: history }]
+```
+
+With `exclusive: true` the output queries act as an ordered router: the first
+one that produces rows for the element wins and the remaining queries are not
+evaluated (an empty result does not stop the chain; `output: false`
+intermediates and the buffer's persistence are unaffected).
 
 ### Source common parameters
 
@@ -360,6 +415,7 @@ Source parameters (the single table has `name` and optional `fields`):
 | includeCurrent     | optional | Boolean         | Whether the current element itself appears in the buffer table during its own evaluation (default `true` — e.g. the triggering event is part of the matched sequence). Independent of `bufferFilter`. |
 | stateTtlSeconds    | optional | Integer         | Streaming state GC: a group's state is cleared when no element arrived for this long (event time). Defaults to `maxDurationSeconds`; omit both and state is kept indefinitely. |
 | bufferFilter       | optional | Filter          | Filter-DSL condition selecting which elements are **persisted** (default: all).                                        |
+| insertSql          | optional | String          | SQL defining the buffered rows: evaluated per element (in the same session, before the main queries), its **result rows (0..N)** are persisted instead of the raw element — its WHERE replaces `bufferFilter`-style selection, its select list replaces `fields` (exclusive with `fields`), and `UNNEST` fans one element out into several buffer rows. Must select the `groupFields` **unchanged** (validated per row at runtime) and cannot read the buffer itself. With `includeCurrent`, the current element's contribution to the visible buffer is its insert rows. |
 | triggerFilter      | optional | Filter          | Filter-DSL condition selecting which elements **evaluate the SQL** and produce output (default: all). Elements matching neither filter are dropped without state access. |
 | tables[0].name     | required | String          | SQL table name (`sourceName.name`).                                                                                     |
 | tables[0].fields   | optional | Array<String\>  | Input fields persisted per buffered element. Defaults to **the columns the SQL references** (derived from the plan), so state size follows the query automatically; when set explicitly, it must cover every referenced column. `groupFields` are always stored. |
