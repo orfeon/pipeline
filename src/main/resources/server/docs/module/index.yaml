@@ -45,6 +45,9 @@ transforms:
   - title: aggregation
     description: Performs aggregation processing on multiple inputs with grouping, filtering, and field selection. Supports 12 aggregation functions (count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, array_agg) with per-record conditions, expression-based fields, weighted calculations, and configurable output limiting. Works consistently in both batch and streaming modes.
     tags: [transform, aggregation, batch, streaming, groupby]
+  - title: attribution
+    description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
+    tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch]
   - title: beamsql
     description: Processes and combines input data using SQL queries based on Apache Beam SQL (Calcite). Supports JOIN across multiple inputs, aggregation with windowing, built-in UDFs/UDAFs, and inline lookup joins against external sources (JDBC / Spanner / Bigtable / REST) registered via the sources parameter.
     tags: [transform, beamsql, batch, streaming, sql, join, aggregation, lookup, jdbc, spanner, bigtable, rest]
