@@ -64,6 +64,9 @@ public final class LookupSourceConfig {
         private JsonElement bufferFilter;
         private JsonElement triggerFilter;
         private String insertSql;
+        private String restoreSql;
+        private List<String> dedupFields;
+        private String insertOutput;
 
         private CacheParameters cache;
 
@@ -168,6 +171,16 @@ public final class LookupSourceConfig {
                                 "parameters.sources[" + index + "] (buffer) insertSql and"
                                         + " tables[0].fields are exclusive (the insert query's"
                                         + " select list defines the buffered columns)");
+                    }
+                    if(restoreSql != null && (dedupFields == null || dedupFields.isEmpty())) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (buffer) restoreSql requires"
+                                        + " dedupFields (restored rows and replayed input may"
+                                        + " overlap; declare the row identity columns)");
+                    }
+                    if(insertOutput != null && insertOutput.isEmpty()) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "].insertOutput must not be empty");
                     }
                 }
                 default -> throw new IllegalModuleException(
@@ -308,7 +321,10 @@ public final class LookupSourceConfig {
             Long stateTtlSeconds,
             String bufferFilterJson,
             String triggerFilterJson,
-            String insertSql) implements Serializable {
+            String insertSql,
+            String restoreSql,
+            List<String> dedupFields,
+            String insertOutput) implements Serializable {
     }
 
     /**
@@ -343,7 +359,10 @@ public final class LookupSourceConfig {
                             ? null : source.bufferFilter.toString(),
                     source.triggerFilter == null || source.triggerFilter.isJsonNull()
                             ? null : source.triggerFilter.toString(),
-                    source.insertSql);
+                    source.insertSql,
+                    source.restoreSql,
+                    source.dedupFields == null ? null : List.copyOf(source.dedupFields),
+                    source.insertOutput);
         }
         return config;
     }

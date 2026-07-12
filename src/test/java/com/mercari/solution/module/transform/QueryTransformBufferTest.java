@@ -489,7 +489,7 @@ public class QueryTransformBufferTest {
 
         final LookupSourceConfig.BufferConfig bufferConfig = new LookupSourceConfig.BufferConfig(
                 "buf", "history", List.of("userId"), null,
-                null, null, true, 5L, null, null, null); // stateTtlSeconds = 5
+                null, null, true, 5L, null, null, null, null, null, null); // stateTtlSeconds = 5
         final QueryTransform.BufferQueryProcessor processor = new QueryTransform.BufferQueryProcessor(
                 query, "INPUT", null, bufferConfig, List.of("userId", "amount"), List.of("events"),
                 inputSchema, Map.of("", OUTPUT_TAG), Map.of(), List.of(), false, FAILURE_TAG);
@@ -533,6 +533,117 @@ public class QueryTransformBufferTest {
         });
 
         pipeline.run();
+    }
+
+    /**
+     * TTL clears the restored flag too: an idle key re-restores on its next
+     * element, and the engine's retention trim keeps rows older than
+     * maxDuration out regardless of the restore SQL — cache semantics.
+     */
+    @Test
+    public void testTtlReRestoreRespectsRetention() throws Exception {
+        final String url = "jdbc:h2:mem:bufferttlrestoretest;DB_CLOSE_DELAY=-1";
+        try (final java.sql.Connection connection =
+                     java.sql.DriverManager.getConnection(url, "sa", "")) {
+            try (final java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS HISTORY (
+                          USER_ID VARCHAR(16) NOT NULL,
+                          AMOUNT BIGINT NOT NULL,
+                          EVENT_TIME TIMESTAMP,
+                          PRIMARY KEY (USER_ID, AMOUNT)
+                        )""");
+                statement.execute("DELETE FROM HISTORY");
+            }
+            // write via setTimestamp so the stored instant is timezone-independent
+            // (a TIMESTAMP literal would be interpreted as local wall-clock)
+            try (final java.sql.PreparedStatement insert = connection.prepareStatement(
+                    "INSERT INTO HISTORY VALUES (?, ?, ?)")) {
+                insert.setString(1, "u1");
+                insert.setLong(2, 1L);
+                insert.setTimestamp(3, java.sql.Timestamp.from(
+                        java.time.Instant.parse("2025-05-01T10:00:00Z")));
+                insert.executeUpdate();
+            }
+
+            final Schema inputSchema = Schema.of(List.of(
+                    Schema.Field.of("userId", Schema.FieldType.STRING),
+                    Schema.Field.of("amount", Schema.FieldType.INT64)));
+            final BufferLookupSource bufferSource = BufferLookupSource.builder()
+                    .withName("buf")
+                    .withTable("history")
+                    .withGroupFields(List.of("userId"))
+                    .withRowSchema(inputSchema)
+                    .build();
+            final com.mercari.solution.util.pipeline.lookup.source.JdbcLookupSource jdbc =
+                    com.mercari.solution.util.pipeline.lookup.source.JdbcLookupSource.builder()
+                            .withName("db")
+                            .withDriver("org.h2.Driver")
+                            .withUrl(url)
+                            .withUser("sa")
+                            .withPassword("")
+                            .withTable("HISTORY", "HISTORY")
+                            .build();
+            final Query2 query = Query2.builder()
+                    .withInput("INPUT", inputSchema)
+                    .withSource(bufferSource)
+                    .withSource(jdbc)
+                    .withStateRestore("SELECT h.USER_ID AS userId, h.AMOUNT AS amount,"
+                            + " h.EVENT_TIME AS __timestamp FROM INPUT AS i"
+                            + " JOIN db.HISTORY AS h ON h.USER_ID = i.userId")
+                    .withSql("SELECT i.amount AS amount, s.cnt AS cnt FROM INPUT AS i"
+                            + " JOIN LATERAL (SELECT COUNT(*) AS cnt FROM buf.history AS b"
+                            + " WHERE b.userId = i.userId) AS s ON TRUE")
+                    .build();
+
+            // maxDuration 30s, TTL 10s, restore enabled, dedup by userId+time
+            final LookupSourceConfig.BufferConfig bufferConfig = new LookupSourceConfig.BufferConfig(
+                    "buf", "history", List.of("userId"), null,
+                    null, 30L, true, 10L, null, null,
+                    null, "restore", List.of("userId", "__timestamp"), null);
+            final QueryTransform.BufferQueryProcessor processor = new QueryTransform.BufferQueryProcessor(
+                    query, "INPUT", null, bufferConfig, List.of("userId", "amount"), List.of("events"),
+                    inputSchema, Map.of("", OUTPUT_TAG), Map.of(), List.of(), true, FAILURE_TAG);
+
+            final List<Schema.Field> stateFields = new ArrayList<>(inputSchema.getFields());
+            stateFields.add(Schema.Field.of(BufferLookupSource.TIMESTAMP_FIELD, Schema.FieldType.TIMESTAMP));
+            stateFields.add(Schema.Field.of(BufferLookupSource.INPUT_FIELD, Schema.FieldType.STRING.withNullable(true)));
+            final ElementCoder stateCoder = ElementCoder.of(Schema.of(stateFields));
+
+            final Instant t2 = Instant.parse("2025-05-01T10:00:05Z");
+            final Instant t3 = Instant.parse("2025-05-01T10:00:40Z");
+            final TestStream<KV<String, MElement>> stream = TestStream
+                    .create(KvCoder.of(StringUtf8Coder.of(), ElementCoder.of(inputSchema)))
+                    .addElements(TimestampedValue.of(KV.of("u1", element("u1", 2L, t2)), t2))
+                    // TTL (t2 + 10s) fires: buffer + restored flag cleared
+                    .advanceWatermarkTo(Instant.parse("2025-05-01T10:00:20Z"))
+                    .addElements(TimestampedValue.of(KV.of("u1", element("u1", 3L, t3)), t3))
+                    .advanceWatermarkToInfinity();
+
+            final PCollectionTuple outputs = pipeline
+                    .apply("TestStream", stream)
+                    .apply("Query", ParDo
+                            .of(new QueryTransform.StreamingBufferQueryDoFn(processor, stateCoder))
+                            .withOutputTags(OUTPUT_TAG, TupleTagList.of(FAILURE_TAG)));
+            final PCollection<MElement> output = outputs.get(OUTPUT_TAG)
+                    .setCoder(ElementCoder.of(query.getOutputSchema()));
+
+            PAssert.that(output).satisfies(elements -> {
+                final Map<Long, Long> countByAmount = new HashMap<>();
+                for(final MElement element : elements) {
+                    countByAmount.put(element.getAsLong("amount"), element.getAsLong("cnt"));
+                }
+                Assertions.assertEquals(2, countByAmount.size(), "map=" + countByAmount);
+                // first touch restores the external row (10:00:00, within 30s) → 2
+                Assertions.assertEquals(2L, countByAmount.get(2L));
+                // after TTL: re-restore, but the external row is now outside the
+                // retention window relative to 10:00:40 → only the current element
+                Assertions.assertEquals(1L, countByAmount.get(3L));
+                return null;
+            });
+
+            pipeline.run();
+        }
     }
 
     /** Explicit fields must cover every buffer column the SQL references. */
@@ -899,6 +1010,244 @@ public class QueryTransformBufferTest {
                 IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
         Assertions.assertTrue(thrown.getMessage().contains("insertSql"),
                 "unexpected error: " + thrown.getMessage());
+    }
+
+    /**
+     * The restart-recovery loop: state is empty (fresh pipeline), the external
+     * store holds the pre-restart history, restoreSql seeds each key's state on
+     * first touch, and dedupFields absorbs the overlap between restored rows
+     * and replayed input.
+     */
+    @Test
+    public void testRestoreFromExternalWithReplayDedup() throws Exception {
+        final String url = "jdbc:h2:mem:bufferrestoretest;DB_CLOSE_DELAY=-1";
+        try (final java.sql.Connection connection =
+                     java.sql.DriverManager.getConnection(url, "sa", "")) {
+            try (final java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS HISTORY (
+                          USER_ID VARCHAR(16) NOT NULL,
+                          EVENT_ID VARCHAR(16) NOT NULL,
+                          EVENT_TIME TIMESTAMP,
+                          PRIMARY KEY (USER_ID, EVENT_ID)
+                        )""");
+                statement.execute("DELETE FROM HISTORY");
+                statement.execute("""
+                        INSERT INTO HISTORY VALUES
+                          ('u1', 'e1', TIMESTAMP '2025-05-01 00:00:01'),
+                          ('u1', 'e2', TIMESTAMP '2025-05-01 00:00:02')""");
+            }
+
+            // input replays e2 (already in the external store) and adds e3
+            final String configJson = """
+                    {
+                      "sources": [
+                        {
+                          "name": "events",
+                          "module": "create",
+                          "timestampAttribute": "eventTime",
+                          "parameters": {
+                            "type": "element",
+                            "elements": [
+                              { "userId": "u1", "eventId": "e2", "eventTime": "2025-05-01T00:00:02Z" },
+                              { "userId": "u1", "eventId": "e3", "eventTime": "2025-05-01T00:00:03Z" }
+                            ]
+                          },
+                          "schema": {
+                            "fields": [
+                              { "name": "userId", "type": "string" },
+                              { "name": "eventId", "type": "string" },
+                              { "name": "eventTime", "type": "timestamp" }
+                            ]
+                          }
+                        }
+                      ],
+                      "transforms": [
+                        {
+                          "name": "query",
+                          "module": "query",
+                          "inputs": ["events"],
+                          "parameters": {
+                            "sql": "SELECT i.eventId AS eventId, s.cnt AS cnt FROM INPUT AS i JOIN LATERAL (SELECT COUNT(*) AS cnt FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE",
+                            "sources": [
+                              {
+                                "name": "ext",
+                                "type": "jdbc",
+                                "driver": "org.h2.Driver",
+                                "url": "%s",
+                                "user": "sa",
+                                "password": "",
+                                "tables": [ { "name": "HISTORY" } ]
+                              },
+                              {
+                                "name": "buf",
+                                "type": "buffer",
+                                "groupFields": ["userId"],
+                                "dedupFields": ["eventId"],
+                                "restoreSql": "SELECT h.USER_ID AS userId, h.EVENT_ID AS eventId, h.EVENT_TIME AS __timestamp FROM INPUT AS i JOIN ext.HISTORY AS h ON h.USER_ID = i.userId",
+                                "tables": [ { "name": "history" } ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                    """.formatted(url);
+
+            final Config config = Config.load(configJson);
+            final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+            PAssert.that(outputs.get("query").getCollection()).satisfies(elements -> {
+                final Map<String, Long> countByEvent = new HashMap<>();
+                for(final MElement element : elements) {
+                    countByEvent.put(element.getAsString("eventId"), element.getAsLong("cnt"));
+                }
+                Assertions.assertEquals(2, countByEvent.size());
+                // e2: restored e1+e2 plus the replayed live e2, deduplicated → 2
+                Assertions.assertEquals(2L, countByEvent.get("e2"));
+                // e3: e1, e2 (restored), e3 → 3 (the replayed e2 counted once)
+                Assertions.assertEquals(3L, countByEvent.get("e3"));
+                return null;
+            });
+
+            pipeline.run();
+        }
+    }
+
+    /** insertOutput emits the persisted rows — including persist-only elements. */
+    @Test
+    public void testInsertOutputEmitsPersistedRows() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "timestampAttribute": "eventTime",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "userId": "u1", "action": "view",     "amount": 1,   "eventTime": "2025-05-01T00:00:01Z" },
+                          { "userId": "u1", "action": "view",     "amount": 2,   "eventTime": "2025-05-01T00:00:02Z" },
+                          { "userId": "u1", "action": "purchase", "amount": 100, "eventTime": "2025-05-01T00:00:03Z" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "userId", "type": "string" },
+                          { "name": "action", "type": "string" },
+                          { "name": "amount", "type": "int64" },
+                          { "name": "eventTime", "type": "timestamp" }
+                        ]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "sql": "SELECT i.amount AS amount, s.viewCnt AS viewCnt FROM INPUT AS i JOIN LATERAL (SELECT COUNT(*) AS viewCnt FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE",
+                        "sources": [
+                          {
+                            "name": "buf",
+                            "type": "buffer",
+                            "groupFields": ["userId"],
+                            "includeCurrent": false,
+                            "bufferFilter": [ { "key": "action", "op": "=", "value": "view" } ],
+                            "triggerFilter": [ { "key": "action", "op": "=", "value": "purchase" } ],
+                            "insertSql": "SELECT userId, amount FROM INPUT WHERE action = 'view'",
+                            "insertOutput": "persisted",
+                            "tables": [ { "name": "history" } ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        // persist-only view elements still emit their buffer rows
+        PAssert.that(outputs.get("query.persisted").getCollection()).satisfies(elements -> {
+            final Set<Long> amounts = new java.util.HashSet<>();
+            for(final MElement element : elements) {
+                amounts.add(element.getAsLong("amount"));
+                Assertions.assertNotNull(element.getPrimitiveValue("__timestamp"));
+            }
+            Assertions.assertEquals(Set.of(1L, 2L), amounts);
+            return null;
+        });
+        // the trigger element evaluated against the two persisted views
+        PAssert.that(outputs.get("query").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                count++;
+                Assertions.assertEquals(2L, element.getAsLong("viewCnt"));
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    /** restoreSql demands dedupFields and the __timestamp column. */
+    @Test
+    public void testRestoreValidationErrors() throws Exception {
+        final String base = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ { "userId": "u1" } ]
+                      },
+                      "schema": { "fields": [ { "name": "userId", "type": "string" } ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "sql": "SELECT i.userId AS userId, s.cnt AS cnt FROM INPUT AS i JOIN LATERAL (SELECT COUNT(*) AS cnt FROM buf.history AS b WHERE b.userId = i.userId) AS s ON TRUE",
+                        "sources": [
+                          {
+                            "name": "buf",
+                            "type": "buffer",
+                            "groupFields": ["userId"],
+                            %s
+                            "tables": [ { "name": "history" } ]
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        // missing dedupFields
+        final Config noDedup = Config.load(base.formatted(
+                "\"restoreSql\": \"SELECT userId, CURRENT_TIMESTAMP AS __timestamp FROM INPUT\","));
+        final IllegalModuleException thrown1 = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, noDedup));
+        Assertions.assertTrue(thrown1.getMessage().contains("dedupFields"),
+                "unexpected error: " + thrown1.getMessage());
+
+        // missing __timestamp column in the restore select list
+        final Config noTimestamp = Config.load(base.formatted(
+                "\"restoreSql\": \"SELECT userId FROM INPUT\", \"dedupFields\": [\"userId\"],"));
+        final IllegalModuleException thrown2 = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, noTimestamp));
+        Assertions.assertTrue(thrown2.getMessage().contains("__timestamp"),
+                "unexpected error: " + thrown2.getMessage());
     }
 
     private static MElement element(String userId, long amount, Instant timestamp) {
