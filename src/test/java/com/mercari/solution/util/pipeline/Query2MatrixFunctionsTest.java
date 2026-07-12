@@ -204,6 +204,173 @@ public class Query2MatrixFunctionsTest {
         }
     }
 
+    @Test
+    public void testLinearRegRidgeOverload() {
+        // Exact samples of y = 2 x1: lambda = 0 matches OLS; lambda = 1
+        // penalizes the slope but not the intercept:
+        // (X'X + diag(0, 1)) b = X'y with X'X = [[3,6],[6,14]], X'y = [12,28]
+        // -> b = [4/3, 4/3].
+        final List<Map<String, Object>> samples = List.of(
+                Map.of("y", 2d, "x1", 1d, "x2", 0d),
+                Map.of("y", 4d, "x1", 2d, "x2", 0d),
+                Map.of("y", 6d, "x1", 3d, "x2", 0d));
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", samplesSchema())
+                .withSql("""
+                        SELECT i.groupId AS groupId,
+                               AS_DOUBLE_ARRAY(LINEAR_REG(s.y, ARRAY[s.x1], 0.0)) AS ols,
+                               AS_DOUBLE_ARRAY(LINEAR_REG(s.y, ARRAY[s.x1], 1.0)) AS ridge
+                        FROM INPUT AS i, UNNEST(i.samples) AS s
+                        GROUP BY i.groupId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(List.of(
+                    MElement.of(Map.of("groupId", "g1", "samples", samples), TIMESTAMP)),
+                    TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            assertDoubleArray(List.of(0d, 2d), outputs.get(0).getPrimitiveValue("ols"));
+            assertDoubleArray(List.of(4d / 3d, 4d / 3d), outputs.get(0).getPrimitiveValue("ridge"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testLinregPredictTrainAndPredictInOneStatement() {
+        // Fit y = 1 + 2 x1 + 3 x2 on the history rows and apply the model to a
+        // fixed feature vector in the same statement: 1 + 2*2 + 3*1 = 8.
+        final List<Map<String, Object>> samples = new java.util.ArrayList<>();
+        final double[][] xs = {{0, 0}, {1, 0}, {0, 1}, {1, 1}, {2, 1}, {1, 2}};
+        for (final double[] x : xs) {
+            samples.add(Map.of("y", 1 + 2 * x[0] + 3 * x[1], "x1", x[0], "x2", x[1]));
+        }
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", samplesSchema())
+                .withSql("""
+                        SELECT i.groupId AS groupId,
+                               LINREG_PREDICT(LINEAR_REG(s.y, ARRAY[s.x1, s.x2]),
+                                              ARRAY[2.0, 1.0]) AS forecast
+                        FROM INPUT AS i, UNNEST(i.samples) AS s
+                        GROUP BY i.groupId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(List.of(
+                    MElement.of(Map.of("groupId", "g1", "samples", samples), TIMESTAMP)),
+                    TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertEquals(8d, doubleValue(outputs.get(0), "forecast"), DELTA);
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testBayesLinRegWithKnownNoise() {
+        // y = 2x samples (1,2), (2,4), (3,6); alpha = 1, noiseVar = 1.
+        // Posterior precision A = I + X'X = [[4,6],[6,15]], S = A^-1,
+        // m = S X'y = [0.5, 5/3]; at x' = [1,2]: mean = 23/6,
+        // var = 1 + x' S x' = 1 + 7/24.
+        final List<Map<String, Object>> samples = List.of(
+                Map.of("y", 2d, "x1", 1d, "x2", 0d),
+                Map.of("y", 4d, "x1", 2d, "x2", 0d),
+                Map.of("y", 6d, "x1", 3d, "x2", 0d));
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", samplesSchema())
+                .withSql("""
+                        SELECT i.groupId AS groupId,
+                               BAYES_PREDICT(BAYES_LINREG(s.y, ARRAY[s.x1], 1.0, 1.0),
+                                             ARRAY[2.0]) AS prediction
+                        FROM INPUT AS i, UNNEST(i.samples) AS s
+                        GROUP BY i.groupId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(List.of(
+                    MElement.of(Map.of("groupId", "g1", "samples", samples), TIMESTAMP)),
+                    TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            assertDoubleArray(List.of(23d / 6d, Math.sqrt(1d + 7d / 24d)),
+                    outputs.get(0).getPrimitiveValue("prediction"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testBayesLinRegWithEstimatedNoise() {
+        // Near-exact data with a weak prior: the estimated noise variance is
+        // tiny, so the predictive mean tracks y = 2x closely and the sd stays
+        // small but positive.
+        final List<Map<String, Object>> samples = List.of(
+                Map.of("y", 2d, "x1", 1d, "x2", 0d),
+                Map.of("y", 4d, "x1", 2d, "x2", 0d),
+                Map.of("y", 6d, "x1", 3d, "x2", 0d));
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", samplesSchema())
+                .withSql("""
+                        SELECT i.groupId AS groupId,
+                               BAYES_PREDICT(BAYES_LINREG(s.y, ARRAY[s.x1], 0.01),
+                                             ARRAY[2.0]) AS prediction
+                        FROM INPUT AS i, UNNEST(i.samples) AS s
+                        GROUP BY i.groupId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(List.of(
+                    MElement.of(Map.of("groupId", "g1", "samples", samples), TIMESTAMP)),
+                    TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            final Object value = outputs.get(0).getPrimitiveValue("prediction");
+            Assertions.assertInstanceOf(List.class, value);
+            final List<?> prediction = (List<?>) value;
+            final double mean = ((Number) prediction.get(0)).doubleValue();
+            final double sd = ((Number) prediction.get(1)).doubleValue();
+            Assertions.assertEquals(4d, mean, 0.05);
+            Assertions.assertTrue(sd > 0 && sd < 0.5, "sd out of range: " + sd);
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testModelAggregatesOverAllNullGroupYieldNull() {
+        // All-NULL y rows: the fit yields NULL and both predictors pass the
+        // NULL through instead of failing.
+        final Map<String, Object> nullRow = new HashMap<>();
+        nullRow.put("y", null);
+        nullRow.put("x1", 1d);
+        nullRow.put("x2", 2d);
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", samplesSchema())
+                .withSql("""
+                        SELECT i.groupId AS groupId,
+                               LINREG_PREDICT(LINEAR_REG(s.y, ARRAY[s.x1, s.x2]),
+                                              ARRAY[1.0, 1.0]) AS forecast,
+                               BAYES_PREDICT(BAYES_LINREG(s.y, ARRAY[s.x1], 1.0, 1.0),
+                                             ARRAY[1.0]) AS prediction
+                        FROM INPUT AS i, UNNEST(i.samples) AS s
+                        GROUP BY i.groupId
+                        """)
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(List.of(
+                    MElement.of(Map.of("groupId", "g1", "samples", List.of(nullRow)), TIMESTAMP)),
+                    TIMESTAMP);
+            Assertions.assertEquals(1, outputs.size());
+            Assertions.assertNull(outputs.get(0).getPrimitiveValue("forecast"));
+            Assertions.assertNull(outputs.get(0).getPrimitiveValue("prediction"));
+        } finally {
+            query.teardown();
+        }
+    }
+
     private static double doubleValue(MElement element, String field) {
         return ((Number) element.getPrimitiveValue(field)).doubleValue();
     }

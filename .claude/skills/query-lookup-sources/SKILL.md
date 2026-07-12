@@ -347,6 +347,36 @@ Query2.builder()
     transforms; `_INT`/DOUBLE variants project, COMPACT/DISTINCT are
     `ARRAY<ANY>` like SEQ_COLLECT), `TIME_BUCKET(ts, size)` (fixed-width
     timestamp floor; wrap in `UNIX_MILLIS` for a numeric key).
+  - Stateful-model companions (added 2026-07 for the buffer source; local to
+    this repo, candidates for origin sync): drift triggers
+    `SEQ_PAGE_HINKLEY(rows, field, delta, lambda)` / `SEQ_CUSUM(rows, field,
+    target, slack, threshold)` (1-based detection index, 0 = none;
+    `SequenceDriftFunctions`), forecasts `SEQ_EXP_SMOOTH(rows, field, alpha)`
+    / `SEQ_HOLT(rows, field, alpha, beta [, horizon])`
+    (`SequenceSmoothFunctions`; both families reuse the SEQ_FOLD field spec
+    via `FieldResolvingImplementor`), time-decayed UDAFs `DECAY_SUM/AVG(value,
+    ts, halfLife, asOf)` / `DECAY_COUNT(ts, halfLife, asOf)` (weight
+    `2^(-(asOf-ts)/halfLife)`, explicit `asOf` because LATERAL blocks reject
+    residual correlations — pass `i.__timestamp` and GROUP BY it;
+    `DecayFunctions`), and `BETA_SAMPLE(alpha, beta, seed)` (deterministic
+    Thompson-sampling draw, seed mixed with the shapes; `StatFunctions`).
+    **Calcite UDAF null pitfall found here**: `AggregateFunctionImpl`-based
+    aggregates are wrapped by the *strict* implementor — rows with any NULL
+    argument are skipped before `add`, and a group where nothing accumulated
+    yields NULL. COUNT-like semantics (0 over all-NULL) cannot be expressed
+    in a UDAF; document `COALESCE(…, 0.0)` instead. Tests:
+    `Query2ModelFunctionsTest`.
+  - Model-fit built-ins (in `MatrixFunctions`): `LINEAR_REG(y, xs, lambda)`
+    ridge arity-overload (intercept unpenalized), `BAYES_LINREG(y, xs,
+    priorPrecision [, noiseVar])` (Bishop posterior; noiseVar estimated from
+    ridge-fit RSS when omitted; opaque result packs
+    `[k, noiseVar, mean(k), cov(k×k)]`), and the inference scalars
+    `LINREG_PREDICT(model, features)` / `BAYES_PREDICT(model, features)`
+    (`[mean, sd]`, observation noise included). Train + predict in one
+    statement by GROUP BY-ing the current element's feature columns
+    (per-element evaluation keeps that a single group). Aggregate hosts
+    share `LinearRegHost.Acc`; the Gram merge may return either accumulator —
+    fold scalar fields into whichever survived (`mergeBayes`).
   - Linear-algebra built-ins (`MatrixFunctions`, thin adapters over the shared
     ojalgo core `util/domain/math/MatrixOps` — same core as the select
     module's matrix functions): `COSINE_SIMILARITY(a, b)`,
@@ -359,7 +389,8 @@ Query2.builder()
     `MAHALANOBIS(x, mean, precision [, columns])`, `POLY_FIT(xs, ys, degree)`, and the
     `LINEAR_REG(y, xs)` UDAF (Gram-matrix accumulator, mergeable; result is
     an opaque List like SEQ_COLLECT — wrap in `AS_DOUBLE_ARRAY(v)` to project
-    an `ARRAY<DOUBLE>`). Tests: `Query2MatrixFunctionsTest`.
+    an `ARRAY<DOUBLE>`, or feed it to `LINREG_PREDICT` — see the model-fit
+    bullet below). Tests: `Query2MatrixFunctionsTest`.
   - **BigQuery-lex quoting trap**: a define containing string literals must be
     a *double-quoted* SQL string (`"A: $action = 'promo'"`) — `''` escaping is
     the origin engine's Lex.JAVA convention and fails to parse here.

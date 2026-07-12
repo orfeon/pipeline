@@ -48,12 +48,32 @@ import java.util.Map;
  *     least-squares polynomial coefficients in ascending order
  *     ({@code POLY_FIT(...)[2]} of a degree-1 fit is the slope — SQL arrays
  *     are 1-based).</li>
- * <li><b>{@code LINEAR_REG(y, xs)}</b> — aggregate: multivariate linear
- *     regression of {@code y} on the feature vector {@code xs}
+ * <li><b>{@code LINEAR_REG(y, xs [, lambda])}</b> — aggregate: multivariate
+ *     linear regression of {@code y} on the feature vector {@code xs}
  *     ({@code ARRAY[x1, x2, …]}, same length every row), an intercept is
  *     prepended automatically; accumulates the Gram matrix (mergeable) and
- *     solves at result time. Like SEQ_COLLECT the raw result is an opaque
- *     collection — wrap it in {@code AS_DOUBLE_ARRAY} to project it.</li>
+ *     solves at result time. The optional {@code lambda} (a constant ≥ 0)
+ *     is a ridge penalty on the non-intercept coefficients — the
+ *     per-key-refit form of segment-wise regularized regression. Like
+ *     SEQ_COLLECT the raw result is an opaque collection — feed it to
+ *     {@code LINREG_PREDICT} or wrap it in {@code AS_DOUBLE_ARRAY} to
+ *     project the coefficients ({@code [intercept, b1, …]}).</li>
+ * <li><b>{@code LINREG_PREDICT(model, features)}</b> → {@code DOUBLE}: apply
+ *     a LINEAR_REG result (or any {@code [intercept, b1, …]} coefficient
+ *     array) to a feature vector — train on history and predict the current
+ *     element in one statement.</li>
+ * <li><b>{@code BAYES_LINREG(y, xs, priorPrecision [, noiseVar])}</b> —
+ *     aggregate: Bayesian linear regression with an isotropic Gaussian
+ *     prior {@code N(0, priorPrecision⁻¹ I)} over all coefficients
+ *     (intercept included). With {@code noiseVar} the posterior is exact;
+ *     without it the noise variance is estimated from the ridge-fit
+ *     residuals ({@code RSS / max(1, n - k)}). The opaque result carries the
+ *     posterior mean and covariance — consume it with {@code BAYES_PREDICT};
+ *     the layout is internal.</li>
+ * <li><b>{@code BAYES_PREDICT(model, features)}</b> → {@code ARRAY<DOUBLE>}
+ *     {@code [mean, sd]}: posterior-predictive mean and standard deviation
+ *     (observation noise included) of a BAYES_LINREG model at a feature
+ *     vector — uncertainty-aware forecasts for downstream decisions.</li>
  * <li><b>{@code AS_DOUBLE_ARRAY(v)}</b> → {@code ARRAY<DOUBLE>}: re-types an
  *     opaque numeric collection (a LINEAR_REG result, an ARRAY_COMPACT'ed
  *     numeric array) into a projectable double array.</li>
@@ -150,6 +170,70 @@ public class MatrixFunctions {
         return MatrixOps.toList(vector("AS_DOUBLE_ARRAY", value));
     }
 
+    /** Applies a {@code [intercept, b1, …]} coefficient vector to a feature vector. */
+    public static Double linregPredict(Object model, Object features) {
+        final double[] coefs = vector("LINREG_PREDICT", model);
+        final double[] x = vector("LINREG_PREDICT", features);
+        if (coefs == null || x == null) {
+            return null;
+        }
+        if (coefs.length != x.length + 1) {
+            throw new IllegalArgumentException("LINREG_PREDICT model has " + coefs.length
+                    + " coefficients (intercept included), which does not fit "
+                    + x.length + " features");
+        }
+        double out = coefs[0];
+        for (int i = 0; i < x.length; i++) {
+            out += coefs[i + 1] * x[i];
+        }
+        return out;
+    }
+
+    /**
+     * Posterior-predictive {@code [mean, sd]} of a {@code BAYES_LINREG} model
+     * at a feature vector (observation noise included in the variance).
+     */
+    public static List bayesPredict(Object model, Object features) {
+        final double[] packed = vector("BAYES_PREDICT", model);
+        final double[] x = vector("BAYES_PREDICT", features);
+        if (packed == null || x == null) {
+            return null;
+        }
+        if (packed.length < 2) {
+            throw new IllegalArgumentException(
+                    "BAYES_PREDICT model is not a BAYES_LINREG result");
+        }
+        final int k = (int) packed[0];
+        if (k < 1 || packed.length != 2 + k + k * k) {
+            throw new IllegalArgumentException(
+                    "BAYES_PREDICT model is not a BAYES_LINREG result");
+        }
+        if (x.length + 1 != k) {
+            throw new IllegalArgumentException("BAYES_PREDICT model has " + k
+                    + " coefficients (intercept included), which does not fit "
+                    + x.length + " features");
+        }
+        final double noiseVar = packed[1];
+        final double[] row = new double[k];
+        row[0] = 1d;
+        System.arraycopy(x, 0, row, 1, x.length);
+        double mean = 0d;
+        double quadratic = 0d;
+        for (int i = 0; i < k; i++) {
+            mean += packed[2 + i] * row[i];
+            double covRow = 0d;
+            for (int j = 0; j < k; j++) {
+                covRow += packed[2 + k + i * k + j] * row[j];
+            }
+            quadratic += row[i] * covRow;
+        }
+        final double variance = Math.max(0d, noiseVar + quadratic);
+        final List<Double> out = new ArrayList<>(2);
+        out.add(mean);
+        out.add(Math.sqrt(variance));
+        return out;
+    }
+
     private static double[] vector(String functionName, Object value) {
         try {
             return MatrixOps.toVector(value);
@@ -199,6 +283,7 @@ public class MatrixFunctions {
         public static class Acc {
             public double[][] xtx;
             public double[] xty;
+            public double ridge = Double.NaN;
         }
 
         public Acc init() {
@@ -206,8 +291,22 @@ public class MatrixFunctions {
         }
 
         public Acc add(Acc acc, Object y, Object xs) {
+            addRow(acc, y, xs);
+            return acc;
+        }
+
+        public Acc merge(Acc a, Acc b) {
+            return mergeAcc(a, b);
+        }
+
+        public List<Double> result(Acc acc) {
+            return solveAcc(acc);
+        }
+
+        /** Accumulates one row; returns whether the row counted (non-NULL). */
+        static boolean addRow(Acc acc, Object y, Object xs) {
             if (y == null || xs == null) {
-                return acc;
+                return false;
             }
             if (!(y instanceof Number number)) {
                 throw new IllegalArgumentException("LINEAR_REG requires a numeric y, but got "
@@ -230,10 +329,10 @@ public class MatrixFunctions {
                 }
                 acc.xty[i] += row[i] * number.doubleValue();
             }
-            return acc;
+            return true;
         }
 
-        public Acc merge(Acc a, Acc b) {
+        static <A extends Acc> A mergeAcc(A a, A b) {
             if (b.xtx == null) {
                 return a;
             }
@@ -250,24 +349,216 @@ public class MatrixFunctions {
                 }
                 a.xty[i] += b.xty[i];
             }
+            if (Double.isNaN(a.ridge)) {
+                a.ridge = b.ridge;
+            }
             return a;
         }
 
-        public List<Double> result(Acc acc) {
+        /** Solves the normal equations, penalizing the non-intercept diagonal only. */
+        static List<Double> solveAcc(Acc acc) {
             if (acc.xtx == null) {
                 return null;
             }
-            return MatrixOps.toList(MatrixOps.solveGram(acc.xtx, acc.xty, 0d));
+            final double ridge = Double.isNaN(acc.ridge) ? 0d : acc.ridge;
+            double[][] xtx = acc.xtx;
+            if (ridge > 0) {
+                xtx = new double[acc.xtx.length][];
+                for (int i = 0; i < acc.xtx.length; i++) {
+                    xtx[i] = acc.xtx[i].clone();
+                    if (i > 0) {
+                        xtx[i][i] += ridge;
+                    }
+                }
+            }
+            return MatrixOps.toList(MatrixOps.solveGram(xtx, acc.xty, 0d));
+        }
+    }
+
+    /**
+     * {@code LINEAR_REG(y, xs, lambda)} — the ridge overload: {@code lambda}
+     * (a constant ≥ 0) penalizes the non-intercept coefficients.
+     */
+    public static class LinearRegRidgeHost {
+
+        public LinearRegHost.Acc init() {
+            return new LinearRegHost.Acc();
+        }
+
+        public LinearRegHost.Acc add(LinearRegHost.Acc acc, Object y, Object xs, Object lambda) {
+            if (!(lambda instanceof Number l)) {
+                throw new IllegalArgumentException("LINEAR_REG lambda must be a number >= 0,"
+                        + " but got " + (lambda == null ? "NULL" : lambda.getClass().getSimpleName()));
+            }
+            final double ridge = l.doubleValue();
+            if (ridge < 0) {
+                throw new IllegalArgumentException(
+                        "LINEAR_REG lambda must be >= 0, but was " + ridge);
+            }
+            acc.ridge = ridge;
+            LinearRegHost.addRow(acc, y, xs);
+            return acc;
+        }
+
+        public LinearRegHost.Acc merge(LinearRegHost.Acc a, LinearRegHost.Acc b) {
+            return LinearRegHost.mergeAcc(a, b);
+        }
+
+        public List<Double> result(LinearRegHost.Acc acc) {
+            return LinearRegHost.solveAcc(acc);
+        }
+    }
+
+    /**
+     * {@code BAYES_LINREG} accumulator host (see the class javadoc for the
+     * model). The opaque result packs {@code [k, noiseVar, mean(k),
+     * cov(k×k) row-major]} with {@code k} the coefficient count (intercept
+     * first) — {@code BAYES_PREDICT} is the consumer; the layout is internal.
+     */
+    public static class BayesLinRegHost {
+
+        /** The mutable accumulator; public because generated code manipulates it. */
+        public static class Acc extends LinearRegHost.Acc {
+            public double yty;
+            public long n;
+            public double alpha = Double.NaN;
+            public double noiseVar = Double.NaN;
+        }
+
+        public Acc init() {
+            return new Acc();
+        }
+
+        public Acc add(Acc acc, Object y, Object xs, Object priorPrecision) {
+            setAlpha(acc, priorPrecision);
+            accumulate(acc, y, xs);
+            return acc;
+        }
+
+        public Acc merge(Acc a, Acc b) {
+            return mergeBayes(a, b);
+        }
+
+        public List<Double> result(Acc acc) {
+            return posterior(acc);
+        }
+
+        /** Gram merge may keep either instance — fold the other side's scalars into it. */
+        static Acc mergeBayes(Acc a, Acc b) {
+            final Acc out = LinearRegHost.mergeAcc(a, b);
+            final Acc other = out == a ? b : a;
+            out.yty += other.yty;
+            out.n += other.n;
+            if (Double.isNaN(out.alpha)) {
+                out.alpha = other.alpha;
+            }
+            if (Double.isNaN(out.noiseVar)) {
+                out.noiseVar = other.noiseVar;
+            }
+            return out;
+        }
+
+        static void setAlpha(Acc acc, Object priorPrecision) {
+            if (!(priorPrecision instanceof Number a)) {
+                throw new IllegalArgumentException("BAYES_LINREG priorPrecision must be a number"
+                        + " > 0, but got " + (priorPrecision == null
+                                ? "NULL" : priorPrecision.getClass().getSimpleName()));
+            }
+            final double alpha = a.doubleValue();
+            if (alpha <= 0) {
+                throw new IllegalArgumentException(
+                        "BAYES_LINREG priorPrecision must be > 0, but was " + alpha);
+            }
+            acc.alpha = alpha;
+        }
+
+        static void accumulate(Acc acc, Object y, Object xs) {
+            if (LinearRegHost.addRow(acc, y, xs)) {
+                final double value = ((Number) y).doubleValue();
+                acc.yty += value * value;
+                acc.n++;
+            }
+        }
+
+        static List<Double> posterior(Acc acc) {
+            if (acc.xtx == null) {
+                return null;
+            }
+            final int k = acc.xty.length;
+            double noiseVar = acc.noiseVar;
+            if (Double.isNaN(noiseVar)) {
+                // Estimate the noise variance from the ridge-fit residuals
+                // (lambda = alpha as the working penalty).
+                final double[] m0 = MatrixOps.solveGram(acc.xtx, acc.xty, acc.alpha);
+                final double rss = acc.yty - 2 * MatrixOps.dot(m0, acc.xty)
+                        + MatrixOps.dot(m0, MatrixOps.multiply(acc.xtx, m0));
+                noiseVar = Math.max(Math.max(rss, 0d) / Math.max(1, acc.n - k), 1e-12);
+            }
+            final double beta = 1d / noiseVar;
+            final double[][] precision = new double[k][k];
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < k; j++) {
+                    precision[i][j] = beta * acc.xtx[i][j];
+                }
+                precision[i][i] += acc.alpha;
+            }
+            final double[][] cov = MatrixOps.inverse(precision);
+            final double[] mean = MatrixOps.multiply(cov, acc.xty);
+            final List<Double> out = new ArrayList<>(2 + k + k * k);
+            out.add((double) k);
+            out.add(noiseVar);
+            for (int i = 0; i < k; i++) {
+                out.add(beta * mean[i]);
+            }
+            for (int i = 0; i < k; i++) {
+                for (int j = 0; j < k; j++) {
+                    out.add(cov[i][j]);
+                }
+            }
+            return out;
+        }
+    }
+
+    /** {@code BAYES_LINREG(y, xs, priorPrecision, noiseVar)} — the known-noise overload. */
+    public static class BayesLinRegNoiseHost {
+
+        public BayesLinRegHost.Acc init() {
+            return new BayesLinRegHost.Acc();
+        }
+
+        public BayesLinRegHost.Acc add(BayesLinRegHost.Acc acc, Object y, Object xs,
+                Object priorPrecision, Object noiseVar) {
+            BayesLinRegHost.setAlpha(acc, priorPrecision);
+            if (!(noiseVar instanceof Number v)) {
+                throw new IllegalArgumentException("BAYES_LINREG noiseVar must be a number > 0,"
+                        + " but got " + (noiseVar == null
+                                ? "NULL" : noiseVar.getClass().getSimpleName()));
+            }
+            final double variance = v.doubleValue();
+            if (variance <= 0) {
+                throw new IllegalArgumentException(
+                        "BAYES_LINREG noiseVar must be > 0, but was " + variance);
+            }
+            acc.noiseVar = variance;
+            BayesLinRegHost.accumulate(acc, y, xs);
+            return acc;
+        }
+
+        public BayesLinRegHost.Acc merge(BayesLinRegHost.Acc a, BayesLinRegHost.Acc b) {
+            return BayesLinRegHost.mergeBayes(a, b);
+        }
+
+        public List<Double> result(BayesLinRegHost.Acc acc) {
+            return BayesLinRegHost.posterior(acc);
         }
     }
 
     /** The Calcite function objects. */
     static List<Map.Entry<String, Function>> builtIns() {
-        final Function linearReg = AggregateFunctionImpl.create(LinearRegHost.class);
-        if (linearReg == null) {
-            throw new IllegalStateException(
-                    "LINEAR_REG host does not match the aggregate convention");
-        }
+        final Function linearReg = aggregate("LINEAR_REG", LinearRegHost.class);
+        final Function linearRegRidge = aggregate("LINEAR_REG", LinearRegRidgeHost.class);
+        final Function bayesLinReg = aggregate("BAYES_LINREG", BayesLinRegHost.class);
+        final Function bayesLinRegNoise = aggregate("BAYES_LINREG", BayesLinRegNoiseHost.class);
         return List.of(
                 Map.entry("COSINE_SIMILARITY",
                         new DoubleFunction("cosineSimilarity", "a", "b")),
@@ -287,7 +578,23 @@ public class MatrixFunctions {
                         new DoubleArrayFunction("polyFit", "xs", "ys", "degree")),
                 Map.entry("AS_DOUBLE_ARRAY",
                         new DoubleArrayFunction("asDoubleArray", "value")),
-                Map.entry("LINEAR_REG", linearReg));
+                Map.entry("LINREG_PREDICT",
+                        new DoubleFunction("linregPredict", "model", "features")),
+                Map.entry("BAYES_PREDICT",
+                        new DoubleArrayFunction("bayesPredict", "model", "features")),
+                Map.entry("LINEAR_REG", linearReg),
+                Map.entry("LINEAR_REG", linearRegRidge),
+                Map.entry("BAYES_LINREG", bayesLinReg),
+                Map.entry("BAYES_LINREG", bayesLinRegNoise));
+    }
+
+    private static Function aggregate(String name, Class<?> host) {
+        final Function function = AggregateFunctionImpl.create(host);
+        if (function == null) {
+            throw new IllegalStateException(
+                    name + " host does not match the aggregate convention");
+        }
+        return function;
     }
 
     /** ANY-parameter scalar with an explicit return type (Object-typed reflective targets). */
