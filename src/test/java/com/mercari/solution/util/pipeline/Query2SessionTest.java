@@ -184,6 +184,31 @@ public class Query2SessionTest {
     }
 
     @Test
+    public void testStateRestoreKindEvaluation() {
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withStateRestore("SELECT userId FROM INPUT")
+                .withSql("SELECT userId FROM INPUT")
+                .build();
+        query.setup();
+        try {
+            final Map<String, List<MElement>> inputs = Map.of("INPUT", List.of(input(1L)));
+            // restore-only: restore rows returned, no outputs evaluated
+            final Query2.SessionResult restoreOnly = query.executeAll(inputs, TIMESTAMP,
+                    java.util.EnumSet.of(Query2.Statement.Kind.STATE_RESTORE));
+            Assertions.assertEquals(1, restoreOnly.restoreRows().size());
+            Assertions.assertTrue(restoreOnly.outputs().isEmpty());
+            // query-only: outputs evaluated, restore skipped
+            final Query2.SessionResult queryOnly = query.executeAll(inputs, TIMESTAMP,
+                    java.util.EnumSet.of(Query2.Statement.Kind.QUERY));
+            Assertions.assertNull(queryOnly.restoreRows());
+            Assertions.assertEquals(1, queryOnly.outputs().get("").size());
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
     public void testForwardReferenceRejected() {
         // statement order matters: a statement may only reference earlier ones
         final Throwable thrown = Assertions.assertThrows(Throwable.class, () -> Query2.builder()

@@ -416,6 +416,9 @@ Source parameters (the single table has `name` and optional `fields`):
 | stateTtlSeconds    | optional | Integer         | Streaming state GC: a group's state is cleared when no element arrived for this long (event time). Defaults to `maxDurationSeconds`; omit both and state is kept indefinitely. |
 | bufferFilter       | optional | Filter          | Filter-DSL condition selecting which elements are **persisted** (default: all).                                        |
 | insertSql          | optional | String          | SQL defining the buffered rows: evaluated per element (in the same session, before the main queries), its **result rows (0..N)** are persisted instead of the raw element — its WHERE replaces `bufferFilter`-style selection, its select list replaces `fields` (exclusive with `fields`), and `UNNEST` fans one element out into several buffer rows. Must select the `groupFields` **unchanged** (validated per row at runtime) and cannot read the buffer itself. With `includeCurrent`, the current element's contribution to the visible buffer is its insert rows. |
+| insertOutput       | optional | String          | Emit the rows persisted into the buffer (plus `__timestamp`/`__input`) as a **named module output** (`transformName.insertOutput`) — feed it to a sink to keep an external copy of the buffer for `restoreSql`. Emitted for every persisted element (including persist-only, non-trigger ones); restored/seeded rows are never emitted, so recovery cannot loop back into the external store. Write it with an idempotent upsert (the emission is at-least-once). |
+| restoreSql         | optional | String          | SQL that **rebuilds a key's state from an external copy** on the key's first access (see "State recovery" below). Its select list must be exactly the buffered columns plus the rows' original event time as `__timestamp` (TIMESTAMP; `__input` optional); it must join the external table on the `groupFields` and cannot read the buffer itself. Requires `dedupFields`. |
+| dedupFields        | optional | Array<String\>  | Row-identity columns (buffered columns / `__timestamp` / `__input`). Visible buffer rows are **deduplicated at read time** (first occurrence in event-time order wins) — this is what makes overlap between restored rows, replayed input and at-least-once external writes harmless. Required with `restoreSql`; useful on its own for at-least-once inputs. Identity columns are always persisted. |
 | triggerFilter      | optional | Filter          | Filter-DSL condition selecting which elements **evaluate the SQL** and produce output (default: all). Elements matching neither filter are dropped without state access. |
 | tables[0].name     | required | String          | SQL table name (`sourceName.name`).                                                                                     |
 | tables[0].fields   | optional | Array<String\>  | Input fields persisted per buffered element. Defaults to **the columns the SQL references** (derived from the plan), so state size follows the query automatically; when set explicitly, it must cover every referenced column. `groupFields` are always stored. |
@@ -446,6 +449,61 @@ transforms:
             - { key: action, op: "=", value: purchase }
           tables:
             - name: history
+```
+
+### State recovery (`insertOutput` + `restoreSql`)
+
+Beam state does not survive a pipeline **restart** (as opposed to a Dataflow
+*update*, which preserves it) — a problem for buffers that accumulate months of
+history. The recovery loop keeps an external copy and rebuilds state from it
+lazily:
+
+1. **Write side**: `insertOutput` emits every persisted buffer row as a named
+   output; a sink (spanner/jdbc/bigtable) upserts it into an external table
+   keyed by the `dedupFields` identity.
+2. **Restore side**: `restoreSql` runs on a key's **first access** (and after a
+   TTL clear), lookup-joining the external table by the `groupFields` and
+   seeding the state with the returned rows at their original `__timestamp`s.
+   A `restored` flag per key guards re-execution; a failed restore is retried
+   on the key's next element.
+3. **Overlap safety**: after a restart, resume the input from *before* the
+   crash (prefer duplicates over gaps) — `dedupFields` deduplicates the visible
+   rows at read time, so restored rows, replayed input and at-least-once
+   external writes never double-count.
+
+When it runs: once per key per pipeline lifetime, again after a TTL clear
+(the engine trims restored rows to the `maxDurationSeconds` window relative to
+the current element, so a re-restore can never resurrect expired history —
+with `restoreSql` left permanently configured, the Beam state behaves as a
+**cache over the external store** and aggressive `stateTtlSeconds` becomes
+safe), and per run in batch (state starts empty every run).
+
+Operational notes: the first elements after a restart issue one external
+lookup per key — size the external store for that burst (Spanner: consider
+`maxStalenessSeconds`). Dataflow update / snapshots remain the first line of
+defense; this is the recovery path for non-updatable changes, config mistakes
+and runner migrations.
+
+```yaml
+sources:
+  - name: ext
+    type: spanner
+    ...
+    tables: [{ name: HISTORY }]
+  - name: buf
+    type: buffer
+    groupFields: [userId]
+    maxDurationSeconds: 7776000
+    stateTtlSeconds: 7776000
+    insertSql: SELECT userId, action, eventId FROM INPUT WHERE action <> 'heartbeat'
+    insertOutput: bufferRows          # → sink upserts detect.bufferRows into ext HISTORY
+    restoreSql: |
+      SELECT h.userId AS userId, h.action AS action, h.eventId AS eventId,
+             h.eventTime AS __timestamp
+      FROM INPUT AS i
+      JOIN ext.HISTORY AS h ON h.userId = i.userId
+    dedupFields: [eventId]
+    tables: [{ name: history }]
 ```
 
 Notes:

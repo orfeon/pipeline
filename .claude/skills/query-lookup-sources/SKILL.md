@@ -561,6 +561,44 @@ a one-statement session). Facts that matter when touching it:
   to sessions; keep test fixtures' element rows ≥ 2 fields or alias columns
   explicitly.
 
+## Buffer state recovery (`restoreSql` / `dedupFields` / `insertOutput`) — IMPLEMENTED 2026-07
+
+Beam state is lost on pipeline restart; the buffer's recovery loop keeps an
+external copy (`insertOutput` → sink) and rebuilds state lazily
+(`restoreSql`, a third statement kind `STATE_RESTORE` alongside
+`BUFFER_INSERT`; `executeAll` takes an `EnumSet<Statement.Kind>` now).
+Implementation facts:
+
+- **Restore-on-first-touch**: a `restored` ValueState<Boolean> per key guards
+  execution; the DoFn reads the pre-seed buffer FIRST, seeds via
+  `state.add(row, row's own __timestamp)` and merges in memory (no
+  OrderedListState read-after-write), then sets the flag. `onTtl` clears the
+  flag with the rest — re-restore after idle is safe because the engine trims
+  seeded rows to the maxDuration window relative to the current element
+  (the restore SQL's own time filter is just an efficiency hint). Permanent
+  restoreSql = state is a cache over the external store.
+- **Dedup is read-time**: `dedupFields` (row identity) deduplicates
+  `visibleRows` after assembly, first occurrence in time order wins — one
+  mechanism absorbs restored/replayed/at-least-once overlap regardless of
+  origin. The identity columns are force-added to the stored fields (the SQL
+  never reads them, so auto-narrowing would otherwise drop them — cost a test
+  failure). State keeps duplicate rows until eviction; counts drift
+  conservatively.
+- **`insertOutput` emits only live persisted rows** (never seeded ones), and
+  emits for persist-only (non-trigger) elements too — both essential: the
+  first prevents a write-back loop into the external store, the second keeps
+  the external copy complete.
+- restoreSql validation: select list must be exactly the buffered columns +
+  `__timestamp` (TIMESTAMP, the rows' ORIGINAL event times — restored rows at
+  the current element's time would corrupt ordering/retention) with optional
+  `__input`; per-row groupFields equality is validated like insertSql; the
+  pass-1 plan without the buffer source rejects self-reference naturally.
+- **Timezone trap in JDBC test fixtures**: an H2 `TIMESTAMP '10:00:00'`
+  literal is local wall-clock — on a JST machine it becomes 01:00Z internally
+  and silently falls outside retention windows. Write test fixtures via
+  `PreparedStatement.setTimestamp(Timestamp.from(instant))` (timezone-neutral
+  roundtrip with the jdbc source's `toInstant()` reading).
+
 ## Direct Bindable execution (`BindableQuery`) — IMPLEMENTED 2026-07
 
 Per-element evaluation no longer goes through JDBC. `Query2.setup()` (and the

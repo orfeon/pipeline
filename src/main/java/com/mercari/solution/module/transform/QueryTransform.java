@@ -12,6 +12,7 @@ import com.mercari.solution.util.pipeline.lookup.LookupSource;
 import com.mercari.solution.util.pipeline.lookup.source.BufferLookupSource;
 import com.mercari.solution.util.pipeline.lookup.source.LookupSourceConfig;
 import com.mercari.solution.util.pipeline.lookup.source.SideInputLookupSource;
+import org.apache.beam.sdk.coders.BooleanCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.state.OrderedListState;
@@ -45,6 +46,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -243,9 +246,12 @@ public class QueryTransform extends Transform {
         // The schema of the buffered rows: with insertSql the buffer holds the
         // insert query's result rows — derive its schema first, planned WITHOUT
         // the buffer source (so an insert query referencing the buffer itself
-        // fails naturally at construction).
+        // fails naturally at construction). The restore query is planned the
+        // same way, for the same reason.
         final String bufferInsertSql = bufferConfig == null ? null
                 : Parameters.loadQuery(bufferConfig.insertSql(), getTemplateArgs());
+        final String bufferRestoreSql = bufferConfig == null ? null
+                : Parameters.loadQuery(bufferConfig.restoreSql(), getTemplateArgs());
         Schema bufferRowSchema = null;
         if(bufferConfig != null) {
             if(bufferInsertSql != null) {
@@ -266,6 +272,21 @@ public class QueryTransform extends Transform {
             } else {
                 bufferRowSchema = inputSchema;
             }
+            if(bufferRestoreSql != null) {
+                try {
+                    Query2.builder()
+                            .withInput(parameters.table, inputSchema)
+                            .withSources(LookupSourceConfig.createSources(
+                                    LookupSourceConfig.nonBufferSources(parameters.sources),
+                                    sideInputSchemas, null))
+                            .withSql(bufferRestoreSql)
+                            .build();
+                } catch (final Throwable e) {
+                    throw new IllegalModuleException(
+                            "query transform module[" + getName()
+                                    + "] failed to plan buffer restoreSql, cause: " + e.getMessage());
+                }
+            }
         }
 
         final Query2 query;
@@ -279,6 +300,9 @@ public class QueryTransform extends Transform {
             if(bufferInsertSql != null) {
                 builder.withBufferInsert(bufferInsertSql);
             }
+            if(bufferRestoreSql != null) {
+                builder.withStateRestore(bufferRestoreSql);
+            }
             query = builder.build();
         } catch (final Throwable e) {
             throw new IllegalModuleException(
@@ -286,13 +310,51 @@ public class QueryTransform extends Transform {
         }
 
         final Map<String, Schema> outputSchemas = query.getOutputSchemas();
+        for(final Schema schema : outputSchemas.values()) {
+            validateOutputSchema(schema);
+        }
+
+        // Buffer preparation: the persisted columns, the state row schema, and
+        // the restore-schema/dedup validations (needed here because the
+        // insertOutput output rides the state row schema).
+        List<String> storedFields = null;
+        Schema stateSchema = null;
+        if(bufferConfig != null) {
+            final BufferLookupSource bufferSource = query.getSources().stream()
+                    .filter(s -> s instanceof BufferLookupSource)
+                    .map(s -> (BufferLookupSource) s)
+                    .findAny()
+                    .orElseThrow(() -> new IllegalModuleException(
+                            "query transform module[" + getName() + "] buffer source was not created"));
+            final List<Schema.Field> stateFields = new ArrayList<>();
+            if(bufferInsertSql != null) {
+                final Schema insertSchema = query.getBufferInsertSchema();
+                storedFields = insertSchema.getFields().stream().map(Schema.Field::getName).toList();
+                stateFields.addAll(insertSchema.getFields());
+            } else {
+                storedFields = resolveStoredFields(bufferConfig, bufferSource, inputSchema);
+                for(final Schema.Field field : inputSchema.getFields()) {
+                    if(storedFields.contains(field.getName())) {
+                        stateFields.add(field);
+                    }
+                }
+            }
+            stateFields.add(Schema.Field.of(BufferLookupSource.TIMESTAMP_FIELD, Schema.FieldType.TIMESTAMP));
+            stateFields.add(Schema.Field.of(BufferLookupSource.INPUT_FIELD, Schema.FieldType.STRING.withNullable(true)));
+            stateSchema = Schema.of(stateFields);
+            validateBufferRecovery(bufferConfig, query, storedFields, outputSchemas.keySet());
+        }
+
         // One tag per output statement (the legacy single-sql form uses the
-        // default unnamed tag); the first output statement is the main output.
+        // default unnamed tag) plus the optional buffer insertOutput; the
+        // first output statement is the main output.
+        final Map<String, Schema> emittedSchemas = new LinkedHashMap<>(outputSchemas);
+        if(bufferConfig != null && bufferConfig.insertOutput() != null) {
+            emittedSchemas.put(bufferConfig.insertOutput(), stateSchema);
+        }
         final Map<String, TupleTag<MElement>> outputTags = new LinkedHashMap<>();
-        for(final Map.Entry<String, Schema> entry : outputSchemas.entrySet()) {
-            validateOutputSchema(entry.getValue());
-            outputTags.put(entry.getKey(),
-                    new TupleTag<>(entry.getKey().isEmpty() ? "output" : entry.getKey()));
+        for(final String name : emittedSchemas.keySet()) {
+            outputTags.put(name, new TupleTag<>(name.isEmpty() ? "output" : name));
         }
         final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
         final List<TupleTag<?>> additionalTags = new ArrayList<>();
@@ -318,19 +380,80 @@ public class QueryTransform extends Transform {
                             .withOutputTags(mainTag, TupleTagList.of(additionalTags)));
         } else {
             outputs = expandWithBuffer(inputs, inputSchema, bufferConfig, query, parameters,
-                    sideInputViews, outputTags, mainTag, additionalTags, failureTag);
+                    storedFields, stateSchema, sideInputViews, outputTags, mainTag,
+                    additionalTags, failureTag);
         }
 
         errorHandler.addError(outputs.get(failureTag));
 
         MCollectionTuple tuple = null;
-        for(final Map.Entry<String, Schema> entry : outputSchemas.entrySet()) {
+        for(final Map.Entry<String, Schema> entry : emittedSchemas.entrySet()) {
             final PCollection<MElement> collection = outputs.get(outputTags.get(entry.getKey()));
             tuple = tuple == null
                     ? MCollectionTuple.of(entry.getKey(), collection, entry.getValue())
                     : tuple.and(entry.getKey(), collection, entry.getValue());
         }
         return tuple;
+    }
+
+    /**
+     * Construction-time validation of the recovery surface: the restore
+     * statement must yield exactly the buffered row shape (stored fields +
+     * {@code __timestamp}, optionally {@code __input}), the dedup fields must
+     * be buffered columns, and the insertOutput name must not collide.
+     */
+    private void validateBufferRecovery(
+            final LookupSourceConfig.BufferConfig bufferConfig,
+            final Query2 query,
+            final List<String> storedFields,
+            final Set<String> outputNames) {
+
+        final List<String> allowed = new ArrayList<>(storedFields);
+        allowed.add(BufferLookupSource.TIMESTAMP_FIELD);
+        allowed.add(BufferLookupSource.INPUT_FIELD);
+        if(bufferConfig.dedupFields() != null) {
+            for(final String dedupField : bufferConfig.dedupFields()) {
+                if(!allowed.contains(dedupField)) {
+                    throw new IllegalModuleException(
+                            "query transform module[" + getName() + "] buffer dedupFields '"
+                                    + dedupField + "' is not a buffered column: " + allowed);
+                }
+            }
+        }
+        if(bufferConfig.restoreSql() != null) {
+            final Schema restoreSchema = query.getStateRestoreSchema();
+            final List<String> restoreFields = restoreSchema.getFields().stream()
+                    .map(Schema.Field::getName).toList();
+            if(!restoreFields.contains(BufferLookupSource.TIMESTAMP_FIELD)) {
+                throw new IllegalModuleException(
+                        "query transform module[" + getName() + "] buffer restoreSql must select"
+                                + " the restored rows' original event time as '"
+                                + BufferLookupSource.TIMESTAMP_FIELD + "' (TIMESTAMP)");
+            }
+            for(final String storedField : storedFields) {
+                if(!restoreFields.contains(storedField)) {
+                    throw new IllegalModuleException(
+                            "query transform module[" + getName() + "] buffer restoreSql must"
+                                    + " select every buffered column; missing: " + storedField
+                                    + " (buffered columns: " + storedFields + ")");
+                }
+            }
+            for(final String restoreField : restoreFields) {
+                if(!allowed.contains(restoreField)) {
+                    throw new IllegalModuleException(
+                            "query transform module[" + getName() + "] buffer restoreSql selects '"
+                                    + restoreField + "' which is not a buffered column"
+                                    + " (buffered columns: " + storedFields + " plus "
+                                    + BufferLookupSource.TIMESTAMP_FIELD + "/"
+                                    + BufferLookupSource.INPUT_FIELD + ")");
+                }
+            }
+        }
+        if(bufferConfig.insertOutput() != null && outputNames.contains(bufferConfig.insertOutput())) {
+            throw new IllegalModuleException(
+                    "query transform module[" + getName() + "] buffer insertOutput '"
+                            + bufferConfig.insertOutput() + "' collides with a query output name");
+        }
     }
 
     /**
@@ -347,6 +470,8 @@ public class QueryTransform extends Transform {
             final LookupSourceConfig.BufferConfig bufferConfig,
             final Query2 query,
             final Parameters parameters,
+            final List<String> storedFields,
+            final Schema stateSchema,
             final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews,
             final Map<String, TupleTag<MElement>> outputTags,
             final TupleTag<MElement> mainTag,
@@ -364,33 +489,7 @@ public class QueryTransform extends Transform {
                             + " support session windows)");
         }
 
-        final BufferLookupSource bufferSource = query.getSources().stream()
-                .filter(s -> s instanceof BufferLookupSource)
-                .map(s -> (BufferLookupSource) s)
-                .findAny()
-                .orElseThrow(() -> new IllegalModuleException(
-                        "query transform module[" + getName() + "] buffer source was not created"));
-
-        // With insertSql the buffered rows are the insert query's results: its
-        // select list defines the stored columns (no narrowing to derive).
-        final boolean insertMode = bufferConfig.insertSql() != null;
-        final List<String> storedFields;
-        final List<Schema.Field> stateFields = new ArrayList<>();
-        if(insertMode) {
-            final Schema insertSchema = query.getBufferInsertSchema();
-            storedFields = insertSchema.getFields().stream().map(Schema.Field::getName).toList();
-            stateFields.addAll(insertSchema.getFields());
-        } else {
-            storedFields = resolveStoredFields(bufferConfig, bufferSource, inputSchema);
-            for(final Schema.Field field : inputSchema.getFields()) {
-                if(storedFields.contains(field.getName())) {
-                    stateFields.add(field);
-                }
-            }
-        }
-        stateFields.add(Schema.Field.of(BufferLookupSource.TIMESTAMP_FIELD, Schema.FieldType.TIMESTAMP));
-        stateFields.add(Schema.Field.of(BufferLookupSource.INPUT_FIELD, Schema.FieldType.STRING.withNullable(true)));
-        final Coder<MElement> stateCoder = ElementCoder.of(Schema.of(stateFields));
+        final Coder<MElement> stateCoder = ElementCoder.of(stateSchema);
 
         final BufferQueryProcessor processor = new BufferQueryProcessor(
                 query, parameters.table, parameters.filterJson(), bufferConfig, storedFields,
@@ -411,7 +510,8 @@ public class QueryTransform extends Transform {
      * The input fields persisted in state per buffered element: the explicit
      * {@code fields} list when given (validated to cover every buffer column
      * the SQL references), otherwise the referenced columns collected from the
-     * plan — in both cases forcing the groupFields in, in input schema order.
+     * plan — in both cases forcing the groupFields and any input-column
+     * dedupFields in, in input schema order.
      */
     private List<String> resolveStoredFields(
             final LookupSourceConfig.BufferConfig bufferConfig,
@@ -427,6 +527,16 @@ public class QueryTransform extends Transform {
                 referencedInput.add(column);
             }
         }
+        // dedup identity columns must be persisted even when the SQL never
+        // reads them (the dedup happens outside the SQL)
+        final Set<String> forced = new LinkedHashSet<>(bufferConfig.groupFields());
+        if(bufferConfig.dedupFields() != null) {
+            for(final String dedupField : bufferConfig.dedupFields()) {
+                if(inputFieldNames.contains(dedupField)) {
+                    forced.add(dedupField);
+                }
+            }
+        }
         final Set<String> stored = new LinkedHashSet<>();
         if(bufferConfig.fields() != null) {
             for(final String field : bufferConfig.fields()) {
@@ -437,7 +547,7 @@ public class QueryTransform extends Transform {
                 }
             }
             stored.addAll(bufferConfig.fields());
-            stored.addAll(bufferConfig.groupFields());
+            stored.addAll(forced);
             final List<String> missing = referencedInput.stream()
                     .filter(column -> !stored.contains(column))
                     .toList();
@@ -448,7 +558,7 @@ public class QueryTransform extends Transform {
             }
         } else {
             stored.addAll(referencedInput);
-            stored.addAll(bufferConfig.groupFields());
+            stored.addAll(forced);
         }
         return inputFieldNames.stream().filter(stored::contains).toList();
     }
@@ -598,6 +708,9 @@ public class QueryTransform extends Transform {
         private final String bufferFilterJson;
         private final String triggerFilterJson;
         private final boolean insertMode;
+        private final boolean restoreMode;
+        private final List<String> dedupFields;
+        private final String insertOutputName;
         private final Map<String, TupleTag<MElement>> outputTags;
         private final Map<String, PCollectionView<Iterable<MElement>>> sideInputViews;
         private final Map<String, Logging> logs;
@@ -640,6 +753,9 @@ public class QueryTransform extends Transform {
             this.bufferFilterJson = bufferConfig.bufferFilterJson();
             this.triggerFilterJson = bufferConfig.triggerFilterJson();
             this.insertMode = bufferConfig.insertSql() != null;
+            this.restoreMode = bufferConfig.restoreSql() != null;
+            this.dedupFields = bufferConfig.dedupFields();
+            this.insertOutputName = bufferConfig.insertOutput();
             this.sideInputViews = sideInputViews;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
@@ -671,6 +787,7 @@ public class QueryTransform extends Transform {
                 final BoundedWindow window,
                 final OrderedListState<MElement> buffer,
                 final ValueState<Long> count,
+                final ValueState<Boolean> restoredState,
                 final ValueState<Long> maxTsState,
                 final Timer ttlTimer) {
 
@@ -715,6 +832,19 @@ public class QueryTransform extends Transform {
                 final String inputName = input.getIndex() < inputNames.size()
                         ? inputNames.get(input.getIndex()) : null;
 
+                // State restore on the key's first touch: seed the buffer from
+                // the restore query's rows at their original event times. The
+                // pre-seed contents are read first and merged in memory (no
+                // OrderedListState read-after-write); the restored flag guards
+                // re-execution until a TTL clear.
+                List<TimestampedValue<MElement>> buffered = null;
+                if(restoreMode && keyComplete && !Boolean.TRUE.equals(restoredState.read())) {
+                    buffered = readSorted(buffer);
+                    buffered.addAll(restoreState(buffer, count, input, timestamp));
+                    buffered.sort(java.util.Comparator.comparing(TimestampedValue::getTimestamp));
+                    restoredState.write(true);
+                }
+
                 // The current element's buffer contribution: with insertSql the
                 // insert query's result rows (0..N, evaluated first in the same
                 // session), otherwise the element itself.
@@ -722,7 +852,8 @@ public class QueryTransform extends Transform {
                 if(persist || (trigger && includeCurrent)) {
                     if(insertMode) {
                         final Query2.SessionResult insertResult = query.executeAll(
-                                Map.of(table, List.of(input)), timestamp, true, false);
+                                Map.of(table, List.of(input)), timestamp,
+                                EnumSet.of(Query2.Statement.Kind.BUFFER_INSERT));
                         final List<MElement> insertRows = insertResult.bufferRows() == null
                                 ? List.of() : insertResult.bufferRows();
                         final List<MElement> converted = new ArrayList<>(insertRows.size());
@@ -738,11 +869,21 @@ public class QueryTransform extends Transform {
                     }
                 }
 
-                final List<TimestampedValue<MElement>> buffered =
-                        trigger ? readSorted(buffer) : null;
+                if(trigger && buffered == null) {
+                    buffered = readSorted(buffer);
+                }
                 if(persist && !currentRows.isEmpty()) {
                     writeAndEvict(buffer, count, maxTsState, ttlTimer,
                             currentRows, timestamp, buffered, window);
+                    // The live rows just persisted also feed the external copy
+                    // (restored/seeded rows are never re-emitted, so no loop
+                    // back into the external store).
+                    if(insertOutputName != null) {
+                        final TupleTag<MElement> insertTag = outputTags.get(insertOutputName);
+                        for(final MElement row : currentRows) {
+                            c.output(insertTag, row);
+                        }
+                    }
                 }
                 if(trigger) {
                     final List<MElement> visible = visibleRows(buffered, timestamp,
@@ -754,13 +895,65 @@ public class QueryTransform extends Transform {
                     bufferSource.setData(visible, keyElement);
                     Logging.log(LOG, logs, "input", input);
                     final Query2.SessionResult result = query.executeAll(
-                            Map.of(table, List.of(input)), timestamp, false, true);
+                            Map.of(table, List.of(input)), timestamp,
+                            EnumSet.of(Query2.Statement.Kind.QUERY));
                     emitOutputs(c, outputTags, logs, result);
                 }
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed to execute query", input, e, failFast);
                 c.output(failuresTag, badRecord);
             }
+        }
+
+        /**
+         * Seeds the buffer state from the restore query's rows at their
+         * original event times, trimming to the retention window relative to
+         * the current element (so a TTL-triggered re-restore can never
+         * resurrect expired history, regardless of the restore SQL's own
+         * filters). Returns the seeded entries for the in-memory merge.
+         */
+        private List<TimestampedValue<MElement>> restoreState(
+                final OrderedListState<MElement> buffer,
+                final ValueState<Long> count,
+                final MElement input,
+                final Instant timestamp) {
+
+            final Query2.SessionResult restoreResult = query.executeAll(
+                    Map.of(table, List.of(input)), timestamp,
+                    EnumSet.of(Query2.Statement.Kind.STATE_RESTORE));
+            final List<MElement> restoreRows = restoreResult.restoreRows() == null
+                    ? List.of() : restoreResult.restoreRows();
+            final Instant cutoff = maxDurationMillis == null
+                    ? null : timestamp.minus(Duration.millis(maxDurationMillis));
+            final List<TimestampedValue<MElement>> seeded = new ArrayList<>();
+            for(final MElement row : restoreRows) {
+                validateGroupKey(row, input);
+                final Object micros = row.getPrimitiveValue(BufferLookupSource.TIMESTAMP_FIELD);
+                if(micros == null) {
+                    throw new IllegalStateException(
+                            "buffer restoreSql row has a null " + BufferLookupSource.TIMESTAMP_FIELD
+                                    + " (the restored rows' original event time is required)");
+                }
+                final Instant rowTimestamp = Instant.ofEpochMilli(((Number) micros).longValue() / 1000L);
+                if(cutoff != null && rowTimestamp.isBefore(cutoff)) {
+                    continue;
+                }
+                final Map<String, Object> values = new HashMap<>();
+                for(final String storedField : storedFields) {
+                    values.put(storedField, row.getPrimitiveValue(storedField));
+                }
+                values.put(BufferLookupSource.TIMESTAMP_FIELD, ((Number) micros).longValue());
+                values.put(BufferLookupSource.INPUT_FIELD,
+                        row.getPrimitiveValue(BufferLookupSource.INPUT_FIELD));
+                final MElement bufferRow = MElement.of(values, rowTimestamp);
+                buffer.add(TimestampedValue.of(bufferRow, rowTimestamp));
+                seeded.add(TimestampedValue.of(bufferRow, rowTimestamp));
+            }
+            if(maxCount != null && !seeded.isEmpty()) {
+                final Long read = count.read();
+                count.write((read == null ? 0L : read) + seeded.size());
+            }
+            return seeded;
         }
 
         /**
@@ -865,15 +1058,17 @@ public class QueryTransform extends Transform {
 
         /**
          * Exact read-time visibility: duration cutoff, plus the current
-         * element's buffer rows when {@code includeCurrent}, trimmed to the
-         * newest {@code maxCount} — the query never sees more than maxCount
-         * buffer rows per evaluation.
+         * element's buffer rows when {@code includeCurrent}, deduplicated by
+         * {@code dedupFields} (first occurrence in time order wins — restored
+         * rows, replayed input and at-least-once external writes may overlap),
+         * trimmed to the newest {@code maxCount} — the query never sees more
+         * than maxCount buffer rows per evaluation.
          */
         private List<MElement> visibleRows(
                 final List<TimestampedValue<MElement>> buffered,
                 final Instant timestamp,
                 final List<MElement> currentRows) {
-            final List<MElement> visible = new ArrayList<>();
+            List<MElement> visible = new ArrayList<>();
             final Instant cutoff = maxDurationMillis == null
                     ? null : timestamp.minus(Duration.millis(maxDurationMillis));
             if(buffered != null) {
@@ -884,17 +1079,34 @@ public class QueryTransform extends Transform {
                 }
             }
             visible.addAll(currentRows);
+            if(dedupFields != null && !dedupFields.isEmpty()) {
+                final Map<List<Object>, MElement> seen = new LinkedHashMap<>();
+                for(final MElement row : visible) {
+                    final List<Object> identity = new ArrayList<>(dedupFields.size());
+                    for(final String dedupField : dedupFields) {
+                        identity.add(row.getPrimitiveValue(dedupField));
+                    }
+                    seen.putIfAbsent(identity, row);
+                }
+                visible = new ArrayList<>(seen.values());
+            }
             if(maxCount != null && visible.size() > maxCount) {
                 return new ArrayList<>(visible.subList(visible.size() - maxCount, visible.size()));
             }
             return visible;
         }
 
-        /** Clears the group's state when the TTL elapsed with no newer element. */
+        /**
+         * Clears the group's state when the TTL elapsed with no newer element.
+         * The restored flag is cleared too: the key's next element re-restores
+         * from the external store within the retention window (cache
+         * semantics) — with no restoreSql this is a no-op flag.
+         */
         void onTtl(
                 final Instant firingTimestamp,
                 final OrderedListState<MElement> buffer,
                 final ValueState<Long> count,
+                final ValueState<Boolean> restoredState,
                 final ValueState<Long> maxTsState) {
             if(ttlMillis == null) {
                 return;
@@ -906,6 +1118,7 @@ public class QueryTransform extends Transform {
             }
             buffer.clear();
             count.clear();
+            restoredState.clear();
             maxTsState.clear();
         }
 
@@ -936,6 +1149,8 @@ public class QueryTransform extends Transform {
         private final StateSpec<OrderedListState<MElement>> bufferSpec;
         @StateId("count")
         private final StateSpec<ValueState<Long>> countSpec = StateSpecs.value(VarLongCoder.of());
+        @StateId("restored")
+        private final StateSpec<ValueState<Boolean>> restoredSpec = StateSpecs.value(BooleanCoder.of());
 
         BatchBufferQueryDoFn(final BufferQueryProcessor processor, final Coder<MElement> coder) {
             this.processor = processor;
@@ -958,8 +1173,9 @@ public class QueryTransform extends Transform {
                 final ProcessContext c,
                 final BoundedWindow window,
                 @StateId("buffer") final OrderedListState<MElement> buffer,
-                @StateId("count") final ValueState<Long> count) {
-            processor.process(c, window, buffer, count, null, null);
+                @StateId("count") final ValueState<Long> count,
+                @StateId("restored") final ValueState<Boolean> restored) {
+            processor.process(c, window, buffer, count, restored, null, null);
         }
     }
 
@@ -977,6 +1193,8 @@ public class QueryTransform extends Transform {
         private final StateSpec<OrderedListState<MElement>> bufferSpec;
         @StateId("count")
         private final StateSpec<ValueState<Long>> countSpec = StateSpecs.value(VarLongCoder.of());
+        @StateId("restored")
+        private final StateSpec<ValueState<Boolean>> restoredSpec = StateSpecs.value(BooleanCoder.of());
         @StateId("maxTs")
         private final StateSpec<ValueState<Long>> maxTsSpec = StateSpecs.value(VarLongCoder.of());
         @TimerId("ttl")
@@ -1003,9 +1221,10 @@ public class QueryTransform extends Transform {
                 final BoundedWindow window,
                 @StateId("buffer") final OrderedListState<MElement> buffer,
                 @StateId("count") final ValueState<Long> count,
+                @StateId("restored") final ValueState<Boolean> restored,
                 @StateId("maxTs") final ValueState<Long> maxTs,
                 @TimerId("ttl") final Timer ttl) {
-            processor.process(c, window, buffer, count, maxTs, ttl);
+            processor.process(c, window, buffer, count, restored, maxTs, ttl);
         }
 
         @OnTimer("ttl")
@@ -1013,8 +1232,9 @@ public class QueryTransform extends Transform {
                 final OnTimerContext c,
                 @StateId("buffer") final OrderedListState<MElement> buffer,
                 @StateId("count") final ValueState<Long> count,
+                @StateId("restored") final ValueState<Boolean> restored,
                 @StateId("maxTs") final ValueState<Long> maxTs) {
-            processor.onTtl(c.timestamp(), buffer, count, maxTs);
+            processor.onTtl(c.timestamp(), buffer, count, restored, maxTs);
         }
     }
 

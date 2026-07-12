@@ -136,12 +136,19 @@ public class Query2 implements Serializable {
 
     /**
      * One named statement of the session. {@code output} statements contribute
-     * a named entry to the session result; a {@code bufferInsert} statement's
-     * rows are returned separately (the host persists them into Beam state).
-     * Every statement's result is referenceable as a table by later statements.
+     * a named entry to the session result; a {@code BUFFER_INSERT} statement's
+     * rows are returned separately (the host persists them into Beam state), a
+     * {@code STATE_RESTORE} statement's rows likewise (the host seeds Beam
+     * state from them on a key's first touch). Every statement's result is
+     * referenceable as a table by later statements.
      */
-    public record Statement(String name, String sql, boolean output, boolean bufferInsert)
+    public record Statement(String name, String sql, boolean output, Kind kind)
             implements Serializable {
+
+        /** What a statement's result feeds. */
+        public enum Kind {
+            QUERY, BUFFER_INSERT, STATE_RESTORE
+        }
 
         public Statement {
             if (sql == null || sql.isEmpty()) {
@@ -150,17 +157,25 @@ public class Query2 implements Serializable {
             if (name == null) {
                 name = "";
             }
+            if (kind == null) {
+                kind = Kind.QUERY;
+            }
         }
 
         public static Statement of(String name, String sql, boolean output) {
-            return new Statement(name, sql, output, false);
+            return new Statement(name, sql, output, Kind.QUERY);
         }
     }
 
-    /** The per-element result of a session: output name → rows, plus buffer-insert rows. */
+    /**
+     * The per-element result of a session: output name → rows, plus the
+     * buffer-insert and state-restore statements' rows (null when the
+     * statement is absent or was not evaluated).
+     */
     public record SessionResult(
             Map<String, List<MElement>> outputs,
-            List<MElement> bufferRows) {
+            List<MElement> bufferRows,
+            List<MElement> restoreRows) {
     }
 
     private final List<Statement> statements;
@@ -169,7 +184,8 @@ public class Query2 implements Serializable {
     private final List<LookupSource> sources;
     private final List<UserDefinedFunctions.FunctionSpec> functions;
     private final Map<String, Schema> outputSchemas;   // output statements only
-    private final Schema bufferInsertSchema;           // null when no bufferInsert statement
+    private final Schema bufferInsertSchema;           // null when no BUFFER_INSERT statement
+    private final Schema stateRestoreSchema;           // null when no STATE_RESTORE statement
 
     private transient List<CompiledStatement> compiled;
     private transient Map<String, List<MElement>> elements;
@@ -209,45 +225,55 @@ public class Query2 implements Serializable {
         this.sources = sources == null ? List.of() : List.copyOf(sources);
         this.functions = functions == null ? List.of() : List.copyOf(functions);
         validateStatements();
-        // keyed by statement index: names may repeat across the bufferInsert
-        // statement and the legacy unnamed single statement (both "")
+        // keyed by statement index: names may repeat across the special-kind
+        // statements and the legacy unnamed single statement (all "")
         final Map<Integer, Schema> derivedSchemas = deriveOutputSchemas();
         this.outputSchemas = new LinkedHashMap<>();
         Schema insertSchema = null;
+        Schema restoreSchema = null;
         for (int i = 0; i < this.statements.size(); i++) {
             final Statement statement = this.statements.get(i);
             final Schema schema = derivedSchemas.get(i);
-            if (statement.bufferInsert()) {
-                insertSchema = schema;
-            } else if (statement.output()) {
-                this.outputSchemas.put(statement.name(), schema);
+            switch (statement.kind()) {
+                case BUFFER_INSERT -> insertSchema = schema;
+                case STATE_RESTORE -> restoreSchema = schema;
+                case QUERY -> {
+                    if (statement.output()) {
+                        this.outputSchemas.put(statement.name(), schema);
+                    }
+                }
             }
         }
         this.bufferInsertSchema = insertSchema;
+        this.stateRestoreSchema = restoreSchema;
     }
 
     private void validateStatements() {
         final Set<String> names = new HashSet<>();
         int outputCount = 0;
+        int queryCount = 0;
         int bufferInsertCount = 0;
-        for (int i = 0; i < statements.size(); i++) {
-            final Statement statement = statements.get(i);
-            if (statement.bufferInsert()) {
-                bufferInsertCount++;
-                if (i != 0) {
+        int stateRestoreCount = 0;
+        boolean sawQuery = false;
+        for (final Statement statement : statements) {
+            if (statement.kind() != Statement.Kind.QUERY) {
+                if (statement.kind() == Statement.Kind.BUFFER_INSERT) {
+                    bufferInsertCount++;
+                } else {
+                    stateRestoreCount++;
+                }
+                if (sawQuery) {
                     throw new IllegalArgumentException(
-                            "the bufferInsert statement must be the first statement");
+                            "special-kind statements must precede the query statements");
                 }
                 continue;
             }
+            sawQuery = true;
+            queryCount++;
             if (statement.output()) {
                 outputCount++;
             }
             if (statement.name().isEmpty()) {
-                if (statements.size() > (bufferInsertCount + 1)) {
-                    throw new IllegalArgumentException(
-                            "statements require a name when more than one is defined");
-                }
                 continue;
             }
             if (!names.add(statement.name().toUpperCase())) {
@@ -269,8 +295,18 @@ public class Query2 implements Serializable {
                 }
             }
         }
+        for (final Statement statement : statements) {
+            if (statement.kind() == Statement.Kind.QUERY
+                    && statement.name().isEmpty() && queryCount > 1) {
+                throw new IllegalArgumentException(
+                        "statements require a name when more than one is defined");
+            }
+        }
         if (bufferInsertCount > 1) {
             throw new IllegalArgumentException("at most one bufferInsert statement is allowed");
+        }
+        if (stateRestoreCount > 1) {
+            throw new IllegalArgumentException("at most one stateRestore statement is allowed");
         }
         if (outputCount == 0) {
             throw new IllegalArgumentException("at least one output statement is required");
@@ -306,6 +342,7 @@ public class Query2 implements Serializable {
         private final List<UserDefinedFunctions.FunctionSpec> functions = new ArrayList<>();
         private final List<Statement> statements = new ArrayList<>();
         private String bufferInsertSql;
+        private String stateRestoreSql;
         private boolean exclusive;
 
         public Builder withInput(final String name, final Schema schema) {
@@ -378,6 +415,17 @@ public class Query2 implements Serializable {
         }
 
         /**
+         * A statement whose result rows the host seeds Beam state from on a
+         * key's first touch (not an output; must carry the buffered rows'
+         * columns plus their original {@code __timestamp}). See the query
+         * module's buffer source.
+         */
+        public Builder withStateRestore(final String sql) {
+            this.stateRestoreSql = sql;
+            return this;
+        }
+
+        /**
          * Stop evaluating after the first output statement that produced rows
          * (non-output statements always run).
          */
@@ -388,8 +436,11 @@ public class Query2 implements Serializable {
 
         public Query2 build() {
             final List<Statement> all = new ArrayList<>();
+            if (stateRestoreSql != null) {
+                all.add(new Statement("", stateRestoreSql, false, Statement.Kind.STATE_RESTORE));
+            }
             if (bufferInsertSql != null) {
-                all.add(new Statement("", bufferInsertSql, false, true));
+                all.add(new Statement("", bufferInsertSql, false, Statement.Kind.BUFFER_INSERT));
             }
             all.addAll(statements);
             return new Query2(inputSchemas, sources, functions, all, exclusive);
@@ -414,6 +465,11 @@ public class Query2 implements Serializable {
     /** The bufferInsert statement's result schema, or null when none is defined. */
     public Schema getBufferInsertSchema() {
         return bufferInsertSchema;
+    }
+
+    /** The stateRestore statement's result schema, or null when none is defined. */
+    public Schema getStateRestoreSchema() {
+        return stateRestoreSchema;
     }
 
     /**
@@ -462,10 +518,11 @@ public class Query2 implements Serializable {
     }
 
     private static String describeStatement(final Statement statement) {
-        if (statement.bufferInsert()) {
-            return " (bufferInsert)";
-        }
-        return statement.name().isEmpty() ? "" : " '" + statement.name() + "'";
+        return switch (statement.kind()) {
+            case BUFFER_INSERT -> " (bufferInsert)";
+            case STATE_RESTORE -> " (stateRestore)";
+            case QUERY -> statement.name().isEmpty() ? "" : " '" + statement.name() + "'";
+        };
     }
 
     /** Plans every statement (with sources set up) and reads the result schemas, without executing. */
@@ -476,7 +533,7 @@ public class Query2 implements Serializable {
             setupSources();
             final Map<String, List<MElement>> buffers = createBuffers();
             forEachStatement(buffers, runtimes, (index, statement, planned, rootSchema, intermediate) -> {
-                if (statement.output() || statement.bufferInsert()) {
+                if (statement.output() || statement.kind() != Statement.Kind.QUERY) {
                     try (final PreparedStatement s = prepare(planned)) {
                         schemas.put(index, CalciteSchemaUtil.convertSchema(s.getMetaData()));
                     }
@@ -572,25 +629,24 @@ public class Query2 implements Serializable {
 
     /** Evaluates every statement of the session. */
     public SessionResult executeAll(final Map<String, List<MElement>> inputs, final Instant timestamp) {
-        return executeAll(inputs, timestamp, true, true);
+        return executeAll(inputs, timestamp, java.util.EnumSet.allOf(Statement.Kind.class));
     }
 
     /**
-     * Evaluates the session against the given per-table inputs. Statements run
-     * in order; every statement's rows are registered under its name for later
-     * statements; {@code output} statements contribute to the result map (in
-     * statement order). With {@code exclusive}, evaluation stops after the
-     * first output statement that produced rows.
+     * Evaluates the session against the given per-table inputs. Statements of
+     * the requested kinds run in order; every evaluated statement's rows are
+     * registered under its name for later statements; {@code output} statements
+     * contribute to the result map (in statement order). With {@code exclusive},
+     * evaluation stops after the first output statement that produced rows.
      *
-     * @param evaluateBufferInsert whether to evaluate the bufferInsert statement
-     * @param evaluateStatements   whether to evaluate the regular statements
-     *        (false = persistence-only evaluation for non-trigger elements)
+     * @param kinds which statement kinds to evaluate (the host separates the
+     *        state-restore / persistence / output phases around its Beam state
+     *        operations)
      */
     public SessionResult executeAll(
             final Map<String, List<MElement>> inputs,
             final Instant timestamp,
-            final boolean evaluateBufferInsert,
-            final boolean evaluateStatements) {
+            final Set<Statement.Kind> kinds) {
 
         if (compiled == null) {
             throw new IllegalStateException("query is not set up (call setup() first)");
@@ -604,24 +660,25 @@ public class Query2 implements Serializable {
         }
         final Map<String, List<MElement>> outputs = new LinkedHashMap<>();
         List<MElement> bufferRows = null;
+        List<MElement> restoreRows = null;
         for (final CompiledStatement statement : compiled) {
-            if (statement.statement.bufferInsert()) {
-                if (!evaluateBufferInsert) {
-                    continue;
-                }
-            } else if (!evaluateStatements) {
+            if (!kinds.contains(statement.statement.kind())) {
                 continue;
             }
             try {
                 final List<Object[]> rows = statement.bindableQuery.executeInternalRows();
                 statement.intermediate.setRows(rows);
-                if (statement.statement.bufferInsert()) {
-                    bufferRows = toElements(statement, rows, timestamp);
-                } else if (statement.statement.output()) {
-                    final List<MElement> results = toElements(statement, rows, timestamp);
-                    outputs.put(statement.statement.name(), results);
-                    if (exclusive && !results.isEmpty()) {
-                        break;
+                switch (statement.statement.kind()) {
+                    case BUFFER_INSERT -> bufferRows = toElements(statement, rows, timestamp);
+                    case STATE_RESTORE -> restoreRows = toElements(statement, rows, timestamp);
+                    case QUERY -> {
+                        if (statement.statement.output()) {
+                            final List<MElement> results = toElements(statement, rows, timestamp);
+                            outputs.put(statement.statement.name(), results);
+                            if (exclusive && !results.isEmpty()) {
+                                return new SessionResult(outputs, bufferRows, restoreRows);
+                            }
+                        }
                     }
                 }
             } catch (final RuntimeException e) {
@@ -630,7 +687,7 @@ public class Query2 implements Serializable {
                                 + ": " + statement.statement.sql(), e);
             }
         }
-        return new SessionResult(outputs, bufferRows);
+        return new SessionResult(outputs, bufferRows, restoreRows);
     }
 
     private static List<MElement> toElements(final CompiledStatement statement,
