@@ -18,7 +18,7 @@ A `schema` must be defined at the source level to describe the expected entity p
 |--------------------|----------|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
 | name               | required | String              | Step name. specified to be unique in config file.                                                                                                    |
 | module             | required | String              | Specified `datastore`                                                                                                                                |
-| schema             | required | [Schema](SCHEMA.md) | Schema of the data to be read. Required unless `kind` is specified (in which case schema is estimated from Datastore Stats on a best-effort basis). |
+| schema             | required | [Schema](../common/schema.md) | Schema of the data to be read. Required unless `kind` is specified (in which case schema is estimated from Datastore Stats on a best-effort basis). |
 | timestampAttribute | optional | String              | If you want to use the value of a field as the event time, specify the name of the field. (The field must be Timestamp type)                         |
 | parameters         | required | Map<String,Object\> | Specify the following individual parameters                                                                                                          |
 

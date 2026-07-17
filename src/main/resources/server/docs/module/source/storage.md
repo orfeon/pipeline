@@ -23,7 +23,7 @@ This module differs from the [Files Source Module](files.md): the Files module o
 |--------------------|----------|---------------------|------------------------------------------------------------------------------------------------------------------------------|
 | name               | required | String              | Step name. specified to be unique in config file.                                                                            |
 | module             | required | String              | Specified `storage`                                                                                                          |
-| schema             | optional | [Schema](SCHEMA.md) | Schema of the data to be read. Not required for `avro` or `parquet` formats (auto-inferred). Required for `csv` and `json` formats if you want structured output. |
+| schema             | optional | [Schema](../common/schema.md) | Schema of the data to be read. Not required for `avro` or `parquet` formats (auto-inferred). Required for `csv` and `json` formats if you want structured output. |
 | timestampAttribute | optional | String              | If you want to use the value of a field as the event time, specify the name of the field. (The field must be Timestamp or Date type) |
 | parameters         | required | Map<String,Object\> | Specify the following individual parameters                                                                                  |
 

@@ -21,7 +21,7 @@ The row key is generated from a FreeMarker template expression. Column families 
 | inputs     | required | Array<String\>      | Specify the names of the step to be used as input.                    |
 | waits      | optional | Array<String\>      | Specify the names of the steps to wait for before processing.        |
 | strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy for streaming execution.               |
-| logging    | optional | Array<[Logging](../common/logging.md)\> | Logging settings. Supports `input` and `output` targets. |
+| logs       | optional | Array<[Logging](../common/logging.md)\> | Logging settings. Supports `input` and `output` points. |
 | parameters | required | Map<String,Object\> | Specify the following individual parameters                          |
 
 ## Bigtable sink module parameters

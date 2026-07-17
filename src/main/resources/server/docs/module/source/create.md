@@ -16,7 +16,7 @@ Source Module for generating data directly from configuration. You can either li
 |--------------------|----------|---------------------|------------------------------------------------------------------------------------------------------------------------------|
 | name               | required | String              | Step name. specified to be unique in config file.                                                                            |
 | module             | required | String              | Specified `create`                                                                                                           |
-| schema             | optional | [Schema](SCHEMA.md) | Schema of the data to be read. Required when `type` is `element`.                                                            |
+| schema             | optional | [Schema](../common/schema.md) | Schema of the data to be read. Required when `type` is `element`.                                                            |
 | timestampAttribute | optional | String              | If you want to use the value of a field as the event time, specify the name of the field. (The field must be Timestamp type) |
 | parameters         | required | Map<String,Object\> | Specify the following individual parameters                                                                                  |
 
