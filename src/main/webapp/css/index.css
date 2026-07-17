@@ -166,6 +166,20 @@ header.navbar {
     background-color: var(--focus-color);
 }
 
+/* Flash used when the agent points at a module (snippet relatedModule) */
+.drawflow .drawflow-node.node-highlight {
+    animation: nodeHighlightPulse 0.8s ease-in-out 3;
+}
+
+@keyframes nodeHighlightPulse {
+    0%, 100% {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+    50% {
+        box-shadow: 0 0 0 6px rgba(255, 193, 7, 0.65);
+    }
+}
+
 .drawflow .drawflow-node .inputs,
 .drawflow .drawflow-node .outputs {
     display: flex;
@@ -267,6 +281,27 @@ header.navbar {
 /* Source: hide label for hidden input_1 */
 .drawflow .drawflow-node.source .input.input_1::after {
     display: none;
+}
+
+/* Named-output labels - left of each output port dot.
+   The attribute is only set on multi-output nodes (partition/query),
+   so single-output nodes render no label. */
+.drawflow .drawflow-node .output {
+    position: relative;
+}
+.drawflow .drawflow-node .output::after {
+    content: attr(data-output-label);
+    position: absolute;
+    right: 18px;
+    top: -1px;
+    font-size: 9px;
+    font-weight: 600;
+    color: #198754;
+    white-space: nowrap;
+    pointer-events: none;
+}
+.drawflow .drawflow-node .output + .output {
+    margin-top: 6px;
 }
 
 /* === Connection line styles === */
@@ -897,6 +932,200 @@ header.navbar {
     background-color: #a3cfbb;
 }
 
+/* Validation result badge */
+.agent-validation {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 8px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.agent-validation.success {
+    background-color: #d1e7dd;
+    color: #0f5132;
+}
+
+.agent-validation.error {
+    background-color: #f8d7da;
+    color: #842029;
+}
+
+.agent-validation-detail {
+    margin-left: 6px;
+    font-weight: 400;
+    opacity: 0.85;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Snippet cards (illustrative examples, not applied to the canvas) */
+.agent-snippet-card {
+    margin-top: 10px;
+    border: 1px solid #dee2e6;
+    border-left: 3px solid #ffc107;
+    border-radius: 8px;
+    background-color: #fffdf5;
+    overflow: hidden;
+}
+
+.agent-snippet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    background-color: #fff8e1;
+    border-bottom: 1px solid #f0e6c8;
+}
+
+.agent-snippet-title {
+    flex: 1;
+    font-size: 12px;
+    font-weight: 600;
+    color: #664d03;
+}
+
+.agent-snippet-module {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    border: 1px solid #dee2e6;
+    border-radius: 10px;
+    background-color: #fff;
+    font-size: 11px;
+    color: #495057;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.agent-snippet-module:hover {
+    background-color: #664d03;
+    border-color: #664d03;
+    color: #fff;
+}
+
+.agent-snippet-copy {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    background-color: #fff;
+    font-size: 11px;
+    color: #495057;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.agent-snippet-copy:hover {
+    background-color: #f8f9fa;
+}
+
+.agent-snippet-description {
+    padding: 6px 10px 0;
+    font-size: 12px;
+    color: #495057;
+}
+
+.agent-snippet-card pre {
+    margin: 6px 10px 10px;
+}
+
+/* Clarifying question quick-reply chips */
+.agent-questions {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.agent-question-text {
+    font-size: 12px;
+    color: #6c757d;
+    margin-bottom: 4px;
+}
+
+.agent-question-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.agent-question-chip {
+    padding: 4px 12px;
+    border: 1px solid #198754;
+    border-radius: 14px;
+    background-color: #fff;
+    font-size: 12px;
+    color: #198754;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.agent-question-chip:hover {
+    background-color: #198754;
+    color: #fff;
+}
+
+/* Markdown-lite in assistant messages */
+.agent-md code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background-color: #f1f3f5;
+    font-size: 12px;
+    color: #d63384;
+}
+
+.agent-md .agent-md-list {
+    margin: 4px 0;
+    padding-left: 20px;
+}
+
+.agent-md .agent-md-gap {
+    height: 8px;
+}
+
+/* Config diff view */
+.agent-diff-badge {
+    margin-left: 6px;
+    background-color: #cfe2ff;
+    color: #0d6efd;
+}
+
+.agent-diff-badge:hover {
+    background-color: #9ec5fe;
+}
+
+.agent-message-bubble pre.agent-diff {
+    background-color: #f8f9fa;
+    color: #495057;
+    border: 1px solid #dee2e6;
+}
+
+.agent-diff .agent-diff-add {
+    background-color: #d1e7dd;
+    color: #0f5132;
+}
+
+.agent-diff .agent-diff-del {
+    background-color: #f8d7da;
+    color: #842029;
+}
+
+.agent-diff .agent-diff-skip {
+    color: #adb5bd;
+    text-align: center;
+}
+
+.agent-diff-empty {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #6c757d;
+}
+
 /* Tool call messages (collapsed) */
 .agent-tool-group {
     margin-bottom: 12px;
@@ -926,6 +1155,26 @@ header.navbar {
 
 .agent-tool-toggle.expanded .bi-chevron-right {
     transform: rotate(90deg);
+}
+
+.agent-tool-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.agent-tool-label + .agent-tool-label::before {
+    content: '·';
+    margin-right: 4px;
+    color: #adb5bd;
+}
+
+.agent-tool-status.success {
+    color: #198754;
+}
+
+.agent-tool-status.error {
+    color: #dc3545;
 }
 
 .agent-tool-detail {

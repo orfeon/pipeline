@@ -3,13 +3,13 @@
  */
 'use strict';
 
-import { $id, getJson, setStatus } from './util.js';
+import { $id, on, getJson, setStatus } from './util.js';
 import { loadMonaco } from './monaco.js';
-import { initDrawflow, initModuleList } from './canvas.js';
+import { initDrawflow, initModuleList, importConfigToCanvas } from './canvas.js';
 import { openModuleConfig, initModalEvents } from './modals.js';
 import { showModuleSchema, showModuleRecords, initRunButtons } from './result.js';
 import { initAgent } from './agent.js';
-import { initAutoSave } from './autosave.js';
+import { initAutoSave, clearWorkspace } from './autosave.js';
 
 // /api/spec serves the module catalog from server/docs/module/index.yaml
 function toModuleDef(entry) {
@@ -28,6 +28,17 @@ function loadSpec() {
             transforms: (modules.transforms || []).map(toModuleDef),
             sinks: (modules.sinks || []).map(toModuleDef)
         };
+    });
+}
+
+function initClearButton() {
+    on('btn-workspace-clear', 'click', function() {
+        if (!window.confirm('Clear the canvas and the saved workspace? This cannot be undone.')) {
+            return;
+        }
+        importConfigToCanvas({});
+        clearWorkspace();
+        setStatus('Workspace cleared', 'success');
     });
 }
 
@@ -76,6 +87,7 @@ function init() {
             initRunButtons();
             initModalEvents();
             initAgent();
+            initClearButton();
             initResizeHandle();
             loadMonaco(); // Pre-load Monaco so language service initializes before first modal open
             setStatus('Ready');

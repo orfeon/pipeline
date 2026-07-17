@@ -210,12 +210,63 @@ function createModuleItem(module, type) {
 // Node management
 // =============================
 
+/**
+ * Stamp each output dot with its tag so CSS renders a label
+ * (content: attr(data-output-label)) and hover shows a tooltip.
+ * A single default output stays unlabeled.
+ */
+function applyOutputLabels(nodeId) {
+    const data = editor.getNodeFromId(nodeId).data;
+    const outputNames = Array.isArray(data.outputNames) ? data.outputNames : [''];
+    if (outputNames.length === 1 && outputNames[0] === '') return;
+    outputNames.forEach(function(tag, index) {
+        const dot = document.querySelector('#node-' + nodeId + ' .output.output_' + (index + 1));
+        if (!dot) return;
+        const label = tag || 'out';
+        dot.setAttribute('data-output-label', label);
+        dot.title = 'output: ' + (tag ? data.name + '.' + tag : data.name);
+    });
+    // keep the node tall enough for its output dot column
+    if (outputNames.length > 2) {
+        const content = document.querySelector('#node-' + nodeId + ' .node-content');
+        if (content) {
+            content.style.minHeight = (outputNames.length * 24) + 'px';
+        }
+    }
+}
+
+/**
+ * Return the output port class ('output_N') for the given tag on a node,
+ * adding a port when the tag is not (yet) known — e.g. a config referencing
+ * an output the parameter-derived list did not predict.
+ */
+function ensureOutputPort(nodeId, tag) {
+    const node = editor.getNodeFromId(nodeId);
+    const outputNames = Array.isArray(node.data.outputNames) ? node.data.outputNames.slice() : [''];
+    let index = outputNames.indexOf(tag);
+    if (index < 0) {
+        editor.addNodeOutput(nodeId);
+        outputNames.push(tag);
+        node.data.outputNames = outputNames;
+        editor.updateNodeDataFromId(nodeId, node.data);
+        applyOutputLabels(nodeId);
+        index = outputNames.length - 1;
+    }
+    return 'output_' + (index + 1);
+}
+
 export function addModuleToCanvas(moduleName, moduleType, config) {
     config = config || null;
     nodeCounter[moduleType]++;
     const defaultName = (config && config.name) ? config.name : (moduleName + '_' + nodeCounter[moduleType]);
 
-    const nodeHtml = createNodeHtml(moduleName, moduleType, defaultName);
+    const inputs = 3;   // input_1: data, input_2: wait, input_3: sideInput
+    // Nodes start with a single default output port. Named-output ports
+    // (partition/query) appear when a config references them (import) or when
+    // dryrun/run reports their schemas — no parameter-derived duplication.
+    const outputs = 1;
+
+    const nodeHtml = createNodeHtml(moduleName, moduleType, defaultName, outputs);
 
     // Place node near top-left of visible viewport, accounting for pan/zoom
     const zoom = editor.zoom || 1;
@@ -224,9 +275,6 @@ export function addModuleToCanvas(moduleName, moduleType, config) {
     const margin = 30;
     const posX = (margin - canvasX) / zoom + Math.random() * 80;
     const posY = (margin - canvasY) / zoom + Math.random() * 80;
-
-    const inputs = 3;   // input_1: data, input_2: wait, input_3: sideInput
-    const outputs = 1;
 
     const nodeData = {
         moduleName: moduleName,
@@ -260,14 +308,17 @@ export function addModuleToCanvas(moduleName, moduleType, config) {
     return nodeId;
 }
 
-function createNodeHtml(moduleName, moduleType, name) {
+function createNodeHtml(moduleName, moduleType, name, outputCount) {
     const icons = {
         source: 'bi-box-arrow-in-right',
         transform: 'bi-arrow-left-right',
         sink: 'bi-box-arrow-right'
     };
 
-    return '<div class="node-content">' +
+    // Give the node enough height for its output dot column
+    const minHeight = (outputCount || 1) > 2 ? ' style="min-height: ' + (outputCount * 24) + 'px"' : '';
+
+    return '<div class="node-content"' + minHeight + '>' +
         '<div class="node-header ' + moduleType + '">' +
             '<i class="bi ' + icons[moduleType] + '"></i>' +
             '<span>' + escapeHtml(moduleName) + '</span>' +
@@ -288,11 +339,13 @@ export function getNodeData(nodeId) {
  */
 export function updateNodeData(nodeId, data) {
     editor.updateNodeDataFromId(nodeId, data);
-    const newHtml = createNodeHtml(data.moduleName, data.moduleType, data.name);
+    const outputCount = Object.keys(editor.getNodeFromId(nodeId).outputs || {}).length;
+    const newHtml = createNodeHtml(data.moduleName, data.moduleType, data.name, outputCount);
     const nodeElement = document.querySelector('#node-' + nodeId + ' .drawflow_content_node');
     if (nodeElement) {
         nodeElement.innerHTML = newHtml;
     }
+    applyOutputLabels(nodeId);
     notifyChanged();
 }
 
@@ -310,78 +363,162 @@ export function removeNode(nodeId) {
     editor.removeNodeId('node-' + nodeId);
 }
 
+/**
+ * Scroll to the node with the given module name and flash it.
+ * Returns false when no node on the canvas has that name.
+ */
+export function highlightNodeByName(name) {
+    const nodes = editor.export().drawflow.Home.data;
+    for (const id in nodes) {
+        if (nodes[id].data.name === name) {
+            const nodeElement = $id('node-' + id);
+            if (!nodeElement) return false;
+            nodeElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+            nodeElement.classList.remove('node-highlight');
+            void nodeElement.offsetWidth; // restart the animation on repeated clicks
+            nodeElement.classList.add('node-highlight');
+            setTimeout(function() {
+                nodeElement.classList.remove('node-highlight');
+            }, 2400);
+            return true;
+        }
+    }
+    return false;
+}
+
 // =============================
 // Result indicators (dryrun schema / run records)
 // =============================
 
-export function updateNodeSchemaIndicator(moduleName, schema) {
-    moduleSchemas[moduleName] = schema;
+/** Split an output registry key ("module" or "module.tag") into its parts. */
+function splitOutputName(outputName) {
+    const dot = outputName.indexOf('.');
+    return dot > 0
+        ? { moduleName: outputName.substring(0, dot), tag: outputName.substring(dot + 1) }
+        : { moduleName: outputName, tag: '' };
+}
 
+function findNodeIdByName(moduleName) {
     const nodes = editor.export().drawflow.Home.data;
     for (const id in nodes) {
         if (nodes[id].data.name === moduleName) {
-            nodes[id].data.outputSchema = schema;
-            editor.updateNodeDataFromId(parseInt(id), nodes[id].data);
-
-            const nodeElement = document.querySelector('#node-' + id + ' .node-content');
-            if (nodeElement) {
-                let indicator = nodeElement.querySelector('.node-schema-indicator');
-                if (!indicator) {
-                    indicator = document.createElement('i');
-                    indicator.className = 'bi bi-file-earmark-text node-schema-indicator';
-                    indicator.title = 'View output schema';
-                    indicator.addEventListener('click', function(e) {
-                        e.stopPropagation();
-                        const latestSchema = moduleSchemas[moduleName];
-                        if (latestSchema && callbacks.onShowSchema) {
-                            callbacks.onShowSchema(moduleName, latestSchema);
-                        }
-                    });
-                    nodeElement.style.position = 'relative';
-                    nodeElement.appendChild(indicator);
-                }
-                indicator.classList.add('has-schema');
-            }
-            break;
+            return parseInt(id);
         }
+    }
+    return null;
+}
+
+/**
+ * The schema shown for a node: the default output's schema directly, or —
+ * when dryrun reported named outputs — one nested group per output so the
+ * existing schema renderer displays them together.
+ */
+function collectModuleSchemas(moduleName) {
+    const namedKeys = Object.keys(moduleSchemas).filter(function(key) {
+        return key.indexOf(moduleName + '.') === 0;
+    });
+    if (namedKeys.length === 0) {
+        return moduleSchemas[moduleName];
+    }
+    const fields = [];
+    if (moduleSchemas[moduleName]) {
+        fields.push({ name: '(default)', type: 'element', fields: moduleSchemas[moduleName].fields || [] });
+    }
+    namedKeys.forEach(function(key) {
+        fields.push({
+            name: key.substring(moduleName.length + 1),
+            type: 'element',
+            fields: (moduleSchemas[key] || {}).fields || []
+        });
+    });
+    return { fields: fields };
+}
+
+/**
+ * Reflect a dryrun/run output schema on the canvas. outputName is the output
+ * registry key: "module" for the default output, "module.tag" for named
+ * outputs (partition/query) — named outputs get their port here.
+ */
+export function updateNodeSchemaIndicator(outputName, schema) {
+    moduleSchemas[outputName] = schema;
+
+    const parts = splitOutputName(outputName);
+    const nodeId = findNodeIdByName(parts.moduleName);
+    if (nodeId === null) return;
+    const moduleName = parts.moduleName;
+
+    if (parts.tag) {
+        ensureOutputPort(nodeId, parts.tag);
+    }
+
+    const data = editor.getNodeFromId(nodeId).data;
+    data.outputSchema = schema;
+    editor.updateNodeDataFromId(nodeId, data);
+
+    const nodeElement = document.querySelector('#node-' + nodeId + ' .node-content');
+    if (nodeElement) {
+        let indicator = nodeElement.querySelector('.node-schema-indicator');
+        if (!indicator) {
+            indicator = document.createElement('i');
+            indicator.className = 'bi bi-file-earmark-text node-schema-indicator';
+            indicator.title = 'View output schema';
+            indicator.addEventListener('click', function(e) {
+                e.stopPropagation();
+                const latestSchema = collectModuleSchemas(moduleName);
+                if (latestSchema && callbacks.onShowSchema) {
+                    callbacks.onShowSchema(moduleName, latestSchema);
+                }
+            });
+            nodeElement.style.position = 'relative';
+            nodeElement.appendChild(indicator);
+        }
+        indicator.classList.add('has-schema');
     }
 }
 
-export function updateNodeOutputIndicator(moduleName, output) {
-    moduleOutputs[moduleName] = output;
+export function updateNodeOutputIndicator(outputName, output) {
+    moduleOutputs[outputName] = output;
 
-    const nodes = editor.export().drawflow.Home.data;
-    for (const id in nodes) {
-        if (nodes[id].data.name === moduleName) {
-            nodes[id].data.output = output;
-            editor.updateNodeDataFromId(parseInt(id), nodes[id].data);
+    const parts = splitOutputName(outputName);
+    const nodeId = findNodeIdByName(parts.moduleName);
+    if (nodeId === null) return;
+    const moduleName = parts.moduleName;
 
-            const nodeElement = document.querySelector('#node-' + id + ' .node-content');
-            if (nodeElement) {
-                const schemaIndicator = nodeElement.querySelector('.node-schema-indicator');
-                if (schemaIndicator) {
-                    schemaIndicator.style.display = 'none';
-                }
+    if (parts.tag) {
+        ensureOutputPort(nodeId, parts.tag);
+    }
 
-                let indicator = nodeElement.querySelector('.node-output-indicator');
-                if (!indicator) {
-                    indicator = document.createElement('i');
-                    indicator.className = 'bi bi-table node-output-indicator';
-                    indicator.title = 'View output records';
-                    indicator.addEventListener('click', function(e) {
-                        e.stopPropagation();
-                        const latestOutput = moduleOutputs[moduleName];
-                        if (latestOutput && callbacks.onShowRecords) {
-                            callbacks.onShowRecords(moduleName, latestOutput);
-                        }
-                    });
-                    nodeElement.style.position = 'relative';
-                    nodeElement.appendChild(indicator);
-                }
-                indicator.classList.add('has-output');
-            }
-            break;
+    const data = editor.getNodeFromId(nodeId).data;
+    data.output = output;
+    editor.updateNodeDataFromId(nodeId, data);
+
+    const nodeElement = document.querySelector('#node-' + nodeId + ' .node-content');
+    if (nodeElement) {
+        const schemaIndicator = nodeElement.querySelector('.node-schema-indicator');
+        if (schemaIndicator) {
+            schemaIndicator.style.display = 'none';
         }
+
+        let indicator = nodeElement.querySelector('.node-output-indicator');
+        if (!indicator) {
+            indicator = document.createElement('i');
+            indicator.className = 'bi bi-table node-output-indicator';
+            indicator.title = 'View output records';
+            indicator.addEventListener('click', function(e) {
+                e.stopPropagation();
+                // show the default output when present, else the first named one
+                const key = moduleOutputs[moduleName] ? moduleName
+                    : Object.keys(moduleOutputs).find(function(k) {
+                        return k.indexOf(moduleName + '.') === 0;
+                    });
+                if (key && callbacks.onShowRecords) {
+                    callbacks.onShowRecords(key, moduleOutputs[key]);
+                }
+            });
+            nodeElement.style.position = 'relative';
+            nodeElement.appendChild(indicator);
+        }
+        indicator.classList.add('has-output');
     }
 }
 
@@ -395,10 +532,21 @@ function extractConnectionNames(nodeInputs, portName, nodeMap) {
     if (port && port.connections) {
         port.connections.forEach(function(conn) {
             const sourceNode = nodeMap[conn.node];
-            if (sourceNode) names.push(sourceNode.data.name);
+            if (!sourceNode) return;
+            // conn.input holds the source node's output port class (drawflow convention)
+            const tag = getOutputTagByClass(sourceNode, conn.input);
+            names.push(tag ? sourceNode.data.name + '.' + tag : sourceNode.data.name);
         });
     }
     return names;
+}
+
+function getOutputTagByClass(node, outputClass) {
+    const outputNames = node.data.outputNames;
+    if (!Array.isArray(outputNames) || !outputClass) return '';
+    const index = parseInt(String(outputClass).replace('output_', ''), 10) - 1;
+    const tag = outputNames[index];
+    return typeof tag === 'string' ? tag : '';
 }
 
 export function generateConfig() {
@@ -515,11 +663,24 @@ export function importConfigToCanvas(config) {
         columnX: { source: 100, transform: 400, sink: 700 }
     };
 
-    function connect(sourceName, nodeId, inputClass) {
-        const sourceNodeId = nodeIdMap[sourceName];
-        if (sourceNodeId) {
-            editor.addConnection(sourceNodeId, nodeId, 'output_1', inputClass);
+    // sourceRef may be "moduleName" or "moduleName.outputTag" (named outputs
+    // of e.g. partition/query modules)
+    function connect(sourceRef, nodeId, inputClass) {
+        let sourceName = sourceRef;
+        let tag = '';
+        if (!(sourceRef in nodeIdMap)) {
+            const dot = sourceRef.indexOf('.');
+            if (dot > 0) {
+                sourceName = sourceRef.substring(0, dot);
+                tag = sourceRef.substring(dot + 1);
+            }
         }
+        const sourceNodeId = nodeIdMap[sourceName];
+        if (!sourceNodeId) {
+            setStatus('Unresolved input reference: ' + sourceRef, 'warning');
+            return;
+        }
+        editor.addConnection(sourceNodeId, nodeId, ensureOutputPort(sourceNodeId, tag), inputClass);
     }
 
     function importModules(moduleConfigs, type) {
@@ -527,11 +688,6 @@ export function importConfigToCanvas(config) {
             const nodeId = addModuleToCanvas(moduleConfig.module, type, moduleConfig);
             nodeIdMap[moduleConfig.name] = nodeId;
             positionNode(nodeId, layout.columnX[type], layout.startY + index * layout.nodeSpacingY);
-            if (type !== 'source' && moduleConfig.inputs) {
-                moduleConfig.inputs.forEach(function(inputName) {
-                    connect(inputName, nodeId, 'input_1');
-                });
-            }
         });
     }
 
@@ -539,11 +695,21 @@ export function importConfigToCanvas(config) {
     importModules(config.transforms, 'transform');
     importModules(config.sinks, 'sink');
 
-    // Create waits and sideInputs connections for all module types
+    // Wire all connections after every node exists, so references to modules
+    // defined later in the config (order does not matter to the engine) and
+    // named-output references resolve correctly.
     const allModuleConfigs = [].concat(config.sources || [], config.transforms || [], config.sinks || []);
     allModuleConfigs.forEach(function(moduleConfig) {
         const nodeId = nodeIdMap[moduleConfig.name];
         if (!nodeId) return;
+        if (moduleConfig.module && moduleConfig.inputs) {
+            const isSource = (config.sources || []).indexOf(moduleConfig) >= 0;
+            if (!isSource) {
+                moduleConfig.inputs.forEach(function(inputName) {
+                    connect(inputName, nodeId, 'input_1');
+                });
+            }
+        }
         (moduleConfig.waits || []).forEach(function(waitName) {
             connect(waitName, nodeId, 'input_2');
         });
