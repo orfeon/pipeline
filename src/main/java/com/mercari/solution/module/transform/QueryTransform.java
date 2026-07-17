@@ -58,7 +58,7 @@ import java.util.Set;
 
 /**
  * Runs a Calcite SQL statement over each input element, inside a DoFn, optionally
- * joined against external lookup sources (JDBC / Spanner / Bigtable / REST / gRPC)
+ * joined against external lookup sources (JDBC / Spanner / Bigtable / Datastore / Firestore / REST / gRPC)
  * or other pipeline collections delivered as Beam side inputs ({@code sideinput}).
  *
  * <p>Unlike the {@code beamsql} module (which plans SQL over whole PCollections and may

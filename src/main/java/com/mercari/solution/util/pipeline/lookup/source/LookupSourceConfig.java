@@ -35,13 +35,15 @@ public final class LookupSourceConfig {
         private String user;
         private String password;
 
-        // spanner / bigtable
+        // spanner / bigtable / datastore / firestore
         private String projectId;
         private String instanceId;
         private String databaseId;
         private Boolean emulator;
         private Long maxStalenessSeconds;
         private String appProfileId;
+        private String namespace;
+        private String emulatorHost;
 
         // rest
         private String baseUrl;
@@ -105,6 +107,39 @@ public final class LookupSourceConfig {
                     }
                 }
                 case "rest" -> {
+                }
+                case "datastore" -> {
+                    if(projectId == null) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (datastore) requires projectId");
+                    }
+                    for(int t = 0; t < tables.size(); t++) {
+                        final TableParameters table = tables.get(t);
+                        if(table.name == null) {
+                            throw new IllegalModuleException(
+                                    "parameters.sources[" + index + "].tables[" + t
+                                            + "] (datastore) requires name");
+                        }
+                        if(table.keyType != null
+                                && !"string".equals(table.keyType) && !"int64".equals(table.keyType)) {
+                            throw new IllegalModuleException(
+                                    "parameters.sources[" + index + "].tables[" + t
+                                            + "].keyType must be string or int64 but was: " + table.keyType);
+                        }
+                    }
+                }
+                case "firestore" -> {
+                    if(projectId == null) {
+                        throw new IllegalModuleException(
+                                "parameters.sources[" + index + "] (firestore) requires projectId");
+                    }
+                    for(int t = 0; t < tables.size(); t++) {
+                        if(tables.get(t).name == null) {
+                            throw new IllegalModuleException(
+                                    "parameters.sources[" + index + "].tables[" + t
+                                            + "] (firestore) requires name");
+                        }
+                    }
                 }
                 case "sideinput" -> {
                     for(int t = 0; t < tables.size(); t++) {
@@ -184,7 +219,7 @@ public final class LookupSourceConfig {
                     }
                 }
                 default -> throw new IllegalModuleException(
-                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, rest, grpc, sideinput, buffer but was: " + type);
+                        "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, datastore, firestore, rest, grpc, sideinput, buffer but was: " + type);
             }
         }
     }
@@ -260,6 +295,11 @@ public final class LookupSourceConfig {
 
         // sideinput (keyFields shared with rest)
         private String input;
+
+        // datastore / firestore (keyField / fields shared)
+        private String kind;
+        private String collection;
+        private String keyType;
     }
 
     public static class ColumnParameters implements Serializable {
@@ -512,6 +552,48 @@ public final class LookupSourceConfig {
                             tableBuilder.withColumn(column.name, column.family, column.qualifier,
                                     Schema.Type.of(column.type == null ? "string" : column.type));
                         }
+                    }
+                    builder.withTable(tableBuilder.build());
+                }
+                yield builder.build();
+            }
+            case "datastore" -> {
+                final DatastoreLookupSource.Builder builder = DatastoreLookupSource.builder()
+                        .withName(source.name)
+                        .withProjectId(source.projectId)
+                        .withDatabaseId(source.databaseId)
+                        .withNamespace(source.namespace)
+                        .withEmulatorHost(source.emulatorHost);
+                for(final TableParameters table : source.tables) {
+                    final DatastoreLookupSource.TableBuilder tableBuilder = DatastoreLookupSource.table()
+                            .withName(table.name)
+                            .withKind(table.kind == null ? table.table : table.kind)
+                            .withNumericKey("int64".equals(table.keyType));
+                    if(table.keyField != null) {
+                        tableBuilder.withKeyField(table.keyField);
+                    }
+                    if(table.fields != null && !table.fields.isJsonNull()) {
+                        tableBuilder.withFields(parseFields(table.fields));
+                    }
+                    builder.withTable(tableBuilder.build());
+                }
+                yield builder.build();
+            }
+            case "firestore" -> {
+                final FirestoreLookupSource.Builder builder = FirestoreLookupSource.builder()
+                        .withName(source.name)
+                        .withProjectId(source.projectId)
+                        .withDatabaseId(source.databaseId)
+                        .withEmulatorHost(source.emulatorHost);
+                for(final TableParameters table : source.tables) {
+                    final FirestoreLookupSource.TableBuilder tableBuilder = FirestoreLookupSource.table()
+                            .withName(table.name)
+                            .withCollection(table.collection == null ? table.table : table.collection);
+                    if(table.keyField != null) {
+                        tableBuilder.withKeyField(table.keyField);
+                    }
+                    if(table.fields != null && !table.fields.isJsonNull()) {
+                        tableBuilder.withFields(parseFields(table.fields));
                     }
                     builder.withTable(tableBuilder.build());
                 }
