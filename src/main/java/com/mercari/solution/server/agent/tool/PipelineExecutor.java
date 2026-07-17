@@ -6,7 +6,7 @@ import dev.langchain4j.agent.tool.Tool;
 
 public class PipelineExecutor {
 
-    @Tool("""
+    @Tool(name = "run", value = """
         Validate and dry-run a pipeline configuration.
         Use this tool to check if a pipeline config is valid.
         The tool returns the validation result including any errors.
