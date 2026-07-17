@@ -49,6 +49,9 @@ public class StorageSink extends Sink {
         private Boolean bom;
         private Boolean outputEmpty;
 
+        // arrow
+        private Integer batchSize;
+
         // inner use
         private List<String> outputTemplateArgs;
 
@@ -73,6 +76,9 @@ public class StorageSink extends Sink {
             if(this.format == null) {
                 errorMessages.add("parameters.format must not be null");
             }
+            if(this.batchSize != null && this.batchSize < 1) {
+                errorMessages.add("parameters.batchSize must be positive");
+            }
 
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -92,6 +98,10 @@ public class StorageSink extends Sink {
             }
             if(this.outputEmpty == null) {
                 this.outputEmpty = false;
+            }
+            // For Arrow format (rows per record batch; bounds per-writer off-heap memory)
+            if(this.batchSize == null) {
+                this.batchSize = 10000;
             }
 
             // For CSV format
@@ -154,6 +164,7 @@ public class StorageSink extends Sink {
                 yield CsvSink.of(outputSchema, fields, parameters.header, null, parameters.bom);
             }
             case json -> JsonSink.of(outputSchema, false, parameters.bom);
+            case arrow -> ArrowSink.of(outputSchema, parameters.codec, parameters.batchSize);
             case avro, parquet -> {
                 final boolean fitSchema = false;// Optional.ofNullable(schema.getUseDestinationSchema()).orElse(false);
                 yield switch (parameters.format) {
@@ -169,6 +180,7 @@ public class StorageSink extends Sink {
             case json -> "WriteJSON";
             case avro -> "WriteAvro";
             case parquet -> "WriteParquet";
+            case arrow -> "WriteArrow";
         };
 
         final WriteFilesResult writeFilesResult;
