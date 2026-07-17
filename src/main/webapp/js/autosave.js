@@ -63,6 +63,19 @@ function restoreWorkspace() {
 }
 
 /**
+ * Drop the saved workspace and any pending save, so a subsequent reload
+ * starts from an empty canvas.
+ */
+export function clearWorkspace() {
+    clearTimeout(saveTimer);
+    try {
+        localStorage.removeItem(STORAGE_KEY);
+    } catch (e) {
+        console.error('Failed to clear saved workspace:', e);
+    }
+}
+
+/**
  * Restore any saved workspace, then start auto-saving on canvas changes.
  * Call after the canvas and module list are initialized.
  */

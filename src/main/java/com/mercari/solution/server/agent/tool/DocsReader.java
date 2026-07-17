@@ -7,12 +7,15 @@ import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 public class DocsReader {
 
-    private static final String DOCS_BASE_PATH = "/server/docs/module";
+    private static final String DOCS_ROOT_PATH = "/server/docs";
+    private static final String DOCS_BASE_PATH = DOCS_ROOT_PATH + "/module";
 
     public enum ModuleType {
         source,
@@ -83,6 +86,69 @@ public class DocsReader {
         } catch (final Exception e) {
             return String.format("Failed to read documentation for %s module '%s': %s", type.name(), name, e.getMessage());
         }
+    }
+
+    @Tool("""
+        Read any bundled documentation file by its path relative to the docs root.
+        Module documentation may reference shared documents that are not module docs themselves,
+        e.g. a link "../common/filter.md" inside "module/transform/select.md" resolves to
+        "module/common/filter.md". Use this tool to follow such references.
+        Shared documents include: module/common/filter.md, module/common/select.md,
+        module/common/strategy.md, module/common/expression.md, module/common/schema.md,
+        module/common/schema-migration.md, module/common/logging.md, module/common/template.md,
+        and system.md (the config's system block reference).
+    """)
+    public String getDocument(
+            @P(name = "path", description = "Document path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md'.") String path) {
+
+        final String normalized = normalizeDocPath(path);
+        if (normalized == null) {
+            return "Error: invalid document path '" + path + "'. Specify a .md path relative to the docs root, e.g. 'module/common/filter.md'.";
+        }
+        final String resourcePath = DOCS_ROOT_PATH + "/" + normalized;
+        try (final InputStream is = getClass().getResourceAsStream(resourcePath)) {
+            if (is == null) {
+                return "Document not found: '" + normalized + "'. Relative links resolve against the referencing document's directory (e.g. '../common/filter.md' in 'module/transform/select.md' is 'module/common/filter.md').";
+            }
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (final Exception e) {
+            return String.format("Failed to read document '%s': %s", normalized, e.getMessage());
+        }
+    }
+
+    /**
+     * Normalize a docs-root-relative path: resolves '.'/'..' segments and rejects
+     * paths that escape the docs root or do not point at a markdown file.
+     */
+    static String normalizeDocPath(final String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        String p = path.trim().replace('\\', '/');
+        while (p.startsWith("/")) {
+            p = p.substring(1);
+        }
+        final Deque<String> segments = new ArrayDeque<>();
+        for (final String segment : p.split("/")) {
+            switch (segment) {
+                case "", "." -> { }
+                case ".." -> {
+                    if (segments.isEmpty()) {
+                        return null;
+                    }
+                    segments.removeLast();
+                }
+                default -> segments.addLast(segment);
+            }
+        }
+        if (segments.isEmpty()) {
+            return null;
+        }
+        final String normalized = String.join("/", segments);
+        if (!normalized.endsWith(".md")) {
+            return null;
+        }
+        return normalized;
     }
 
     public static DocsReader create() {

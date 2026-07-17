@@ -17,7 +17,6 @@ import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.SystemMessage;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.V;
-import org.apache.beam.sdk.values.KV;
 
 import java.util.*;
 
@@ -49,7 +48,7 @@ public interface PipelineAgent {
                     System.out.println(e.request());
                 })
                 .build()
-                .chat(lastUserMessage.singleText(), "");
+                .chat(lastUserMessage.singleText(), createCanvasConfigContext(body));
 
         final List<ChatMessage> newResponseMessages = historyMemory
                 .messages()
@@ -57,6 +56,17 @@ public interface PipelineAgent {
         final List<Map<String, Object>> newMessages = createResponseMessages(newResponseMessages);
 
         return new Gson().toJson(newMessages);
+    }
+
+    private static String createCanvasConfigContext(final JsonObject body) {
+        if (!body.has("config") || !body.get("config").isJsonPrimitive()) {
+            return "";
+        }
+        final String canvasConfig = body.get("config").getAsString().trim();
+        if (canvasConfig.isEmpty()) {
+            return "";
+        }
+        return "\nCurrent pipeline config on the user's canvas:\n```yaml\n" + canvasConfig + "\n```";
     }
 
     private static List<ChatMessage> createHistoryMessages(final JsonArray historyJson) {
@@ -150,10 +160,6 @@ public interface PipelineAgent {
             }
         }
         return responseMessages;
-    }
-
-    private static KV<String, String> parseUserMessage() {
-        return KV.of("", "");
     }
 
 }

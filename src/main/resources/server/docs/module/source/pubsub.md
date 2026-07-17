@@ -25,7 +25,7 @@ Supports four message deserialization formats:
 |--------------------|----------|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
 | name               | required | String              | Step name. specified to be unique in config file.                                                                                                   |
 | module             | required | String              | Specified `pubsub`                                                                                                                                  |
-| schema             | conditional | [Schema](SCHEMA.md) | Schema of the data to be read. Required for `json`, `avro`, and `protobuf` formats. Not required for `message` format. For `avro`, the schema can be auto-inferred from the Pub/Sub topic/subscription schema if not specified. |
+| schema             | conditional | [Schema](../common/schema.md) | Schema of the data to be read. Required for `json`, `avro`, and `protobuf` formats. Not required for `message` format. For `avro`, the schema can be auto-inferred from the Pub/Sub topic/subscription schema if not specified. |
 | timestampAttribute | optional | String              | Attribute name containing the event timestamp. If specified, the attribute value is used as the event time instead of the Pub/Sub publish time.      |
 | parameters         | required | Map<String,Object\> | Specify the following individual parameters                                                                                                         |
 

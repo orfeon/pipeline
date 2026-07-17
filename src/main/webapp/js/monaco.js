@@ -51,6 +51,21 @@ function createOrGetEditor(containerId, language) {
             renderLineHighlight: 'line',
             folding: true
         });
+
+        // The YAML completion provider only fires on typed trigger characters
+        // (space / colon), so open the suggest widget after Enter: auto-indent
+        // already puts the cursor at the right nesting level.
+        ed.onDidChangeModelContent(function(e) {
+            if (e.isFlush || e.isUndoing || e.isRedoing || e.changes.length !== 1) return;
+            // Enter + auto-indent inserts exactly '\n' + whitespace
+            if (!/^\r?\n[ \t]*$/.test(e.changes[0].text)) return;
+            if (ed.getModel().getLanguageId() !== 'yaml') return;
+            setTimeout(function() {
+                if (!ed.hasTextFocus()) return;
+                ed.trigger('auto', 'editor.action.triggerSuggest', {});
+            }, 0);
+        });
+
         monacoEditors[containerId] = ed;
         return ed;
     });

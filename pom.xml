@@ -95,6 +95,9 @@
           <excludes>
             <exclude>com/mercari/solution/server/**/*.java</exclude>
           </excludes>
+          <testExcludes>
+            <testExclude>com/mercari/solution/server/**/*.java</testExclude>
+          </testExcludes>
         </configuration>
       </plugin>
 
@@ -307,6 +310,8 @@
             <configuration>
               <excludes combine.self="override">
               </excludes>
+              <testExcludes combine.self="override">
+              </testExcludes>
             </configuration>
           </plugin>
           <plugin>
