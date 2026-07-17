@@ -1,6 +1,7 @@
 package com.mercari.solution.server;
 
 import com.mercari.solution.server.api.AgentService;
+import com.mercari.solution.server.code.CodeRepository;
 import jakarta.servlet.ServletContext;
 import jakarta.servlet.ServletContextEvent;
 import jakarta.servlet.ServletContextListener;
@@ -21,6 +22,11 @@ public class ServerInitializer implements ServletContextListener {
             LOG.info("AgentService ChatModel initialized successfully.");
         } catch (Exception e) {
             LOG.warn("Failed to initialize AgentService ChatModel. Agent feature will not be available.", e);
+        }
+        try {
+            CodeRepository.init(context);
+        } catch (Exception e) {
+            LOG.warn("Failed to initialize CodeRepository. Code-reading tools will not be available.", e);
         }
     }
 
