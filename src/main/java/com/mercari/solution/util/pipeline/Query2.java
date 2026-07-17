@@ -81,7 +81,7 @@ import java.util.function.Consumer;
 /**
  * Executes Calcite SQL over bounded, in-memory {@link MElement} lists,
  * optionally joined against external {@link LookupSource}s (JDBC / Spanner /
- * Bigtable / REST) via <em>key-driven lookup-joins</em>.
+ * Bigtable / Datastore / Firestore / REST / gRPC) via <em>key-driven lookup-joins</em>.
  *
  * <p>This is the successor of {@link Query}: the same "SQL inside a DoFn" core
  * (plan and compile once per worker, evaluate repeatedly against small in-memory

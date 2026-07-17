@@ -1,13 +1,13 @@
 ---
 name: query-lookup-sources
-description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/rest/grpc/sideinput/buffer), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, the buffer source's stateful DoFn in QueryTransform, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
+description: Developing and maintaining the query transform's SQL engine (Query2), its external lookup sources (jdbc/spanner/bigtable/datastore/firestore/rest/grpc/sideinput/buffer), correlated LATERAL evaluation, and UDF/UDAF registration. Use when adding or changing a lookup source, touching util/pipeline/Query2 or util/pipeline/lookup, the buffer source's stateful DoFn in QueryTransform, debugging "standalone scans are not supported" / "Lookup source id N is not registered" / lookup-join-not-chosen problems, adding UDFs to Query2, or extending the LATERAL machinery.
 ---
 
 # Query engine & lookup sources
 
 The `query` transform module runs one Calcite SQL statement per input element
 inside a DoFn — no shuffle, windowing/timestamps inherited — optionally joining
-external tables (JDBC / Spanner / Bigtable / REST / gRPC) or other pipeline
+external tables (JDBC / Spanner / Bigtable / Datastore / Firestore / REST / gRPC) or other pipeline
 collections delivered as Beam side inputs **on their keys** as batched
 lookup-joins that never scan the external table. This subsystem was ported from
 [orfeon/calcite-multi-engine](https://github.com/orfeon/calcite-multi-engine)
@@ -58,9 +58,17 @@ exact problem Beam's vendoring exists to avoid. Use the vendored Guava
   - `CalciteValues` — primitive ↔ Calcite-internal value conversion (below).
   - `LookupKey` / `LookupRequest` / `LookupBatch` / `PerKeyLookup` — key model
     and the shared per-distinct-key loop for backends that can't array-bind.
-- `util/pipeline/lookup/source/` — the seven adapters: `JdbcLookupSource`,
+- `util/pipeline/lookup/source/` — the nine adapters: `JdbcLookupSource`,
   `SpannerLookupSource` (native tables + parameterized-query tables),
-  `BigtableLookupSource`, `RestLookupSource`, `GrpcLookupSource`
+  `BigtableLookupSource`, `DatastoreLookupSource` / `FirestoreLookupSource`
+  (document stores as config-declared-schema tables — kind/collection per
+  table, the single key column is the entity key name-or-id / document id
+  (`__name__` by default), batch key reads (`lookup` RPC / `getAll` with a
+  field mask), point equality only — range/prefix requests are rejected at
+  runtime; embedded entities / nested maps surface as `json` columns; no
+  launcher connectivity needed; emulator via `emulatorHost`; hermetic unit
+  tests + emulator ITs `DatastoreQueryLookupIT` / `FirestoreQueryLookupIT`),
+  `RestLookupSource`, `GrpcLookupSource`
   (descriptor-set-driven dynamic client — no generated stubs; the grpc/protobuf
   runtime is already on the classpath via Beam GCP IO, so it adds no
   dependency. Serializes the descriptor-set **bytes** so only the launcher

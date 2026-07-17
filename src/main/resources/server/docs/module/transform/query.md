@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Query Transform Module
-description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / REST / gRPC) or other pipeline collections delivered as side inputs can be joined on their keys as batched lookup-joins — the external table is never scanned. A buffer source additionally exposes the transform's own past input elements, accumulated per key in Beam state, as a lookup table — per-key history, sequences and funnels with no external store. One element yields zero or more output rows.
-tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, rest, grpc, sideinput, buffer, state, history, cep]
+description: Runs a Calcite SQL query over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL, and external tables (JDBC / Spanner / Bigtable / Datastore / Firestore / REST / gRPC) or other pipeline collections delivered as side inputs can be joined on their keys as batched lookup-joins — the external table is never scanned. A buffer source additionally exposes the transform's own past input elements, accumulated per key in Beam state, as a lookup table — per-key history, sequences and funnels with no external store. One element yields zero or more output rows.
+tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, datastore, firestore, rest, grpc, sideinput, buffer, state, history, cep]
 timestamp: 2026-07-03T00:00:00Z
 ---
 
@@ -15,7 +15,7 @@ Unlike the [beamsql](beamsql.md) module — which plans SQL over whole PCollecti
 - **No shuffle, ever.** The query runs entirely inside the DoFn. Windowing, triggering, and element timestamps of the surrounding pipeline are preserved, so batch and streaming behave identically.
 - **Collections live inside the element.** Array-of-struct fields can be expanded with `UNNEST` (optionally with `LATERAL` subqueries), so aggregation (`COUNT`/`SUM`/`AVG`/…, `GROUP BY`, `HAVING`), ordering with `ORDER BY` / `LIMIT`, and set operations (`UNION` / `INTERSECT` / `EXCEPT`) all operate over the per-element collection.
 - **Fan-out or fold.** One input element yields zero or more output rows: a query without aggregation fans out (one row per unnested item), an aggregate query folds the element into one row, and a `WHERE` that matches nothing drops the element.
-- **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, REST/gRPC APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
+- **External lookup-joins.** With `sources`, tables in external systems (JDBC databases, Cloud Spanner, Cloud Bigtable, Cloud Datastore, Cloud Firestore, REST/gRPC APIs) are referenced in the SQL as `sourceName.tableName` and joined **on their key** — a batched, index-backed key read per join, never a scan of the external table.
 - **In-pipeline lookup-joins.** A `sideinput` source exposes **another collection of the same pipeline** (declared in the module's `sideInputs`) as a lookup table — no external store: the data is broadcast to the workers as a Beam side input and hash-indexed by the declared key once per window.
 - **Per-key history joins.** A `buffer` source exposes **this transform's own past input elements**, accumulated per group key in Beam state, as a lookup table — sequence detection, funnels and per-key aggregates over recent events with no external store. This is the one source type that changes the pipeline shape: the input is keyed by `groupFields` and the query runs in a stateful DoFn (see below).
 
@@ -29,7 +29,7 @@ A join between the input and a lookup table is executed as a key-driven read whe
 - **Prefix**: equality on the leading key columns only (JDBC / Spanner, index-backed prefix scan; fans out to all rows under the prefix) — `ON t.key1 = i.a`
 - **Prefix + range**: equality on the leading columns plus a bounded range on the next — `ON t.key1 = i.a AND t.key2 >= i.lo AND t.key2 <= i.hi`
 
-The right-hand side of each condition may be any expression over input columns **or a literal** (so a REST endpoint or header can be fixed in SQL). `INNER` and `LEFT` joins are supported. Key values are batched and deduplicated across the join, and one backend request is issued per batch (JDBC: one OR-of-tuples query; Spanner: one `read(KeySet)`; Bigtable: one multi-range `readRows`; REST: one HTTP call per **distinct** key tuple).
+The right-hand side of each condition may be any expression over input columns **or a literal** (so a REST endpoint or header can be fixed in SQL). `INNER` and `LEFT` joins are supported. Key values are batched and deduplicated across the join, and one backend request is issued per batch (JDBC: one OR-of-tuples query; Spanner: one `read(KeySet)`; Bigtable: one multi-range `readRows`; Datastore: one batch key `lookup`; Firestore: one `getAll` batch read; REST: one HTTP call per **distinct** key tuple).
 
 ### Correlated LATERAL blocks (per-key aggregation / top-N)
 
@@ -83,7 +83,7 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 - The SQL sees exactly **one element per evaluation**. Aggregation across elements is out of scope — use the [aggregation](aggregation.md) or [beamsql](beamsql.md) module for cross-element grouping. (Aggregation over the rows fetched *for* one element — e.g. `GROUP BY` over a lookup fan-out — is fine.)
 - Every expression in the select list must have an **explicit alias** (`AS name`); auto-generated column names such as `EXPR$0` are rejected at pipeline construction.
 - Reserved words used as field names (e.g. `value`) must be quoted with backticks.
-- Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata. (`sideinput` sources take their schema from the pipeline itself and need no connectivity.)
+- Lookup sources are read at pipeline construction time to derive table metadata (JDBC `DatabaseMetaData`, Spanner `INFORMATION_SCHEMA`), so the machine that launches the pipeline needs connectivity to them; workers reuse the serialized metadata. (`sideinput` sources take their schema from the pipeline itself, and `datastore` / `firestore` / `rest` tables declare their columns in configuration — none of these need launcher connectivity.)
 - Lookups must be **read-only and idempotent** — a lookup may run many times, in any order, and per-bundle retries repeat it. Never point a REST table at a side-effecting endpoint.
 - `MATCH_RECOGNIZE` is **not supported** (the underlying Calcite enumerable runtime cannot execute it). For per-element sequence patterns, use the built-in `SEQ_MATCH` function (below), or `ORDER BY`/`LIMIT`/aggregation over the collection (optionally in a LATERAL block).
 - `float32` external columns are surfaced as `float64` in SQL; timestamps are compared at millisecond precision inside the SQL engine.
@@ -166,7 +166,7 @@ intermediates and the buffer's persistence are unaffected).
 | parameter | optional | type           | description                                                                    |
 |-----------|----------|----------------|--------------------------------------------------------------------------------|
 | name      | required | String         | Schema name the source's tables are referenced by in SQL (`name.table`).       |
-| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `rest`, `grpc`, `sideinput`, `buffer`.   |
+| type      | required | String         | One of `jdbc`, `spanner`, `bigtable`, `datastore`, `firestore`, `rest`, `grpc`, `sideinput`, `buffer`. |
 | tables    | required | Array<Table\>  | Tables to expose. Per-type table parameters below.                             |
 | cache     | optional | Cache          | On-memory cache over the source's lookups (see below). Off unless the block is present. |
 
@@ -261,6 +261,65 @@ Table parameters:
 | columns     | optional | Array<Column\>  | Value columns: `name`, `family`, `qualifier` (defaults to `name`), `type`.  |
 
 The row key is a single opaque column and the **only** key — composite key structure (`user#ts`) is built by the caller in SQL, e.g. `ON b.rowKey = i.userId || '#' || i.date`. Cell bytes use the HBase-compatible codec (`DATE`/`TIMESTAMP` as epoch-microsecond INT64, numbers big-endian, strings UTF-8); only the latest cell version is read.
+
+### datastore source
+
+Exposes Cloud Datastore **kinds** as lookup tables. A lookup is one batch key
+`lookup` RPC per join batch (never a query, never a scan); a missing entity
+yields no row — use a `LEFT JOIN` for a default. Datastore is schemaless, so
+the value columns are declared in configuration; entity metadata needs no
+launcher connectivity.
+
+| parameter    | optional | type   | description                                                        |
+|--------------|----------|--------|----------------------------------------------------------------------|
+| projectId    | required | String | GCP project of the Datastore database.                             |
+| databaseId   | optional | String | Named database id (default: the default database).                 |
+| namespace    | optional | String | Datastore namespace of the looked-up entities.                     |
+| emulatorHost | optional | String | Datastore emulator `host:port` (also honors `DATASTORE_EMULATOR_HOST`). |
+
+Table parameters:
+
+| parameter | optional | type          | description                                                                          |
+|-----------|----------|---------------|------------------------------------------------------------------------------------------|
+| name      | required | String        | SQL table name.                                                                      |
+| kind      | optional | String        | Datastore kind (defaults to `name`).                                                 |
+| keyField  | optional | String        | Column name the entity key is surfaced as (default `__name__`).                      |
+| keyType   | optional | String        | `string` (key **name**, default) or `int64` (numeric key **id**).                    |
+| fields    | optional | Array<Field\> | Value columns (standard schema fields JSON: `name`, `type`, …). Use type `json` for embedded entities. |
+
+The entity key (name or id, per `keyType`) is the single key column — **point
+equality only** (`ON d.__name__ = i.userId`); range/prefix conditions and
+ancestor paths are not supported. Embedded entities and geo points surface as
+`json` columns; array properties as `array` columns; timestamps at millisecond
+precision.
+
+### firestore source
+
+Exposes Cloud Firestore **collections** as lookup tables. A lookup is one
+`getAll` batch read per join batch, restricted to the projected fields (never a
+query, never a scan); a missing document yields no row — use a `LEFT JOIN` for
+a default. Firestore is schemaless, so the value columns are declared in
+configuration; document metadata needs no launcher connectivity.
+
+| parameter    | optional | type   | description                                                          |
+|--------------|----------|--------|------------------------------------------------------------------------|
+| projectId    | required | String | GCP project of the Firestore database.                               |
+| databaseId   | optional | String | Database id (default `(default)`).                                   |
+| emulatorHost | optional | String | Firestore emulator `host:port`.                                       |
+
+Table parameters:
+
+| parameter  | optional | type          | description                                                                          |
+|------------|----------|---------------|------------------------------------------------------------------------------------------|
+| name       | required | String        | SQL table name.                                                                      |
+| collection | optional | String        | Collection path, possibly a subcollection (`users/u1/orders`); defaults to `name`.   |
+| keyField   | optional | String        | Column name the document id is surfaced as (default `__name__`).                     |
+| fields     | optional | Array<Field\> | Value columns (standard schema fields JSON: `name`, `type`, …). Use type `json` for nested maps. |
+
+The document id (always a string) is the single key column — **point equality
+only** (`ON d.__name__ = i.userId`). Nested maps, geo points and document
+references surface as `json` columns; array fields as `array` columns;
+timestamps at millisecond precision.
 
 ### rest source
 
@@ -946,6 +1005,49 @@ transforms:
               columns:
                 - { name: plan, family: cf, type: string }
                 - { name: score, family: cf, type: float64 }
+```
+
+### Datastore / Firestore document lookup by key
+
+Document stores join on their single key column (`__name__` by default): the
+entity key name for Datastore, the document id for Firestore. Value columns are
+declared per table (`json` for embedded entities / nested maps); a missing
+entity/document yields no row, so `LEFT JOIN` keeps the input element.
+
+```yaml
+transforms:
+  - name: enriched
+    module: query
+    inputs: [events]
+    parameters:
+      sql: |
+        SELECT
+          i.userId AS userId,
+          u.name AS name,
+          u.address AS address,
+          d.plan AS plan
+        FROM
+          INPUT AS i
+        LEFT JOIN fs.users AS u ON u.__name__ = i.userId
+        LEFT JOIN ds.accounts AS d ON d.__name__ = i.userId
+      sources:
+        - name: fs
+          type: firestore
+          projectId: my-project
+          tables:
+            - name: users
+              collection: Users
+              fields:
+                - { name: name, type: string }
+                - { name: address, type: json }
+        - name: ds
+          type: datastore
+          projectId: my-project
+          tables:
+            - name: accounts
+              kind: Accounts
+              fields:
+                - { name: plan, type: string }
 ```
 
 ### REST API lookup with response-array fan-out

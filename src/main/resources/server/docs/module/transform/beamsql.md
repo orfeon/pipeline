@@ -38,7 +38,7 @@ A variety of built-in [UDFs and UDAFs](#built-in-udfs) are also available.
 | namedParameters      | optional | Map<String,String\> | Named parameters for the SQL query. Cannot be used together with `positionalParameters`.                                                                                                                                                         |
 | positionalParameters | optional | Array<String\>      | Positional parameters for the SQL query. Cannot be used together with `namedParameters`.                                                                                                                                                         |
 | autoLoading          | optional | Boolean             | Enable auto-loading of Beam SQL table providers.                                                                                                                                                                                                 |
-| sources              | optional | Array<Source\>      | External lookup sources (jdbc / spanner / bigtable / rest / grpc; `sideinput` is query-module only — beamsql joins PCollections natively). Each source's tables are referenced as `sourceName.tableName` and joined as inline lookups — see below. Same per-type parameters as the [query](query.md) module. |
+| sources              | optional | Array<Source\>      | External lookup sources (jdbc / spanner / bigtable / datastore / firestore / rest / grpc; `sideinput` is query-module only — beamsql joins PCollections natively). Each source's tables are referenced as `sourceName.tableName` and joined as inline lookups — see below. Same per-type parameters as the [query](query.md) module. |
 
 ### SQL loading
 
@@ -69,7 +69,7 @@ seekable-table mechanism: a join against one is planned as an **inline lookup** 
 each input row the matching rows are fetched from the external system (never a scan
 of the external table; a standalone `FROM sourceName.tableName` fails). The
 configuration is identical to the [query](query.md) module's `sources` (jdbc /
-spanner incl. parameterized query tables / bigtable / rest).
+spanner incl. parameterized query tables / bigtable / datastore / firestore / rest).
 
 Constraints (differences from the `query` module's lookup-join):
 
@@ -87,7 +87,8 @@ Constraints (differences from the `query` module's lookup-join):
   the temporal type is needed. `TIMESTAMP` columns pass through natively.
 - Lookups must be read-only and idempotent; the launcher needs connectivity to the
   sources at pipeline construction (table metadata is derived once and shipped to
-  workers).
+  workers — datastore / firestore / rest tables declare their columns in
+  configuration and need no launcher connectivity).
 
 ```yaml
 transforms:
