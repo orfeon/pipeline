@@ -31,6 +31,8 @@ A join between the input and a lookup table is executed as a key-driven read whe
 
 The right-hand side of each condition may be any expression over input columns **or a literal** (so a REST endpoint or header can be fixed in SQL). `INNER` and `LEFT` joins are supported. Key values are batched and deduplicated across the join, and one backend request is issued per batch (JDBC: one OR-of-tuples query; Spanner: one `read(KeySet)`; Bigtable: one multi-range `readRows`; Datastore: one batch key `lookup`; Firestore: one `getAll` batch read; REST: one HTTP call per **distinct** key tuple).
 
+A join condition that does not fit this contract (or a standalone `FROM sourceName.tableName` scan) is rejected at **pipeline construction time** with an error naming the table — lookup tables are never scanned.
+
 ### Correlated LATERAL blocks (per-key aggregation / top-N)
 
 The rows fetched for one key can be processed as a set *inside* the join, by writing the lookup as a correlated `LATERAL` subquery. The correlated conditions must satisfy the same key contract (they become the fetch); **everything else in the block — aggregation, `HAVING`, `DISTINCT`, uncorrelated filters, `ORDER BY` / `LIMIT` — is evaluated over the fetched per-key row set in memory, inside the DoFn** (compiled once per worker, never a shuffle):
@@ -107,6 +109,28 @@ Any other use of a lookup table — a standalone scan (`FROM db.table` without t
 | table     | optional | String | Table name under which the input element is visible in the SQL. Defaults to `INPUT`.                                                                                                                     |
 | filter    | optional | Filter | Filter-DSL condition over the input element (same syntax as the `filter` module). Elements not matching are dropped **before** the SQL evaluation — the filter costs ~100ns per element, an order of magnitude less than even a simple SQL evaluation, so use it to skip elements the query would discard anyway. With a `buffer` source, non-matching elements are neither buffered nor evaluated (contrast with `bufferFilter`/`triggerFilter`, which split those concerns). |
 | sources   | optional | Array<Source\> | External lookup sources. Each source's tables are referenced in the SQL as `sourceName.tableName` and joined on their keys (see the contract above).                                              |
+| guard     | optional | Guard  | Runtime guards applied per evaluation (see below).                                                                                                                                                       |
+
+## Guardrails (`guard`)
+
+Two protection layers, ported from the origin engine's guard policy and adapted to per-element evaluation:
+
+**Plan-time (always on, no configuration).** A join whose condition does not fit the key contract leaves a scan of the lookup table in the plan — that scan can never execute. The transform rejects such a plan at **pipeline construction time** with an error naming the table(s) and the key contract, instead of failing per element on the workers after the job started.
+
+**Runtime (`guard` parameter).** Safety net against evaluations that explode or hang in ways plan-time checks cannot see (LATERAL fan-out, `UNNEST` cross joins, a slow external lookup). Checked at every result-row boundary; violations throw with a `query guard:` message and follow the module's normal failure handling — `failFast: true` stops the job, otherwise the element is routed to `failureSinks` / `outputFailure` as a dead letter.
+
+| parameter     | optional | type | description |
+|---------------|----------|------|-------------|
+| maxRows       | optional | Long | Maximum result rows per statement per evaluation. Exceeding it fails the evaluation (never a silent truncation). |
+| timeoutMillis | optional | Long | Deadline over one evaluation (all statements of the session). Checked between result rows — a call blocked *inside* a lookup source is not interrupted; the deadline fires at the next row boundary. |
+
+```yaml
+    parameters:
+      sql: "SELECT ... FROM INPUT i JOIN db.history h ON h.userId = i.userId"
+      guard:
+        maxRows: 10000
+        timeoutMillis: 5000
+```
 
 ## Multiple queries per element (`queries` / `exclusive`)
 
