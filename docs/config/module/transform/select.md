@@ -20,7 +20,3 @@ Select transform module can be used to filter rows by specified filter condition
 | select      | selective required | Array<[SelectField](../common/select.md)\> | Specify a list of field definitions if you want to refine, rename, or apply some processing to the input fields. |
 | groupFields | optional           | Array<String\>                             | Specify the names of fields to be referenced to group the data.　                                                 |
 
-
-## Related example config files
-
-* [Avro to filter to Avro](../../../../examples/avro-to-filter-to-avro.json)

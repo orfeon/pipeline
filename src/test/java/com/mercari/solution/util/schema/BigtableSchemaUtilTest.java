@@ -13,16 +13,9 @@ import com.google.cloud.bigtable.data.v2.models.DeleteFamily;
 import com.google.cloud.bigtable.data.v2.models.Range;
 import com.google.cloud.bigtable.data.v2.models.RowCell;
 import com.google.cloud.bigtable.data.v2.models.SetCell;
-import com.google.cloud.bigtable.data.v2.models.sql.ColumnMetadata;
-import com.google.cloud.bigtable.data.v2.models.sql.ResultSet;
-import com.google.cloud.bigtable.data.v2.models.sql.ResultSetMetadata;
-import com.google.cloud.bigtable.data.v2.models.sql.SqlType;
-import com.google.cloud.bigtable.data.v2.models.sql.Struct;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
-import com.google.protobuf.AbstractMessage;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.ProtocolMessageEnum;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.DateTimeUtil;
@@ -41,7 +34,6 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
 
 public class BigtableSchemaUtilTest {
 
@@ -790,10 +782,9 @@ public class BigtableSchemaUtilTest {
                         RowCell.create("cf1", ByteString.copyFromUtf8("q1"), 3000L, List.of(), ByteString.copyFrom(Bytes.toBytes("hello"))),
                         RowCell.create("cf1", ByteString.copyFromUtf8("q2"), 3000L, List.of(), ByteString.copyFrom(Bytes.toBytes(42L)))));
 
-        final org.joda.time.Instant timestamp = org.joda.time.Instant.parse("2024-01-01T00:00:00Z");
-        final MElement element = BigtableSchemaUtil.convert(row, BigtableSchemaUtil.toMap(families), timestamp);
-        Assertions.assertEquals("hello", element.getPrimitiveValue("stringField"));
-        Assertions.assertEquals(42L, element.getPrimitiveValue("longField"));
+        final Map<String, Object> values = BigtableSchemaUtil.toPrimitiveValues(row, BigtableSchemaUtil.toMap(families));
+        Assertions.assertEquals("hello", values.get("stringField"));
+        Assertions.assertEquals(42L, values.get("longField"));
     }
 
     @Test
@@ -891,260 +882,6 @@ public class BigtableSchemaUtilTest {
         Assertions.assertTrue(schema.hasField("sourceCluster"));
         Assertions.assertTrue(schema.hasField("tieBreaker"));
         Assertions.assertTrue(schema.hasField("value"));
-    }
-
-    private static ColumnMetadata columnMetadata(final String name, final SqlType<?> type) {
-        return new ColumnMetadata() {
-            @Override
-            public String name() {
-                return name;
-            }
-            @Override
-            public SqlType<?> type() {
-                return type;
-            }
-        };
-    }
-
-    private static ResultSetMetadata metadataOf(final List<ColumnMetadata> columns) {
-        return new ResultSetMetadata() {
-            @Override
-            public List<ColumnMetadata> getColumns() {
-                return columns;
-            }
-            @Override
-            public SqlType<?> getColumnType(int index) {
-                return columns.get(index).type();
-            }
-            @Override
-            public SqlType<?> getColumnType(String columnName) {
-                return getColumnType(getColumnIndex(columnName));
-            }
-            @Override
-            public int getColumnIndex(String columnName) {
-                for (int i = 0; i < columns.size(); i++) {
-                    if (columns.get(i).name().equals(columnName)) {
-                        return i;
-                    }
-                }
-                throw new IllegalArgumentException(columnName);
-            }
-        };
-    }
-
-    private static class FakeResultSet implements ResultSet {
-
-        private final ResultSetMetadata metadata;
-        private final Map<String, Object> values;
-
-        FakeResultSet(final ResultSetMetadata metadata, final Map<String, Object> values) {
-            this.metadata = metadata;
-            this.values = values;
-        }
-
-        @Override
-        public boolean next() {
-            return false;
-        }
-
-        @Override
-        public ResultSetMetadata getMetadata() {
-            return metadata;
-        }
-
-        @Override
-        public void close() {
-        }
-
-        @Override
-        public boolean isNull(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public boolean isNull(String name) {
-            return values.get(name) == null;
-        }
-
-        @Override
-        public ByteString getBytes(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public ByteString getBytes(String name) {
-            return (ByteString) values.get(name);
-        }
-
-        @Override
-        public String getString(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public String getString(String name) {
-            return (String) values.get(name);
-        }
-
-        @Override
-        public long getLong(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public long getLong(String name) {
-            return (Long) values.get(name);
-        }
-
-        @Override
-        public double getDouble(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public double getDouble(String name) {
-            return (Double) values.get(name);
-        }
-
-        @Override
-        public float getFloat(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public float getFloat(String name) {
-            return (Float) values.get(name);
-        }
-
-        @Override
-        public boolean getBoolean(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public boolean getBoolean(String name) {
-            return (Boolean) values.get(name);
-        }
-
-        @Override
-        public java.time.Instant getTimestamp(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public java.time.Instant getTimestamp(String name) {
-            return (java.time.Instant) values.get(name);
-        }
-
-        @Override
-        public com.google.cloud.Date getDate(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public com.google.cloud.Date getDate(String name) {
-            return (com.google.cloud.Date) values.get(name);
-        }
-
-        @Override
-        public Struct getStruct(int index) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public Struct getStruct(String name) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <ElemType> List<ElemType> getList(int index, SqlType.Array<ElemType> arrayType) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <ElemType> List<ElemType> getList(String name, SqlType.Array<ElemType> arrayType) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <K, V> Map<K, V> getMap(int index, SqlType.Map<K, V> mapType) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <K, V> Map<K, V> getMap(String name, SqlType.Map<K, V> mapType) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <MsgType extends AbstractMessage> MsgType getProtoMessage(int index, MsgType message) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <MsgType extends AbstractMessage> MsgType getProtoMessage(String name, MsgType message) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <EnumType extends ProtocolMessageEnum> EnumType getProtoEnum(int index, Function<Integer, EnumType> creator) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public <EnumType extends ProtocolMessageEnum> EnumType getProtoEnum(String name, Function<Integer, EnumType> creator) {
-            throw new UnsupportedOperationException();
-        }
-    }
-
-    @Test
-    public void testConvertResultSet() throws Exception {
-        final List<ColumnMetadata> columns = List.of(
-                columnMetadata("boolField", SqlType.bool()),
-                columnMetadata("stringField", SqlType.string()),
-                columnMetadata("bytesField", SqlType.bytes()),
-                columnMetadata("longField", SqlType.int64()),
-                columnMetadata("floatField", SqlType.float32()),
-                columnMetadata("doubleField", SqlType.float64()),
-                columnMetadata("dateField", SqlType.date()),
-                columnMetadata("timestampField", SqlType.timestamp()),
-                columnMetadata("nullField", SqlType.string()));
-        final ResultSetMetadata metadata = metadataOf(columns);
-
-        final Schema schema = BigtableSchemaUtil.convertSchema(metadata);
-        Assertions.assertEquals(Schema.Type.bool, schema.getField("boolField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.string, schema.getField("stringField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.bytes, schema.getField("bytesField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.int64, schema.getField("longField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.float32, schema.getField("floatField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.float64, schema.getField("doubleField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.date, schema.getField("dateField").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.timestamp, schema.getField("timestampField").getFieldType().getType());
-
-        final Map<String, Object> values = new HashMap<>();
-        values.put("boolField", true);
-        values.put("stringField", "s");
-        values.put("bytesField", ByteString.copyFromUtf8("b"));
-        values.put("longField", 5L);
-        values.put("floatField", 1.5F);
-        values.put("doubleField", 2.5D);
-        values.put("dateField", com.google.cloud.Date.fromYearMonthDay(2024, 3, 1));
-        values.put("timestampField", java.time.Instant.parse("2024-01-01T00:00:00.123456Z"));
-        values.put("nullField", null);
-
-        final org.joda.time.Instant timestamp = org.joda.time.Instant.parse("2024-01-01T00:00:00Z");
-        final MElement element = BigtableSchemaUtil.convert(new FakeResultSet(metadata, values), timestamp);
-
-        Assertions.assertEquals(Boolean.TRUE, element.getPrimitiveValue("boolField"));
-        Assertions.assertEquals("s", element.getPrimitiveValue("stringField"));
-        Assertions.assertEquals(ByteString.copyFromUtf8("b"), element.getPrimitiveValue("bytesField"));
-        Assertions.assertEquals(5L, element.getPrimitiveValue("longField"));
-        Assertions.assertEquals(1.5F, element.getPrimitiveValue("floatField"));
-        Assertions.assertEquals(2.5D, element.getPrimitiveValue("doubleField"));
-        Assertions.assertEquals((int) LocalDate.parse("2024-03-01").toEpochDay(), element.getPrimitiveValue("dateField"));
-        // convertFieldValue truncates the timestamp to milli precision (epoch micros value)
-        Assertions.assertEquals(1704067200123000L, element.getPrimitiveValue("timestampField"));
-        Assertions.assertNull(element.getPrimitiveValue("nullField"));
     }
 
     // remove hadoop serialize format

@@ -46,7 +46,7 @@ The exact set depends on the module, but most modules follow this convention:
 | `output`      | Every record the module emits.                                                  |
 | `not_matched` | Records dropped by a filter condition (modules with `filter` support: select, http, drive, files, ...). |
 | `matched`     | Records that passed a filter condition.                                          |
-| `response`    | Raw responses (http transform).                                                   |
+| `response`    | Raw responses (http source).                                                      |
 | `system`      | Module-internal status messages.                                                  |
 
 The `logs` field is also available on failure sink definitions (`failureSinks`).

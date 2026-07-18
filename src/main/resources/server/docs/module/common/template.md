@@ -30,10 +30,9 @@ The rest of this document describes the per-record layer.
 | select / partition / aggregation (transform) | `text` select function — generates a string field from other fields |
 | files (sink) | output path and content templates — per-record dynamic file names |
 | storage / bigquery / datastore / firestore / pubsub (sink) | dynamic destination parameters (e.g. bucket paths, attributes) |
-| bigtable (source / transform / sink) | row key templates (e.g. `${userId}#${utils.bigtable.reverseTimestampMicros(timestamp)}`) |
+| bigtable (source / sink) | row key templates (e.g. `${userId}#${utils.bigtable.reverseTimestampMicros(timestamp)}`) |
 | bigquery / jdbc / spanner (source) | query text (combined with config args; per-microbatch variables in streaming) |
-| http (source / transform) | request URL / body templates |
-| vertexai.gemini (transform) | prompt templates |
+| http (source) | request URL / body templates |
 | debug (sink) | log message template |
 
 Consult each module's documentation for which of its parameters accept templates.

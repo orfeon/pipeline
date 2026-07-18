@@ -38,21 +38,15 @@ This page lists the modules registered in the current codebase.
 | module                                                                                | description                                                                                                             |
 |-----------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
 | [select](../../../src/main/resources/server/docs/module/transform/select.md)           | Filter rows and transform field values with a rich set of select functions                                              |
-| [filter](transform/filter.md)                                                           | Filter input rows according to specified conditions                                                                     |
 | [aggregation](../../../src/main/resources/server/docs/module/transform/aggregation.md) | Perform aggregation with grouping, filtering, and field selection in both batch and streaming                           |
 | [beamsql](../../../src/main/resources/server/docs/module/transform/beamsql.md)         | Process and combine input data using SQL queries based on Apache Beam SQL (Calcite)                                     |
 | [query](../../../src/main/resources/server/docs/module/transform/query.md)             | Run a Calcite SQL query over each input element inside a DoFn (no shuffle), with lookup joins to external sources       |
 | [partition](../../../src/main/resources/server/docs/module/transform/partition.md)     | Split input data into multiple named outputs based on filter conditions                                                 |
-| lookup                                                                                   | Enrich records by looking up matching records from side inputs                                                          |
 | compare                                                                                  | Compare records across multiple inputs by primary key and output differences                                            |
-| deserialize                                                                              | Deserialize a value serialized in a specified format                                                                    |
 | [reshuffle](../../../src/main/resources/server/docs/module/transform/reshuffle.md)     | Insert a reshuffle stage to prevent fusion optimizations and enable checkpointing                                       |
-| [http](transform/http.md)                                                               | Send an HTTP request to the specified endpoint and get the result                                                       |
-| [bigtable](transform/bigtable.md)                                                       | Query rows from Cloud Bigtable and process them                                                                         |
 | [onnx](transform/onnx.md)                                                               | Make inferences using the specified [ONNX](https://onnxruntime.ai/) model file                                          |
 | onnx_gen                                                                                 | Run generative inference (prompt-based) using ONNX generative models                                                    |
 | [pdfextract](transform/pdfextract.md)                                                   | Extract text and metadata from PDF files                                                                                |
-| vertexai.gemini                                                                          | Process data using Vertex AI Gemini models                                                                              |
 
 ## Sink Modules
 

@@ -6,8 +6,9 @@ mapped onto Beam `AwsOptions` with `default`/`static`/`assumeRole` providers; us
 Phase 1 done (`GcpCredentialsCache` central provider with `options.gcp.credentials` /
 `MERCARI_PIPELINE_GCP_CREDENTIALS` sources, `MCredentialFactory` for Beam GCP IOs, metadata-server
 guard `IAMUtil.isOnGcp()`, explicit-project error in `OptionUtil.getDefaultProject`; all direct
-`getApplicationDefault()` call sites migrated except the vertexai/tasks modules slated for
-removal; deploy guides remain scheduled for Phase 5),
+`getApplicationDefault()` call sites migrated except the tasks module slated for removal
+(the `vertexai.gemini` transform has since been deleted); deploy guides remain scheduled for
+Phase 5),
 Phase 2 done (`credentials.type: gcpFederation`: `GcpFederatedAwsCredentialsProvider` — GCP ID
 token → STS `AssumeRoleWithWebIdentity` — delivered to workers via `S3Options.s3ClientFactoryClass`
 = `GcpFederatedS3ClientFactory` + string `FederationOptions` (see the §5.2 amendment on why the
@@ -40,7 +41,7 @@ Out of scope (tracked separately, not blocked by this design):
   CVE surface becomes a concern.
 - Clouds other than GCP and AWS. Interfaces introduced here should not actively block a third
   provider, but we do not design for one (YAGNI).
-- `vertexai.gemini` transform's token-refresh logic — the module is slated for removal.
+- `vertexai.gemini` transform's token-refresh logic — resolved: the module has been deleted.
 
 This document is the single source of truth for the cross-cloud auth work. Each implementation PR
 should reference the relevant section rather than restating the design.

@@ -40,6 +40,3 @@ The schema of the output of this module is that if no `select` parameter is spec
 | value     | (specified by `type`) | Generated data                                            |
 | timestamp | Timestamp             | Processed timestamp                                       |
 
-## Related example config files
-
-* [Create to Solr on CloudRun to BigQuery](../../../../examples/create-to-http-to-bigquery.json)

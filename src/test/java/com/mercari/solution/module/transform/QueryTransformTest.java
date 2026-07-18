@@ -266,11 +266,12 @@ public class QueryTransformTest {
                     },
                     {
                       "name": "highOnly",
-                      "module": "filter",
+                      "module": "select",
                       "inputs": ["query.high"],
                       "parameters": {
-                        "filter": [
-                          { "key": "score", "op": ">", "value": 0 }
+                        "select": [
+                          { "name": "id", "field": "id" },
+                          { "name": "score", "field": "score" }
                         ]
                       }
                     }

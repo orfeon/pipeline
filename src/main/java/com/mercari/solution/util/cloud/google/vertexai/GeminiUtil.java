@@ -2,13 +2,9 @@ package com.mercari.solution.util.cloud.google.vertexai;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.OpenApiSchema;
-import com.mercari.solution.util.schema.converter.ElementToJsonConverter;
-import com.mercari.solution.util.schema.converter.JsonToElementConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,28 +22,7 @@ public class GeminiUtil {
 
     private static final Logger LOG = LoggerFactory.getLogger(GeminiUtil.class);
 
-    private static final String ENDPOINT_GENERATE_CONTENT = "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s";
     private static final String ENDPOINT_BATCH_PREDICTION = "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/batchPredictionJobs";
-
-    private static final Schema generateContentRequestSchema = GenerateContentRequest.createSchema();
-
-    public static class Model implements Serializable {
-        public String project;
-        public String region;
-        public String publisher;
-        public String id;
-
-        public List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-
-            return errorMessages;
-        }
-
-        public void setDefaults() {
-
-        }
-
-    }
 
     public static class BatchPredictionJobsRequest implements Serializable {
         public String displayName;
@@ -238,160 +213,7 @@ public class GeminiUtil {
         public Content systemInstruction;
         public GenerationConfig generationConfig;
         public SafetySetting safetySetting;
-
-        public static GenerateContentResponse of(JsonObject responseJson) {
-            final GenerateContentResponse response = new GenerateContentResponse();
-            return response;
-        }
     }
-
-    // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#request_body
-    public static class GenerateContentRequest implements Serializable {
-
-        public String cachedContent;
-        public List<Content> contents;
-        public Content systemInstruction;
-        public List<Tool> tools;
-        public GenerationConfig generationConfig;
-        public SafetySetting safetySetting;
-        public Map<String, String> labels;
-
-        public List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(contents == null || contents.isEmpty()) {
-                errorMessages.add("request.contents must not be empty");
-            } else {
-                for(int i=0; i<contents.size(); i++) {
-                    errorMessages.addAll(contents.get(i).validate("request.contents[" + i + "]"));
-                }
-            }
-
-            if(systemInstruction != null) {
-                if(systemInstruction.parts == null || systemInstruction.parts.isEmpty()) {
-                    errorMessages.add("request.systemInstruction.parts must not be empty");
-                } else {
-                    for(int i=0; i<systemInstruction.parts.size(); i++) {
-                        if(systemInstruction.parts.get(i).text == null) {
-                            errorMessages.add("request.systemInstruction.parts[" + i + "].text must not be null");
-                        }
-                    }
-                }
-            }
-
-            if(generationConfig != null) {
-                errorMessages.addAll(generationConfig.validate("request.generationConfig"));
-            }
-
-            return errorMessages;
-        }
-
-        public void setDefaults() {
-
-        }
-
-        public JsonObject toJson() {
-            final JsonObject requestJson = new JsonObject();
-
-            if(contents != null) {
-                final JsonArray contentsArray = new JsonArray();
-                for(final Content content : contents) {
-                    final JsonObject contentJson = content.toJson();
-                    contentsArray.add(contentJson);
-                }
-                requestJson.add("contents", contentsArray);
-            }
-
-            if(tools != null) {
-                final JsonArray contentsArray = new JsonArray();
-                for(final Tool tool : tools) {
-                    final JsonObject contentJson = tool.toJson();
-                    contentsArray.add(contentJson);
-                }
-                requestJson.add("tools", contentsArray);
-            }
-
-            if(systemInstruction != null) {
-                final JsonObject systemInstructionJson = systemInstruction.toJson();
-                requestJson.add("systemInstruction", systemInstructionJson);
-            }
-
-            if(generationConfig != null) {
-                final JsonObject generationConfigJson = generationConfig.toJson();
-                requestJson.add("generationConfig", generationConfigJson);
-            }
-
-            if(safetySetting != null) {
-                final JsonObject safetySettingJson = safetySetting.toJson();
-                requestJson.add("safetySetting", safetySettingJson);
-            }
-
-            return requestJson;
-        }
-
-        public static Schema createSchema() {
-            return Schema.builder()
-                    .withField("cachedContent", Schema.FieldType.STRING)
-                    .withField("contents", Schema.FieldType.array(Schema.FieldType.element(Content.createSchema())))
-                    .withField("systemInstruction", Schema.FieldType.element(Content.createSchema()))
-                    //.withField("tools", Schema.FieldType.array(Schema.FieldType.element()))
-                    //.withField("safetySettings", Schema.FieldType.array(Schema.FieldType.element()))
-                    .withField("generationConfig", Schema.FieldType.element(GenerationConfig.createSchema()))
-                    .withField("labels", Schema.FieldType.map(Schema.FieldType.STRING))
-                    .build();
-        }
-
-        public static GenerateContentRequest fromJson(final JsonObject jsonObject) {
-            return new Gson().fromJson(jsonObject, GenerateContentRequest.class);
-        }
-
-        public static JsonObject toJson(final MElement element) {
-            if(element == null) {
-                throw new IllegalArgumentException("");
-            }
-
-            return ElementToJsonConverter.convert(generateContentRequestSchema, element);
-        }
-
-        public static Map<String, Object> toPrimitiveMap(final String jsonText) {
-            if(jsonText == null) {
-                throw new IllegalArgumentException("generateContentRequest json must not be null");
-            }
-            final JsonElement jsonElement = new Gson().fromJson(jsonText, JsonElement.class);
-            if(!jsonElement.isJsonObject()) {
-                throw new IllegalArgumentException("Illegal request json: " + jsonElement);
-            }
-            return toPrimitiveMap(jsonElement.getAsJsonObject());
-        }
-
-        private static Map<String, Object> toPrimitiveMap(final JsonObject jsonObject) {
-            return JsonToElementConverter.convert(generateContentRequestSchema.getFields(), jsonObject);
-        }
-    }
-
-    public static class GenerateContentResponse implements Serializable {
-        public List<Content> contents;
-        public Content systemInstruction;
-        public GenerationConfig generationConfig;
-        public SafetySetting safetySetting;
-
-        public static GenerateContentResponse of(JsonObject responseJson) {
-            final GenerateContentResponse response = new GenerateContentResponse();
-            return response;
-        }
-
-        public static Schema createSchema(final OpenApiSchema openApiSchema) {
-            final Schema.Builder builder = Schema.builder()
-                    .withField("candidates", Schema.FieldType.array(Schema.FieldType.element(Content.createSchema())))
-                    .withField("finishReason", Schema.FieldType.STRING);
-
-            if(openApiSchema != null) {
-                //builder.withField("response", Schema.FieldType.element(OpenApiSchema.createSchema(openApiSchema)));
-            }
-
-            return builder.build();
-        }
-    }
-
 
     public static class Content implements Serializable {
 
@@ -486,53 +308,6 @@ public class GeminiUtil {
                     //.withField("videoMetadata", Schema.FieldType.element(VideoMetadata.createSchema()))
                     .build();
         }
-    }
-
-    public static class Tool implements Serializable {
-
-        public String role;
-        public List<Part> parts;
-
-        public List<FunctionDeclaration> functionDeclarations;
-
-        public JsonObject toJson() {
-            final JsonObject contentJson = new JsonObject();
-            contentJson.addProperty("role", role);
-            final JsonArray partArray = new JsonArray();
-            for(final Part part : parts) {
-                final JsonObject partJson = part.toJson();
-                partArray.add(partJson);
-            }
-            contentJson.add("parts", partArray);
-            return contentJson;
-        }
-
-    }
-
-    public static class FunctionDeclaration implements Serializable {
-
-        public String name;
-        public String description;
-        public OpenApiSchema parameters;
-
-        public JsonObject toJson() {
-            final JsonObject contentJson = new JsonObject();
-            contentJson.addProperty("name", name);
-            contentJson.addProperty("description", description);
-            if(parameters != null) {
-                contentJson.add("parameters", parameters.toJson());
-            }
-            return contentJson;
-        }
-
-        public static Schema createSchema() {
-            return Schema.builder()
-                    .withField("name", Schema.FieldType.STRING)
-                    .withField("description", Schema.FieldType.STRING)
-                    .withField("parameters", Schema.FieldType.element(OpenApiSchema.createSchema()))
-                    .build();
-        }
-
     }
 
     public static class GenerationConfig implements Serializable {
@@ -702,41 +477,6 @@ public class GeminiUtil {
         HARM_BLOCK_METHOD_UNSPECIFIED,
         SEVERITY,
         PROBABILITY
-    }
-
-    public static GenerateContentResponse generateContent(
-            final HttpClient client,
-            final String token,
-            final Model model,
-            final JsonObject body) {
-
-        final String endpoint = String.format(ENDPOINT_GENERATE_CONTENT, model.region, model.project, model.region, model.publisher, model.id);
-        System.out.println(endpoint);
-        System.out.println(body.toString());
-        try {
-            final HttpRequest req = HttpRequest.newBuilder()
-                    .uri(new URI(endpoint + ":generateContent"))
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", "Bearer " + token)
-                    .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
-                    .build();
-            final HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
-            //final JsonObject responseJson = new Gson().fromJson(res.body(), JsonObject.class);
-            System.out.println("response: " + res.body());
-
-            return null;
-        } catch (final Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public static GenerateContentResponse generateContent(
-            final HttpClient client,
-            final String token,
-            final Model model,
-            final GenerateContentRequest request) {
-
-        return generateContent(client, token, model, request.toJson());
     }
 
     public static BatchPredictionJobsResponse batchPredictionJobs(

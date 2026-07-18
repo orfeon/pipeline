@@ -5,11 +5,7 @@ import com.google.bigtable.v2.Mutation;
 import com.google.bigtable.v2.Row;
 import com.google.bigtable.v2.Value;
 import com.google.cloud.ByteArray;
-import com.google.cloud.bigtable.data.v2.BigtableDataClient;
 import com.google.cloud.bigtable.data.v2.models.*;
-import com.google.cloud.bigtable.data.v2.models.sql.*;
-import com.google.cloud.bigtable.data.v2.models.sql.ColumnMetadata;
-import com.google.cloud.bigtable.data.v2.models.sql.ResultSetMetadata;
 import com.google.protobuf.ByteString;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
@@ -32,7 +28,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.SQLException;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -662,80 +657,6 @@ public class BigtableSchemaUtil {
                 .name("value").type(AvroSchemaUtil.REQUIRED_BYTES).noDefault()
                 .name("timestamp").type(AvroSchemaUtil.REQUIRED_LOGICAL_TIMESTAMP_MICRO_TYPE).noDefault()
                 .endRecord();
-    }
-
-    public static Schema convertSchema(final ResultSetMetadata meta)  throws SQLException {
-        final Schema.Builder builder = Schema.builder();
-        for (final ColumnMetadata columnMetadata : meta.getColumns()) {
-            builder.withField(columnMetadata.name(), convertFieldType(columnMetadata.type()));
-        }
-        return builder.build();
-    }
-
-    public static Schema convertSchema(final String projectId, final String instanceId, final String sql) {
-        try(final BigtableDataClient client = BigtableDataClient.create(projectId, instanceId);
-            final ResultSet resultSet = client.executeQuery(client.prepareStatement(sql, new HashMap<>()).bind().build())) {
-            return BigtableSchemaUtil.convertSchema(resultSet.getMetadata());
-        } catch (final IOException | SQLException e) {
-            throw new RuntimeException("", e);
-        }
-    }
-
-    public static MElement convert(
-            final ResultSet resultSet,
-            final Instant timestamp) {
-
-        final Map<String, Object> primitiveValues = new HashMap<>();
-        final ResultSetMetadata meta = resultSet.getMetadata();
-        for (final ColumnMetadata columnMetadata : meta.getColumns()) {
-            final Object primitiveValue = convertFieldValue(resultSet, columnMetadata);
-            primitiveValues.put(columnMetadata.name(), primitiveValue);
-        }
-        return MElement.of(primitiveValues, timestamp);
-    }
-
-    public static MElement convert(
-            final com.google.cloud.bigtable.data.v2.models.Row row,
-            final Map<String, ColumnFamilyProperties> families,
-            final Instant timestamp) {
-
-        final Map<String, Object> primitiveValues = BigtableSchemaUtil.toPrimitiveValues(row, families);
-        return MElement.of(primitiveValues, timestamp);
-    }
-
-    private static Schema.FieldType convertFieldType(final SqlType<?> type) {
-        return switch (type.getCode()) {
-            case BOOL -> Schema.FieldType.BOOLEAN;
-            case STRING -> Schema.FieldType.STRING;
-            case BYTES -> Schema.FieldType.BYTES;
-            case INT64 -> Schema.FieldType.INT64;
-            case FLOAT32 -> Schema.FieldType.FLOAT32;
-            case FLOAT64 -> Schema.FieldType.FLOAT64;
-            case DATE -> Schema.FieldType.DATE;
-            case TIMESTAMP -> Schema.FieldType.TIMESTAMP;
-            default -> Schema.FieldType.STRING;
-        };
-    }
-
-    private static Object convertFieldValue(
-            final ResultSet resultSet,
-            final ColumnMetadata columnMetadata) {
-
-        if(resultSet.isNull(columnMetadata.name())) {
-            return null;
-        }
-
-        return switch (columnMetadata.type().getCode()) {
-            case BOOL -> resultSet.getBoolean(columnMetadata.name());
-            case STRING -> resultSet.getString(columnMetadata.name());
-            case BYTES -> resultSet.getBytes(columnMetadata.name());
-            case INT64 -> resultSet.getLong(columnMetadata.name());
-            case FLOAT32 -> resultSet.getFloat(columnMetadata.name());
-            case FLOAT64 -> resultSet.getDouble(columnMetadata.name());
-            case DATE -> DateTimeUtil.toEpochDay(resultSet.getDate(columnMetadata.name()));
-            case TIMESTAMP -> resultSet.getTimestamp(columnMetadata.name()).toEpochMilli() * 1000L;
-            default -> null;
-        };
     }
 
     public static ModType getModType(final Entry entry) {
