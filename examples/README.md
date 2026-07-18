@@ -38,13 +38,11 @@ Try to find and arrange a configuration file that is similar to the data process
     * [Onnx batch inference](bigquery-to-onnx-to-vectorsearch.json)
     * [AutoML(Vertex AI endpoints) batch prediction](bigquery-to-automl-to-spanner.json)
     * [Solr index from PDF files](bigquery-pdf-to-localsolr.json)
-    * [Http request for Cloud Run](create-to-http-to-bigquery.json)
     * [Tokenize](bigquery-to-tokenize-to-bigquery.json)
     * [Protobuf deserialize](spanner-to-protobuf-to-avro.json)
     * [Decrypt secret data](spanner-to-decrypt-to-avro.json)
     * [SetOperation: Replace Spanner Table](setoperation-replace-spanner.json)
   * Data Flow Control
-    * [Filter](avro-to-filter-to-avro.json)
     * [Partition](avro-to-partition-to-spanner.json)
 * Streaming processing
   * Data Transfer

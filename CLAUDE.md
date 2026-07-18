@@ -63,8 +63,8 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 **Sources** (`module/source/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg`
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create`.
 
-**Transforms** (`module/transform/`): `select` `filter` `aggregation` `beamsql` `query` `partition` `lookup`
-`compare` `deserialize` `reshuffle` `http` `bigtable` `onnx` `onnx_gen` `pdfextract` `vertexai.gemini`.
+**Transforms** (`module/transform/`): `select` `aggregation` `beamsql` `query` `partition`
+`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
 `pubsub` `storage` `files` `debug` `action` `auxia` `tasks` `localH2`.
@@ -196,7 +196,7 @@ self-contained (parameters, examples) — the agent reads one file per module.
 - `TestPipeline` is used standalone (no `@Rule`):
   `private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);`
 - Module tests are config-driven e2e: `Config.load(json)` → `MPipeline.apply(pipeline, config)` →
-  `PAssert` → `pipeline.run()` (see `FilterTransformTest`).
+  `PAssert` → `pipeline.run()` (see `SelectTransformTest`).
 - Tests run in parallel (4 threads) via JUnit Platform config in the surefire plugin.
 - Coverage: JaCoCo runs with `mvn test`; report at `target/site/jacoco/index.html` (CSV/XML alongside).
 - Integration tests (`*IT.java`, Testcontainers emulators, requires Docker) are skipped by default:

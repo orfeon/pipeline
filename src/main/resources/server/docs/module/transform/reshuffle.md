@@ -39,36 +39,35 @@ This module has no individual parameters. The `parameters` block can be omitted 
 
 ### Example 1: Break fusion before an expensive transform
 
-A BigQuery query returns a list of URLs; reshuffling before the per-record HTTP enrichment spreads the requests across all workers instead of the few that read the query results.
+A BigQuery query returns a list of documents; reshuffling before the per-record ONNX inference spreads the work across all workers instead of the few that read the query results.
 
 ```yaml
 sources:
-  - name: urls
+  - name: documents
     module: bigquery
     parameters:
-      query: "SELECT url FROM `myproject.mydataset.target_urls`"
+      query: "SELECT id, body FROM `myproject.mydataset.documents`"
 
 transforms:
   - name: rebalance
     module: reshuffle
     inputs:
-      - urls
+      - documents
 
-  - name: fetched
-    module: http
+  - name: inference
+    module: onnx
     inputs:
       - rebalance
     parameters:
-      request:
-        endpoint: "${url}"
-        method: get
+      model:
+        path: "gs://my-bucket/models/embedding.onnx"
 
 sinks:
   - name: results
     module: storage
     inputs:
-      - fetched
+      - inference
     parameters:
-      output: "gs://my-bucket/responses/"
+      output: "gs://my-bucket/embeddings/"
       format: json
 ```

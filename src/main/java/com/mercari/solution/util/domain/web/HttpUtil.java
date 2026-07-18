@@ -624,76 +624,6 @@ public class HttpUtil {
         }
     }
 
-    public static class Response {
-
-        public Format format;
-        public JsonElement schema;
-        public List<Integer> acceptableStatusCodes;
-
-        private transient Schema schema_;
-
-        public HttpResponse.BodyHandler<?> getBodyHandler() {
-            return switch (format) {
-                case text, json, xml -> HttpResponse.BodyHandlers.ofString();
-                case bytes -> HttpResponse.BodyHandlers.ofByteArray();
-            };
-        }
-
-        public List<String> validate(String name) {
-            final List<String> errorMessages = new ArrayList<>();
-            if(this.format == null) {
-                errorMessages.add("http transform module[" + name + "].format must not be null.");
-            }
-            if(this.schema == null || !this.schema.isJsonObject()) {
-                errorMessages.add("http transform module[" + name + "].schema must not be empty.");
-            }
-            if(this.acceptableStatusCodes != null) {
-                for(final Integer acceptableStatusCode : acceptableStatusCodes) {
-                    if(acceptableStatusCode == null) {
-                        errorMessages.add("http transform module[" + name + "].acceptableStatusCodes value must not be null.");
-                    } else if(acceptableStatusCode >= 600 || acceptableStatusCode < 100) {
-                        errorMessages.add("http transform module[" + name + "].acceptableStatusCodes value[" + acceptableStatusCode + "] must be between 100 and 599");
-                    }
-                }
-            }
-            return errorMessages;
-        }
-
-        public void setDefaults() {
-            if(this.acceptableStatusCodes == null) {
-                this.acceptableStatusCodes = new ArrayList<>();
-            }
-        }
-
-        public void setup() {
-            if(schema != null && schema.isJsonObject()) {
-                this.schema_ = Schema.parse(schema);
-            }
-        }
-
-        public JsonObject toJson() {
-            final JsonObject jsonObject = new JsonObject();
-            jsonObject.addProperty("format", format.name());
-            if(acceptableStatusCodes != null){
-                final JsonArray acceptableStatusCodesArray = new JsonArray();
-                for(final Integer acceptableStatusCode : acceptableStatusCodes) {
-                    acceptableStatusCodesArray.add(acceptableStatusCode);
-                }
-                jsonObject.add("acceptableStatusCodes", acceptableStatusCodesArray);
-            }
-            if(schema != null){
-                jsonObject.add("schema", schema);
-            }
-            return jsonObject;
-        }
-
-        public String toJsonString() {
-            final JsonObject jsonObject = toJson();
-            return jsonObject.toString();
-        }
-
-    }
-
     public enum Format {
         text,
         bytes,
@@ -701,42 +631,11 @@ public class HttpUtil {
         xml
     }
 
-    public enum Type {
-        custom,
-        oauth,
-        openid
-    }
-
     public static HttpResponse.BodyHandler<?> getBodyHandler(final Format format) {
         return switch (format) {
             case text, json, xml -> HttpResponse.BodyHandlers.ofString();
             case bytes -> HttpResponse.BodyHandlers.ofByteArray();
         };
-    }
-
-    public static Schema createResponseSchema(final Response response) {
-        return createResponseSchema(response.schema, response.format);
-    }
-
-    public static Schema createResponseSchema(final JsonElement schema, final Format format) {
-        final Schema.FieldType fieldType;
-        if(schema == null || !schema.isJsonObject()) {
-            fieldType = switch (format) {
-                case bytes -> Schema.FieldType.BYTES.withNullable(true);
-                case text, xml -> Schema.FieldType.STRING.withNullable(true);
-                case json -> Schema.FieldType.JSON.withNullable(true);
-            };
-        } else {
-            final Schema responseSchema = Schema.parse(schema.getAsJsonObject());
-            fieldType = Schema.FieldType.element(responseSchema);
-        }
-
-        return Schema.builder()
-                .withField("statusCode", Schema.FieldType.INT32)
-                .withField("body", fieldType)
-                .withField("headers", Schema.FieldType.map(Schema.FieldType.array(Schema.FieldType.STRING)).withNullable(true))
-                .withField("timestamp", Schema.FieldType.TIMESTAMP)
-                .build();
     }
 
     public static Response2 sendRequest(
@@ -781,18 +680,6 @@ public class HttpUtil {
         } while (request.hasNext(loopValues));
 
         return results;
-    }
-
-    public static <ResponseT> HttpResponse<ResponseT> sendRequest(
-            final HttpClient client,
-            final Request request,
-            final Map<String, Object> standardValues,
-            final HttpResponse.BodyHandler<ResponseT> bodyHandler) throws IOException, InterruptedException, URISyntaxException {
-
-        final HttpRequest req = createRequestBuilder(request, standardValues)
-                .timeout(java.time.Duration.ofSeconds(100))
-                .build();
-        return client.send(req, bodyHandler);
     }
 
     private static HttpRequest.Builder createRequestBuilder(
