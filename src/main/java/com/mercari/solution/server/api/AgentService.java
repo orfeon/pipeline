@@ -36,16 +36,25 @@ public class AgentService {
             final GoogleCredentials credentials = GcpCredentialsCache.credentials();
             credentials.refreshIfExpired();
             final String project = ServiceOptions.getDefaultProjectId();
+            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-3.1-flash-lite");
+            final String location = env("MERCARI_PIPELINE_AGENT_LOCATION", "global");
             return GoogleGenAiChatModel.builder()
                     .googleCredentials(credentials)
                     .projectId(project)
-                    .location("global")
-                    .modelName("gemini-3.1-flash-lite")
+                    .location(location)
+                    .modelName(modelName)
                     .responseFormat(ResponseFormat.JSON)
                     .build();
         } catch (IOException e) {
             throw new RuntimeException("Failed to create chat model", e);
         }
+    }
+
+    private static String env(final String name, final String defaultValue) {
+        return Optional.ofNullable(System.getenv(name))
+                .filter(v -> !v.isBlank())
+                .map(String::trim)
+                .orElse(defaultValue);
     }
 
     public static void serve(

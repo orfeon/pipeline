@@ -10,6 +10,8 @@ import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.config.Options;
 import com.mercari.solution.config.options.DataflowOptions;
+import com.mercari.solution.server.ServerVersion;
+import com.mercari.solution.server.dataflow.DataflowJobReader;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.util.FailureUtil;
 import com.mercari.solution.util.cloud.google.DataflowUtil;
@@ -115,6 +117,7 @@ public class LaunchService {
             final String runner = launch.get("runner").getAsString();
             final JsonObject responseJson = switch (runner) {
                 case "dataflow" -> launchDataflow(config);
+                case "dataflowTemplate" -> launchFlexDataflowTemplate(config, launch, userEmail);
                 case "spark" -> launchSpark(config, launch);
                 case "flink" -> launchFlink(config, launch);
                 case "direct" -> launchDirect(config, launch);
@@ -201,9 +204,22 @@ public class LaunchService {
         throw new IllegalModuleException("To launch dataflow, environment variable must be set: MERCARI_PIPELINE_DATAFLOW_REGION");
     }
 
-    private static LaunchFlexTemplateParameter updateLaunchParameter(LaunchFlexTemplateParameter originalLaunchParameter) {
+    private static LaunchFlexTemplateParameter updateLaunchParameter(
+            LaunchFlexTemplateParameter originalLaunchParameter,
+            final String userEmail) {
+
         final FlexTemplateRuntimeEnvironment.Builder builder = FlexTemplateRuntimeEnvironment
                 .newBuilder(originalLaunchParameter.getEnvironment());
+
+        // Labels let the diagnosis tools recover who launched the job and from which build
+        // (DataflowJobReader compares the version label against the server's own version).
+        final String version = ServerVersion.get();
+        if(version != null) {
+            builder.putAdditionalUserLabels(DataflowJobReader.VERSION_LABEL, sanitizeLabelValue(version));
+        }
+        if(userEmail != null && !userEmail.isBlank()) {
+            builder.putAdditionalUserLabels("mercari-pipeline-user", sanitizeLabelValue(userEmail));
+        }
 
         final String serviceAccount = System.getenv(ENV_VARIABLE_DATAFLOW_SERVICE_ACCOUNT);
         if(serviceAccount != null) {
@@ -229,6 +245,12 @@ public class LaunchService {
                 .newBuilder(originalLaunchParameter)
                 .setEnvironment(builder.build())
                 .build();
+    }
+
+    /** GCP label values allow only lowercase letters, digits, '-' and '_', up to 63 chars. */
+    private static String sanitizeLabelValue(final String value) {
+        final String sanitized = value.trim().toLowerCase().replaceAll("[^a-z0-9_-]", "-");
+        return sanitized.length() > 63 ? sanitized.substring(0, 63) : sanitized;
     }
 
     private static JsonObject launchDataflow(final Config config) {
@@ -266,7 +288,7 @@ public class LaunchService {
         return responseJson;
     }
 
-    private static JsonObject launchFlexDataflowTemplate(Config config, JsonObject launch) throws IOException {
+    private static JsonObject launchFlexDataflowTemplate(Config config, JsonObject launch, String userEmail) throws IOException {
 
         final String templateLocation;
         if(launch.has("parameters") && launch.get("parameters").isJsonObject()) {
@@ -285,7 +307,7 @@ public class LaunchService {
         final JsonObject responseJson = new JsonObject();
         final long startMillis = Instant.now().toEpochMilli();
         final LaunchFlexTemplateParameter launchParameter = updateLaunchParameter(DataflowOptions
-                .createLaunchFlexTemplateParameter(template, parameter, config.getOptions()));
+                .createLaunchFlexTemplateParameter(template, parameter, config.getOptions()), userEmail);
         final LaunchFlexTemplateResponse resp = DataflowUtil
                 .launchFlexTemplate(project, region, launchParameter, false);
 

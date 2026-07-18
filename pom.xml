@@ -101,6 +101,34 @@
         </configuration>
       </plugin>
 
+      <!-- Stamps git.properties on the classpath: used to label launched Dataflow jobs with the
+           build version and to let the agent detect version skew between server and job. -->
+      <plugin>
+        <groupId>io.github.git-commit-id</groupId>
+        <artifactId>git-commit-id-maven-plugin</artifactId>
+        <version>9.0.1</version>
+        <executions>
+          <execution>
+            <id>get-the-git-infos</id>
+            <goals>
+              <goal>revision</goal>
+            </goals>
+            <phase>initialize</phase>
+          </execution>
+        </executions>
+        <configuration>
+          <generateGitPropertiesFile>true</generateGitPropertiesFile>
+          <generateGitPropertiesFilename>${project.build.outputDirectory}/git.properties</generateGitPropertiesFilename>
+          <failOnNoGitDirectory>false</failOnNoGitDirectory>
+          <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+          <includeOnlyProperties>
+            <includeOnlyProperty>^git.commit.id.abbrev$</includeOnlyProperty>
+            <includeOnlyProperty>^git.branch$</includeOnlyProperty>
+            <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
+          </includeOnlyProperties>
+        </configuration>
+      </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
@@ -322,6 +350,12 @@
                 <resource>
                   <directory>docs/config</directory>
                   <targetPath>docs/config</targetPath>
+                </resource>
+                <!-- Framework sources for the agent/MCP code-reading tools (CodeRepository).
+                     Placed under WEB-INF so they are never served over HTTP. -->
+                <resource>
+                  <directory>src/main/java</directory>
+                  <targetPath>WEB-INF/sources/src/main/java</targetPath>
                 </resource>
                 <resource>
                   <directory>examples</directory>
@@ -689,6 +723,12 @@
     <dependency>
       <groupId>com.google.cloud</groupId>
       <artifactId>google-cloud-dataflow</artifactId>
+    </dependency>
+
+    <!-- https://mvnrepository.com/artifact/com.google.cloud/google-cloud-logging -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-logging</artifactId>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/com.google.cloud/google-cloud-secretmanager -->

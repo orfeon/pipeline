@@ -1,6 +1,7 @@
 package com.mercari.solution.server;
 
 import com.mercari.solution.server.api.*;
+import com.mercari.solution.server.diagnosis.DiagnosisService;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -34,6 +35,7 @@ public class PipelineWebhookServer extends HttpServlet {
 
         switch (request.getPathInfo()) {
             case "/probe" -> ProbeService.serve(request, response);
+            case "/events/dataflow" -> DiagnosisService.serveDataflowEvent(request, response);
             default -> {
                 throw new IllegalArgumentException("Not supported path: " + request.getPathInfo());
             }
