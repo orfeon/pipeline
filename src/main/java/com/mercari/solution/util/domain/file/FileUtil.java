@@ -6,7 +6,8 @@ public class FileUtil {
         csv,
         json,
         avro,
-        parquet
+        parquet,
+        arrow
     }
 
     public enum CodecName {

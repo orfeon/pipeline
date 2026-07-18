@@ -40,6 +40,9 @@
     <onnxruntime.version>1.26.0</onnxruntime.version>
     <onnx.version>1.20.1-1.5.13</onnx.version>
 
+    <!-- Must match the arrow-vector version pulled in transitively by beam-sdks-java-io-google-cloud-platform -->
+    <arrow.version>17.0.0</arrow.version>
+
     <slf4j.version>2.0.16</slf4j.version>
     <junit5.version>5.13.4</junit5.version>
     <junit4.version>4.13.2</junit4.version>
@@ -135,6 +138,8 @@
         <version>${maven-surefire-plugin.version}</version>
         <configuration>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
+          <!-- @{argLine} keeps the JaCoCo agent; the add-opens is required by Arrow's off-heap memory (MemoryUtil) on JDK 16+ -->
+          <argLine>@{argLine} --add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
           <properties>
             <!-- JUnit 5 parallel execution (equivalent of the former JUnit4 parallel=all/threadCount=4) -->
             <configurationParameters>
@@ -263,6 +268,8 @@
               <jvmFlag>-Xmx2048m</jvmFlag>
               <jvmFlag>-Xdebug</jvmFlag>
               <jvmFlag>-Xmy:flag=jib-rules</jvmFlag>
+              <!-- Required by Arrow's off-heap memory (MemoryUtil) on JDK 16+ (storage sink arrow format) -->
+              <jvmFlag>--add-opens=java.base/java.nio=ALL-UNNAMED</jvmFlag>
             </jvmFlags>
           </container>
         </configuration>
@@ -574,6 +581,35 @@
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
+    </dependency>
+
+    <!-- Arrow IPC output for the storage sink (arrow-vector/arrow-memory-core already come in
+         transitively via beam-sdks-java-io-google-cloud-platform; an allocation manager and IPC
+         buffer compression codecs must be added explicitly). The unsafe allocator is used instead
+         of arrow-memory-netty because the netty version pinned by Beam/gRPC is too old for it. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-unsafe</artifactId>
+      <version>${arrow.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-compression</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+    <!-- Explicit pin: arrow-compression's transitive zstd-jni (1.5.6-3) would otherwise win over
+         the newer 1.5.6-6 required by parquet-hadoop (both wrap native zstd 1.5.6, but keep the
+         newer JNI packaging). Keep in sync with parquet-hadoop's requirement on Beam upgrades. -->
+    <dependency>
+      <groupId>com.github.luben</groupId>
+      <artifactId>zstd-jni</artifactId>
+      <version>1.5.6-6</version>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-io-amazon-web-services2 -->
