@@ -3,6 +3,7 @@ package com.mercari.solution.util.pipeline;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.lookup.BindableQuery;
+import com.mercari.solution.util.pipeline.lookup.LookupAccessValidator;
 import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.pipeline.lookup.LookupJoinRule;
 import com.mercari.solution.util.pipeline.lookup.LookupLateralJoin;
@@ -178,11 +179,36 @@ public class Query2 implements Serializable {
             List<MElement> restoreRows) {
     }
 
+    /**
+     * Runtime guards applied per evaluation, checked at every result-row
+     * boundary: {@code maxRows} caps each statement's result rows and
+     * {@code timeoutMillis} is a deadline over the whole {@link #executeAll}
+     * call (0 = disabled). Violations throw with a {@code "query guard:"}
+     * message and ride the host's normal failure handling (failFast /
+     * failure sinks). A call blocked inside a lookup source is not
+     * interrupted — the deadline fires at the next row boundary.
+     */
+    public record Guard(long maxRows, long timeoutMillis) implements Serializable {
+
+        public Guard {
+            if (maxRows < 0 || timeoutMillis < 0) {
+                throw new IllegalArgumentException(
+                        "guard maxRows and timeoutMillis must not be negative");
+            }
+        }
+
+        /** True when neither guard is configured. */
+        public boolean isNoop() {
+            return maxRows == 0 && timeoutMillis == 0;
+        }
+    }
+
     private final List<Statement> statements;
     private final boolean exclusive;
     private final Map<String, Schema> inputSchemas;
     private final List<LookupSource> sources;
     private final List<UserDefinedFunctions.FunctionSpec> functions;
+    private final Guard guard;                         // null when unconfigured
     private final Map<String, Schema> outputSchemas;   // output statements only
     private final Schema bufferInsertSchema;           // null when no BUFFER_INSERT statement
     private final Schema stateRestoreSchema;           // null when no STATE_RESTORE statement
@@ -211,7 +237,8 @@ public class Query2 implements Serializable {
             final List<LookupSource> sources,
             final List<UserDefinedFunctions.FunctionSpec> functions,
             final List<Statement> statements,
-            final boolean exclusive) {
+            final boolean exclusive,
+            final Guard guard) {
 
         if (statements == null || statements.isEmpty()) {
             throw new IllegalArgumentException("at least one statement (sql) is required");
@@ -224,7 +251,9 @@ public class Query2 implements Serializable {
         this.inputSchemas = new LinkedHashMap<>(inputSchemas);
         this.sources = sources == null ? List.of() : List.copyOf(sources);
         this.functions = functions == null ? List.of() : List.copyOf(functions);
+        this.guard = guard == null || guard.isNoop() ? null : guard;
         validateStatements();
+        validateLookupAccess();
         // keyed by statement index: names may repeat across the special-kind
         // statements and the legacy unnamed single statement (all "")
         final Map<Integer, Schema> derivedSchemas = deriveOutputSchemas();
@@ -327,7 +356,7 @@ public class Query2 implements Serializable {
 
     public static Query2 of(final Map<String, Schema> inputSchemas, final String sql) {
         return new Query2(inputSchemas, List.of(), List.of(),
-                List.of(Statement.of("", sql, true)), false);
+                List.of(Statement.of("", sql, true)), false, null);
     }
 
     public static Builder builder() {
@@ -344,6 +373,7 @@ public class Query2 implements Serializable {
         private String bufferInsertSql;
         private String stateRestoreSql;
         private boolean exclusive;
+        private Guard guard;
 
         public Builder withInput(final String name, final Schema schema) {
             this.inputSchemas.put(name, schema);
@@ -434,6 +464,12 @@ public class Query2 implements Serializable {
             return this;
         }
 
+        /** Runtime guards applied per evaluation (see {@link Guard}). */
+        public Builder withGuard(final Guard guard) {
+            this.guard = guard;
+            return this;
+        }
+
         public Query2 build() {
             final List<Statement> all = new ArrayList<>();
             if (stateRestoreSql != null) {
@@ -443,7 +479,7 @@ public class Query2 implements Serializable {
                 all.add(new Statement("", bufferInsertSql, false, Statement.Kind.BUFFER_INSERT));
             }
             all.addAll(statements);
-            return new Query2(inputSchemas, sources, functions, all, exclusive);
+            return new Query2(inputSchemas, sources, functions, all, exclusive, guard);
         }
     }
 
@@ -544,6 +580,38 @@ public class Query2 implements Serializable {
             throw e;
         } catch (final Throwable e) {
             throw new IllegalArgumentException("failed to plan sql", e);
+        } finally {
+            closeLateralRuntimes(runtimes);
+            closeSources();
+        }
+    }
+
+    /**
+     * Plans and compiles every statement once at construction time and verifies
+     * that each lookup-table access became a key-driven read. A join whose
+     * condition does not fit the key contract leaves a scan of the lookup table
+     * in the plan — that scan can never execute (it throws per element on the
+     * workers), so it is rejected here, at submission time, with an error
+     * naming the tables. Skipped when no lookup sources are registered.
+     */
+    private void validateLookupAccess() {
+        if (sources.isEmpty()) {
+            return;
+        }
+        final List<LookupLateralRuntime> runtimes = new ArrayList<>();
+        try {
+            setupSources();
+            final Map<String, List<MElement>> buffers = createBuffers();
+            forEachStatement(buffers, runtimes,
+                    (index, statement, planned, rootSchema, intermediate) ->
+                            LookupAccessValidator.validateKeyDrivenAccess(
+                                    BindableQuery.compile(planned.relNode(), rootSchema)
+                                            .physicalPlan(),
+                                    statement.sql()));
+        } catch (final RuntimeException e) {
+            throw e;
+        } catch (final Throwable e) {
+            throw new IllegalArgumentException("failed to validate query plan", e);
         } finally {
             closeLateralRuntimes(runtimes);
             closeSources();
@@ -651,6 +719,9 @@ public class Query2 implements Serializable {
         if (compiled == null) {
             throw new IllegalStateException("query is not set up (call setup() first)");
         }
+        final long guardMaxRows = guard != null ? guard.maxRows() : 0;
+        final long guardDeadlineNanos = guard != null && guard.timeoutMillis() > 0
+                ? System.nanoTime() + guard.timeoutMillis() * 1_000_000L : 0;
         for (final Map.Entry<String, List<MElement>> entry : inputs.entrySet()) {
             final List<MElement> buffer = elements.get(entry.getKey());
             if (buffer != null) {
@@ -666,7 +737,8 @@ public class Query2 implements Serializable {
                 continue;
             }
             try {
-                final List<Object[]> rows = statement.bindableQuery.executeInternalRows();
+                final List<Object[]> rows = statement.bindableQuery
+                        .executeInternalRows(guardMaxRows, guardDeadlineNanos);
                 statement.intermediate.setRows(rows);
                 switch (statement.statement.kind()) {
                     case BUFFER_INSERT -> bufferRows = toElements(statement, rows, timestamp);

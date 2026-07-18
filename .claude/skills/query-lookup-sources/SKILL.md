@@ -137,8 +137,33 @@ A join is rewritten to a key-driven read when its condition constrains a
 
 Bound expressions may reference input columns **or literals** (that's how a
 REST endpoint is fixed in SQL). INNER and LEFT only. A non-matching condition
-leaves the join alone → the plan scans the lookup table → the scan throws the
-rejection error at execution. That error is the intended UX, not a bug.
+leaves the join alone → the plan keeps a scan of the lookup table → since
+2026-07 that plan is rejected at **pipeline construction time**
+(`Query2.validateLookupAccess` → `LookupAccessValidator`, which compiles each
+statement via `BindableQuery` in its own planning pass — deliberately NOT
+sharing `deriveOutputSchemas`' pass, whose `RelRunners` prepare may plan on
+the same cluster planner — and walks the physical plan for surviving
+`LookupTable` scans; `BindableQuery.physicalPlan()` exposes the plan). The
+error names the tables and restates the key contract; the runtime
+scan-rejection in `LookupTable.scan` remains as the backstop. When changing
+the rules, remember both layers.
+
+## Runtime guards (`Query2.Guard` / the transform's `guard` parameter)
+
+`guard: { maxRows, timeoutMillis }` (both optional, 0/absent = off) applies
+per evaluation: `maxRows` caps each statement's result rows, `timeoutMillis`
+is a deadline over the whole `executeAll` call. Checked at every result-row
+boundary in `BindableQuery.executeInternalRows(maxRows, deadlineNanos)` —
+messages carry a `"query guard:"` prefix so failure records are
+recognizable; the host's failFast / failureSinks routing handles violations.
+There is no watchdog: a call blocked inside a lookup source is not
+interrupted (no JDBC statement to cancel on the Bindable path) — the
+deadline fires at the next row boundary. Lateral inner evaluations are not
+guarded individually; the outer row boundaries interleave with them.
+Ported/adapted 2026-07 from the origin engine's GuardPolicy (its plan-time
+access modes requireFilter/requireLimit/maxFetch were NOT ported — with no
+pushdown here, key-driven is the only executable external access, so the
+plan check above is structural and always on).
 
 **Key columns pruned from the projection are fine.** `RelRunners`' standard
 program field-trims before the volcano phase, so a query that never selects a

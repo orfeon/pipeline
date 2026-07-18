@@ -88,6 +88,7 @@ public class QueryTransform extends Transform {
         private String table;
         private com.google.gson.JsonElement filter;
         private List<LookupSourceConfig.SourceParameters> sources;
+        private GuardParameters guard;
 
         private String filterJson() {
             return filter == null || filter.isJsonNull() ? null : filter.toString();
@@ -142,6 +143,18 @@ public class QueryTransform extends Transform {
                 }
             }
             LookupSourceConfig.validate(this.sources);
+            if(this.guard != null) {
+                this.guard.validate();
+            }
+        }
+
+        private Query2.Guard queryGuard() {
+            if(guard == null) {
+                return null;
+            }
+            return new Query2.Guard(
+                    guard.maxRows == null ? 0 : guard.maxRows,
+                    guard.timeoutMillis == null ? 0 : guard.timeoutMillis);
         }
 
         private void setDefaults(Map<String, String> templateArgs) {
@@ -207,6 +220,27 @@ public class QueryTransform extends Transform {
         private String name;
         private String sql;
         private Boolean output;
+    }
+
+    /**
+     * Runtime guards applied per evaluation: {@code maxRows} caps each
+     * statement's result rows, {@code timeoutMillis} bounds one evaluation
+     * (checked at row boundaries). Violations follow the module's normal
+     * failure handling (failFast / failure sinks).
+     */
+    private static class GuardParameters implements Serializable {
+
+        private Long maxRows;
+        private Long timeoutMillis;
+
+        private void validate() {
+            if(maxRows != null && maxRows <= 0) {
+                throw new IllegalModuleException("parameters.guard.maxRows must be positive");
+            }
+            if(timeoutMillis != null && timeoutMillis <= 0) {
+                throw new IllegalModuleException("parameters.guard.timeoutMillis must be positive");
+            }
+        }
     }
 
     @Override
@@ -296,7 +330,8 @@ public class QueryTransform extends Transform {
                     .withSources(LookupSourceConfig.createSources(parameters.sources, sideInputSchemas,
                             bufferRowSchema))
                     .withQueries(parameters.statements())
-                    .withExclusive(parameters.isExclusive());
+                    .withExclusive(parameters.isExclusive())
+                    .withGuard(parameters.queryGuard());
             if(bufferInsertSql != null) {
                 builder.withBufferInsert(bufferInsertSql);
             }

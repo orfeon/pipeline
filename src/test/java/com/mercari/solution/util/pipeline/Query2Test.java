@@ -256,20 +256,121 @@ public class Query2Test {
     }
 
     @Test
-    public void testStandaloneScanIsRejected() {
-        final MemoryLookupSource source = usersSource();
-        final Query2 query = Query2.builder()
-                .withInput("INPUT", inputSchema())
-                .withSource(source)
-                .withSql("SELECT userId, name FROM mem.users")
-                .build();
+    public void testStandaloneScanIsRejectedAtConstruction() {
+        // Plan-time guard: a plan that would scan a lookup table can never
+        // execute, so construction (submission time) rejects it — not the
+        // per-element evaluation on the workers.
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Query2.builder()
+                        .withInput("INPUT", inputSchema())
+                        .withSource(usersSource())
+                        .withSql("SELECT userId, name FROM mem.users")
+                        .build());
+        Assertions.assertTrue(e.getMessage().contains("standalone scans are not supported"),
+                "unexpected message: " + e.getMessage());
+        Assertions.assertTrue(e.getMessage().contains("users"),
+                "message should name the table: " + e.getMessage());
+    }
 
+    @Test
+    public void testNonKeyJoinConditionIsRejectedAtConstruction() {
+        // A join condition that does not fit the key contract (equality on a
+        // non-key column) leaves the join alone → the surviving lookup-table
+        // scan is rejected at construction with the key-contract explanation.
+        final String sql = """
+                SELECT i.userId, u.price
+                FROM INPUT AS i
+                JOIN mem.users AS u ON u.name = i.tag
+                """;
+        final Schema input = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.INT64),
+                Schema.Field.of("tag", Schema.FieldType.STRING)));
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> Query2.builder()
+                        .withInput("INPUT", input)
+                        .withSource(usersSource())
+                        .withSql(sql)
+                        .build());
+        Assertions.assertTrue(e.getMessage().contains("key-driven"),
+                "unexpected message: " + e.getMessage());
+        Assertions.assertTrue(e.getMessage().contains("users"),
+                "message should name the table: " + e.getMessage());
+    }
+
+    @Test
+    public void testGuardMaxRowsPerEvaluation() {
+        final Schema schema = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.STRING),
+                Schema.Field.of("events", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("category", Schema.FieldType.STRING),
+                        Schema.Field.of("amount", Schema.FieldType.INT64)))))));
+        final String sql = "SELECT e.category, e.amount FROM MyTable, UNNEST(events) AS e";
+        final Query2 query = Query2.builder()
+                .withInput("MyTable", schema)
+                .withSql(sql)
+                .withGuard(new Query2.Guard(2, 0))
+                .build();
         query.setup();
         try {
+            final MElement small = MElement.of(Map.of(
+                    "userId", "u1",
+                    "events", List.of(
+                            Map.of("category", "a", "amount", 1L),
+                            Map.of("category", "b", "amount", 2L))), TIMESTAMP);
+            Assertions.assertEquals(2, query.execute(small, TIMESTAMP).size());
+
+            final MElement large = MElement.of(Map.of(
+                    "userId", "u1",
+                    "events", List.of(
+                            Map.of("category", "a", "amount", 1L),
+                            Map.of("category", "b", "amount", 2L),
+                            Map.of("category", "c", "amount", 3L))), TIMESTAMP);
             final IllegalStateException e = Assertions.assertThrows(IllegalStateException.class,
-                    () -> query.execute(List.of(
-                            MElement.of(Map.of("userId", 1L, "qty", 1L), TIMESTAMP)), TIMESTAMP));
-            Assertions.assertTrue(rootMessage(e).contains("standalone scans are not supported"),
+                    () -> query.execute(large, TIMESTAMP));
+            Assertions.assertTrue(rootMessage(e).contains("query guard")
+                            && rootMessage(e).contains("maxRows"),
+                    "unexpected message: " + rootMessage(e));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    /** Test UDF for the timeout guard: sleeps then echoes the argument. */
+    public static class SleepUdfs {
+        public static long sleep(long millis) {
+            try {
+                Thread.sleep(millis);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return millis;
+        }
+    }
+
+    @Test
+    public void testGuardTimeoutPerEvaluation() {
+        final Schema schema = Schema.of(List.of(
+                Schema.Field.of("userId", Schema.FieldType.STRING),
+                Schema.Field.of("waits", Schema.FieldType.array(Schema.FieldType.element(List.of(
+                        Schema.Field.of("label", Schema.FieldType.STRING),
+                        Schema.Field.of("millis", Schema.FieldType.INT64)))))));
+        final String sql = "SELECT w.label, SLEEP_(w.millis) AS slept"
+                + " FROM MyTable, UNNEST(waits) AS w";
+        final Query2 query = Query2.builder()
+                .withInput("MyTable", schema)
+                .withScalarFunction("SLEEP_", SleepUdfs.class, "sleep")
+                .withSql(sql)
+                .withGuard(new Query2.Guard(0, 100))
+                .build();
+        query.setup();
+        try {
+            final MElement slow = MElement.of(Map.of(
+                    "userId", "u1",
+                    "waits", List.of(Map.of("label", "a", "millis", 400L))), TIMESTAMP);
+            final IllegalStateException e = Assertions.assertThrows(IllegalStateException.class,
+                    () -> query.execute(slow, TIMESTAMP));
+            Assertions.assertTrue(rootMessage(e).contains("query guard")
+                            && rootMessage(e).contains("timeoutMillis"),
                     "unexpected message: " + rootMessage(e));
         } finally {
             query.teardown();

@@ -478,6 +478,110 @@ public class QueryTransformTest {
     }
 
     @Test
+    public void testGuardMaxRowsViolationFailsEvaluation() throws Exception {
+        // guard.maxRows caps each statement's result rows per evaluation; the
+        // u1 element fans out to 3 rows and must fail the evaluation.
+        final String configJson = """
+                {
+                  "sources": [
+                    %s
+                  ],
+                  "transforms": [
+                    {
+                      "name": "query",
+                      "module": "query",
+                      "inputs": ["users"],
+                      "parameters": {
+                        "sql": "SELECT userId, e.category AS category, e.amount AS amount FROM INPUT, UNNEST(events) AS e",
+                        "guard": {
+                          "maxRows": 2
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_USERS_SOURCE);
+
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+        final Exception e = Assertions.assertThrows(Exception.class, pipeline::run);
+        Assertions.assertTrue(messageChain(e).contains("query guard"),
+                "unexpected message chain: " + messageChain(e));
+    }
+
+    @Test
+    public void testNonKeyLookupJoinRejectedAtConstruction() throws Exception {
+        final String url = "jdbc:h2:mem:querytransformguardtest;DB_CLOSE_DELAY=-1";
+        try (final java.sql.Connection connection =
+                     java.sql.DriverManager.getConnection(url, "sa", "")) {
+            try (final java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS ITEMS (
+                          ITEM_ID VARCHAR(16) PRIMARY KEY,
+                          TITLE VARCHAR(64)
+                        )""");
+            }
+            // TITLE is not a candidate key: the join cannot become a key-driven
+            // lookup, so the plan keeps a scan — rejected at construction, not
+            // per element on the workers.
+            final String configJson = """
+                    {
+                      "sources": [
+                        {
+                          "name": "carts",
+                          "module": "create",
+                          "parameters": {
+                            "type": "element",
+                            "elements": [ { "itemId": "i1" } ]
+                          },
+                          "schema": {
+                            "fields": [ { "name": "itemId", "type": "string" } ]
+                          }
+                        }
+                      ],
+                      "transforms": [
+                        {
+                          "name": "query",
+                          "module": "query",
+                          "inputs": ["carts"],
+                          "parameters": {
+                            "sql": "SELECT i.itemId AS itemId, m.TITLE AS title FROM INPUT AS i JOIN db.ITEMS AS m ON m.TITLE = i.itemId",
+                            "sources": [
+                              {
+                                "name": "db",
+                                "type": "jdbc",
+                                "driver": "org.h2.Driver",
+                                "url": "%s",
+                                "user": "sa",
+                                "password": "",
+                                "tables": [
+                                  { "name": "ITEMS" }
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                    """.formatted(url);
+
+            final Config config = Config.load(configJson);
+            final IllegalModuleException e = Assertions.assertThrows(
+                    IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+            Assertions.assertTrue(e.getMessage().contains("key-driven"),
+                    "unexpected message: " + e.getMessage());
+        }
+    }
+
+    private static String messageChain(final Throwable e) {
+        final StringBuilder sb = new StringBuilder();
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            sb.append(t.getMessage()).append(" | ");
+        }
+        return sb.toString();
+    }
+
+    @Test
     public void testJdbcLookupJoin() throws Exception {
         final String url = "jdbc:h2:mem:querytransformtest;DB_CLOSE_DELAY=-1";
         // Keep the named in-memory database alive for the duration of the test.

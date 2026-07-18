@@ -64,6 +64,7 @@ public final class BindableQuery {
 
     private final Bindable<?> bindable;
     private final RelDataType rowType;
+    private final RelNode physicalPlan;
     private final SchemaPlus rootSchema;
     private final JavaTypeFactory typeFactory;
     // Objects the code generator stashed for runtime retrieval (e.g. the
@@ -72,10 +73,11 @@ public final class BindableQuery {
     private final AtomicBoolean cancelFlag = new AtomicBoolean(false);
     private final Object timeFrameSet;
 
-    private BindableQuery(Bindable<?> bindable, RelDataType rowType, SchemaPlus rootSchema,
+    private BindableQuery(Bindable<?> bindable, RelNode physicalPlan, SchemaPlus rootSchema,
             JavaTypeFactory typeFactory, Map<String, Object> internalParameters) {
         this.bindable = bindable;
-        this.rowType = rowType;
+        this.rowType = physicalPlan.getRowType();
+        this.physicalPlan = physicalPlan;
         this.rootSchema = rootSchema;
         this.typeFactory = typeFactory;
         this.internalParameters = internalParameters;
@@ -125,7 +127,7 @@ public final class BindableQuery {
         final Map<String, Object> internalParameters = new HashMap<>();
         final Bindable<?> bindable = EnumerableInterpretable.toBindable(
                 internalParameters, null, (EnumerableRel) physical, EnumerableRel.Prefer.ARRAY);
-        return new BindableQuery(bindable, physical.getRowType(), rootSchema,
+        return new BindableQuery(bindable, physical, rootSchema,
                 (JavaTypeFactory) rel.getCluster().getTypeFactory(), internalParameters);
     }
 
@@ -135,14 +137,46 @@ public final class BindableQuery {
     }
 
     /**
+     * The optimized physical plan this query executes — the input for plan
+     * inspections (e.g. verifying every lookup-table access became a
+     * key-driven read).
+     */
+    public RelNode physicalPlan() {
+        return physicalPlan;
+    }
+
+    /**
      * Executes the plan against the current table contents and returns the
      * result rows as full-width {@code Object[]} in Calcite-internal values.
      */
     public List<Object[]> executeInternalRows() {
+        return executeInternalRows(0, 0);
+    }
+
+    /**
+     * Executes with runtime guards checked at every row boundary: the result
+     * row cap and the evaluation deadline. Both use distinctive
+     * {@code "query guard:"} messages so violations are recognizable in
+     * failure records. A blocked call inside a lookup source is not
+     * interrupted — the deadline fires at the next row boundary.
+     *
+     * @param maxRows       maximum result rows (0 = unlimited)
+     * @param deadlineNanos absolute {@link System#nanoTime()} deadline (0 = none)
+     */
+    public List<Object[]> executeInternalRows(final long maxRows, final long deadlineNanos) {
         final DataContext context = createDataContext();
         final int fieldCount = rowType.getFieldCount();
         final List<Object[]> rows = new ArrayList<>();
         for (final Object row : bindable.bind(context)) {
+            if (deadlineNanos != 0 && System.nanoTime() - deadlineNanos >= 0) {
+                throw new IllegalStateException(
+                        "query guard: evaluation exceeded the timeoutMillis deadline");
+            }
+            if (maxRows > 0 && rows.size() >= maxRows) {
+                throw new IllegalStateException(
+                        "query guard: evaluation produced more than maxRows=" + maxRows
+                                + " result rows");
+            }
             rows.add(toArray(row, fieldCount));
         }
         return rows;
