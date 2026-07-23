@@ -31,13 +31,16 @@ public interface PipelineAgent {
         """)
     String chat(@V("message") String message, @V("config") String config);
 
-    static String process(final ChatModel chatModel, final JsonObject body) {
+    static String process(final ChatModel chatModel, final JsonObject body, final AgentInteractionLogger interactionLog) {
         final JsonArray historyJson = body.getAsJsonArray("history");
         final List<ChatMessage> history = createHistoryMessages(historyJson);
         final dev.langchain4j.data.message.UserMessage lastUserMessage = (dev.langchain4j.data.message.UserMessage) history.removeLast();
 
-        final ChatMemory historyMemory = MessageWindowChatMemory.withMaxMessages(history.size() + 20);
+        final ChatMemory historyMemory = MessageWindowChatMemory.withMaxMessages(history.size() + 200);
         history.forEach(historyMemory::add);
+
+        final String canvasConfig = getCanvasConfig(body);
+        interactionLog.userMessage(lastUserMessage.singleText(), canvasConfig);
 
         AiServices.builder(PipelineAgent.class)
                 .chatModel(chatModel)
@@ -48,25 +51,34 @@ public interface PipelineAgent {
                         CodeReader.create(),
                         DataflowReader.create()
                 )
-                .afterToolExecution((e) -> {
-                    System.out.println(e.request());
-                })
+                .afterToolExecution(interactionLog::toolExecution)
                 .build()
-                .chat(lastUserMessage.singleText(), createCanvasConfigContext(body));
+                .chat(lastUserMessage.singleText(), createCanvasConfigContext(canvasConfig));
 
         final List<ChatMessage> newResponseMessages = historyMemory
                 .messages()
                 .subList(history.size(), historyMemory.messages().size());
+
+        for (final ChatMessage newMessage : newResponseMessages) {
+            if (newMessage instanceof AiMessage aiMessage
+                    && aiMessage.text() != null && !aiMessage.text().isBlank()) {
+                interactionLog.assistantMessage(aiMessage.text());
+            }
+        }
+
         final List<Map<String, Object>> newMessages = createResponseMessages(newResponseMessages);
 
         return new Gson().toJson(newMessages);
     }
 
-    private static String createCanvasConfigContext(final JsonObject body) {
+    private static String getCanvasConfig(final JsonObject body) {
         if (!body.has("config") || !body.get("config").isJsonPrimitive()) {
             return "";
         }
-        final String canvasConfig = body.get("config").getAsString().trim();
+        return body.get("config").getAsString().trim();
+    }
+
+    private static String createCanvasConfigContext(final String canvasConfig) {
         if (canvasConfig.isEmpty()) {
             return "";
         }

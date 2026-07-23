@@ -7,6 +7,7 @@ import { $id, on, showModal, hideModal, escapeHtml, setStatus, postJson, dumpYam
 import { importConfigToCanvas, generateConfig, highlightNodeByName } from './canvas.js';
 
 let agentChatHistory = [];
+let agentConversationId = null; // correlates server-side agent logs across turns of one chat
 let agentIsComposing = false;
 let agentIsSending = false;
 let agentUndoSnapshot = null;   // canvas YAML captured before the last agent config apply
@@ -594,7 +595,12 @@ function agentSend(input) {
     container.scrollTop = container.scrollHeight;
 
     // Send to server together with the current canvas config
-    const body = { history: agentChatHistory };
+    if (!agentConversationId) {
+        agentConversationId = (window.crypto && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    }
+    const body = { history: agentChatHistory, conversationId: agentConversationId };
     const canvasYaml = agentGetCanvasConfigYaml();
     if (canvasYaml) {
         body.config = canvasYaml;
@@ -638,6 +644,7 @@ function agentSend(input) {
 
 function agentClearHistory() {
     agentChatHistory = [];
+    agentConversationId = null;
     agentRenderMessages();
 }
 
