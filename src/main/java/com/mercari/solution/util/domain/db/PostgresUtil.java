@@ -1,5 +1,6 @@
 package com.mercari.solution.util.domain.db;
 
+import com.google.common.net.InetAddresses;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
@@ -7,6 +8,7 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
 import org.postgresql.PGConnection;
 
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -14,6 +16,8 @@ import java.io.Serializable;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -25,6 +29,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
@@ -43,6 +48,11 @@ public class PostgresUtil {
     // 2000-01-01T00:00:00Z (PostgreSQL epoch) relative to unix epoch
     private static final long POSTGRES_EPOCH_MICROS = 946684800000000L;
     private static final int POSTGRES_EPOCH_DAYS = 10957;
+    private static final long MICROS_PER_DAY = 86_400_000_000L;
+
+    // address family codes in the inet/cidr binary format (utils/inet.h)
+    private static final int PGSQL_AF_INET = 2;
+    private static final int PGSQL_AF_INET6 = 3;
 
     private static final int NUMERIC_POSITIVE = 0x0000;
     private static final int NUMERIC_NEGATIVE = 0x4000;
@@ -65,11 +75,19 @@ public class PostgresUtil {
         BYTEA,
         DATE,
         TIME,
+        TIMETZ,
         TIMESTAMP,
         TIMESTAMPTZ,
         UUID,
         JSON,
-        JSONB;
+        JSONB,
+        XML,
+        INET,
+        CIDR,
+        MACADDR,
+        MACADDR8,
+        ENUM,
+        ARRAY;
 
         public static ColumnType of(final String typeName) {
             return switch (typeName.toLowerCase()) {
@@ -85,13 +103,51 @@ public class PostgresUtil {
                 case "bpchar", "char", "character" -> BPCHAR;
                 case "bytea" -> BYTEA;
                 case "date" -> DATE;
-                case "time" -> TIME;
-                case "timestamp" -> TIMESTAMP;
-                case "timestamptz" -> TIMESTAMPTZ;
+                case "time", "time without time zone" -> TIME;
+                case "timetz", "time with time zone" -> TIMETZ;
+                case "timestamp", "timestamp without time zone" -> TIMESTAMP;
+                case "timestamptz", "timestamp with time zone" -> TIMESTAMPTZ;
                 case "uuid" -> UUID;
                 case "json" -> JSON;
                 case "jsonb" -> JSONB;
+                case "xml" -> XML;
+                case "inet" -> INET;
+                case "cidr" -> CIDR;
+                case "macaddr" -> MACADDR;
+                case "macaddr8" -> MACADDR8;
                 default -> throw new IllegalArgumentException("postgres module does not support column type: " + typeName);
+            };
+        }
+
+        /** pg_type oid of the type, required in the COPY BINARY array format. */
+        public int getOid() {
+            return switch (this) {
+                case BOOL -> 16;
+                case INT2 -> 21;
+                case INT4 -> 23;
+                case INT8 -> 20;
+                case FLOAT4 -> 700;
+                case FLOAT8 -> 701;
+                case NUMERIC -> 1700;
+                case TEXT -> 25;
+                case VARCHAR -> 1043;
+                case BPCHAR -> 1042;
+                case BYTEA -> 17;
+                case DATE -> 1082;
+                case TIME -> 1083;
+                case TIMETZ -> 1266;
+                case TIMESTAMP -> 1114;
+                case TIMESTAMPTZ -> 1184;
+                case UUID -> 2950;
+                case JSON -> 114;
+                case JSONB -> 3802;
+                case XML -> 142;
+                case INET -> 869;
+                case CIDR -> 650;
+                case MACADDR -> 829;
+                case MACADDR8 -> 774;
+                // enum oids are database-specific and arrays have no single oid
+                case ENUM, ARRAY -> 0;
             };
         }
     }
@@ -100,14 +156,35 @@ public class PostgresUtil {
 
         public final String name;
         public final ColumnType type;
+        // element type of an ARRAY column (null for scalar columns)
+        public final ColumnType elementType;
+        // element pg_type oid, required only to encode arrays (0 when unknown)
+        public final int elementOid;
 
         public Column(final String name, final ColumnType type) {
+            this(name, type, null, 0);
+        }
+
+        private Column(final String name, final ColumnType type, final ColumnType elementType, final int elementOid) {
             this.name = name;
             this.type = type;
+            this.elementType = elementType;
+            this.elementOid = elementOid;
+        }
+
+        public static Column arrayOf(final String name, final ColumnType elementType) {
+            return arrayOf(name, elementType, elementType.getOid());
+        }
+
+        public static Column arrayOf(final String name, final ColumnType elementType, final int elementOid) {
+            return new Column(name, ColumnType.ARRAY, elementType, elementOid);
         }
 
         @Override
         public String toString() {
+            if(ColumnType.ARRAY.equals(type)) {
+                return name + ":" + elementType + "[]";
+            }
             return name + ":" + type;
         }
     }
@@ -255,18 +332,56 @@ public class PostgresUtil {
             if(meta == null) {
                 throw new IllegalArgumentException("Failed to get result schema for query: " + query);
             }
-            return getColumns(meta);
+            return getColumns(connection, meta);
         }
     }
 
-    public static List<Column> getColumns(final ResultSetMetaData meta) throws SQLException {
+    public static List<Column> getColumns(final Connection connection, final ResultSetMetaData meta) throws SQLException {
         final List<Column> columns = new ArrayList<>();
         for(int column = 1; column <= meta.getColumnCount(); column++) {
-            columns.add(new Column(
-                    meta.getColumnName(column),
-                    ColumnType.of(meta.getColumnTypeName(column))));
+            final String name = meta.getColumnName(column);
+            final String typeName = meta.getColumnTypeName(column);
+            if(java.sql.Types.ARRAY == meta.getColumnType(column) || typeName.startsWith("_")) {
+                // pg array type names carry a leading underscore (e.g. _int4), possibly schema-qualified
+                final String elementTypeName = typeName.replaceFirst("_", "");
+                final ResolvedType elementType = resolveType(connection, elementTypeName);
+                columns.add(Column.arrayOf(name, elementType.type, elementType.oid));
+            } else {
+                columns.add(new Column(name, resolveType(connection, typeName).type));
+            }
         }
         return columns;
+    }
+
+    private record ResolvedType(ColumnType type, int oid) implements Serializable { }
+
+    /**
+     * Resolves a type name to a {@link ColumnType}. Names not covered by the built-in
+     * mapping are looked up in {@code pg_type}: enum types map to {@link ColumnType#ENUM}
+     * (COPY BINARY transfers enum values as their text labels) and domain types resolve
+     * recursively to their base type.
+     */
+    private static ResolvedType resolveType(final Connection connection, final String typeName) throws SQLException {
+        try {
+            final ColumnType type = ColumnType.of(typeName);
+            return new ResolvedType(type, type.getOid());
+        } catch (final IllegalArgumentException e) {
+            final String sql = "SELECT oid, typtype, typbasetype::regtype::text FROM pg_type WHERE oid = to_regtype(?)";
+            try(final PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, typeName);
+                try(final ResultSet resultSet = statement.executeQuery()) {
+                    if(resultSet.next()) {
+                        final String typtype = resultSet.getString(2);
+                        if("e".equals(typtype)) {
+                            return new ResolvedType(ColumnType.ENUM, resultSet.getInt(1));
+                        } else if("d".equals(typtype)) {
+                            return resolveType(connection, resultSet.getString(3));
+                        }
+                    }
+                }
+            }
+            throw e;
+        }
     }
 
     public static String createQuery(
@@ -340,12 +455,19 @@ public class PostgresUtil {
             }
             final byte[] bytes = new byte[length];
             input.readFully(bytes);
-            record.put(i, decodeValue(columns.get(i).type, bytes));
+            record.put(i, decodeValue(columns.get(i), bytes));
         }
         return record;
     }
 
-    private static Object decodeValue(final ColumnType type, final byte[] bytes) {
+    private static Object decodeValue(final Column column, final byte[] bytes) {
+        if(ColumnType.ARRAY.equals(column.type)) {
+            return decodeArray(column, bytes);
+        }
+        return decodeScalar(column.type, bytes);
+    }
+
+    private static Object decodeScalar(final ColumnType type, final byte[] bytes) {
         final ByteBuffer buffer = ByteBuffer.wrap(bytes);
         return switch (type) {
             case BOOL -> bytes[0] != 0;
@@ -355,7 +477,8 @@ public class PostgresUtil {
             case FLOAT4 -> buffer.getFloat();
             case FLOAT8 -> buffer.getDouble();
             case NUMERIC -> toAvroDecimalBytes(decodeNumeric(buffer));
-            case TEXT, VARCHAR, BPCHAR, JSON -> new String(bytes, StandardCharsets.UTF_8);
+            // enum values and xml documents are transferred as their text representation
+            case TEXT, VARCHAR, BPCHAR, JSON, XML, ENUM -> new String(bytes, StandardCharsets.UTF_8);
             case JSONB -> {
                 final int version = buffer.get();
                 if(version != 1) {
@@ -366,9 +489,71 @@ public class PostgresUtil {
             case BYTEA -> ByteBuffer.wrap(bytes);
             case DATE -> buffer.getInt() + POSTGRES_EPOCH_DAYS;
             case TIME -> buffer.getLong();
+            case TIMETZ -> {
+                final long micros = buffer.getLong();
+                final int offsetSeconds = buffer.getInt(); // positive west of UTC
+                yield Math.floorMod(micros + offsetSeconds * 1_000_000L, MICROS_PER_DAY);
+            }
             case TIMESTAMP, TIMESTAMPTZ -> buffer.getLong() + POSTGRES_EPOCH_MICROS;
             case UUID -> new UUID(buffer.getLong(), buffer.getLong()).toString();
+            case INET, CIDR -> decodeInet(buffer);
+            case MACADDR, MACADDR8 -> decodeMacaddr(bytes);
+            case ARRAY -> throw new IllegalStateException("array must not be an array element type");
         };
+    }
+
+    private static List<Object> decodeArray(final Column column, final byte[] bytes) {
+        final ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        final int ndim = buffer.getInt();
+        buffer.getInt(); // hasnull flag
+        buffer.getInt(); // element type oid
+        final List<Object> list = new ArrayList<>();
+        if(ndim == 0) {
+            return list;
+        }
+        if(ndim > 1) {
+            throw new IllegalStateException(
+                    "postgres module does not support multidimensional array column: " + column.name + " (ndim: " + ndim + ")");
+        }
+        final int size = buffer.getInt();
+        buffer.getInt(); // lower bound
+        for(int i = 0; i < size; i++) {
+            final int length = buffer.getInt();
+            if(length == -1) {
+                // skip null elements (consistent with ResultSetToRecordConverter)
+                continue;
+            }
+            final byte[] elementBytes = new byte[length];
+            buffer.get(elementBytes);
+            list.add(decodeScalar(column.elementType, elementBytes));
+        }
+        return list;
+    }
+
+    private static String decodeInet(final ByteBuffer buffer) {
+        buffer.get(); // address family (PGSQL_AF_INET or PGSQL_AF_INET6)
+        final int bits = buffer.get() & 0xFF;
+        buffer.get(); // is_cidr flag
+        final int length = buffer.get() & 0xFF;
+        final byte[] address = new byte[length];
+        buffer.get(address);
+        try {
+            // always append the netmask suffix, matching the postgres inet/cidr text output
+            return InetAddress.getByAddress(address).getHostAddress() + "/" + bits;
+        } catch (final UnknownHostException e) {
+            throw new IllegalStateException("Illegal inet binary length: " + length, e);
+        }
+    }
+
+    private static String decodeMacaddr(final byte[] bytes) {
+        final StringBuilder sb = new StringBuilder();
+        for(final byte b : bytes) {
+            if(!sb.isEmpty()) {
+                sb.append(':');
+            }
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     private static BigDecimal decodeNumeric(final ByteBuffer buffer) {
@@ -439,11 +624,70 @@ public class PostgresUtil {
                 output.writeInt(-1);
                 continue;
             }
-            encodeValue(output, columns.get(i).type, unnestUnion(field.schema()), value);
+            encodeValue(output, columns.get(i), unnestUnion(field.schema()), value);
         }
     }
 
     private static void encodeValue(
+            final DataOutputStream output,
+            final Column column,
+            final Schema fieldSchema,
+            final Object value) throws IOException {
+
+        if(ColumnType.ARRAY.equals(column.type)) {
+            encodeArray(output, column, fieldSchema, value);
+            return;
+        }
+        encodeScalar(output, column.type, fieldSchema, value);
+    }
+
+    private static void encodeArray(
+            final DataOutputStream output,
+            final Column column,
+            final Schema fieldSchema,
+            final Object value) throws IOException {
+
+        if(column.elementOid <= 0) {
+            throw new IllegalStateException("element type oid is required to encode array column: " + column.name);
+        }
+        if(!(value instanceof Collection<?> collection)) {
+            throw new IllegalArgumentException("Failed to convert value: " + value + " to array");
+        }
+        final Schema elementSchema;
+        if(fieldSchema != null && Schema.Type.ARRAY.equals(fieldSchema.getType())) {
+            elementSchema = unnestUnion(fieldSchema.getElementType());
+        } else {
+            elementSchema = null;
+        }
+        boolean hasNull = false;
+        for(final Object element : collection) {
+            if(element == null) {
+                hasNull = true;
+                break;
+            }
+        }
+        final ByteArrayOutputStream payloadBytes = new ByteArrayOutputStream();
+        try(final DataOutputStream payload = new DataOutputStream(payloadBytes)) {
+            payload.writeInt(collection.isEmpty() ? 0 : 1); // ndim
+            payload.writeInt(hasNull ? 1 : 0);
+            payload.writeInt(column.elementOid);
+            if(!collection.isEmpty()) {
+                payload.writeInt(collection.size());
+                payload.writeInt(1); // lower bound
+                for(final Object element : collection) {
+                    if(element == null) {
+                        payload.writeInt(-1);
+                    } else {
+                        encodeScalar(payload, column.elementType, elementSchema, element);
+                    }
+                }
+            }
+        }
+        output.writeInt(payloadBytes.size());
+        payloadBytes.writeTo(output);
+    }
+
+    private static void encodeScalar(
             final DataOutputStream output,
             final ColumnType type,
             final Schema fieldSchema,
@@ -479,7 +723,7 @@ public class PostgresUtil {
                 output.writeInt(bytes.length);
                 output.write(bytes);
             }
-            case TEXT, VARCHAR, BPCHAR, JSON -> {
+            case TEXT, VARCHAR, BPCHAR, JSON, XML, ENUM -> {
                 final byte[] bytes = value.toString().getBytes(StandardCharsets.UTF_8);
                 output.writeInt(bytes.length);
                 output.write(bytes);
@@ -503,6 +747,11 @@ public class PostgresUtil {
                 output.writeInt(8);
                 output.writeLong(toMicroOfDay(fieldSchema, value));
             }
+            case TIMETZ -> {
+                output.writeInt(12);
+                output.writeLong(toMicroOfDay(fieldSchema, value));
+                output.writeInt(0); // zone offset in seconds (values are normalized to UTC)
+            }
             case TIMESTAMP, TIMESTAMPTZ -> {
                 output.writeInt(8);
                 output.writeLong(toEpochMicros(fieldSchema, value) - POSTGRES_EPOCH_MICROS);
@@ -513,7 +762,50 @@ public class PostgresUtil {
                 output.writeLong(uuid.getMostSignificantBits());
                 output.writeLong(uuid.getLeastSignificantBits());
             }
+            case INET, CIDR -> {
+                final byte[] bytes = encodeInet(value.toString(), ColumnType.CIDR.equals(type));
+                output.writeInt(bytes.length);
+                output.write(bytes);
+            }
+            case MACADDR -> {
+                final byte[] bytes = encodeMacaddr(value.toString(), 6);
+                output.writeInt(bytes.length);
+                output.write(bytes);
+            }
+            case MACADDR8 -> {
+                final byte[] bytes = encodeMacaddr(value.toString(), 8);
+                output.writeInt(bytes.length);
+                output.write(bytes);
+            }
+            case ARRAY -> throw new IllegalStateException("array must not be an array element type");
         }
+    }
+
+    private static byte[] encodeInet(final String text, final boolean cidr) {
+        final String trimmed = text.trim();
+        final int slash = trimmed.indexOf('/');
+        final String host = slash < 0 ? trimmed : trimmed.substring(0, slash);
+        final byte[] address = InetAddresses.forString(host).getAddress();
+        final int bits = slash < 0 ? address.length * 8 : Integer.parseInt(trimmed.substring(slash + 1));
+        final ByteBuffer buffer = ByteBuffer.allocate(4 + address.length);
+        buffer.put((byte) (address.length == 4 ? PGSQL_AF_INET : PGSQL_AF_INET6));
+        buffer.put((byte) bits);
+        buffer.put((byte) (cidr ? 1 : 0));
+        buffer.put((byte) address.length);
+        buffer.put(address);
+        return buffer.array();
+    }
+
+    private static byte[] encodeMacaddr(final String text, final int length) {
+        final String[] parts = text.trim().split("[:-]");
+        if(parts.length != length) {
+            throw new IllegalArgumentException("Failed to convert value: " + text + " to macaddr" + (length == 8 ? "8" : ""));
+        }
+        final byte[] bytes = new byte[length];
+        for(int i = 0; i < length; i++) {
+            bytes[i] = (byte) Integer.parseInt(parts[i], 16);
+        }
+        return bytes;
     }
 
     private static byte[] encodeNumeric(final BigDecimal decimal) {

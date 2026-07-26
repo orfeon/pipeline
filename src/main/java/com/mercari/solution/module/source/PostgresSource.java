@@ -141,7 +141,7 @@ public class PostgresSource extends Source {
                         throw new IllegalModuleException("Failed to get schema for query: " + query);
                     }
                     outputAvroSchema = ResultSetToRecordConverter.convertSchema(meta);
-                    columns = PostgresUtil.getColumns(meta);
+                    columns = PostgresUtil.getColumns(connection, meta);
                 }
 
                 final long blockCount = PostgresUtil.getBlockCount(connection, parameters.table);

@@ -116,6 +116,122 @@ public class PostgresUtilTest {
         }
     }
 
+    private static final Schema EXTENDED_SCHEMA = SchemaBuilder.record("root").fields()
+            .name("timetzField").type(AvroSchemaUtil.NULLABLE_LOGICAL_TIME_MICRO_TYPE).noDefault()
+            .name("xmlField").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("inetField").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("inet6Field").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("cidrField").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("macaddrField").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("macaddr8Field").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("enumField").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+            .name("intArrayField").type(Schema.createUnion(
+                    Schema.createArray(Schema.create(Schema.Type.INT)), Schema.create(Schema.Type.NULL))).noDefault()
+            .name("textArrayField").type(Schema.createUnion(
+                    Schema.createArray(Schema.create(Schema.Type.STRING)), Schema.create(Schema.Type.NULL))).noDefault()
+            .name("enumArrayField").type(Schema.createUnion(
+                    Schema.createArray(Schema.create(Schema.Type.STRING)), Schema.create(Schema.Type.NULL))).noDefault()
+            .name("decimalArrayField").type(Schema.createUnion(
+                    Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_DECIMAL_TYPE), Schema.create(Schema.Type.NULL))).noDefault()
+            .name("timestampArrayField").type(Schema.createUnion(
+                    Schema.createArray(AvroSchemaUtil.REQUIRED_LOGICAL_TIMESTAMP_MICRO_TYPE), Schema.create(Schema.Type.NULL))).noDefault()
+            .name("emptyArrayField").type(Schema.createUnion(
+                    Schema.createArray(Schema.create(Schema.Type.LONG)), Schema.create(Schema.Type.NULL))).noDefault()
+            .endRecord();
+
+    private static final List<PostgresUtil.Column> EXTENDED_COLUMNS = Arrays.asList(
+            new PostgresUtil.Column("timetzField", PostgresUtil.ColumnType.TIMETZ),
+            new PostgresUtil.Column("xmlField", PostgresUtil.ColumnType.XML),
+            new PostgresUtil.Column("inetField", PostgresUtil.ColumnType.INET),
+            new PostgresUtil.Column("inet6Field", PostgresUtil.ColumnType.INET),
+            new PostgresUtil.Column("cidrField", PostgresUtil.ColumnType.CIDR),
+            new PostgresUtil.Column("macaddrField", PostgresUtil.ColumnType.MACADDR),
+            new PostgresUtil.Column("macaddr8Field", PostgresUtil.ColumnType.MACADDR8),
+            new PostgresUtil.Column("enumField", PostgresUtil.ColumnType.ENUM),
+            PostgresUtil.Column.arrayOf("intArrayField", PostgresUtil.ColumnType.INT4),
+            PostgresUtil.Column.arrayOf("textArrayField", PostgresUtil.ColumnType.TEXT),
+            PostgresUtil.Column.arrayOf("enumArrayField", PostgresUtil.ColumnType.ENUM, 99999),
+            PostgresUtil.Column.arrayOf("decimalArrayField", PostgresUtil.ColumnType.NUMERIC),
+            PostgresUtil.Column.arrayOf("timestampArrayField", PostgresUtil.ColumnType.TIMESTAMPTZ),
+            PostgresUtil.Column.arrayOf("emptyArrayField", PostgresUtil.ColumnType.INT8));
+
+    @Test
+    public void testCopyBinaryRoundTripExtendedTypes() throws IOException {
+
+        final GenericData.Record record = new GenericData.Record(EXTENDED_SCHEMA);
+        record.put("timetzField", LocalTime.of(3, 34, 56, 789000000).toNanoOfDay() / 1000L);
+        record.put("xmlField", "<a attr=\"v\">1</a>");
+        record.put("inetField", "192.168.0.1");
+        record.put("inet6Field", "2001:db8:0:0:0:0:0:1/128");
+        record.put("cidrField", "192.168.100.0/24");
+        record.put("macaddrField", "08:00:2b:01:02:03");
+        record.put("macaddr8Field", "08:00:2b:01:02:03:04:05");
+        record.put("enumField", "happy");
+        record.put("intArrayField", Arrays.asList(1, -2, 3));
+        record.put("textArrayField", Arrays.asList("a", "b c", ""));
+        record.put("enumArrayField", Arrays.asList("sad", "happy"));
+        record.put("decimalArrayField", Arrays.asList(
+                toDecimalBytes(new BigDecimal("123.45")), toDecimalBytes(new BigDecimal("-0.01"))));
+        record.put("timestampArrayField", Arrays.asList(1700000000000000L, null, 1700000001000000L));
+        record.put("emptyArrayField", List.of());
+
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try(final DataOutputStream output = new DataOutputStream(bytes)) {
+            PostgresUtil.writeHeader(output);
+            PostgresUtil.write(output, EXTENDED_COLUMNS, EXTENDED_SCHEMA.getFields(), record);
+            PostgresUtil.writeTrailer(output);
+        }
+        final GenericRecord output;
+        try(final DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+            PostgresUtil.readHeader(input);
+            output = PostgresUtil.read(input, EXTENDED_SCHEMA, EXTENDED_COLUMNS);
+            Assertions.assertNotNull(output);
+            Assertions.assertNull(PostgresUtil.read(input, EXTENDED_SCHEMA, EXTENDED_COLUMNS));
+        }
+
+        Assertions.assertEquals(LocalTime.of(3, 34, 56, 789000000).toNanoOfDay() / 1000L, output.get("timetzField"));
+        Assertions.assertEquals("<a attr=\"v\">1</a>", output.get("xmlField"));
+        // a missing netmask suffix defaults to a single host on write; read always appends it
+        Assertions.assertEquals("192.168.0.1/32", output.get("inetField"));
+        Assertions.assertEquals("2001:db8:0:0:0:0:0:1/128", output.get("inet6Field"));
+        Assertions.assertEquals("192.168.100.0/24", output.get("cidrField"));
+        Assertions.assertEquals("08:00:2b:01:02:03", output.get("macaddrField"));
+        Assertions.assertEquals("08:00:2b:01:02:03:04:05", output.get("macaddr8Field"));
+        Assertions.assertEquals("happy", output.get("enumField"));
+        Assertions.assertEquals(Arrays.asList(1, -2, 3), output.get("intArrayField"));
+        Assertions.assertEquals(Arrays.asList("a", "b c", ""), output.get("textArrayField"));
+        Assertions.assertEquals(Arrays.asList("sad", "happy"), output.get("enumArrayField"));
+        Assertions.assertEquals(Arrays.asList(
+                toDecimalBytes(new BigDecimal("123.45")), toDecimalBytes(new BigDecimal("-0.01"))),
+                output.get("decimalArrayField"));
+        // null array elements are skipped on read
+        Assertions.assertEquals(Arrays.asList(1700000000000000L, 1700000001000000L), output.get("timestampArrayField"));
+        Assertions.assertEquals(List.of(), output.get("emptyArrayField"));
+    }
+
+    @Test
+    public void testCopyBinaryRoundTripExtendedTypesNulls() throws IOException {
+
+        final GenericData.Record record = new GenericData.Record(EXTENDED_SCHEMA);
+        for(final Schema.Field field : EXTENDED_SCHEMA.getFields()) {
+            record.put(field.name(), null);
+        }
+
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try(final DataOutputStream output = new DataOutputStream(bytes)) {
+            PostgresUtil.writeHeader(output);
+            PostgresUtil.write(output, EXTENDED_COLUMNS, EXTENDED_SCHEMA.getFields(), record);
+            PostgresUtil.writeTrailer(output);
+        }
+        try(final DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+            PostgresUtil.readHeader(input);
+            final GenericRecord output = PostgresUtil.read(input, EXTENDED_SCHEMA, EXTENDED_COLUMNS);
+            for(final Schema.Field field : EXTENDED_SCHEMA.getFields()) {
+                Assertions.assertNull(output.get(field.name()));
+            }
+        }
+    }
+
     @Test
     public void testNumericRoundTrip() throws IOException {
 
