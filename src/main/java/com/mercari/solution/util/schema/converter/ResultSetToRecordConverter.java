@@ -174,7 +174,16 @@ public class ResultSetToRecordConverter {
                             Schema.createArray(Schema.create(Schema.Type.BOOLEAN)),
                             Schema.create(Schema.Type.NULL));
                     case "JSON", "JSONB" -> AvroSchemaUtil.NULLABLE_ARRAY_JSON_TYPE;
-                    default -> throw new IllegalStateException("Not supported ArrayElementType: " + typeName);
+                    case "UUID" -> Schema.createUnion(
+                            Schema.createArray(LogicalTypes.uuid().addToSchema(Schema.create(Schema.Type.STRING))),
+                            Schema.create(Schema.Type.NULL));
+                    default -> {
+                        // user-defined element types such as enums are transferred as text
+                        LOG.warn("ArrayElementType: {} as NULLABLE ARRAY STRING", typeName);
+                        yield Schema.createUnion(
+                                Schema.createArray(Schema.create(Schema.Type.STRING)),
+                                Schema.create(Schema.Type.NULL));
+                    }
                 };
             }
             case Types.STRUCT:
@@ -252,6 +261,7 @@ public class ResultSetToRecordConverter {
             case Types.CHAR:
             case Types.VARCHAR:
             case Types.LONGVARCHAR:
+            case Types.SQLXML:
             case Types.OTHER: {
                 return resultSet.getString(column);
             }
@@ -407,11 +417,12 @@ public class ResultSetToRecordConverter {
                     case Types.LONGVARCHAR:
                     case Types.LONGNVARCHAR:
                     case Types.OTHER: {
-                        for(String v : (String[]) array.getArray()) {
+                        // OTHER elements may not be String (e.g. UUID[] or PGobject[] for enum/uuid/inet arrays)
+                        for(final Object v : (Object[]) array.getArray()) {
                             if(v == null) {
                                 continue;
                             }
-                            list.add(v);
+                            list.add(v.toString());
                         }
                         break;
                     }
@@ -519,7 +530,6 @@ public class ResultSetToRecordConverter {
             case Types.DISTINCT:
             case Types.STRUCT:
             case Types.REF:
-            case Types.SQLXML:
             case Types.REF_CURSOR:
             default: {
                 return null;

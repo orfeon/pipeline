@@ -899,6 +899,13 @@
       <version>${testcontainers.version}</version>
       <scope>test</scope>
     </dependency>
+    <!-- PostgreSQL container for PostgresIT (postgres source module / PostgresUtil COPY BINARY) -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>${testcontainers.version}</version>
+      <scope>test</scope>
+    </dependency>
     <!-- LocalStack (S3 / STS / Secrets Manager) and Vault integration tests for cross-cloud
          auth (AwsAuthIT / VaultIT, docs/developer/cloud-auth.md 9) -->
     <dependency>

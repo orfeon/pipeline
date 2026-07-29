@@ -46,7 +46,13 @@ Each range is read with an efficient TID range scan (`WHERE ctid >= '(start,0)' 
 
 ## Supported column types
 
-`boolean`, `smallint`, `integer`, `bigint`, `real`, `double precision`, `numeric`, `text`, `varchar`, `char`, `bytea`, `date`, `time`, `timestamp`, `timestamptz`, `uuid`, `json`, `jsonb`
+`boolean`, `smallint`, `integer`, `bigint`, `real`, `double precision`, `numeric`, `text`, `varchar`, `char`, `bytea`, `date`, `time`, `timetz`, `timestamp`, `timestamptz`, `uuid`, `json`, `jsonb`, `xml`, `inet`, `cidr`, `macaddr`, `macaddr8`, user-defined `enum` types, and one-dimensional arrays of these types.
+
+* `enum` values are read as their text labels (string).
+* Domain types are resolved to their base type.
+* `timetz` values are normalized to UTC time-of-day.
+* `inet`/`cidr` values always include the netmask suffix (e.g. `192.168.0.1/32`), matching the PostgreSQL text output.
+* Array columns are read as Avro arrays. Multidimensional arrays are not supported, and `NULL` elements inside an array are skipped.
 
 ## Example config file
 
