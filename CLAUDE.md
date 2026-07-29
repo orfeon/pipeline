@@ -67,7 +67,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
-`pubsub` `storage` `files` `debug` `action` `auxia` `tasks` `localH2`.
+`pubsub` `storage` `files` `debug` `action` `auxia` `tasks` `localH2` `profile`.
 
 > The registered `@…Module(name=…)` value is authoritative. If this list drifts, regenerate it by grepping
 > `@Source.Module` / `@Transform.Module` / `@Sink.Module` in `src/main/java`.

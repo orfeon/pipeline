@@ -85,6 +85,9 @@ sinks:
   - title: jdbc
     description: Writes data to relational databases via JDBC statements. Supports MySQL, PostgreSQL and other JDBC-compatible databases with batching and configurable write operations.
     tags: [sink, jdbc, batch, streaming, database, sql, mysql, postgresql]
+  - title: profile
+    description: Generates a single self-contained interactive HTML data profiling report from the input dataset using Apache DataSketches. Collects quantiles/histograms (KLL), distinct counts (CPC), frequent items, key set sketches (Theta), row samples (VarOpt) and numeric correlations in one pass, all with mathematical error bounds. Supports field filtering, key declarations with containment/venn diagnostics, segment/time-bucket/multi-input comparison with distribution overlays and PSI/KS drift metrics, comparison against a past report artifact without re-scanning (compareWith), declared field-pair comparison with Q-Q plots, accuracy presets, raw-value hiding, and embeds mergeable sketch binaries for cross-run comparison and BigQuery interoperability.
+    tags: [sink, profile, batch, report, html, statistics, datasketches, observation, quality]
   - title: pubsub
     description: Publishes input data as messages to Google Cloud Pub/Sub topics. Supports JSON, Avro, and Protocol Buffers serialization formats. Includes dynamic topic routing via FreeMarker templates, custom message attributes with template expressions, message ID and ordering key control, batch size tuning, and passthrough of PubsubMessage inputs.
     tags: [sink, pubsub, batch, streaming, gcp, messaging]

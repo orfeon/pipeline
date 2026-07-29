@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__PROFILE_TITLE__</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"
+        integrity="sha384-pPi0zxBAoDu6+JXW/C68UZLvBUUtU+7zonhif43rqj7pxsGyqyqzcian2Rj37Rss"
+        crossorigin="anonymous"></script>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1f2430; --muted: #6b7280; --line: #e5e7eb;
+  --card: #ffffff; --card-border: #e5e7eb; --accent: #2563eb; --accent-bg: #eff6ff;
+  --warn: #b45309; --warn-bg: #fffbeb; --chip: #f3f4f6; --code-bg: #f8fafc;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318; --fg: #e5e7eb; --muted: #9ca3af; --line: #2a2f3a;
+    --card: #181c24; --card-border: #2a2f3a; --accent: #60a5fa; --accent-bg: #172038;
+    --warn: #fbbf24; --warn-bg: #2a2213; --chip: #232834; --code-bg: #161a22;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+a { color: var(--accent); }
+header { padding: 16px 24px 0; border-bottom: 1px solid var(--line); }
+header h1 { margin: 0 0 4px; font-size: 20px; }
+.meta { color: var(--muted); font-size: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+.banner { margin: 8px 0; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+  background: var(--warn-bg); color: var(--warn); display: inline-block; }
+nav.tabs { display: flex; gap: 4px; margin-top: 12px; flex-wrap: wrap; }
+nav.tabs button { border: none; background: none; color: var(--muted); padding: 8px 14px;
+  cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; }
+nav.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+main { padding: 20px 24px 60px; max-width: 1440px; margin: 0 auto; }
+section.tab { display: none; }
+section.tab.active { display: block; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
+  padding: 12px 14px; cursor: pointer; }
+.card:hover { border-color: var(--accent); }
+.card h3 { margin: 0 0 2px; font-size: 14px; display: flex; align-items: center; gap: 6px;
+  word-break: break-all; }
+.badge { font-size: 10px; padding: 1px 7px; border-radius: 9px; background: var(--chip);
+  color: var(--muted); white-space: nowrap; }
+.badge.key { background: var(--accent-bg); color: var(--accent); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.strip { color: var(--muted); font-size: 12px; margin-bottom: 6px; display: flex; gap: 12px; flex-wrap: wrap; }
+.chart { height: 140px; }
+.chart.tall { height: 320px; }
+.chart-fallback { color: var(--muted); font-size: 12px; padding: 20px 0; text-align: center; }
+.statgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 12px 14px; }
+.stat .v { font-size: 22px; font-weight: 700; }
+.stat .l { color: var(--muted); font-size: 12px; }
+.toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+.toolbar input[type=search] { padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--fg); min-width: 220px; }
+.toolbar select { padding: 6px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--fg); }
+.chipbar { display: flex; gap: 6px; flex-wrap: wrap; }
+.chipbar button { border: 1px solid var(--line); background: var(--chip); color: var(--muted);
+  border-radius: 12px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.chipbar button.on { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
+.comparebar { margin: 10px 0 2px; display: flex; flex-direction: column; gap: 6px; }
+.comparebar .axisrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.comparebar .axislabel { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.comparebar .chip { border: 1px solid var(--line); background: var(--chip); color: var(--fg);
+  border-radius: 12px; padding: 2px 10px; font-size: 12px; cursor: pointer;
+  display: inline-flex; gap: 6px; align-items: center; }
+.comparebar .chip .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.comparebar .chip.on { border-color: var(--accent); background: var(--accent-bg); }
+.comparebar .chip .n { color: var(--muted); }
+table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.data th, table.data td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+table.data th { color: var(--muted); font-weight: 600; font-size: 12px; }
+table.data tr.clickable { cursor: pointer; }
+table.data tr.clickable:hover { background: var(--accent-bg); }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none;
+  align-items: flex-start; justify-content: center; padding: 4vh 16px; z-index: 50; overflow: auto; }
+.overlay.open { display: flex; }
+.detail { background: var(--card); border-radius: 12px; max-width: 900px; width: 100%;
+  padding: 20px 24px; border: 1px solid var(--card-border); }
+.detail h2 { margin: 0 0 8px; font-size: 17px; word-break: break-all; }
+.detail .close { float: right; border: none; background: none; color: var(--muted);
+  font-size: 20px; cursor: pointer; }
+.controls { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+.controls button { border: 1px solid var(--line); background: var(--chip); color: var(--fg);
+  border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.controls button.on { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
+.notable-list li { margin: 4px 0; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; overflow-x: auto; }
+.suggestion { border-left: 3px solid var(--accent); }
+.suggestion .kind { text-transform: uppercase; font-size: 11px; color: var(--accent); font-weight: 700; }
+.copy { float: right; font-size: 11px; }
+.samples { color: var(--muted); font-size: 12px; word-break: break-all; }
+.pair-panel { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+h2.sec { font-size: 16px; margin: 22px 0 10px; }
+noscript table { border-collapse: collapse; }
+noscript th, noscript td { border: 1px solid var(--line); padding: 4px 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>__PROFILE_TITLE__</h1>
+  <div class="meta" id="meta"></div>
+  <div id="valuesBanner"></div>
+  <div class="comparebar" id="compareBar"></div>
+  <nav class="tabs" id="tabs"></nav>
+</header>
+<main>
+  <noscript>
+    <p>JavaScript is disabled. Interactive charts are unavailable; basic statistics are shown below.</p>
+    __PROFILE_STATIC__
+  </noscript>
+  <section class="tab" id="tab-overview"></section>
+  <section class="tab" id="tab-fields"></section>
+  <section class="tab" id="tab-relations"></section>
+  <section class="tab" id="tab-segments"></section>
+  <section class="tab" id="tab-time"></section>
+  <section class="tab" id="tab-keys"></section>
+  <section class="tab" id="tab-compare"></section>
+  <section class="tab" id="tab-suggestions"></section>
+  <section class="tab" id="tab-appendix"></section>
+</main>
+<div class="overlay" id="overlay"><div class="detail" id="detail"></div></div>
+
+<script type="application/json" id="profile-payload">__PROFILE_PAYLOAD__</script>
+<script type="application/json" id="profile-manifest">__PROFILE_MANIFEST__</script>
+<script type="application/json" id="profile-sketches">__PROFILE_SKETCHES__</script>
+
+<script>
+"use strict";
+const P = JSON.parse(document.getElementById("profile-payload").textContent);
+const M = JSON.parse(document.getElementById("profile-manifest").textContent);
+const HAS_ECHARTS = typeof echarts !== "undefined";
+const HIDE = P.values === "hide";
+const NOTABLE_LABELS = {
+  all_null: "all values are null", high_null: "high null rate", constant: "single constant value",
+  dominant_value: "one value dominates", unique_like: "distinct ≈ rows", skewed: "extreme skew"
+};
+const fmtInt = n => n == null ? "-" : Number(n).toLocaleString("en-US", {maximumFractionDigits: 0});
+const fmtNum = n => n == null || !isFinite(n) ? "-" : Math.abs(n) >= 1e6 || (Math.abs(n) < 1e-3 && n !== 0)
+  ? Number(n).toExponential(3) : Number(n).toLocaleString("en-US", {maximumFractionDigits: 4});
+const fmtPct = n => n == null ? "-" : (100 * n).toFixed(1) + "%";
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const el = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; };
+
+// ---- comparison state (global compare bar: segments / time axes) ----
+const AXES = P.comparisons || [];
+const PALETTE = ["#5b8ff9", "#5ad8a6", "#f6bd16", "#e8684a", "#6dc8ec", "#9270ca", "#ff9d4d", "#269a99", "#ff99c3", "#bdd2fd"];
+const cmpState = {axis: -1, values: new Set()};
+const groupColor = gi => PALETTE[gi % PALETTE.length];
+function selectedGroups() {
+  if (cmpState.axis < 0 || !cmpState.values.size) return null;
+  const axis = AXES[cmpState.axis];
+  const groups = [];
+  // a baseline group is always part of the overlay as the fixed reference
+  axis.groups.forEach((g, gi) => {
+    if (cmpState.values.has(g.value) || (axis.baseline != null && g.value === axis.baseline)) groups.push([gi, g]);
+  });
+  return groups.length ? {axis, groups} : null;
+}
+
+// ---- charts (lazy init via IntersectionObserver) ----
+const chartQueue = new Map();
+const observer = ("IntersectionObserver" in window) ? new IntersectionObserver(entries => {
+  for (const e of entries) {
+    if (e.isIntersecting && chartQueue.has(e.target)) {
+      const build = chartQueue.get(e.target);
+      chartQueue.delete(e.target);
+      observer.unobserve(e.target);
+      build();
+    }
+  }
+}, {rootMargin: "200px"}) : null;
+
+function lazyChart(container, optionFn) {
+  if (!HAS_ECHARTS) {
+    container.innerHTML = '<div class="chart-fallback">chart unavailable (CDN unreachable)</div>';
+    return;
+  }
+  const build = () => {
+    const chart = echarts.init(container, null, {renderer: "canvas"});
+    chart.setOption(Object.assign({animation: false}, optionFn()));
+    container._chart = chart;
+  };
+  if (observer) { chartQueue.set(container, build); observer.observe(container); }
+  else { build(); }
+}
+window.addEventListener("resize", () => {
+  document.querySelectorAll(".chart").forEach(c => c._chart && c._chart.resize());
+});
+
+const AXIS = {axisLabel: {fontSize: 10}, axisLine: {show: false}, axisTick: {show: false}};
+function histOption(h, log) {
+  const edges = h.edges, counts = h.counts;
+  const labels = counts.map((_, i) => fmtNum(edges[i]) + " – " + fmtNum(edges[i + 1] != null ? edges[i + 1] : edges[i]));
+  return {
+    grid: {left: 40, right: 8, top: 8, bottom: 20},
+    tooltip: {trigger: "axis", confine: true, formatter: p0 => labels[p0[0].dataIndex] + "<br>count: " + fmtInt(p0[0].value)},
+    xAxis: Object.assign({type: "category", data: counts.map((_, i) => i)}, AXIS, {axisLabel: {show: false}}),
+    yAxis: Object.assign({type: log ? "log" : "value", min: log ? 1 : undefined}, AXIS),
+    series: [{type: "bar", data: log ? counts.map(c => Math.max(c, 1)) : counts, barCategoryGap: "10%",
+      itemStyle: {color: "#5b8ff9"}}]
+  };
+}
+function cdfOption(c) {
+  return {
+    grid: {left: 45, right: 12, top: 8, bottom: 20},
+    tooltip: {trigger: "axis", confine: true,
+      formatter: p0 => "value ≤ " + fmtNum(p0[0].data[0]) + "<br>rank: " + fmtPct(p0[0].data[1])},
+    xAxis: Object.assign({type: "value", min: c.points[0], max: c.points[c.points.length - 1]}, AXIS),
+    yAxis: Object.assign({type: "value", min: 0, max: 1}, AXIS),
+    series: [{type: "line", showSymbol: false, data: c.points.map((p, i) => [p, c.ranks[i]]),
+      lineStyle: {color: "#5b8ff9"}}]
+  };
+}
+function topKOption(topK, total, limit) {
+  const rows = topK.slice(0, limit).reverse();
+  const names = rows.map((r, i) => HIDE || r.value == null ? "#" + (rows.length - i) : r.value);
+  return {
+    grid: {left: 110, right: 30, top: 4, bottom: 20},
+    tooltip: {confine: true, formatter: p0 => esc(String(names[p0.dataIndex])) + "<br>count: " + fmtInt(p0.value)
+      + " (" + fmtPct(p0.value / total) + ")"},
+    xAxis: Object.assign({type: "value"}, AXIS),
+    yAxis: Object.assign({type: "category",
+      data: names.map(n => String(n).length > 16 ? String(n).slice(0, 15) + "…" : n)}, AXIS),
+    series: [{type: "bar", data: rows.map(r => r.count), itemStyle: {color: "#5b8ff9"}}]
+  };
+}
+function boolOption(b) {
+  return {
+    tooltip: {confine: true},
+    series: [{type: "pie", radius: ["40%", "68%"],
+      label: {formatter: "{b}: {c}", fontSize: 11},
+      data: [{name: "true", value: b.trueCount, itemStyle: {color: "#5b8ff9"}},
+             {name: "false", value: b.falseCount, itemStyle: {color: "#c6cdd8"}}]}]
+  };
+}
+// ---- overlay chart options (selected comparison groups over shared edges/labels) ----
+function share(count, total) { return total > 0 ? 100 * count / total : 0; }
+function overlayHistOption(f, sel) {
+  const edges = f.overlay.edges;
+  const isTime = !!f.timestamp;
+  const labels = [];
+  for (let i = 0; i + 1 < edges.length; i++) {
+    const mid = (edges[i] + edges[i + 1]) / 2;
+    labels.push(isTime ? new Date(mid).toISOString().slice(0, 10) : fmtNum(edges[i]) + " – " + fmtNum(edges[i + 1]));
+  }
+  const series = [];
+  for (const [gi, g] of sel.groups) {
+    const gf = g.fields[f.path];
+    if (!gf || !gf.hist) continue;
+    series.push({name: String(g.value), type: "line", step: "middle", showSymbol: false,
+      lineStyle: {color: groupColor(gi), width: 1.5}, itemStyle: {color: groupColor(gi)},
+      data: gf.hist.map(c => +share(c, gf.count).toFixed(3))});
+  }
+  return {
+    grid: {left: 40, right: 8, top: 8, bottom: 20},
+    tooltip: {trigger: "axis", confine: true,
+      formatter: ps => labels[ps[0].dataIndex] + ps.map(p0 => "<br>" + esc(p0.seriesName) + ": " + p0.value + "%").join("")},
+    xAxis: Object.assign({type: "category", data: labels.map((_, i) => i)}, AXIS, {axisLabel: {show: false}}),
+    yAxis: Object.assign({type: "value", axisLabel: {fontSize: 10, formatter: "{value}%"}}, AXIS),
+    series: series
+  };
+}
+function overlayTopKOption(f, sel) {
+  const labels = f.overlay.labels;
+  const series = [];
+  for (const [gi, g] of sel.groups) {
+    const gf = g.fields[f.path];
+    if (!gf || !gf.topK) continue;
+    series.push({name: String(g.value), type: "bar", itemStyle: {color: groupColor(gi)},
+      data: gf.topK.map(c => +share(c, gf.count).toFixed(3))});
+  }
+  return {
+    grid: {left: 40, right: 8, top: 8, bottom: 42},
+    tooltip: {trigger: "axis", confine: true,
+      formatter: ps => esc(String(labels[ps[0].dataIndex])) + ps.map(p0 => "<br>" + esc(p0.seriesName) + ": " + p0.value + "%").join("")},
+    xAxis: Object.assign({type: "category",
+      data: labels.map(n => String(n).length > 10 ? String(n).slice(0, 9) + "…" : n)}, AXIS,
+      {axisLabel: {fontSize: 9, rotate: 30}}),
+    yAxis: Object.assign({type: "value", axisLabel: {fontSize: 10, formatter: "{value}%"}}, AXIS),
+    series: series
+  };
+}
+function overlayBoolOption(f, sel) {
+  const series = [];
+  for (const [gi, g] of sel.groups) {
+    const gf = g.fields[f.path];
+    if (!gf) continue;
+    const total = (gf.trueCount || 0) + (gf.falseCount || 0);
+    series.push({name: String(g.value), type: "bar", itemStyle: {color: groupColor(gi)},
+      data: [+share(gf.trueCount || 0, total).toFixed(2), +share(gf.falseCount || 0, total).toFixed(2)]});
+  }
+  return {
+    grid: {left: 40, right: 8, top: 8, bottom: 20},
+    tooltip: {trigger: "axis", confine: true},
+    xAxis: Object.assign({type: "category", data: ["true", "false"]}, AXIS),
+    yAxis: Object.assign({type: "value", axisLabel: {fontSize: 10, formatter: "{value}%"}}, AXIS),
+    series: series
+  };
+}
+function overlayOptionFor(f, sel) {
+  if (f.overlay && f.overlay.edges) {
+    const has = sel.groups.some(([, g]) => g.fields[f.path] && g.fields[f.path].hist);
+    if (has) return () => overlayHistOption(f, sel);
+  }
+  if (f.overlay && f.overlay.labels) {
+    const has = sel.groups.some(([, g]) => g.fields[f.path] && g.fields[f.path].topK);
+    if (has) return () => overlayTopKOption(f, sel);
+  }
+  if (f.bool) return () => overlayBoolOption(f, sel);
+  return null;
+}
+
+function timeHistOption(h) {
+  const labels = h.counts.map((_, i) => new Date((h.edges[i] + h.edges[i + 1]) / 2).toISOString().slice(0, 16));
+  return {
+    grid: {left: 40, right: 8, top: 8, bottom: 20},
+    tooltip: {trigger: "axis", confine: true,
+      formatter: p0 => labels[p0[0].dataIndex] + "<br>count: " + fmtInt(p0[0].value)},
+    xAxis: Object.assign({type: "category", data: labels}, AXIS, {axisLabel: {show: false}}),
+    yAxis: Object.assign({type: "value"}, AXIS),
+    series: [{type: "bar", data: h.counts, barCategoryGap: "10%", itemStyle: {color: "#5b8ff9"}}]
+  };
+}
+
+// ---- header / tabs ----
+(function renderHeader() {
+  const meta = document.getElementById("meta");
+  meta.append(el("<span>rows: <b>" + fmtInt(P.rows) + "</b></span>"));
+  meta.append(el("<span>fields: <b>" + P.fields.length + "</b></span>"));
+  if (P.errorRows > 0) meta.append(el("<span>error rows: <b>" + fmtInt(P.errorRows) + "</b></span>"));
+  meta.append(el("<span>generated: " + esc(M.job && M.job.generatedAt || "") + "</span>"));
+  meta.append(el("<span>KLL k=" + M.sketchParameters.kllK + " / CPC lgK=" + M.sketchParameters.cpcLgK + "</span>"));
+  document.getElementById("valuesBanner").append(el(HIDE
+    ? '<div class="banner">raw values are hidden (values: hide)</div>'
+    : '<div class="banner">this report contains raw data values — treat it with the same sensitivity as the source data</div>'));
+})();
+
+const TABS = [["overview", "Overview"], ["fields", "Fields"], ["relations", "Relations"]];
+if (AXES.some(a => a.kind === "segments")) TABS.push(["segments", "Segments"]);
+if (AXES.some(a => a.kind === "time")) TABS.push(["time", "Time"]);
+if (P.keys) TABS.push(["keys", "Keys"]);
+if (AXES.some(a => a.kind === "inputs") || P.compareWith) TABS.push(["compare", "Compare"]);
+TABS.push(["suggestions", "Next steps"], ["appendix", "Appendix"]);
+
+function currentHash() {
+  const h = {}; location.hash.replace(/^#/, "").split("&").forEach(kv => {
+    const [k, v] = kv.split("="); if (k) h[k] = decodeURIComponent(v || "");
+  }); return h;
+}
+function setHash(update) {
+  const h = Object.assign(currentHash(), update);
+  location.hash = Object.entries(h).filter(([, v]) => v).map(([k, v]) => k + "=" + encodeURIComponent(v)).join("&");
+}
+function activateTab(name) {
+  document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll("section.tab").forEach(s => s.classList.toggle("active", s.id === "tab-" + name));
+  document.querySelectorAll("#tab-" + name + " .chart").forEach(c => c._chart && c._chart.resize());
+}
+(function renderTabs() {
+  const nav = document.getElementById("tabs");
+  for (const [name, label] of TABS) {
+    const b = el('<button data-tab="' + name + '">' + label + "</button>");
+    b.onclick = () => { setHash({tab: name}); activateTab(name); };
+    nav.append(b);
+  }
+})();
+
+// ---- global compare bar ----
+function toggleGroup(axisIndex, value) {
+  if (cmpState.axis !== axisIndex) { cmpState.axis = axisIndex; cmpState.values.clear(); }
+  if (cmpState.values.has(value)) cmpState.values.delete(value); else cmpState.values.add(value);
+  if (!cmpState.values.size) cmpState.axis = -1;
+  syncCompare();
+}
+function syncCompare() {
+  document.querySelectorAll("#compareBar .chip").forEach(chip => {
+    const on = cmpState.axis === +chip.dataset.axis && cmpState.values.has(chip.dataset.value);
+    chip.classList.toggle("on", on);
+  });
+  setHash({cmp: cmpState.axis < 0 ? "" : cmpState.axis + ":" + [...cmpState.values].join("|")});
+  renderFieldList();
+}
+(function renderCompareBar() {
+  if (!AXES.length) return;
+  const bar = document.getElementById("compareBar");
+  AXES.forEach((axis, ai) => {
+    const row = el('<div class="axisrow"><span class="axislabel">' + esc(axis.field)
+      + (axis.granularity ? " (" + esc(axis.granularity) + ")" : "") + ":</span></div>");
+    axis.groups.forEach((g, gi) => {
+      const isBase = axis.baseline != null && g.value === axis.baseline;
+      const chip = el('<button class="chip"><span class="dot" style="background:' + groupColor(gi) + '"></span>'
+        + esc(String(g.value)) + (isBase ? ' <span class="n">(base)</span>' : "")
+        + ' <span class="n">' + fmtInt(g.rows) + "</span></button>");
+      chip.dataset.axis = ai;
+      chip.dataset.value = g.value;
+      chip.onclick = () => toggleGroup(ai, g.value);
+      row.append(chip);
+    });
+    if (axis.truncatedGroups > 0) {
+      row.append(el('<span class="axislabel">+' + axis.truncatedGroups + " more (not kept)</span>"));
+    }
+    bar.append(row);
+  });
+})();
+
+// ---- overview ----
+(function renderOverview() {
+  const s = document.getElementById("tab-overview");
+  const grid = el('<div class="statgrid"></div>');
+  const profiled = P.fields.length, skipped = (P.skippedFields || []).length;
+  const typeCounts = {};
+  P.fields.forEach(f => typeCounts[f.type] = (typeCounts[f.type] || 0) + 1);
+  grid.append(el('<div class="stat"><div class="v">' + fmtInt(P.rows) + '</div><div class="l">rows</div></div>'));
+  grid.append(el('<div class="stat"><div class="v">' + profiled + '</div><div class="l">profiled fields' + (skipped ? " (+" + skipped + " skipped)" : "") + "</div></div>"));
+  for (const [t, c] of Object.entries(typeCounts)) {
+    grid.append(el('<div class="stat"><div class="v">' + c + '</div><div class="l">' + esc(t) + " fields</div></div>"));
+  }
+  s.append(grid);
+
+  const notables = [];
+  P.fields.forEach(f => (f.notable || []).forEach(n => notables.push([f.path, n])));
+  s.append(el('<h2 class="sec">Notable observations</h2>'));
+  if (!notables.length) {
+    s.append(el('<p class="samples">nothing notable — no high-null, constant, dominant or near-unique fields detected.</p>'));
+  } else {
+    const ul = el('<ul class="notable-list"></ul>');
+    for (const [path, n] of notables) {
+      const li = el('<li><span class="badge warn">' + esc(n) + '</span> <a href="javascript:void(0)">' + esc(path)
+        + "</a> — " + (NOTABLE_LABELS[n] || n) + "</li>");
+      li.querySelector("a").onclick = () => openDetail(path);
+      ul.append(li);
+    }
+    s.append(ul);
+  }
+})();
+
+// ---- field cards ----
+const fieldState = {q: "", sort: "schema", types: new Set()};
+function statStrip(f) {
+  const parts = ["null " + fmtPct(f.nullRate)];
+  if (f.distinct) parts.push("distinct " + fmtInt(f.distinct.estimate)
+    + " <span title=\"95% bounds\">[" + fmtInt(f.distinct.lower) + ", " + fmtInt(f.distinct.upper) + "]</span>");
+  if (f.numeric && f.numeric.mean != null) parts.push("mean " + fmtNum(f.numeric.mean));
+  if (f.errorCount > 0) parts.push('<span class="badge warn">errors ' + fmtInt(f.errorCount) + "</span>");
+  if (f.drift) parts.push('<span class="badge' + (f.drift.psi > 0.2 ? " warn" : "") + '" title="PSI vs baseline">PSI '
+    + f.drift.psi.toFixed(3) + " vs " + esc(f.drift.vs) + "</span>");
+  return parts.map(p => "<span>" + p + "</span>").join("");
+}
+function mainChart(f, container, tall) {
+  const h = tall ? "chart tall" : "chart";
+  container.className = h;
+  const sel = selectedGroups();
+  if (sel) {
+    const overlayFn = overlayOptionFor(f, sel);
+    if (overlayFn) { lazyChart(container, overlayFn); return; }
+  }
+  if (f.numeric && f.numeric.histogram) lazyChart(container, () => histOption(f.numeric.histogram, false));
+  else if (f.string && f.string.topK && f.string.topK.length) lazyChart(container, () => topKOption(f.string.topK, f.count, P.topKShow));
+  else if (f.bool) lazyChart(container, () => boolOption(f.bool));
+  else if (f.timestamp && f.timestamp.histogram) lazyChart(container, () => timeHistOption(f.timestamp.histogram));
+  else container.innerHTML = '<div class="chart-fallback">no data</div>';
+}
+function buildCard(f) {
+  const badges = ['<span class="badge">' + esc(f.sourceType) + "</span>"];
+  if (f.isKey) badges.push('<span class="badge key">key</span>');
+  (f.notable || []).forEach(n => badges.push('<span class="badge warn">' + esc(n) + "</span>"));
+  const card = el('<div class="card" id="card-' + esc(f.path) + '"><h3>' + esc(f.path) + " " + badges.join(" ")
+    + '</h3><div class="strip">' + statStrip(f) + '</div><div class="chart"></div></div>');
+  mainChart(f, card.querySelector(".chart"), false);
+  card.onclick = () => openDetail(f.path);
+  return card;
+}
+function fieldMatches(f) {
+  if (fieldState.q && !f.path.toLowerCase().includes(fieldState.q.toLowerCase())) return false;
+  if (fieldState.types.size && !fieldState.types.has(f.type)) return false;
+  return true;
+}
+function sortedFields() {
+  const fields = P.fields.filter(fieldMatches);
+  if (fieldState.sort === "null") fields.sort((a, b) => b.nullRate - a.nullRate);
+  else if (fieldState.sort === "notable") fields.sort((a, b) => (b.notable || []).length - (a.notable || []).length);
+  return fields;
+}
+function renderFieldList() {
+  const holder = document.getElementById("fieldList");
+  holder.innerHTML = "";
+  const fields = sortedFields();
+  if (P.fields.length > 200) {
+    const table = el('<table class="data"><thead><tr><th>field</th><th>type</th><th>null</th><th>distinct</th><th>mean</th><th>notable</th></tr></thead><tbody></tbody></table>');
+    const tbody = table.querySelector("tbody");
+    for (const f of fields) {
+      const tr = el('<tr class="clickable"><td>' + esc(f.path) + "</td><td>" + esc(f.type) + "</td><td>"
+        + fmtPct(f.nullRate) + "</td><td>" + (f.distinct ? fmtInt(f.distinct.estimate) : "-") + "</td><td>"
+        + (f.numeric ? fmtNum(f.numeric.mean) : "-") + "</td><td>" + (f.notable || []).map(esc).join(", ") + "</td></tr>");
+      tr.onclick = () => openDetail(f.path);
+      tbody.append(tr);
+    }
+    holder.append(table);
+  } else {
+    const grid = el('<div class="cards"></div>');
+    fields.forEach(f => grid.append(buildCard(f)));
+    holder.append(grid);
+  }
+}
+(function renderFields() {
+  const s = document.getElementById("tab-fields");
+  const toolbar = el('<div class="toolbar"><input type="search" placeholder="search fields…">'
+    + '<select><option value="schema">schema order</option><option value="null">null rate</option>'
+    + '<option value="notable">notable first</option></select><div class="chipbar"></div></div>');
+  const chipbar = toolbar.querySelector(".chipbar");
+  const types = [...new Set(P.fields.map(f => f.type))];
+  for (const t of types) {
+    const chip = el("<button>" + esc(t) + "</button>");
+    chip.onclick = () => {
+      if (fieldState.types.has(t)) fieldState.types.delete(t); else fieldState.types.add(t);
+      chip.classList.toggle("on"); renderFieldList();
+    };
+    chipbar.append(chip);
+  }
+  toolbar.querySelector("input").oninput = e => { fieldState.q = e.target.value; setHash({q: fieldState.q}); renderFieldList(); };
+  toolbar.querySelector("select").onchange = e => { fieldState.sort = e.target.value; renderFieldList(); };
+  s.append(toolbar);
+  s.append(el('<div id="fieldList"></div>'));
+  renderFieldList();
+})();
+
+// ---- field detail ----
+const overlay = document.getElementById("overlay");
+overlay.onclick = e => { if (e.target === overlay) closeDetail(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
+function closeDetail() { overlay.classList.remove("open"); document.getElementById("detail").innerHTML = ""; }
+function sampleValuesFor(path) {
+  if (!P.sample) return null;
+  const i = P.sample.fields.indexOf(path);
+  if (i < 0) return null;
+  const values = [];
+  for (const row of P.sample.rows) {
+    if (row[i] != null && values.length < 8 && !values.includes(row[i])) values.push(row[i]);
+  }
+  return values;
+}
+function openDetail(path) {
+  const f = P.fields.find(x => x.path === path);
+  if (!f) return;
+  const d = document.getElementById("detail");
+  d.innerHTML = "";
+  d.append(el('<button class="close" title="close">×</button>'));
+  d.querySelector(".close").onclick = closeDetail;
+  d.append(el("<h2>" + esc(f.path) + ' <span class="badge">' + esc(f.sourceType) + "</span></h2>"));
+  d.append(el('<div class="strip">' + statStrip(f) + "</div>"));
+
+  const chart = el('<div class="chart tall"></div>');
+  const state = {view: "pdf", log: false};
+  if (f.numeric && f.numeric.histogram) {
+    const controls = el('<div class="controls"><button data-v="pdf" class="on">histogram</button>'
+      + '<button data-v="cdf">CDF</button><button data-l="1">log scale</button></div>');
+    const redraw = () => {
+      if (chart._chart) { chart._chart.dispose(); chart._chart = null; }
+      const build = state.view === "cdf" ? () => cdfOption(f.numeric.cdf) : () => histOption(f.numeric.histogram, state.log);
+      if (HAS_ECHARTS) { const c = echarts.init(chart); c.setOption(Object.assign({animation: false}, build())); chart._chart = c; }
+    };
+    controls.querySelectorAll("button[data-v]").forEach(b => b.onclick = () => {
+      state.view = b.dataset.v;
+      controls.querySelectorAll("button[data-v]").forEach(x => x.classList.toggle("on", x === b));
+      redraw();
+    });
+    controls.querySelector("button[data-l]").onclick = e => {
+      state.log = !state.log; e.target.classList.toggle("on"); redraw();
+    };
+    d.append(controls);
+    d.append(chart);
+    lazyChart(chart, () => histOption(f.numeric.histogram, false));
+  } else {
+    d.append(chart);
+    mainChart(f, chart, true);
+  }
+
+  if (f.numeric && f.numeric.quantiles) {
+    const q = f.numeric.quantiles;
+    const rankError = f.numeric.rankError != null ? " (rank error ±" + fmtPct(f.numeric.rankError) + ")" : "";
+    d.append(el('<h2 class="sec">Quantiles' + rankError + "</h2>"));
+    d.append(el('<table class="data"><thead><tr>' + Object.keys(q).map(k => "<th>" + k + "</th>").join("")
+      + "</tr></thead><tbody><tr>" + Object.values(q).map(v => "<td>" + fmtNum(v) + "</td>").join("") + "</tr></tbody></table>"));
+    d.append(el('<p class="samples">min ' + fmtNum(f.numeric.min) + " / max " + fmtNum(f.numeric.max)
+      + " / stddev " + fmtNum(f.numeric.stddev) + " / skewness " + fmtNum(f.numeric.skewness)
+      + " / zero " + fmtInt(f.numeric.zeroCount) + " / NaN " + fmtInt(f.numeric.nanCount) + "</p>"));
+  }
+  if (f.string) {
+    if (f.string.length) {
+      d.append(el('<p class="samples">length: min ' + fmtNum(f.string.length.min) + " / p50 " + fmtNum(f.string.length.p50)
+        + " / p95 " + fmtNum(f.string.length.p95) + " / max " + fmtNum(f.string.length.max)
+        + " — empty " + fmtInt(f.emptyCount != null ? f.emptyCount : (f.string.emptyCount || 0)) + "</p>"));
+    }
+    if (f.string.topK && f.string.topK.length && !HIDE) {
+      d.append(el('<h2 class="sec">Top values (estimated counts ±' + fmtInt(f.string.maximumError) + ")</h2>"));
+      const table = el('<table class="data"><thead><tr><th>#</th><th>value</th><th>count</th><th>bounds</th></tr></thead><tbody></tbody></table>');
+      const tbody = table.querySelector("tbody");
+      f.string.topK.forEach((r, i) => tbody.append(el("<tr><td>" + (i + 1) + "</td><td>" + esc(r.value == null ? "#" + (i + 1) : r.value)
+        + "</td><td>" + fmtInt(r.count) + "</td><td>[" + fmtInt(r.lower) + ", " + fmtInt(r.upper) + "]</td></tr>")));
+      d.append(table);
+    }
+  }
+  if (f.timestamp && f.timestamp.min) {
+    d.append(el('<p class="samples">range: ' + esc(f.timestamp.min) + " — " + esc(f.timestamp.max) + "</p>"));
+  }
+  const samples = HIDE ? null : sampleValuesFor(path);
+  if (samples && samples.length) {
+    d.append(el('<h2 class="sec">Sample values</h2><p class="samples">' + samples.map(v => esc(JSON.stringify(v))).join(" · ") + "</p>"));
+  }
+  overlay.classList.add("open");
+}
+
+// ---- relations ----
+(function renderFieldPairs() {
+  if (!P.fieldPairs || !P.fieldPairs.length) return;
+  const s = document.getElementById("tab-relations");
+  s.append(el('<h2 class="sec">Declared comparisons (compare)</h2>'));
+  for (const pair of P.fieldPairs) {
+    const card = el('<div class="card" style="cursor:default"><h3>' + esc(pair.a) + " × " + esc(pair.b) + "</h3></div>");
+    if (pair.error) {
+      card.append(el('<p class="samples">' + esc(pair.error) + "</p>"));
+      s.append(card);
+      continue;
+    }
+    card.append(el('<div class="strip"><span>PSI ' + pair.psi.toFixed(4) + "</span><span>KS " + pair.ks.toFixed(4)
+      + "</span><span>n " + fmtInt(pair.countA) + " / " + fmtInt(pair.countB) + "</span></div>"));
+    const hist = el('<div class="chart"></div>');
+    card.append(hist);
+    lazyChart(hist, () => {
+      const labels = pair.sharesA.map((_, i) => fmtNum(pair.edges[i]) + " – " + fmtNum(pair.edges[i + 1]));
+      return {
+        grid: {left: 40, right: 8, top: 24, bottom: 20},
+        legend: {top: 0, textStyle: {fontSize: 10}},
+        tooltip: {trigger: "axis", confine: true,
+          formatter: ps => labels[ps[0].dataIndex] + ps.map(p0 => "<br>" + esc(p0.seriesName) + ": " + p0.value + "%").join("")},
+        xAxis: Object.assign({type: "category", data: labels.map((_, i) => i)}, AXIS, {axisLabel: {show: false}}),
+        yAxis: Object.assign({type: "value", axisLabel: {fontSize: 10, formatter: "{value}%"}}, AXIS),
+        series: [
+          {name: pair.a, type: "line", step: "middle", showSymbol: false, lineStyle: {color: PALETTE[0]}, itemStyle: {color: PALETTE[0]},
+            data: pair.sharesA.map(v => +(100 * v).toFixed(3))},
+          {name: pair.b, type: "line", step: "middle", showSymbol: false, lineStyle: {color: PALETTE[3]}, itemStyle: {color: PALETTE[3]},
+            data: pair.sharesB.map(v => +(100 * v).toFixed(3))}
+        ]
+      };
+    });
+    const qq = el('<div class="chart"></div>');
+    card.append(qq);
+    lazyChart(qq, () => {
+      const lo = Math.min(pair.qq[0][0], pair.qq[0][1]);
+      const last = pair.qq[pair.qq.length - 1];
+      const hi = Math.max(last[0], last[1]);
+      return {
+        grid: {left: 55, right: 12, top: 8, bottom: 30},
+        tooltip: {confine: true, formatter: p0 => pair.a + ": " + fmtNum(p0.data[0]) + "<br>" + pair.b + ": " + fmtNum(p0.data[1])},
+        xAxis: Object.assign({type: "value", name: pair.a, nameTextStyle: {fontSize: 9}, min: lo, max: hi}, AXIS),
+        yAxis: Object.assign({type: "value", name: pair.b, nameTextStyle: {fontSize: 9}, min: lo, max: hi}, AXIS),
+        series: [
+          {type: "line", showSymbol: false, silent: true, lineStyle: {color: "#9ca3af", type: "dashed", width: 1},
+            data: [[lo, lo], [hi, hi]]},
+          {type: "scatter", symbolSize: 5, itemStyle: {color: PALETTE[0]}, data: pair.qq}
+        ]
+      };
+    });
+    card.append(el('<p class="samples">Q-Q plot: quantiles of ' + esc(pair.a) + " (x) vs " + esc(pair.b)
+      + " (y); points on the dashed line mean identical distributions.</p>"));
+    s.append(card);
+  }
+})();
+
+(function renderRelations() {
+  const s = document.getElementById("tab-relations");
+  const c = P.correlations;
+  if (!c || c.fields.length < 2) {
+    s.append(el('<p class="samples">not enough numeric fields for correlation analysis.</p>'));
+    return;
+  }
+  s.append(el('<h2 class="sec">Numeric correlation (Pearson)</h2>'));
+  const pairPanel = el('<div class="pair-panel" id="pairPanel"><p class="samples">click a cell to inspect the pair.</p></div>');
+  if (c.fields.length > 100) {
+    const pairs = [];
+    for (let i = 0; i < c.fields.length; i++) for (let j = i + 1; j < c.fields.length; j++) {
+      const v = c.matrix[i][j];
+      if (v != null) pairs.push([Math.abs(v), i, j, v]);
+    }
+    pairs.sort((a, b) => b[0] - a[0]);
+    const table = el('<table class="data"><thead><tr><th>field A</th><th>field B</th><th>corr</th><th>n</th></tr></thead><tbody></tbody></table>');
+    const tbody = table.querySelector("tbody");
+    for (const [, i, j, v] of pairs.slice(0, 100)) {
+      const tr = el('<tr class="clickable"><td>' + esc(c.fields[i]) + "</td><td>" + esc(c.fields[j]) + "</td><td>"
+        + v.toFixed(3) + "</td><td>" + fmtInt(c.counts[i][j]) + "</td></tr>");
+      tr.onclick = () => showPair(i, j);
+      tbody.append(tr);
+    }
+    s.append(table);
+  } else {
+    const heat = el('<div class="chart tall" style="height:' + Math.max(320, 24 * c.fields.length + 80) + 'px"></div>');
+    s.append(heat);
+    lazyChart(heat, () => {
+      const data = [];
+      for (let i = 0; i < c.fields.length; i++) for (let j = 0; j < c.fields.length; j++) {
+        if (c.matrix[i][j] != null) data.push([j, i, +c.matrix[i][j].toFixed(3)]);
+      }
+      return {
+        grid: {left: 130, right: 60, top: 10, bottom: 70},
+        tooltip: {confine: true, formatter: p0 => esc(c.fields[p0.data[1]]) + " × " + esc(c.fields[p0.data[0]])
+          + "<br>corr: " + p0.data[2] + " / n: " + fmtInt(c.counts[p0.data[1]][p0.data[0]])},
+        xAxis: Object.assign({type: "category", data: c.fields}, AXIS, {axisLabel: {fontSize: 10, rotate: 45}}),
+        yAxis: Object.assign({type: "category", data: c.fields}, AXIS),
+        visualMap: {min: -1, max: 1, calculable: true, orient: "vertical", right: 0, top: "center",
+          inRange: {color: ["#d7191c", "#f7f7f7", "#2c7bb6"]}, itemHeight: 120, textStyle: {fontSize: 10}},
+        series: [{type: "heatmap", data: data}]
+      };
+    });
+    if (HAS_ECHARTS) {
+      const attach = setInterval(() => {
+        if (heat._chart) {
+          clearInterval(attach);
+          heat._chart.on("click", p0 => showPair(p0.data[1], p0.data[0]));
+        }
+      }, 300);
+    }
+  }
+  s.append(pairPanel);
+
+  function showPair(i, j) {
+    const panel = document.getElementById("pairPanel");
+    panel.innerHTML = "";
+    const a = c.fields[i], b = c.fields[j];
+    const v = c.matrix[i][j];
+    panel.append(el("<h2 class='sec'>" + esc(a) + " × " + esc(b) + "</h2>"));
+    panel.append(el('<p class="samples">corr ' + (v == null ? "-" : v.toFixed(4)) + " / n " + fmtInt(c.counts[i][j]) + "</p>"));
+    if (P.sample && !HIDE) {
+      const ia = P.sample.fields.indexOf(a), ib = P.sample.fields.indexOf(b);
+      if (ia >= 0 && ib >= 0) {
+        const points = P.sample.rows.filter(r => r[ia] != null && r[ib] != null).map(r => [r[ia], r[ib]]);
+        if (points.length) {
+          const sc = el('<div class="chart tall"></div>');
+          panel.append(sc);
+          lazyChart(sc, () => ({
+            grid: {left: 55, right: 16, top: 10, bottom: 35},
+            tooltip: {confine: true},
+            xAxis: Object.assign({type: "value", name: a, nameTextStyle: {fontSize: 10}}, AXIS),
+            yAxis: Object.assign({type: "value", name: b, nameTextStyle: {fontSize: 10}}, AXIS),
+            series: [{type: "scatter", symbolSize: 4, data: points, itemStyle: {color: "#5b8ff9", opacity: 0.5}}]
+          }));
+        }
+      }
+    }
+  }
+})();
+
+// ---- segments / time tabs ----
+(function renderAxisTabs() {
+  AXES.forEach((axis, ai) => {
+    const s = document.getElementById("tab-" + axis.kind);
+    if (!s) return;
+    if (!s.childElementCount) {
+      s.append(el('<p class="samples">Select chips in the compare bar above to overlay per-group distributions on every field card.</p>'));
+    }
+    s.append(el('<h2 class="sec">' + esc(axis.field)
+      + (axis.granularity ? " (" + esc(axis.granularity) + " buckets)" : "")
+      + (axis.truncatedGroups > 0 ? ' <span class="badge warn">top ' + axis.groups.length + " of "
+        + (axis.groups.length + axis.truncatedGroups) + " groups</span>" : "") + "</h2>"));
+
+    const chartHeight = axis.kind === "time" ? 200 : Math.max(120, 24 * Math.min(axis.groups.length, 20) + 40);
+    const chart = el('<div class="chart" style="height:' + chartHeight + 'px"></div>');
+    s.append(chart);
+    lazyChart(chart, () => {
+      const names = axis.groups.map(g => String(g.value));
+      const data = axis.groups.map((g, gi) => ({value: g.rows, itemStyle: {color: groupColor(gi)}}));
+      if (axis.kind === "time") {
+        return {
+          grid: {left: 50, right: 8, top: 8, bottom: 40},
+          tooltip: {trigger: "axis", confine: true},
+          xAxis: Object.assign({type: "category", data: names}, AXIS, {axisLabel: {fontSize: 9, rotate: 45}}),
+          yAxis: Object.assign({type: "value"}, AXIS),
+          series: [{type: "bar", data: data, barCategoryGap: "20%"}]
+        };
+      }
+      return {
+        grid: {left: 120, right: 30, top: 4, bottom: 20},
+        tooltip: {confine: true},
+        xAxis: Object.assign({type: "value"}, AXIS),
+        yAxis: Object.assign({type: "category",
+          data: names.slice().reverse().map(n => n.length > 16 ? n.slice(0, 15) + "…" : n)}, AXIS),
+        series: [{type: "bar", data: data.slice().reverse()}]
+      };
+    });
+
+    const table = el('<table class="data"><thead><tr><th></th><th>group</th><th>rows</th><th>share</th><th>nulls (axis field)</th></tr></thead><tbody></tbody></table>');
+    const tbody = table.querySelector("tbody");
+    axis.groups.forEach((g, gi) => {
+      const axisField = g.fields[axis.field] || {};
+      const tr = el('<tr class="clickable"><td><span class="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'
+        + groupColor(gi) + '"></span></td><td>' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>"
+        + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td><td>" + fmtInt(axisField.nulls) + "</td></tr>");
+      tr.onclick = () => toggleGroup(ai, g.value);
+      tbody.append(tr);
+    });
+    s.append(table);
+  });
+})();
+
+// ---- keys ----
+(function renderKeys() {
+  if (!P.keys) return;
+  const s = document.getElementById("tab-keys");
+  s.append(el('<h2 class="sec">Declared keys</h2>'));
+  const table = el('<table class="data"><thead><tr><th>field</th><th>distinct (Theta)</th><th>95% bounds</th><th>keyness (distinct / rows)</th></tr></thead><tbody></tbody></table>');
+  const tbody = table.querySelector("tbody");
+  for (const k of P.keys.fields) {
+    tbody.append(el("<tr><td>" + esc(k.path) + "</td><td>" + fmtInt(k.distinct) + "</td><td>["
+      + fmtInt(k.distinctLower) + ", " + fmtInt(k.distinctUpper) + "]</td><td>" + fmtPct(k.keyness) + "</td></tr>"));
+  }
+  s.append(table);
+  if (P.keys.venn) renderVenn(s, P.keys.venn);
+  if (P.keys.fields.length > 1) {
+    s.append(el('<h2 class="sec">Containment (row = A, col = B: |A∩B| / |A|)</h2>'));
+    const m = el('<table class="data"><thead><tr><th></th>' + P.keys.fields.map(k => "<th>" + esc(k.path) + "</th>").join("")
+      + "</tr></thead><tbody></tbody></table>");
+    const tbody2 = m.querySelector("tbody");
+    P.keys.fields.forEach((k, i) => {
+      tbody2.append(el("<tr><th>" + esc(k.path) + "</th>" + P.keys.containment[i].map(v =>
+        "<td>" + (v == null ? "-" : fmtPct(v)) + "</td>").join("") + "</tr>"));
+    });
+    s.append(m);
+  }
+})();
+
+// ---- compare tab (inputs comparison + past report) ----
+(function renderCompare() {
+  const s = document.getElementById("tab-compare");
+  const inputsAxisIndex = AXES.findIndex(a => a.kind === "inputs");
+
+  if (inputsAxisIndex >= 0) {
+    const axis = AXES[inputsAxisIndex];
+    s.append(el('<h2 class="sec">Inputs comparison' + (axis.baseline ? " (baseline: " + esc(axis.baseline) + ")" : "") + "</h2>"));
+    const inputsTable = el('<table class="data"><thead><tr><th></th><th>input</th><th>rows</th><th>share</th></tr></thead><tbody></tbody></table>');
+    const tbody = inputsTable.querySelector("tbody");
+    axis.groups.forEach((g, gi) => {
+      const tr = el('<tr class="clickable"><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'
+        + groupColor(gi) + '"></span></td><td>' + esc(String(g.value)) + (g.value === axis.baseline ? ' <span class="badge">base</span>' : "")
+        + "</td><td>" + fmtInt(g.rows) + "</td><td>" + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td></tr>");
+      tr.onclick = () => toggleGroup(inputsAxisIndex, g.value);
+      tbody.append(tr);
+    });
+    s.append(inputsTable);
+
+    // per-field drift vs baseline, worst first
+    const drifts = [];
+    for (const g of axis.groups) {
+      if (g.value === axis.baseline) continue;
+      for (const [path, gf] of Object.entries(g.fields)) {
+        if (gf.psi != null) drifts.push({path, vs: g.value, psi: gf.psi, ks: gf.ks});
+      }
+    }
+    drifts.sort((a, b) => b.psi - a.psi);
+    if (drifts.length) {
+      s.append(el('<h2 class="sec">Field drift vs baseline (PSI)</h2>'));
+      const table = el('<table class="data"><thead><tr><th>field</th><th>vs</th><th>PSI</th><th>KS</th></tr></thead><tbody></tbody></table>');
+      const tbody2 = table.querySelector("tbody");
+      for (const d of drifts) {
+        const tr = el('<tr class="clickable"><td>' + esc(d.path) + "</td><td>" + esc(d.vs) + "</td><td>"
+          + (d.psi > 0.2 ? '<span class="badge warn">' + d.psi.toFixed(4) + "</span>" : d.psi.toFixed(4))
+          + "</td><td>" + (d.ks != null ? d.ks.toFixed(4) : "-") + "</td></tr>");
+        tr.onclick = () => openDetail(d.path);
+        tbody2.append(tr);
+      }
+      s.append(table);
+      s.append(el('<p class="samples">PSI &lt; 0.1: stable · 0.1–0.2: moderate shift · &gt; 0.2: significant shift. Select input chips in the compare bar to see the distributions overlaid.</p>'));
+    }
+  }
+
+  const cw = P.compareWith;
+  if (cw) {
+    s.append(el('<h2 class="sec">vs past report</h2>'));
+    s.append(el('<p class="samples">' + esc(cw.source) + (cw.generatedAtOld ? " · generated " + esc(cw.generatedAtOld) : "")
+      + " · rows " + fmtInt(cw.rowsOld) + " → " + fmtInt(cw.rowsNew) + "</p>"));
+    (cw.warnings || []).forEach(w => s.append(el('<div class="banner">' + esc(w) + "</div>")));
+
+    const rows = (cw.fields || []).slice().sort((a, b) => (b.psi || 0) - (a.psi || 0));
+    const table = el('<table class="data"><thead><tr><th>field</th><th>status</th><th>PSI</th><th>KS</th><th>p50</th><th>null rate</th><th>distinct</th></tr></thead><tbody></tbody></table>');
+    const tbody = table.querySelector("tbody");
+    const panel = el('<div class="pair-panel" id="cwPanel"></div>');
+    for (const f of rows) {
+      const statusBadge = f.status === "common" ? "" :
+        ' <span class="badge warn">' + esc(f.status) + (f.typeOld ? " (was " + esc(f.typeOld) + ")" : "") + "</span>";
+      const tr = el("<tr" + (f.cdf ? ' class="clickable"' : "") + "><td>" + esc(f.path) + statusBadge + "</td><td>" + esc(f.type || "") + "</td><td>"
+        + (f.psi != null ? (f.psi > 0.2 ? '<span class="badge warn">' + f.psi.toFixed(4) + "</span>" : f.psi.toFixed(4)) : "-")
+        + "</td><td>" + (f.ks != null ? f.ks.toFixed(4) : "-")
+        + "</td><td>" + (f.p50Old != null ? fmtNum(f.p50Old) + " → " + fmtNum(f.p50New) : "-")
+        + "</td><td>" + (f.nullRateOld != null ? fmtPct(f.nullRateOld) + " → " + fmtPct(f.nullRateNew) : "-")
+        + "</td><td>" + (f.distinctOld != null || f.distinctNew != null
+          ? fmtInt(f.distinctOld) + " → " + fmtInt(f.distinctNew) : "-") + "</td></tr>");
+      if (f.cdf) tr.onclick = () => {
+        panel.innerHTML = "";
+        panel.append(el('<h2 class="sec">' + esc(f.path) + " : CDF old vs new</h2>"));
+        const chart = el('<div class="chart tall"></div>');
+        panel.append(chart);
+        lazyChart(chart, () => ({
+          grid: {left: 45, right: 12, top: 24, bottom: 20},
+          legend: {top: 0, textStyle: {fontSize: 10}},
+          tooltip: {trigger: "axis", confine: true},
+          xAxis: Object.assign({type: "value", min: f.cdf.edges[0], max: f.cdf.edges[f.cdf.edges.length - 1]}, AXIS),
+          yAxis: Object.assign({type: "value", min: 0, max: 1}, AXIS),
+          series: [
+            {name: "old", type: "line", showSymbol: false, lineStyle: {color: "#9ca3af"},
+              data: f.cdf.oldRanks.map((r, i) => [f.cdf.edges[i], r])},
+            {name: "new", type: "line", showSymbol: false, lineStyle: {color: PALETTE[0]},
+              data: f.cdf.newRanks.map((r, i) => [f.cdf.edges[i], r])}
+          ]
+        }));
+      };
+      tbody.append(tr);
+      if (f.keyOverlap) {
+        const ko = f.keyOverlap;
+        tbody.append(el('<tr><td colspan="7" class="samples">key overlap (Theta): |old| ' + fmtInt(ko.distinctOld)
+          + " · |new| " + fmtInt(ko.distinctNew)
+          + (ko.intersection != null ? " · |old ∩ new| " + fmtInt(ko.intersection)
+            + " · retained " + fmtPct(ko.retainedShare) + " · new keys " + fmtPct(ko.newShare) : "") + "</td></tr>"));
+      }
+    }
+    s.append(table);
+    s.append(panel);
+  }
+
+  if (inputsAxisIndex < 0 && !cw) {
+    s.append(el('<p class="samples">no comparison configured.</p>'));
+  }
+})();
+
+// ---- proportional venn (2-3 key sets, self-drawn SVG) ----
+function lensArea(r1, r2, d) {
+  if (d >= r1 + r2) return 0;
+  if (d <= Math.abs(r1 - r2)) { const r = Math.min(r1, r2); return Math.PI * r * r; }
+  const a1 = r1 * r1 * Math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1));
+  const a2 = r2 * r2 * Math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2));
+  const a3 = 0.5 * Math.sqrt(Math.max(0, (-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2)));
+  return a1 + a2 - a3;
+}
+function vennDistance(r1, r2, targetArea) {
+  let lo = Math.abs(r1 - r2), hi = r1 + r2;
+  if (targetArea >= lensArea(r1, r2, lo)) return lo;
+  if (targetArea <= 0) return hi;
+  for (let i = 0; i < 48; i++) {
+    const mid = (lo + hi) / 2;
+    if (lensArea(r1, r2, mid) > targetArea) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+function renderVenn(s, venn) {
+  s.append(el('<h2 class="sec">Key overlap (proportional venn, Theta estimates)</h2>'));
+  const n = venn.sizes.length;
+  const radii = venn.sizes.map(v => Math.sqrt(Math.max(v, 1) / Math.PI));
+  const inter = {};
+  for (const p of venn.pairs) inter[p.a + "-" + p.b] = p.size;
+  const centers = [[0, 0]];
+  const d01 = vennDistance(radii[0], radii[1], inter["0-1"] || 0);
+  centers.push([d01, 0]);
+  if (n === 3) {
+    const d02 = vennDistance(radii[0], radii[2], inter["0-2"] || 0);
+    const d12 = vennDistance(radii[1], radii[2], inter["1-2"] || 0);
+    const x = d01 > 0 ? (d02 * d02 - d12 * d12 + d01 * d01) / (2 * d01) : 0;
+    const y = Math.sqrt(Math.max(0, d02 * d02 - x * x));
+    centers.push([x, y]);
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  centers.forEach(([x, y], i) => {
+    minX = Math.min(minX, x - radii[i]); maxX = Math.max(maxX, x + radii[i]);
+    minY = Math.min(minY, y - radii[i]); maxY = Math.max(maxY, y + radii[i]);
+  });
+  const W = 420, H = 280, pad = 12;
+  const scale = Math.min((W - 2 * pad) / (maxX - minX), (H - 2 * pad) / (maxY - minY));
+  const sx = x => pad + (x - minX) * scale + (W - 2 * pad - (maxX - minX) * scale) / 2;
+  const sy = y => pad + (y - minY) * scale + (H - 2 * pad - (maxY - minY) * scale) / 2;
+  let svg = '<svg viewBox="0 0 ' + W + " " + H + '" style="max-width:460px;width:100%">';
+  centers.forEach(([x, y], i) => {
+    svg += '<circle cx="' + sx(x).toFixed(1) + '" cy="' + sy(y).toFixed(1) + '" r="' + (radii[i] * scale).toFixed(1)
+      + '" fill="' + groupColor(i) + '" fill-opacity="0.40" stroke="' + groupColor(i) + '" stroke-width="1.5"/>';
+  });
+  centers.forEach(([x, y], i) => {
+    svg += '<text x="' + sx(x).toFixed(1) + '" y="' + (sy(y) - radii[i] * scale - 4).toFixed(1)
+      + '" text-anchor="middle" font-size="11" fill="currentColor">' + esc(venn.labels[i]) + " (" + fmtInt(venn.sizes[i]) + ")</text>";
+  });
+  svg += "</svg>";
+  s.append(el('<div>' + svg + "</div>"));
+  const captions = venn.pairs.map(p =>
+    esc(venn.labels[p.a]) + " ∩ " + esc(venn.labels[p.b]) + " ≈ " + fmtInt(p.size));
+  if (venn.triple != null) captions.push("all three ≈ " + fmtInt(venn.triple));
+  s.append(el('<p class="samples">' + captions.join(" · ") + "</p>"));
+}
+
+// ---- suggestions ----
+(function renderSuggestions() {
+  const s = document.getElementById("tab-suggestions");
+  s.append(el('<h2 class="sec">Analyses this report could add</h2>'));
+  s.append(el('<p class="samples">These were inferred from the data but not executed — declaring meaning is left to you. Add one line to the sink parameters and re-run.</p>'));
+  if (!P.suggestions || !P.suggestions.length) {
+    s.append(el('<p class="samples">no suggestions for this dataset.</p>'));
+    return;
+  }
+  const grid = el('<div class="cards"></div>');
+  for (const g of P.suggestions) {
+    const card = el('<div class="card suggestion"><div class="kind">' + esc(g.kind) + '</div><p>'
+      + esc(g.reason) + '</p><pre>' + esc(g.yaml) + '</pre><a class="copy" href="javascript:void(0)">copy</a></div>');
+    card.onclick = e => e.stopPropagation();
+    card.querySelector(".copy").onclick = () => navigator.clipboard && navigator.clipboard.writeText(g.yaml);
+    grid.append(card);
+  }
+  s.append(grid);
+})();
+
+// ---- appendix ----
+(function renderAppendix() {
+  const s = document.getElementById("tab-appendix");
+  s.append(el('<h2 class="sec">Sketch parameters (accuracy expansion)</h2>'));
+  const sp = M.sketchParameters;
+  s.append(el('<table class="data"><thead><tr><th>parameter</th><th>value</th><th>guarantee</th></tr></thead><tbody>'
+    + "<tr><td>KLL k</td><td>" + sp.kllK + "</td><td>normalized rank error ≈ " + (sp.kllK >= 800 ? "0.6%" : sp.kllK >= 200 ? "1.3%" : "2.6%") + "</td></tr>"
+    + "<tr><td>CPC lgK</td><td>" + sp.cpcLgK + "</td><td>distinct-count RSE ≈ " + (100 * 0.588 / Math.sqrt(2 ** sp.cpcLgK)).toFixed(2) + "%</td></tr>"
+    + "<tr><td>Frequent Items map</td><td>" + sp.fiMaxMapSize + "</td><td>no false negatives above error bound</td></tr>"
+    + "<tr><td>Theta lgK</td><td>" + sp.thetaLgK + "</td><td>set-operation estimates with 95% bounds</td></tr>"
+    + "<tr><td>sample k (VarOpt)</td><td>" + sp.sampleK + "</td><td>weighted uniform row sample</td></tr>"
+    + "</tbody></table>"));
+  if (M.degradations && M.degradations.length) {
+    s.append(el('<h2 class="sec">Degradations</h2><ul>' + M.degradations.map(d => "<li>" + esc(d) + "</li>").join("") + "</ul>"));
+  }
+  if ((P.skippedFields || []).length) {
+    s.append(el('<h2 class="sec">Skipped fields</h2>'));
+    s.append(el('<table class="data"><thead><tr><th>field</th><th>type</th><th>reason</th></tr></thead><tbody>'
+      + P.skippedFields.map(f => "<tr><td>" + esc(f.path) + "</td><td>" + esc(f.sourceType) + "</td><td>" + esc(f.reason) + "</td></tr>").join("")
+      + "</tbody></table>"));
+  }
+  s.append(el('<h2 class="sec">Manifest</h2>'));
+  s.append(el("<pre>" + esc(JSON.stringify(M, null, 2)) + "</pre>"));
+  const sketchesText = document.getElementById("profile-sketches").textContent;
+  const hasSketches = sketchesText && sketchesText.trim() !== "{}";
+  s.append(el('<p class="samples">embedded sketch binaries: ' + (hasSketches
+    ? "yes (" + Math.round(sketchesText.length / 1024) + " KB base64; mergeable with future reports and BigQuery bqutil.datasketches UDFs)"
+    : "not embedded") + "</p>"));
+})();
+
+// ---- initial state from URL hash ----
+(function init() {
+  const h = currentHash();
+  if (h.q) {
+    fieldState.q = h.q;
+    const input = document.querySelector('#tab-fields input[type=search]');
+    if (input) { input.value = h.q; renderFieldList(); }
+  }
+  if (h.cmp && AXES.length) {
+    const sep = h.cmp.indexOf(":");
+    const ai = +h.cmp.slice(0, sep);
+    if (ai >= 0 && ai < AXES.length) {
+      cmpState.axis = ai;
+      h.cmp.slice(sep + 1).split("|").filter(v => v)
+        .filter(v => AXES[ai].groups.some(g => String(g.value) === v))
+        .forEach(v => cmpState.values.add(v));
+      if (!cmpState.values.size) cmpState.axis = -1; else syncCompare();
+    }
+  }
+  const tab = TABS.some(([n]) => n === h.tab) ? h.tab : "overview";
+  activateTab(tab);
+})();
+</script>
+</body>
+</html>
