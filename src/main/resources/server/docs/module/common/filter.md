@@ -36,10 +36,16 @@ Supported syntax:
 * Numeric arithmetic: `price * qty > total`, `(field1 - field2) / field3 >= 1` (values are evaluated as double, same as the `expression` attribute)
 * Nested fields with dots: `attr.category = 'x'`
 
+Date, timestamp and enum comparison:
+
+* **Timestamp** fields compare against string literals in ISO format (`ts >= '2024-01-01T00:00:00Z'`), space-separated format with optional offset (`ts >= '2024-01-15 19:00:00+09:00'`), plain dates meaning midnight UTC (`ts > '2024-01-01'`), or SQL literals (`ts >= TIMESTAMP '2024-01-15 10:30:00'`, interpreted as UTC)
+* **Date** fields compare against `'yyyy-MM-dd'` / `'yyyy/MM/dd'` strings or `DATE '2024-01-15'` literals, and work with `BETWEEN`: `d BETWEEN '2024-01-01' AND '2024-03-31'`
+* **Time** fields compare against `'HH:mm'` / `'HH:mm:ss'` strings
+* **Enum** fields are resolved to their symbol and compared as strings: `status = 'ACTIVE'`, `status IN ('ACTIVE', 'DONE')`
+
 Notes:
 
 * String literals use single quotes (`'a'`). Field names that collide with SQL reserved words must be back-quoted: `` `timestamp` >= '2024-01-01T00:00:00Z' ``
-* Date/timestamp fields can be compared against string literals: `ts > '2024-01-01T00:00:00Z'`
 * Functions on strings, subqueries and other full SQL features are not supported here — use the `query` transform for those.
 
 ## JSON conditions

@@ -274,6 +274,48 @@ public class FilterSqlTest {
     }
 
     @Test
+    public void testDateTimestampEnumComparison() {
+        final com.mercari.solution.module.Schema schema = com.mercari.solution.module.Schema.builder()
+                .withField("status", com.mercari.solution.module.Schema.FieldType.enumeration(List.of("PENDING", "ACTIVE", "DONE")))
+                .withField("d", com.mercari.solution.module.Schema.FieldType.DATE)
+                .withField("ts", com.mercari.solution.module.Schema.FieldType.TIMESTAMP)
+                .build();
+        final com.mercari.solution.module.MElement element = com.mercari.solution.module.MElement.builder()
+                .withInt32("status", 1)  // index of ACTIVE
+                .withDate("d", java.time.LocalDate.of(2024, 1, 15))
+                .withTimestamp("ts", Instant.parse("2024-01-15T10:30:00Z"))
+                .build();
+
+        // enum fields are resolved to their symbol and compared as strings
+        Assertions.assertTrue(evalElement("status = 'ACTIVE'", schema, element));
+        Assertions.assertTrue(evalElement("status IN ('ACTIVE', 'DONE')", schema, element));
+        Assertions.assertFalse(evalElement("status = 'PENDING'", schema, element));
+
+        // date fields against string literals (yyyy-MM-dd, yyyy/MM/dd) or DATE literals
+        Assertions.assertTrue(evalElement("d = '2024-01-15'", schema, element));
+        Assertions.assertTrue(evalElement("d = '2024/01/15'", schema, element));
+        Assertions.assertTrue(evalElement("d BETWEEN '2024-01-01' AND '2024-03-31'", schema, element));
+        Assertions.assertTrue(evalElement("d = DATE '2024-01-15'", schema, element));
+        Assertions.assertFalse(evalElement("d < '2024-01-01'", schema, element));
+
+        // timestamp fields against ISO strings (with or without zone/offset),
+        // plain dates (midnight UTC), or TIMESTAMP literals
+        Assertions.assertTrue(evalElement("ts >= '2024-01-01T00:00:00Z'", schema, element));
+        Assertions.assertTrue(evalElement("ts >= '2024-01-01 00:00:00'", schema, element));
+        Assertions.assertTrue(evalElement("ts >= '2024-01-15 19:00:00+09:00'", schema, element));
+        Assertions.assertTrue(evalElement("ts > '2024-01-01'", schema, element));
+        Assertions.assertTrue(evalElement("ts >= TIMESTAMP '2024-01-15 10:30:00'", schema, element));
+        Assertions.assertTrue(evalElement("ts < TIMESTAMP '2024-01-15 10:30:01'", schema, element));
+    }
+
+    private static boolean evalElement(
+            final String filter,
+            final com.mercari.solution.module.Schema schema,
+            final com.mercari.solution.module.MElement element) {
+        return Filter.filter(Filter.parse(filter), schema, element);
+    }
+
+    @Test
     public void testConstantTrueCondition() {
         // constant TRUE means "no condition": always matched
         Assertions.assertTrue(eval("true", Map.of("a", 1L)));
