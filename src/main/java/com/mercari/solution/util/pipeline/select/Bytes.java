@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.select;
 
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.HBaseBytes;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.joda.time.Instant;
 
@@ -107,14 +108,14 @@ public class Bytes implements SelectFunction {
 
     private static Object decode(final Schema.Type type, byte[] bytes) {
         return switch (type) {
-            case bool -> org.apache.hadoop.hbase.util.Bytes.toBoolean(bytes);
-            case string, json -> org.apache.hadoop.hbase.util.Bytes.toString(bytes);
-            case int16 -> org.apache.hadoop.hbase.util.Bytes.toShort(bytes);
-            case int32, date -> org.apache.hadoop.hbase.util.Bytes.toInt(bytes);
-            case int64, time, timestamp -> org.apache.hadoop.hbase.util.Bytes.toLong(bytes);
-            case float32 -> org.apache.hadoop.hbase.util.Bytes.toFloat(bytes);
-            case float64 -> org.apache.hadoop.hbase.util.Bytes.toDouble(bytes);
-            case decimal -> org.apache.hadoop.hbase.util.Bytes.toBigDecimal(bytes);
+            case bool -> HBaseBytes.toBoolean(bytes);
+            case string, json -> HBaseBytes.toString(bytes);
+            case int16 -> HBaseBytes.toShort(bytes);
+            case int32, date -> HBaseBytes.toInt(bytes);
+            case int64, time, timestamp -> HBaseBytes.toLong(bytes);
+            case float32 -> HBaseBytes.toFloat(bytes);
+            case float64 -> HBaseBytes.toDouble(bytes);
+            case decimal -> HBaseBytes.toBigDecimal(bytes);
             case bytes -> ByteBuffer.wrap(bytes);
             default -> throw new IllegalArgumentException("");
         };
@@ -125,14 +126,14 @@ public class Bytes implements SelectFunction {
             return null;
         }
         final byte[] bytes = switch (object) {
-            case Boolean b -> org.apache.hadoop.hbase.util.Bytes.toBytes(b);
-            case String s -> org.apache.hadoop.hbase.util.Bytes.toBytes(s);
-            case Short s -> org.apache.hadoop.hbase.util.Bytes.toBytes(s);
-            case Integer i -> org.apache.hadoop.hbase.util.Bytes.toBytes(i);
-            case Long l -> org.apache.hadoop.hbase.util.Bytes.toBytes(l);
-            case Float f -> org.apache.hadoop.hbase.util.Bytes.toBytes(f);
-            case Double d -> org.apache.hadoop.hbase.util.Bytes.toBytes(d);
-            case BigDecimal b -> org.apache.hadoop.hbase.util.Bytes.toBytes(b);
+            case Boolean b -> HBaseBytes.toBytes(b);
+            case String s -> HBaseBytes.toBytes(s);
+            case Short s -> HBaseBytes.toBytes(s);
+            case Integer i -> HBaseBytes.toBytes(i);
+            case Long l -> HBaseBytes.toBytes(l);
+            case Float f -> HBaseBytes.toBytes(f);
+            case Double d -> HBaseBytes.toBytes(d);
+            case BigDecimal b -> HBaseBytes.toBytes(b);
             case ByteBuffer b -> b.array();
             case byte[] b -> b;
             default -> throw new IllegalArgumentException();

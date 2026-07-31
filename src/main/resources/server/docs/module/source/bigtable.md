@@ -44,7 +44,7 @@ Source Module for reading data from [Google Cloud Bigtable](https://cloud.google
 | columns               | optional | Array<[Column](#column-parameters)\>          | Column family/qualifier definitions that map Bigtable cells to output fields (used for `outputType: row`). If omitted, the row schema contains only the additional fields below.  |
 | filter                | optional | JSON                                          | Row filter condition. See [Filter format](#filter-format).                                                                                                                        |
 | keyRange              | optional | JSON                                          | Row key range(s) to read. See [KeyRange format](#keyrange-format). If not specified, all keys are read.                                                                           |
-| format                | optional | Enum                                          | Default deserialization format for cell values. Values: `bytes`, `avro`, `text`, `hadoop`, `avromap`. Default: `bytes`. Can be overridden per column family or qualifier. New spelling: `encoding: {format: ...}` (declaring both with different values is an error). |
+| format                | optional | Enum                                          | Default deserialization format for cell values. Values: `bytes`, `avro`, `text`, `avromap`. Default: `bytes`. Can be overridden per column family or qualifier. New spelling: `encoding: {format: ...}` (declaring both with different values is an error). |
 | encoding              | optional | [CellEncoding](#cellencoding-parameters)      | New spelling of `format`: the shared encoding vocabulary applied at the cell granularity. Cascades the same way (top level → family → qualifier).                                 |
 | cellType              | optional | Enum                                          | Which cell versions of a column to output. Values: `last` (latest cell), `first` (oldest cell), `all` (all cells as an array). Default: `last`. Can be overridden per column family. |
 | outputType            | optional | Enum                                          | Output element shape. Values: `row` (one element per row), `cell` (one element per cell). Default: `row`.                                                                          |
@@ -85,7 +85,7 @@ granularity. Usable at the top level (default), per column family, and per quali
 
 | parameter | optional  | type   | description                                                                                                |
 |-----------|-----------|--------|------------------------------------------------------------------------------------------------------------|
-| format    | selective | Enum   | Cell value format: `bytes`, `avro`, `text`, `hadoop`, `avromap`. Alias of the legacy `format` key.        |
+| format    | selective | Enum   | Cell value format: `bytes`, `avro`, `text`, `avromap`. Alias of the legacy `format` key.        |
 | reference | optional  | Object | For `avro` format cells: the Avro schema document, via `uri` (a `gs://.../*.avsc` path) or `inline` (the schema JSON itself). Replaces declaring nested `fields` on the qualifier. Resolved once at assembly time. |
 
 Example — an Avro-encoded cell whose schema comes from a file:

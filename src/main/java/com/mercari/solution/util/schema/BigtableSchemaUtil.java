@@ -17,9 +17,7 @@ import freemarker.template.Template;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.util.Utf8;
 import org.apache.beam.sdk.values.KV;
-import org.apache.commons.io.IOUtils;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.io.*;
+import com.mercari.solution.util.HBaseBytes;
 import org.joda.time.Instant;
 
 import java.io.*;
@@ -40,7 +38,6 @@ public class BigtableSchemaUtil {
         bytes,
         avro,
         text,
-        hadoop,
         avromap
     }
 
@@ -683,14 +680,14 @@ public class BigtableSchemaUtil {
             if(is == null) {
                 //LOG.info("BadRecord avro file is not found: " + RESOURCE_CDC_AVRO_SCHEMA_PATH);
                 try(final InputStream iss = Files.newInputStream(Path.of(RESOURCE_RUNTIME_CDC_AVRO_SCHEMA_PATH))) {
-                    final String schemaJson = org.apache.commons.io.IOUtils.toString(iss,  StandardCharsets.UTF_8);
+                    final String schemaJson = new String(iss.readAllBytes(), StandardCharsets.UTF_8);
                     final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(schemaJson);
                     return Schema.of(avroSchema);
                 } catch (Throwable e) {
                     throw new IllegalArgumentException("BadRecord avro file is not found", e);
                 }
             }
-            final String schemaJson = IOUtils.toString(is,  StandardCharsets.UTF_8);
+            final String schemaJson = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(schemaJson);
             return Schema.of(avroSchema);
         } catch (final IOException e) {
@@ -910,7 +907,6 @@ public class BigtableSchemaUtil {
         return switch (format) {
             case text -> toByteStringText(primitiveValue);
             case bytes -> toByteStringBytes(primitiveValue, dynamicType);
-            case hadoop -> toByteStringHadoop(primitiveValue);
             case avro -> {
                 try {
                     final byte[] bytes = AvroSchemaUtil.encode(primitiveValue);
@@ -967,18 +963,18 @@ public class BigtableSchemaUtil {
             return ByteString.copyFrom(new byte[0]);
         }
         final byte[] bytes = switch (primitiveValue) {
-            case Boolean b -> Bytes.toBytes(b);
-            case String s -> Bytes.toBytes(s);
+            case Boolean b -> HBaseBytes.toBytes(b);
+            case String s -> HBaseBytes.toBytes(s);
             case byte[] bs -> bs;
             case ByteBuffer bb -> toBytes(bb);
             case ByteString bs -> bs.toByteArray();
             case ByteArray ba -> ba.toByteArray();
-            case BigDecimal bd -> Bytes.toBytes(bd);
-            case Short s -> Bytes.toBytes(s);
-            case Integer i -> Bytes.toBytes(i);
-            case Long l -> Bytes.toBytes(l);
-            case Float f -> Bytes.toBytes(f);
-            case Double d -> Bytes.toBytes(d);
+            case BigDecimal bd -> HBaseBytes.toBytes(bd);
+            case Short s -> HBaseBytes.toBytes(s);
+            case Integer i -> HBaseBytes.toBytes(i);
+            case Long l -> HBaseBytes.toBytes(l);
+            case Float f -> HBaseBytes.toBytes(f);
+            case Double d -> HBaseBytes.toBytes(d);
             default -> throw new IllegalArgumentException("Not supported bytes class: " + primitiveValue.getClass());
         };
         return ByteString.copyFrom(bytes);
@@ -1006,27 +1002,21 @@ public class BigtableSchemaUtil {
         }
         primitiveValue = convertDynamicFieldValue(dynamicType, primitiveValue);
         final byte[] bytes = switch (primitiveValue) {
-            case Boolean b -> Bytes.toBytes(b);
-            case String s -> Bytes.toBytes(s);
-            case Utf8 u -> Bytes.toBytes(u.toString());
+            case Boolean b -> HBaseBytes.toBytes(b);
+            case String s -> HBaseBytes.toBytes(s);
+            case Utf8 u -> HBaseBytes.toBytes(u.toString());
             case byte[] bs -> bs;
             case ByteBuffer bb -> toBytes(bb);
             case ByteString bs -> bs.toByteArray();
             case ByteArray ba -> ba.toByteArray();
-            case BigDecimal bd -> Bytes.toBytes(bd);
-            case Short s -> Bytes.toBytes(s);
-            case Integer i -> Bytes.toBytes(i);
-            case Long l -> Bytes.toBytes(l);
-            case Float f -> Bytes.toBytes(f);
-            case Double d -> Bytes.toBytes(d);
+            case BigDecimal bd -> HBaseBytes.toBytes(bd);
+            case Short s -> HBaseBytes.toBytes(s);
+            case Integer i -> HBaseBytes.toBytes(i);
+            case Long l -> HBaseBytes.toBytes(l);
+            case Float f -> HBaseBytes.toBytes(f);
+            case Double d -> HBaseBytes.toBytes(d);
             default -> throw new IllegalArgumentException("Not supported bytes class: " + primitiveValue.getClass());
         };
-        return ByteString.copyFrom(bytes);
-    }
-
-    public static ByteString toByteStringHadoop(final Object primitiveValue) {
-        final Writable writable = toWritable(primitiveValue);
-        final byte[] bytes = WritableUtils.toByteArray(writable);
         return ByteString.copyFrom(bytes);
     }
 
@@ -1113,7 +1103,6 @@ public class BigtableSchemaUtil {
                     throw new RuntimeException(e);
                 }
             }
-            case hadoop -> toPrimitiveValueFromWritable(fieldtype, byteString);
         };
     }
 
@@ -1123,68 +1112,15 @@ public class BigtableSchemaUtil {
         }
         final byte[] bytes = byteString.toByteArray();
         return switch (fieldtype.getType()) {
-            case bool -> Bytes.toBoolean(bytes);
-            case string, json -> Bytes.toString(bytes);
+            case bool -> HBaseBytes.toBoolean(bytes);
+            case string, json -> HBaseBytes.toString(bytes);
             case bytes -> ByteBuffer.wrap(bytes);
-            case int16 -> Bytes.toShort(bytes);
-            case int32, date, enumeration -> Bytes.toInt(bytes);
-            case int64, time, timestamp -> Bytes.toLong(bytes);
-            case float32 -> Bytes.toFloat(bytes);
-            case float64 -> Bytes.toDouble(bytes);
+            case int16 -> HBaseBytes.toShort(bytes);
+            case int32, date, enumeration -> HBaseBytes.toInt(bytes);
+            case int64, time, timestamp -> HBaseBytes.toLong(bytes);
+            case float32 -> HBaseBytes.toFloat(bytes);
+            case float64 -> HBaseBytes.toDouble(bytes);
             default -> throw new IllegalArgumentException("Not supported deserialize type: " + fieldtype.getType());
-        };
-    }
-
-    public static Object toPrimitiveValueFromWritable(Schema.FieldType fieldtype, final ByteString byteString) {
-        if(byteString == null) {
-            return null;
-        }
-        return toPrimitiveValueFromWritable(fieldtype, byteString.toByteArray());
-    }
-
-    public static Object toPrimitiveValueFromWritable(Schema.FieldType fieldType, final byte[] bytes) {
-        if(fieldType == null || bytes == null) {
-            return null;
-        }
-        final Writable writable = getWritable(fieldType);
-
-        try(final ByteArrayInputStream is = new ByteArrayInputStream(bytes);
-            final DataInputStream ds = new DataInputStream(is)) {
-            writable.readFields(ds);
-            return toPrimitiveValue(writable);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private static Object toPrimitiveValue(Writable writable) {
-        return switch (writable) {
-            case BooleanWritable b -> b.get();
-            case Text t -> t.toString();
-            case BytesWritable b -> b.copyBytes();
-            case ShortWritable s -> s.get();
-            case VIntWritable i -> i.get();
-            case VLongWritable l -> l.get();
-            case FloatWritable f -> f.get();
-            case DoubleWritable d -> d.get();
-            case ArrayWritable arrayWritable -> {
-                final List<Object> list = new ArrayList<>();
-                for(Writable w : arrayWritable.get()) {
-                    final Object o = toPrimitiveValue(w);
-                    list.add(o);
-                }
-                yield list;
-            }
-            case MapWritable m -> {
-                final Map<String, Object> map = new HashMap<>();
-                for(final Map.Entry<Writable,Writable> entry : m.entrySet()) {
-                    final Object key = toPrimitiveValue(entry.getKey());
-                    final Object value = toPrimitiveValue(entry.getValue());
-                    map.put(key.toString(), value);
-                }
-                yield map;
-            }
-            default -> throw new IllegalArgumentException();
         };
     }
 
@@ -1200,182 +1136,6 @@ public class BigtableSchemaUtil {
             case byte[] b -> Value.newBuilder().setBytesValue(ByteString.copyFrom(b)).build();
             default -> throw new IllegalArgumentException();
         };
-    }
-
-    private static Writable getWritable(final Schema.FieldType fieldType) {
-        return switch (fieldType.getType()) {
-            case bool -> new BooleanWritable();
-            case int16 -> new ShortWritable();
-            case int32, date -> new VIntWritable();
-            case int64, time, timestamp -> new VLongWritable();
-            case float32 -> new FloatWritable();
-            case float64 -> new DoubleWritable();
-            case string, json -> new Text();
-            case bytes -> new BytesWritable();
-            case map, element -> new MapWritable();
-            case array -> {
-                final Class<? extends Writable> writableClass = getWritableClass(fieldType.getArrayValueType());
-                yield new ArrayWritable(writableClass);
-            }
-            default -> throw new IllegalArgumentException();
-        };
-    }
-
-    private static Class<? extends Writable> getWritableClass(final Schema.FieldType fieldType) {
-        if(fieldType == null) {
-            return NullWritable.class;
-        }
-        return switch (fieldType.getType()) {
-            case bool -> BooleanWritable.class;
-            case string, json -> Text.class;
-            case bytes -> BytesWritable.class;
-            case int16 -> ShortWritable.class;
-            case int32, date, enumeration -> VIntWritable.class;
-            case int64, time, timestamp -> VLongWritable.class;
-            case float32 -> FloatWritable.class;
-            case float64 -> DoubleWritable.class;
-            case array -> switch (fieldType.getArrayValueType().getType()) {
-                case bool -> BoolArrayWritable.class;
-                case string, json -> TextArrayWritable.class;
-                case bytes -> BytesArrayWritable.class;
-                case int16 -> ShortArrayWritable.class;
-                case int32, date, enumeration -> IntArrayWritable.class;
-                case int64, time, timestamp -> LongArrayWritable.class;
-                case float32 -> FloatArrayWritable.class;
-                case float64 -> DoubleArrayWritable.class;
-                default -> throw new IllegalArgumentException();
-            };
-            case map, element -> MapWritable.class;
-            default -> throw new IllegalArgumentException();
-        };
-    }
-
-    private static Writable toWritable(final Object value) {
-        if(value == null) {
-            return NullWritable.get();
-        }
-        return switch (value) {
-            case Boolean b -> new BooleanWritable(b);
-            case String s -> new Text(s);
-            case byte[] bs -> new BytesWritable(bs);
-            case ByteBuffer bb -> new BytesWritable(toBytes(bb));
-            case ByteString bs -> new BytesWritable(bs.toByteArray());
-            case ByteArray ba -> new BytesWritable(ba.toByteArray());
-            case BigDecimal bd -> new BytesWritable(bd.toBigInteger().toByteArray());
-            case Short s -> new ShortWritable(s);
-            case Integer i -> new VIntWritable(i);
-            case Long l -> new VLongWritable(l);
-            case Float f -> new FloatWritable(f);
-            case Double d -> new DoubleWritable(d);
-            case Collection<?> c -> {
-                if(c.isEmpty()) {
-                    yield new TextArrayWritable(new Writable[0]);
-                }
-                Object v = null;
-                final Writable[] array = new Writable[c.size()];
-                int i=0;
-                for(final Object o : c) {
-                    array[i] = toWritable(o);
-                    i++;
-                    v = o;
-                }
-                yield switch (v) {
-                    case Boolean b -> new BoolArrayWritable(array);
-                    case String s -> new TextArrayWritable(array);
-                    case byte[] b -> new BytesArrayWritable(array);
-                    case ByteBuffer bb -> new BytesArrayWritable(array);
-                    case Short s -> new ShortArrayWritable(array);
-                    case Integer ii -> new IntArrayWritable(array);
-                    case Long l -> new LongArrayWritable(array);
-                    case Float f -> new FloatArrayWritable(array);
-                    case Double d -> new DoubleArrayWritable(array);
-                    default -> throw new IllegalArgumentException();
-                };
-            }
-            case Map<?, ?> m -> {
-                final MapWritable mapWritable = new MapWritable();
-                for(final Map.Entry<?, ?> entry : m.entrySet()) {
-                    final Writable k = toWritable(entry.getKey());
-                    final Writable v = toWritable(entry.getValue());
-                    mapWritable.put(k, v);
-                }
-                yield mapWritable;
-            }
-            default -> throw new IllegalArgumentException();
-        };
-    }
-
-    public static class BoolArrayWritable extends ArrayWritable {
-        public BoolArrayWritable() {
-            super(BooleanWritable.class);
-        }
-        public BoolArrayWritable(final Writable[] array) {
-            super(BooleanWritable.class, array);
-        }
-    }
-
-    public static class ShortArrayWritable extends ArrayWritable {
-        public ShortArrayWritable() {
-            super(ShortWritable.class);
-        }
-        public ShortArrayWritable(final Writable[] array) {
-            super(ShortWritable.class, array);
-        }
-    }
-
-    public static class IntArrayWritable extends ArrayWritable {
-        public IntArrayWritable() {
-            super(VIntWritable.class);
-        }
-        public IntArrayWritable(final Writable[] array) {
-            super(VIntWritable.class, array);
-        }
-    }
-
-    public static class LongArrayWritable extends ArrayWritable {
-        public LongArrayWritable() {
-            super(VLongWritable.class);
-        }
-        public LongArrayWritable(final Writable[] array) {
-            super(VLongWritable.class, array);
-        }
-    }
-
-    public static class FloatArrayWritable extends ArrayWritable {
-        public FloatArrayWritable() {
-            super(FloatWritable.class);
-        }
-        public FloatArrayWritable(final Writable[] array) {
-            super(FloatWritable.class, array);
-        }
-    }
-
-    public static class DoubleArrayWritable extends ArrayWritable {
-        public DoubleArrayWritable() {
-            super(DoubleWritable.class);
-        }
-        public DoubleArrayWritable(final Writable[] array) {
-            super(DoubleWritable.class, array);
-        }
-    }
-
-    public static class TextArrayWritable extends ArrayWritable {
-        public TextArrayWritable() {
-            super(Text.class);
-        }
-        public TextArrayWritable(final Writable[] array) {
-            super(Text.class, array);
-        }
-    }
-
-    public static class BytesArrayWritable extends ArrayWritable {
-        public BytesArrayWritable() {
-            super(BytesWritable.class);
-        }
-
-        public BytesArrayWritable(final Writable[] array) {
-            super(BytesWritable.class, array);
-        }
     }
 
 }

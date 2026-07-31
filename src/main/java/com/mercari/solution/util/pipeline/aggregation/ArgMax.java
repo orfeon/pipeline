@@ -9,7 +9,7 @@ import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.pipeline.select.stateful.StatefulFunction;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
-import net.objecthunter.exp4j.Expression;
+import com.mercari.solution.util.ExpressionUtil.Expression;
 import org.joda.time.Instant;
 
 

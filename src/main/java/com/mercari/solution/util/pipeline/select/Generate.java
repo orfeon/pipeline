@@ -6,7 +6,7 @@ import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.ExpressionUtil;
 import freemarker.template.Template;
-import net.objecthunter.exp4j.Expression;
+import com.mercari.solution.util.ExpressionUtil.Expression;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -151,8 +151,8 @@ public class Generate implements SelectFunction {
                     final Double value = ExpressionUtil.getAsDouble(object, Double.NaN);
                     values.put(variable, value);
                 }
-                final long fromN = Double.valueOf(this.fromExpression.setVariables(values).evaluate()).longValue();
-                final long toN   = Double.valueOf(this.toExpression.setVariables(values).evaluate()).longValue();
+                final long fromN = Double.valueOf(this.fromExpression.evaluate(values)).longValue();
+                final long toN   = Double.valueOf(this.toExpression.evaluate(values)).longValue();
                 long currentN = fromN;
                 while(currentN < toN) {
                     final Object output = switch (outputFieldType.getType()) {

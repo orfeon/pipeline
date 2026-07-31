@@ -398,57 +398,6 @@ public class BigtableSchemaUtilTest {
                 () -> BigtableSchemaUtil.convertDynamicFieldValue(Schema.Type.bytes, "x"));
     }
 
-    private static Object hadoopRoundTrip(final Object value, final Schema.FieldType fieldType) {
-        final ByteString byteString = BigtableSchemaUtil.toByteStringHadoop(value);
-        return BigtableSchemaUtil.toPrimitiveValueFromWritable(fieldType, byteString);
-    }
-
-    @Test
-    public void testHadoopFormatScalarRoundTrip() {
-        Assertions.assertEquals(Boolean.TRUE, hadoopRoundTrip(true, Schema.FieldType.BOOLEAN));
-        Assertions.assertEquals("hello", hadoopRoundTrip("hello", Schema.FieldType.STRING));
-        Assertions.assertEquals(Short.valueOf((short) 3), hadoopRoundTrip((short) 3, Schema.FieldType.type(Schema.Type.int16)));
-        Assertions.assertEquals(Integer.valueOf(7), hadoopRoundTrip(7, Schema.FieldType.INT32));
-        Assertions.assertEquals(Long.valueOf(7L), hadoopRoundTrip(7L, Schema.FieldType.INT64));
-        Assertions.assertEquals(Float.valueOf(1.5F), hadoopRoundTrip(1.5F, Schema.FieldType.FLOAT32));
-        Assertions.assertEquals(Double.valueOf(2.5D), hadoopRoundTrip(2.5D, Schema.FieldType.FLOAT64));
-        Assertions.assertArrayEquals(new byte[]{1,2,3}, (byte[]) hadoopRoundTrip(new byte[]{1,2,3}, Schema.FieldType.BYTES));
-        Assertions.assertArrayEquals(new byte[]{4,5}, (byte[]) hadoopRoundTrip(ByteString.copyFrom(new byte[]{4,5}), Schema.FieldType.BYTES));
-        Assertions.assertArrayEquals(new byte[]{4,5}, (byte[]) hadoopRoundTrip(ByteBuffer.wrap(new byte[]{4,5}), Schema.FieldType.BYTES));
-        Assertions.assertArrayEquals(new byte[]{4,5}, (byte[]) hadoopRoundTrip(ByteArray.copyFrom(new byte[]{4,5}), Schema.FieldType.BYTES));
-
-        Assertions.assertNull(BigtableSchemaUtil.toPrimitiveValueFromWritable(Schema.FieldType.STRING, (ByteString) null));
-        Assertions.assertNull(BigtableSchemaUtil.toPrimitiveValueFromWritable(null, new byte[]{1}));
-        Assertions.assertNull(BigtableSchemaUtil.toPrimitiveValueFromWritable(Schema.FieldType.STRING, (byte[]) null));
-    }
-
-    @Test
-    public void testHadoopFormatArrayRoundTrip() {
-        Assertions.assertEquals(List.of("a", "b"), hadoopRoundTrip(List.of("a", "b"), Schema.FieldType.array(Schema.FieldType.STRING)));
-        Assertions.assertEquals(List.of(1, 2), hadoopRoundTrip(List.of(1, 2), Schema.FieldType.array(Schema.FieldType.INT32)));
-        Assertions.assertEquals(List.of(1L, 2L), hadoopRoundTrip(List.of(1L, 2L), Schema.FieldType.array(Schema.FieldType.INT64)));
-        Assertions.assertEquals(List.of(1.5F), hadoopRoundTrip(List.of(1.5F), Schema.FieldType.array(Schema.FieldType.FLOAT32)));
-        Assertions.assertEquals(List.of(2.5D), hadoopRoundTrip(List.of(2.5D), Schema.FieldType.array(Schema.FieldType.FLOAT64)));
-        Assertions.assertEquals(List.of(true, false), hadoopRoundTrip(List.of(true, false), Schema.FieldType.array(Schema.FieldType.BOOLEAN)));
-        Assertions.assertEquals(List.of((short) 1, (short) 2), hadoopRoundTrip(List.of((short) 1, (short) 2), Schema.FieldType.array(Schema.FieldType.type(Schema.Type.int16))));
-        Assertions.assertEquals(List.of(), hadoopRoundTrip(List.of(), Schema.FieldType.array(Schema.FieldType.STRING)));
-    }
-
-    @Test
-    public void testHadoopFormatMapRoundTrip() {
-        final Map<String, Object> input = Map.of(
-                "a", 1,
-                "b", "x",
-                "c", List.of("p", "q"),
-                "d", Map.of("e", 5L));
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> output = (Map<String, Object>) hadoopRoundTrip(input, Schema.FieldType.map(Schema.FieldType.STRING));
-        Assertions.assertEquals(Integer.valueOf(1), output.get("a"));
-        Assertions.assertEquals("x", output.get("b"));
-        Assertions.assertEquals(List.of("p", "q"), output.get("c"));
-        Assertions.assertEquals(Map.of("e", 5L), output.get("d"));
-    }
-
     @Test
     public void testToMutationsSetCell() {
         final String config = """
