@@ -196,6 +196,43 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | leafCount         | Long                                          | Number of leaves covered by the slice                              |
 | noFinding         | Boolean                                       | `true` only on explicit no-finding rows                            |
 
+## Choosing an algorithm
+
+| | `riskloc` (default) | `adtributor` | `exhaustive` |
+|---|---|---|---|
+| Root causes it finds | Cross-dimension slices, multiple independent causes | Elements within a single dimension | Everything (exact EP ranking) |
+| Cost | Medium | Light | Heavy (combinatorial) |
+| Output shape | Minimal culprit slice set | Per-dimension value ranking | Full slice ranking |
+| Typical use | Incident investigation, KPI deep-dive | Recurring reports, screening dashboards | Calibration, small-data exact answers |
+
+- **`riskloc`** — start here and keep it unless you have a reason not to. It is the only
+  implemented algorithm that finds cross-dimension culprits (`region=a AND category=x`) and
+  separates multiple independent causes iteratively. The one practical tuning knob is
+  `riskThreshold`: lower it to `0.3`–`0.4` for recall-oriented investigation (including
+  single-leaf causes, which sit on the 0.5 boundary — see
+  [Known limitations](#known-limitations)), raise it to `0.6`–`0.7` to suppress noise in
+  recurring monitoring.
+- **`adtributor`** — for routine per-dimension reporting where the "one culprit dimension"
+  assumption holds ("which country?", "which client version?"). Lighter, stable, and its
+  ranking output is easy to explain to non-analysts, but it structurally misses
+  cross-dimension (mix/interaction) culprits. A practical two-stage pattern: run `adtributor`
+  on schedule, and when a change it cannot explain appears, re-run the same config with
+  `riskloc` for the deep dive.
+- **`exhaustive`** — not for production jobs. On small data (up to roughly thousands of leaves
+  with `maxLayer` ≤ 2) it produces the exact EP ranking, which makes it the tool for
+  calibrating `riskThreshold` when onboarding a new data domain, and for verifying that a
+  `riskloc` result is not a search artifact.
+- **`squeeze`** (reserved) — will target forecast-based baselines with very high cardinality;
+  until then use `riskloc` with `guards.maxCardinality`.
+
+For derived measures, keep `derivedAllocation: gre` (default) for ordinary ratio KPIs.
+`partialDerivative` is a cheap linearization that is adequate while changes are small relative
+to the totals — a large disagreement with `gre` is itself a signal that the change is too big
+for linear attribution. Choose `shapley` (≤ 10 variables) when the allocation itself is the
+deliverable and must be order-independent and axiomatically fair, e.g. financial variance
+reporting. For the explanatory-power basis, the `auto` default rarely needs overriding — see
+[epBasis](#epbasis).
+
 ## Example: KPI change analysis (week over week)
 
 "GMV dropped 6% versus last week — which category × region × client is responsible?"
