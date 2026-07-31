@@ -63,7 +63,7 @@ public class AttributionTransform extends Transform {
             private String name;
             private MeasureType type;
             private String expression;
-            private List<Double> quantiles; // reserved for type: distribution
+            private List<Double> quantiles; // type: distribution only. default: [0.5]
         }
 
         private static class ComparisonParameter implements Serializable {
@@ -176,13 +176,13 @@ public class AttributionTransform extends Transform {
 
         // Rejections of enum values reserved for future versions. These subsume the spec's
         // cross-parameter constraints 1 (mixRate requires a derived measure), 2 (unit: metric
-        // requires mode: series), 5 (expressiveness above slice requires fdrControl) and
-        // 6 (distribution measures cannot use shapley): re-instate those checks verbatim when
-        // the corresponding values are unlocked.
+        // requires mode: series) and 5 (expressiveness above slice requires fdrControl):
+        // re-instate those checks verbatim when the corresponding values are unlocked.
+        // Constraint 6 (distribution measures cannot use shapley) lives in validateMeasures.
         private void validateReserved(final String prefix, final List<String> errorMessages) {
             if(measures != null) {
                 for(final MeasureParameter measure : measures) {
-                    if(MeasureType.distribution.equals(measure.type) || MeasureType.sketch.equals(measure.type)) {
+                    if(MeasureType.sketch.equals(measure.type)) {
                         errorMessages.add(prefix + "measures.type: " + measure.type + " is reserved and not implemented yet");
                     }
                 }
@@ -280,6 +280,36 @@ public class AttributionTransform extends Transform {
                         errorMessages.add(prefix + "measures[" + measure.name + "] has " + variables.size()
                                 + " variables, but derivedAllocation: shapley supports at most "
                                 + DerivedAllocation.MAX_SHAPLEY_VARIABLES);
+                    }
+                } else if(MeasureType.distribution.equals(type)) {
+                    if(measure.expression != null) {
+                        errorMessages.add(prefix + "measures[" + measure.name + "].expression must not be set for type: distribution");
+                    }
+                    validateNumericField(prefix, errorMessages, inputSchemas, measure.name, "measures[" + measure.name + "]");
+                    if(measure.quantiles != null) {
+                        for(final Double quantile : measure.quantiles) {
+                            if(quantile == null || !(quantile > 0 && quantile < 1)) {
+                                errorMessages.add(prefix + "measures[" + measure.name
+                                        + "].quantiles must be in (0, 1) exclusive: " + measure.quantiles);
+                                break;
+                            }
+                        }
+                    }
+                    // Spec constraint 6
+                    if(semantics != null && DerivedAllocation.Method.shapley.equals(semantics.derivedAllocation)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: distribution cannot be used with derivedAllocation: shapley");
+                    }
+                    // Quantiles are not additive: a net-change share is undefined for them
+                    if(semantics != null && EngineConfig.EpBasis.netDelta.equals(semantics.epBasis)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: distribution always uses epBasis: absoluteDelta; remove epBasis: netDelta");
+                    }
+                    if(comparison != null && comparison.reference != null
+                            && ReferenceStrategy.synthetic.equals(comparison.reference.strategy)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: distribution cannot be used with the synthetic reference"
+                                + " (no independence model is defined for distributions)");
                     }
                 }
             }
@@ -483,6 +513,10 @@ public class AttributionTransform extends Transform {
                 if(measure.type == null) {
                     measure.type = MeasureType.fundamental;
                 }
+                if(MeasureType.distribution.equals(measure.type)
+                        && (measure.quantiles == null || measure.quantiles.isEmpty())) {
+                    measure.quantiles = List.of(0.5);
+                }
             }
             if(comparison == null) {
                 comparison = new ComparisonParameter();
@@ -626,6 +660,7 @@ public class AttributionTransform extends Transform {
         private List<DimensionSpec> dimensions;
         private List<MeasureSpec> measures;
         private List<String> columnNames;
+        private List<String> distributionNames;
         private EngineConfig engineConfig;
         private String algorithm;
 
@@ -652,6 +687,7 @@ public class AttributionTransform extends Transform {
                     .toList();
 
             final Set<String> columnNames = new LinkedHashSet<>();
+            final Set<String> distributionNames = new LinkedHashSet<>();
             final List<MeasureSpec> measures = new ArrayList<>();
             for(final Parameters.MeasureParameter measure : parameters.measures) {
                 if(MeasureType.derived.equals(measure.type)) {
@@ -659,6 +695,9 @@ public class AttributionTransform extends Transform {
                             new TreeSet<>(ExpressionUtil.estimateVariables(measure.expression)));
                     measures.add(MeasureSpec.derived(measure.name, measure.expression, variables));
                     columnNames.addAll(variables);
+                } else if(MeasureType.distribution.equals(measure.type)) {
+                    measures.add(MeasureSpec.distribution(measure.name, measure.quantiles));
+                    distributionNames.add(measure.name);
                 } else {
                     measures.add(MeasureSpec.fundamental(measure.name));
                     columnNames.add(measure.name);
@@ -666,6 +705,7 @@ public class AttributionTransform extends Transform {
             }
             task.measures = measures;
             task.columnNames = new ArrayList<>(columnNames);
+            task.distributionNames = new ArrayList<>(distributionNames);
 
             task.algorithm = parameters.engine.algorithm.name();
             task.engineConfig = new EngineConfig(
@@ -759,7 +799,8 @@ public class AttributionTransform extends Transform {
                 }
 
                 final List<String> dimensionNames = DimensionSpec.names(task.dimensions);
-                final LeafTable.Builder builder = LeafTable.builder(dimensionNames, task.columnNames);
+                final LeafTable.Builder builder = LeafTable
+                        .builder(dimensionNames, task.columnNames, task.distributionNames);
                 long dropped = 0;
                 for(final MElement element : elements) {
                     Logging.log(LOG, logs, "input", element);
@@ -777,10 +818,23 @@ public class AttributionTransform extends Transform {
                         final Double value = element.getAsDouble(task.columnNames.get(i));
                         values[i] = value == null ? 0.0 : value;
                     }
-                    if(Role.TARGET.equals(role)) {
+                    final boolean target = Role.TARGET.equals(role);
+                    if(target) {
                         builder.addTarget(dims, values);
                     } else {
                         builder.addBaseline(dims, values);
+                    }
+                    // Distribution measures consume one sample per row (event-level input)
+                    for(int d = 0; d < task.distributionNames.size(); d++) {
+                        final Double sample = element.getAsDouble(task.distributionNames.get(d));
+                        if(sample == null || !Double.isFinite(sample)) {
+                            continue;
+                        }
+                        if(target) {
+                            builder.addTargetSample(dims, d, sample);
+                        } else {
+                            builder.addBaselineSample(dims, d, sample);
+                        }
                     }
                 }
                 if(dropped > 0) {
@@ -891,6 +945,9 @@ public class AttributionTransform extends Transform {
                     .withFloat64("totalTarget", measureResult.targetTotal())
                     .withInt64("leafCount", (long) finding.leafCount())
                     .withBool("noFinding", false);
+            if(measureResult.quantile() != null) {
+                builder.withFloat64("quantile", measureResult.quantile());
+            }
             if(finding.riskScore() != null) {
                 builder.withFloat64("riskScore", finding.riskScore());
             }
@@ -907,7 +964,11 @@ public class AttributionTransform extends Transform {
                 final MeasureResult measureResult,
                 final org.joda.time.Instant timestamp) {
 
-            return MElement.builder()
+            final MElement.Builder builder = MElement.builder();
+            if(measureResult.quantile() != null) {
+                builder.withFloat64("quantile", measureResult.quantile());
+            }
+            return builder
                     .withString("measure", measureResult.measure())
                     .withString("algorithm", task.algorithm)
                     .withString("epBasis", measureResult.epBasis().name())
@@ -950,6 +1011,7 @@ public class AttributionTransform extends Transform {
     private static Schema createOutputSchema() {
         return Schema.builder()
                 .withField("measure", Schema.FieldType.STRING)
+                .withField("quantile", Schema.FieldType.FLOAT64.withNullable(true))
                 .withField("algorithm", Schema.FieldType.STRING)
                 .withField("epBasis", Schema.FieldType.STRING)
                 .withField("rank", Schema.FieldType.INT64)

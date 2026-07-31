@@ -207,6 +207,71 @@ public class AttributionEngineTest {
     }
 
     @Test
+    public void testDistributionMeasureLocalizesQuantileShift() {
+        // Event-level latency: every leaf gets samples 10..100; region=a target leaves have their
+        // top value replaced by 500 (tail shift only — the median is untouched). b/c carry ±1
+        // noise so the deviation distribution is not degenerate.
+        final LeafTable.Builder builder = LeafTable
+                .builder(List.of("region", "cat"), List.of(), List.of("latency"));
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String cat : List.of("x", "y")) {
+                final String[] dims = new String[]{region, cat};
+                builder.addBaseline(dims, new double[0]);
+                builder.addTarget(dims, new double[0]);
+                for(int i = 1; i <= 10; i++) {
+                    builder.addBaselineSample(dims, 0, i * 10);
+                    final double sample = switch (region) {
+                        case "a" -> i == 10 ? 500 : i * 10;
+                        case "b" -> i == 10 ? 101 : i * 10;
+                        default -> i == 10 ? 99 : i * 10;
+                    };
+                    builder.addTargetSample(dims, 0, sample);
+                }
+            }
+        }
+        final MeasureSpec latency = MeasureSpec.distribution("latency", List.of(0.5, 0.99));
+        final AttributionResult result = AttributionEngine.run(
+                builder.build(), flatDimensions(List.of("region", "cat")), List.of(latency),
+                config(EngineConfig.Algorithm.riskloc), false);
+
+        // One MeasureResult per quantile
+        Assertions.assertEquals(2, result.results().size());
+
+        final MeasureResult median = result.results().getFirst();
+        Assertions.assertEquals("latency", median.measure());
+        Assertions.assertEquals(0.5, median.quantile());
+        Assertions.assertEquals(EngineConfig.EpBasis.absoluteDelta, median.epBasis());
+        Assertions.assertEquals(50.0, median.baselineTotal(), 1e-9);
+        Assertions.assertTrue(median.findings().isEmpty(), "median did not shift");
+
+        final MeasureResult p99 = result.results().get(1);
+        Assertions.assertEquals(0.99, p99.quantile());
+        Assertions.assertEquals(EngineConfig.EpBasis.absoluteDelta, p99.epBasis());
+        Assertions.assertEquals(100.0, p99.baselineTotal(), 1e-9);
+        Assertions.assertEquals(500.0, p99.targetTotal(), 1e-9);
+        Assertions.assertFalse(p99.findings().isEmpty());
+        final Finding finding = p99.findings().getFirst();
+        Assertions.assertEquals(new Slice(new int[]{0}, new String[]{"a"}), finding.slices().getFirst());
+        // Finding values are quantiles of the merged slice sketches, not sums
+        Assertions.assertEquals(100.0, finding.baselineSum(), 1e-9);
+        Assertions.assertEquals(500.0, finding.targetSum(), 1e-9);
+    }
+
+    @Test
+    public void testDistributionMeasureRejectsSyntheticMarginal() {
+        final LeafTable.Builder builder = LeafTable
+                .builder(List.of("d"), List.of(), List.of("latency"));
+        builder.addTargetSample(new String[]{"a"}, 0, 10);
+        builder.addTargetSample(new String[]{"b"}, 0, 20);
+        final LeafTable table = builder.build();
+
+        Assertions.assertThrows(IllegalArgumentException.class, () -> AttributionEngine.run(
+                table, flatDimensions(List.of("d")),
+                List.of(MeasureSpec.distribution("latency", List.of(0.5))),
+                config(EngineConfig.Algorithm.riskloc), true));
+    }
+
+    @Test
     public void testNoChangeYieldsEmptyFindings() {
         final LeafTable.Builder builder = LeafTable.builder(List.of("d"), List.of("m"));
         builder.addBaseline(new String[]{"a"}, new double[]{100});

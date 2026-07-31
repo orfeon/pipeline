@@ -1,5 +1,7 @@
 package com.mercari.solution.util.domain.attribution;
 
+import org.apache.datasketches.kll.KllDoublesSketch;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -35,6 +37,10 @@ public final class AttributionEngine {
 
         LeafTable binned = Preprocess.bin(raw, dimensions);
         if(syntheticMarginal) {
+            if(binned.distributionCount() > 0) {
+                throw new IllegalArgumentException(
+                        "synthetic marginal baseline does not support distribution measures");
+            }
             binned = SyntheticReference.marginal(binned);
         }
         final LeafTable table = Preprocess.applyGuards(binned, config.guards());
@@ -43,6 +49,10 @@ public final class AttributionEngine {
 
         final List<MeasureResult> results = new ArrayList<>();
         for(final MeasureSpec measure : measures) {
+            if(MeasureSpec.Type.distribution.equals(measure.type())) {
+                results.addAll(runDistribution(table, measure, algorithm, config));
+                continue;
+            }
             final boolean derived = MeasureSpec.Type.derived.equals(measure.type());
             MeasureVector vector = derived
                     ? DerivedAllocation.allocate(config.derivedAllocation(), table, measure)
@@ -79,6 +89,95 @@ public final class AttributionEngine {
             results.add(new MeasureResult(measure.name(), baselineTotal, targetTotal, resolvedBasis, findings));
         }
         return new AttributionResult(results);
+    }
+
+    /**
+     * Localizes one distribution measure at each of its quantiles independently.
+     * Per-leaf f/v are the leaf sketches' quantile values; the supplied explanatory power is the
+     * mass-weighted absolute quantile shift share {@code (n_f + n_v)·|v - f|} normalized to sum 1
+     * (an absoluteDelta-basis semantic — quantiles are not additive, so a netDelta share is not
+     * defined). Finding and total values are quantiles of the merged sketches, never sums.
+     */
+    private static List<MeasureResult> runDistribution(
+            final LeafTable table,
+            final MeasureSpec measure,
+            final AttributionAlgorithm algorithm,
+            final EngineConfig config) {
+
+        final int distribution = table.distributionIndex(measure.name());
+        final List<MeasureResult> results = new ArrayList<>();
+        for(final Double quantile : measure.quantiles()) {
+            final MeasureVector vector = distributionVector(table, distribution, quantile);
+            final List<Finding> findings = algorithm.localize(table, vector, config).stream()
+                    .map(finding -> new Finding(
+                            finding.slices(),
+                            finding.riskScore(),
+                            finding.explanatoryPower(),
+                            finding.surprise(),
+                            mergedQuantile(table, distribution, finding.slices(), quantile, true),
+                            mergedQuantile(table, distribution, finding.slices(), quantile, false),
+                            finding.leafCount()))
+                    .toList();
+            results.add(new MeasureResult(
+                    measure.name(),
+                    quantile,
+                    mergedQuantile(table, distribution, null, quantile, true),
+                    mergedQuantile(table, distribution, null, quantile, false),
+                    EngineConfig.EpBasis.absoluteDelta,
+                    findings));
+        }
+        return results;
+    }
+
+    private static MeasureVector distributionVector(
+            final LeafTable table, final int distribution, final double quantile) {
+
+        final int leafCount = table.leafCount();
+        final double[] f = new double[leafCount];
+        final double[] v = new double[leafCount];
+        final double[] ep = new double[leafCount];
+        double weightSum = 0;
+        for(int leaf = 0; leaf < leafCount; leaf++) {
+            final KllDoublesSketch fs = table.baselineSketch(distribution, leaf);
+            final KllDoublesSketch vs = table.targetSketch(distribution, leaf);
+            f[leaf] = quantileOf(fs, quantile);
+            v[leaf] = quantileOf(vs, quantile);
+            final double mass = (fs == null ? 0 : fs.getN()) + (vs == null ? 0 : vs.getN());
+            ep[leaf] = mass * Math.abs(v[leaf] - f[leaf]);
+            weightSum += ep[leaf];
+        }
+        if(weightSum > 0) {
+            for(int leaf = 0; leaf < leafCount; leaf++) {
+                ep[leaf] /= weightSum;
+            }
+        }
+        return new MeasureVector(f, v, ep);
+    }
+
+    private static double quantileOf(final KllDoublesSketch sketch, final double quantile) {
+        return sketch == null || sketch.isEmpty() ? 0.0 : sketch.getQuantile(quantile);
+    }
+
+    /** Quantile of the union of the given slices' leaf sketches ({@code null} slices = all leaves). */
+    private static double mergedQuantile(
+            final LeafTable table,
+            final int distribution,
+            final List<Slice> slices,
+            final double quantile,
+            final boolean baseline) {
+
+        final KllDoublesSketch merged = KllDoublesSketch.newHeapInstance(LeafTable.SKETCH_K);
+        for(int leaf = 0; leaf < table.leafCount(); leaf++) {
+            if(slices == null || covered(slices, table.dims(leaf))) {
+                final KllDoublesSketch sketch = baseline
+                        ? table.baselineSketch(distribution, leaf)
+                        : table.targetSketch(distribution, leaf);
+                if(sketch != null && !sketch.isEmpty()) {
+                    merged.merge(sketch);
+                }
+            }
+        }
+        return merged.isEmpty() ? 0.0 : merged.getQuantile(quantile);
     }
 
     /**

@@ -100,6 +100,33 @@ public class PreprocessTest {
         Assertions.assertSame(original, table);
     }
 
+    @Test
+    public void testGuardsMergeDistributionSketchesIntoOther() {
+        // Distribution-only table: c and d fall out of maxCardinality=2 (ranked by sample mass)
+        // and their sketches must be merged into the "other" leaf
+        final LeafTable.Builder builder = LeafTable.builder(List.of("id"), List.of(), List.of("lat"));
+        for(int i = 1; i <= 50; i++) {
+            builder.addTargetSample(new String[]{"a"}, 0, i);
+        }
+        for(int i = 1; i <= 40; i++) {
+            builder.addTargetSample(new String[]{"b"}, 0, i);
+        }
+        builder.addTargetSample(new String[]{"c"}, 0, 1);
+        builder.addTargetSample(new String[]{"c"}, 0, 2);
+        builder.addTargetSample(new String[]{"d"}, 0, 3);
+        builder.addTargetSample(new String[]{"d"}, 0, 4);
+
+        final LeafTable table = Preprocess.applyGuards(
+                builder.build(), new EngineConfig.Guards(0, 3, 2));
+
+        Assertions.assertEquals(Set.of("a", "b", Preprocess.OTHER_VALUE), table.dimensionValues(0));
+        final int otherLeaf = findLeaf(table, Preprocess.OTHER_VALUE);
+        Assertions.assertEquals(4, table.targetSketch(0, otherLeaf).getN());
+        // Median of the merged samples {1,2,3,4}
+        Assertions.assertEquals(2.0, table.targetSketch(0, otherLeaf).getQuantile(0.5), 1e-9);
+        Assertions.assertNull(table.baselineSketch(0, otherLeaf));
+    }
+
     private static int findLeaf(final LeafTable table, final String value) {
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
             if(value.equals(table.dimValue(leaf, 0))) {
