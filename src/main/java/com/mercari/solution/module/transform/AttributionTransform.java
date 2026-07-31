@@ -261,6 +261,7 @@ public class AttributionTransform extends Transform {
                     }
                     final Set<String> variables;
                     try {
+                        ExpressionUtil.createDefaultExpression(measure.expression);
                         variables = ExpressionUtil.estimateVariables(measure.expression);
                     } catch (final Throwable e) {
                         errorMessages.add(prefix + "measures[" + measure.name + "].expression is invalid: " + e.getMessage());

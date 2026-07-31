@@ -1,10 +1,8 @@
 package com.mercari.solution.util.domain.attribution;
 
-import net.objecthunter.exp4j.Expression;
-import net.objecthunter.exp4j.ExpressionBuilder;
+import com.mercari.solution.util.ExpressionUtil;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -42,7 +40,7 @@ public final class DerivedAllocation {
         if(!MeasureSpec.Type.derived.equals(measure.type())) {
             throw new IllegalArgumentException("measure " + measure.name() + " is not derived");
         }
-        final Expression expression = createExpression(measure);
+        final ExpressionUtil.Expression expression = createExpression(measure);
         return switch (method) {
             case gre -> gre(expression, table, measure);
             case partialDerivative -> partialDerivative(expression, table, measure);
@@ -52,11 +50,11 @@ public final class DerivedAllocation {
 
     /** Evaluates the derived expression at the given component values (0 when non-finite). */
     public static double evaluate(final MeasureSpec measure, final Map<String, Double> componentValues) {
-        final Expression expression = createExpression(measure);
+        final ExpressionUtil.Expression expression = createExpression(measure);
         return evalSafe(expression, measure.variables(), componentValues);
     }
 
-    private static MeasureVector gre(final Expression expression, final LeafTable table, final MeasureSpec measure) {
+    private static MeasureVector gre(final ExpressionUtil.Expression expression, final LeafTable table, final MeasureSpec measure) {
         final List<String> variables = measure.variables();
         final int leafCount = table.leafCount();
         final int k = variables.size();
@@ -98,7 +96,7 @@ public final class DerivedAllocation {
         return new MeasureVector(pseudoBaseline, pseudoTarget, ep);
     }
 
-    private static MeasureVector partialDerivative(final Expression expression, final LeafTable table, final MeasureSpec measure) {
+    private static MeasureVector partialDerivative(final ExpressionUtil.Expression expression, final LeafTable table, final MeasureSpec measure) {
         final List<String> variables = measure.variables();
         final int leafCount = table.leafCount();
         final int k = variables.size();
@@ -136,7 +134,7 @@ public final class DerivedAllocation {
         return MeasureVector.of(pseudoBaseline, pseudoTarget);
     }
 
-    private static MeasureVector shapley(final Expression expression, final LeafTable table, final MeasureSpec measure) {
+    private static MeasureVector shapley(final ExpressionUtil.Expression expression, final LeafTable table, final MeasureSpec measure) {
         final List<String> variables = measure.variables();
         final int k = variables.size();
         if(k > MAX_SHAPLEY_VARIABLES) {
@@ -207,40 +205,31 @@ public final class DerivedAllocation {
         return columns;
     }
 
-    private static Expression createExpression(final MeasureSpec measure) {
+    private static ExpressionUtil.Expression createExpression(final MeasureSpec measure) {
         if(measure.expression() == null || measure.variables() == null || measure.variables().isEmpty()) {
             throw new IllegalArgumentException("derived measure " + measure.name()
                     + " requires expression and variables");
         }
-        return new ExpressionBuilder(measure.expression())
-                .variables(new HashSet<>(measure.variables()))
-                .build();
+        return ExpressionUtil.createDefaultExpression(measure.expression());
     }
 
-    private static double eval(final Expression expression, final List<String> variables, final double[] values) {
+    private static double eval(final ExpressionUtil.Expression expression, final List<String> variables, final double[] values) {
+        final Map<String, Double> map = new HashMap<>();
         for(int i = 0; i < variables.size(); i++) {
-            expression.setVariable(variables.get(i), values[i]);
+            map.put(variables.get(i), values[i]);
         }
-        try {
-            final double result = expression.evaluate();
-            return Double.isFinite(result) ? result : 0.0;
-        } catch (final ArithmeticException e) {
-            // exp4j throws on division by zero; treat undefined points as 0 (empty slice semantics)
-            return 0.0;
-        }
+        // Division by zero yields Infinity under the JavaScript-like semantics;
+        // treat undefined points as 0 (empty slice semantics)
+        final double result = expression.evaluate(map);
+        return Double.isFinite(result) ? result : 0.0;
     }
 
-    private static double evalSafe(final Expression expression, final List<String> variables, final Map<String, Double> values) {
+    private static double evalSafe(final ExpressionUtil.Expression expression, final List<String> variables, final Map<String, Double> values) {
         final Map<String, Double> map = new HashMap<>();
         for(final String variable : variables) {
             map.put(variable, values.getOrDefault(variable, 0.0));
         }
-        expression.setVariables(map);
-        try {
-            final double result = expression.evaluate();
-            return Double.isFinite(result) ? result : 0.0;
-        } catch (final ArithmeticException e) {
-            return 0.0;
-        }
+        final double result = expression.evaluate(map);
+        return Double.isFinite(result) ? result : 0.0;
     }
 }

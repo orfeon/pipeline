@@ -6,9 +6,9 @@ import java.util.List;
 /**
  * Measure definition for attribution analysis.
  * A {@code fundamental} measure is a sum-additive column; a {@code derived} measure is an arithmetic
- * expression (exp4j syntax) over fundamental columns, e.g. {@code "orders / sessions"}.
- * The caller extracts {@code variables} from the expression (this library does not depend on the
- * pipeline's expression utilities).
+ * expression (Lucene expressions, JavaScript-like syntax) over fundamental columns,
+ * e.g. {@code "orders / sessions"}. The caller extracts {@code variables} from the expression;
+ * evaluation uses the pipeline's shared {@code ExpressionUtil} function registry.
  */
 public record MeasureSpec(
         String name,

@@ -27,7 +27,8 @@ Supports:
 - **Adtributor algorithm** — the classic single-dimension attribution (Bhagwan et al., NSDI 2014)
   using explanatory power + Jensen–Shannon surprise. Also `exhaustive` as a brute-force baseline.
 - **Derived measures** — ratio/expression measures such as `cvr = orders / sessions` declared as
-  exp4j expressions, allocated to their components by `gre` (generalized ripple effect, default),
+  [Lucene expressions](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html)
+  (JavaScript-like syntax), allocated to their components by `gre` (generalized ripple effect, default),
   `partialDerivative`, or `shapley`.
 - **Four reference (baseline) strategies** — two-input `external`, single-input `external` with a
   label column, `timeShift` (period-over-period), `split` (by a row attribute), and
@@ -64,7 +65,7 @@ Array of measures to explain. Each measure is analyzed independently.
 |------------|----------|--------|-----------------------------------------------------------------------------------------------------------------|
 | name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. |
 | type       | optional | Enum   | `fundamental` (default) or `derived`. (`distribution`, `sketch` are **reserved**.)                               |
-| expression | required for derived | String | Arithmetic expression (exp4j) over numeric input fields, e.g. `"orders / sessions"`. All variables must exist as numeric input fields. |
+| expression | required for derived | String | Arithmetic expression (Lucene expressions, JavaScript-like syntax) over numeric input fields, e.g. `"orders / sessions"`. All variables must exist as numeric input fields. |
 
 Fundamental measures and derived-expression variables must be **sum-additive** (counts, amounts).
 Declare ratios as `derived` with their additive components as variables — do not feed
