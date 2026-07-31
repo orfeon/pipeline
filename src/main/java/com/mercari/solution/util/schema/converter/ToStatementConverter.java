@@ -23,6 +23,7 @@ import java.sql.*;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 
@@ -119,7 +120,11 @@ public class ToStatementConverter {
                         if (isNull) {
                             statement.setNull(index, Types.TIMESTAMP);
                         } else {
-                            statement.setTimestamp(index, Timestamp.from(Instant.ofEpochMilli(i / 1000)));
+                            // java.sql.Timestamp keeps nanosecond precision, so build the
+                            // Instant from microseconds directly. Dividing by 1000 first
+                            // truncated the sub-millisecond digits and collapsed distinct
+                            // timestamp-micros values onto the same millisecond.
+                            statement.setTimestamp(index, Timestamp.from(Instant.EPOCH.plus(i, ChronoUnit.MICROS)));
                         }
                     } else if (LogicalTypes.timeMicros().equals(fieldSchema.getLogicalType())) {
                         if (isNull) {
