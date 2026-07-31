@@ -92,5 +92,5 @@ sinks:
     description: Writes input data to Google Cloud Spanner tables using mutations. Supports INSERT, UPDATE, INSERT_OR_UPDATE, REPLACE, and DELETE operations. Includes commit timestamp injection, batch tuning parameters, RPC priority control, max commit delay, failure handling with dead-letter output, and emulator support.
     tags: [sink, spanner, batch, streaming, gcp, sql]
   - title: storage
-    description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
-    tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
+    description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, Arrow IPC, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
+    tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, arrow, csv, json]

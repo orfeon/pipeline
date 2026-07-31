@@ -1,14 +1,14 @@
 ---
 type: Sink Module
 title: Storage Sink Module
-description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
-tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
+description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, Arrow IPC, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
+tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, arrow, csv, json]
 timestamp: 2026-06-22T00:00:00Z
 ---
 
 # Storage Sink Module
 
-Sink Module for writing input data as structured files to Cloud Storage (GCS), S3, or the local file system. The entire PCollection is written as a batch of files in a specified format (Avro, Parquet, JSON, or CSV).
+Sink Module for writing input data as structured files to Cloud Storage (GCS), S3, or the local file system. The entire PCollection is written as a batch of files in a specified format (Avro, Parquet, Arrow IPC, JSON, or CSV).
 
 This module differs from the [Files Sink Module](files.md): the Files module writes **one file per input record** with per-record dynamic paths, while the Storage module writes the **entire dataset** as sharded files in a structured format.
 
@@ -29,7 +29,7 @@ This module differs from the [Files Sink Module](files.md): the Files module wri
 | parameter     | optional | type    | description                                                                                                                                                                                                        |
 |---------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | output        | required | String  | Output path. Supports GCS (`gs://`), S3 (`s3://`), or local paths. Supports [FreeMarker template expressions](#dynamic-output-paths) referencing input field values for dynamic partitioning (e.g. `gs://bucket/path/${field_name}/data`). |
-| format        | required | Enum    | Output file format. Values: `avro`, `parquet`, `json`, `csv`.                                                                                                                                                      |
+| format        | required | Enum    | Output file format. Values: `avro`, `parquet`, `arrow`, `json`, `csv`.                                                                                                                                             |
 | suffix        | optional | String  | File name suffix (e.g. `.avro`, `.parquet`). Supports [FreeMarker template expressions](#suffix-template-variables) for streaming windowed output. Default: `""` (empty).                                           |
 | numShards     | optional | Integer | Number of output file shards. If not specified or less than 1, auto-sharding is used. If set to `1`, a single output file is produced (suffix is appended directly without shard index).                            |
 | compression   | optional | Enum    | File-level compression. Values: `ZIP`, `GZIP`, `BZIP2`, `ZSTD`, `LZO`, `LZOP`, `DEFLATE`, `UNCOMPRESSED`, `AUTO`. Default: `AUTO`.                                                                               |
@@ -39,6 +39,7 @@ This module differs from the [Files Sink Module](files.md): the Files module wri
 | header        | optional | Boolean | (CSV only) If `true`, writes a CSV header row. Default: `false`.                                                                                                                                                    |
 | bom           | optional | Boolean | (CSV/JSON only) If `true`, writes a UTF-8 BOM at the beginning of the file. Default: `false`.                                                                                                                       |
 | outputEmpty   | optional | Boolean | If `true`, writes an empty file even when there are no input records. Default: `false`.                                                                                                                              |
+| batchSize     | optional | Integer | (Arrow only) Number of rows per Arrow record batch. Bounds each writer's off-heap (direct) memory to roughly `batchSize` × row width; consumers stream the file batch by batch. Default: `10000`.                    |
 
 ### Format details
 
@@ -46,24 +47,37 @@ This module differs from the [Files Sink Module](files.md): the Files module wri
 |----------|--------------------------------------------------------------------------------------------------------------|
 | `avro`   | Apache Avro binary format. Schema is embedded in the file. Supports `codec` parameter.                       |
 | `parquet`| Apache Parquet columnar format. Supports `codec` parameter.                                                  |
+| `arrow`  | Apache Arrow IPC File format (Feather V2). Readable directly by pandas (`pyarrow.ipc.open_file`), Polars (`read_ipc`), and DuckDB without conversion. Recommended suffix: `.arrow`. Supports `batchSize` and `codec` (`ZSTD` / `LZ4` buffer compression only; other codec values including the default `SNAPPY` write uncompressed buffers). |
 | `json`   | Each record as a JSON object, one per line (JSON Lines format).                                              |
 | `csv`    | Comma-separated values. Use `header` to include column names. Use `bom` for Excel-compatible UTF-8 output.   |
 
 ### Codec values
 
-| codec          | avro | parquet | description               |
-|----------------|------|---------|---------------------------|
-| `SNAPPY`       | yes  | yes     | Fast compression (default) |
-| `ZSTD`         | yes  | yes     | Zstandard compression      |
-| `UNCOMPRESSED` | yes  | yes     | No compression             |
-| `BZIP2`        | yes  | no      | BZip2 compression          |
-| `DEFLATE`      | yes  | no      | Deflate compression        |
-| `XZ`           | yes  | no      | XZ compression             |
-| `LZO`          | no   | yes     | LZO compression            |
-| `LZ4`          | no   | yes     | LZ4 compression            |
-| `LZ4_RAW`      | no   | yes     | Raw LZ4 compression        |
-| `BROTLI`       | no   | yes     | Brotli compression         |
-| `GZIP`         | no   | yes     | GZIP compression           |
+| codec          | avro | parquet | arrow | description               |
+|----------------|------|---------|-------|---------------------------|
+| `SNAPPY`       | yes  | yes     | no    | Fast compression (default) |
+| `ZSTD`         | yes  | yes     | yes   | Zstandard compression      |
+| `UNCOMPRESSED` | yes  | yes     | yes   | No compression             |
+| `BZIP2`        | yes  | no      | no    | BZip2 compression          |
+| `DEFLATE`      | yes  | no      | no    | Deflate compression        |
+| `XZ`           | yes  | no      | no    | XZ compression             |
+| `LZO`          | no   | yes     | no    | LZO compression            |
+| `LZ4`          | no   | yes     | yes   | LZ4 compression (LZ4_FRAME for arrow) |
+| `LZ4_RAW`      | no   | yes     | no    | Raw LZ4 compression        |
+| `BROTLI`       | no   | yes     | no    | Brotli compression         |
+| `GZIP`         | no   | yes     | no    | GZIP compression           |
+
+For `arrow`, codec values other than `ZSTD` / `LZ4` (including the default `SNAPPY`) are treated as
+uncompressed: Arrow IPC buffer compression only defines `LZ4_FRAME` and `ZSTD`.
+
+### Arrow format JVM requirement
+
+Arrow's off-heap memory requires the JVM flag `--add-opens=java.base/java.nio=ALL-UNNAMED`
+(JDK 16+); without it the first arrow write fails with `Failed to initialize MemoryUtil`.
+The template container image already sets this flag for its entrypoint JVM (DirectRunner /
+template launcher). **On Dataflow the worker JVM is started by the Dataflow service, not the
+container entrypoint**, so launch pipelines that use `format: arrow` with the pipeline option
+`--jdkAddOpenModules=java.base/java.nio=ALL-UNNAMED`.
 
 ## Dynamic output paths
 
@@ -139,7 +153,26 @@ sinks:
       suffix: ".parquet"
 ```
 
-### Example 3: Write CSV with header and BOM
+### Example 3: Write Arrow IPC files for pandas / Polars / DuckDB
+
+Write Arrow IPC (Feather V2) files that Python tools can read directly without conversion
+(`pyarrow.ipc.open_file()`, `polars.read_ipc()`, DuckDB IPC reader).
+
+```yaml
+sinks:
+  - name: arrow_output
+    module: storage
+    inputs:
+      - source
+    parameters:
+      output: "gs://my-bucket/exports/data"
+      format: arrow
+      suffix: ".arrow"
+      codec: ZSTD       # optional: ZSTD or LZ4 buffer compression (omit for uncompressed)
+      batchSize: 10000  # optional: rows per record batch
+```
+
+### Example 4: Write CSV with header and BOM
 
 Write CSV files with a header row and UTF-8 BOM for Excel compatibility.
 
@@ -157,7 +190,7 @@ sinks:
       bom: true
 ```
 
-### Example 4: Dynamic output path partitioning
+### Example 5: Dynamic output path partitioning
 
 Partition output files by the value of a field. Each unique value produces a separate output directory.
 
@@ -178,7 +211,7 @@ sinks:
       format: avro
 ```
 
-### Example 5: Single file output
+### Example 6: Single file output
 
 Write all records into a single file without sharding.
 
@@ -195,7 +228,7 @@ sinks:
       suffix: ".avro"
 ```
 
-### Example 6: Write JSON to GCS with compression
+### Example 7: Write JSON to GCS with compression
 
 ```yaml
 sinks:
@@ -210,7 +243,7 @@ sinks:
       suffix: ".json"
 ```
 
-### Example 7: Write to AWS S3
+### Example 8: Write to AWS S3
 
 ```yaml
 sinks:
@@ -223,7 +256,7 @@ sinks:
       format: avro
 ```
 
-### Example 8: Streaming windowed output with dynamic suffix
+### Example 9: Streaming windowed output with dynamic suffix
 
 Write windowed streaming data with window timestamps in the file name.
 

@@ -2,14 +2,23 @@ package com.mercari.solution.module.sink;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
+import org.apache.arrow.compression.CommonsCompressionFactory;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.ipc.ArrowFileReader;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Stream;
@@ -122,6 +131,100 @@ public class StorageSinkTest {
         final List<String> lines = Files.readAllLines(files.getFirst(), StandardCharsets.UTF_8);
         Assertions.assertEquals(4, lines.size()); // header + 3 records
         Assertions.assertEquals("sequence,message", lines.getFirst());
+    }
+
+    @Test
+    public void testWriteArrow() throws Exception {
+        final String dir = BASE_DIR + "/arrow";
+        cleanDir(dir);
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "sinks": [
+                    {
+                      "name": "storage",
+                      "module": "storage",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "%s/data",
+                        "format": "arrow",
+                        "suffix": ".arrow",
+                        "numShards": 1
+                      }
+                    }
+                  ]
+                }
+                """.formatted(createSourceJson(), dir);
+
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+        pipeline.run();
+
+        final List<Path> files = listFiles(dir);
+        Assertions.assertFalse(files.isEmpty(), "arrow output files must exist under " + dir);
+        final List<Long> sequences = new ArrayList<>();
+        try(final BufferAllocator allocator = new RootAllocator();
+            final FileInputStream is = new FileInputStream(files.getFirst().toFile());
+            final ArrowFileReader reader = new ArrowFileReader(is.getChannel(), allocator)) {
+
+            while(reader.loadNextBatch()) {
+                final VectorSchemaRoot root = reader.getVectorSchemaRoot();
+                final BigIntVector sequence = (BigIntVector) root.getVector("sequence");
+                final VarCharVector message = (VarCharVector) root.getVector("message");
+                for(int i = 0; i < root.getRowCount(); i++) {
+                    sequences.add(sequence.get(i));
+                    Assertions.assertEquals("hello", new String(message.get(i), StandardCharsets.UTF_8));
+                }
+            }
+        }
+        Assertions.assertEquals(List.of(0L, 1L, 2L), sequences.stream().sorted().toList());
+    }
+
+    @Test
+    public void testWriteArrowZstdMultiBatch() throws Exception {
+        final String dir = BASE_DIR + "/arrow-zstd";
+        cleanDir(dir);
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "sinks": [
+                    {
+                      "name": "storage",
+                      "module": "storage",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "%s/data",
+                        "format": "arrow",
+                        "suffix": ".arrow",
+                        "codec": "ZSTD",
+                        "batchSize": 2,
+                        "numShards": 1
+                      }
+                    }
+                  ]
+                }
+                """.formatted(createSourceJson(), dir);
+
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+        pipeline.run();
+
+        final List<Path> files = listFiles(dir);
+        Assertions.assertFalse(files.isEmpty(), "arrow output files must exist under " + dir);
+        long total = 0;
+        int batches = 0;
+        try(final BufferAllocator allocator = new RootAllocator();
+            final FileInputStream is = new FileInputStream(files.getFirst().toFile());
+            final ArrowFileReader reader = new ArrowFileReader(
+                    is.getChannel(), allocator, CommonsCompressionFactory.INSTANCE)) {
+
+            while(reader.loadNextBatch()) {
+                total += reader.getVectorSchemaRoot().getRowCount();
+                batches++;
+            }
+        }
+        Assertions.assertEquals(3, total);
+        Assertions.assertEquals(2, batches); // batchSize=2 with 3 records -> batches of 2 and 1
     }
 
     @Test
