@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Attribution Transform Module
-description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
-tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch]
+description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
+tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches]
 timestamp: 2026-07-12T00:00:00Z
 ---
 
@@ -30,6 +30,10 @@ Supports:
   [Lucene expressions](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html)
   (JavaScript-like syntax), allocated to their components by `gre` (generalized ripple effect, default),
   `partialDerivative`, or `shapley`.
+- **Distribution measures** — "the p99 latency got worse — which slice?" Per-leaf value
+  distributions are held as mergeable [Apache DataSketches](https://datasketches.apache.org/)
+  KLL sketches and quantile shifts are localized per configured quantile. See
+  [Distribution measures](#distribution-measures).
 - **Four reference (baseline) strategies** — two-input `external`, single-input `external` with a
   label column, `timeShift` (period-over-period), `split` (by a row attribute), and
   `synthetic` marginal (interaction discovery against an independence model).
@@ -63,13 +67,40 @@ Array of measures to explain. Each measure is analyzed independently.
 
 | parameter  | optional | type   | description                                                                                                     |
 |------------|----------|--------|-----------------------------------------------------------------------------------------------------------------|
-| name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. |
-| type       | optional | Enum   | `fundamental` (default) or `derived`. (`distribution`, `sketch` are **reserved**.)                               |
+| name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. For `distribution`, the numeric input field whose per-row values form the distribution. |
+| type       | optional | Enum   | `fundamental` (default), `derived` or `distribution`. (`sketch` is **reserved**.)                                |
 | expression | required for derived | String | Arithmetic expression (Lucene expressions, JavaScript-like syntax) over numeric input fields, e.g. `"orders / sessions"`. All variables must exist as numeric input fields. |
+| quantiles  | optional (distribution only) | Array<Double\> | Quantiles in (0, 1) to analyze, e.g. `[0.5, 0.99]`. Each quantile is localized independently and produces its own result rows. Default `[0.5]`. |
 
 Fundamental measures and derived-expression variables must be **sum-additive** (counts, amounts).
 Declare ratios as `derived` with their additive components as variables — do not feed
 pre-computed ratio columns as fundamental measures.
+
+### Distribution measures
+
+A `distribution` measure localizes a **shift in the value distribution** (e.g. a latency tail
+regression) instead of a change in a sum. Unlike the other types, the input rows are expected to
+be **event-level**: each row contributes its value of the `name` field as one sample to its
+dimension tuple's distribution. Per-leaf distributions are held as mergeable
+[Apache DataSketches](https://datasketches.apache.org/) KLL sketches, which is what makes slice
+evaluation possible — a slice's distribution is the union (merge) of its leaves' sketches.
+
+Semantics per configured quantile `q`:
+
+- Per-leaf baseline/target values are the leaf sketches' `q`-quantiles; the localization
+  algorithms then run unchanged on those values.
+- Explanatory power is the **mass-weighted absolute quantile shift** share
+  `(n_baseline + n_target) · |Δq|`, normalized to sum 1. Quantiles are not additive, so a
+  net-change share is undefined: distribution measures always report `epBasis: absoluteDelta`
+  (requesting `netDelta` is a validation error).
+- Reported `baseline` / `target` values (per finding and totals) are quantiles of the merged
+  sketches, **not sums**.
+- Not combinable with the `synthetic` reference (no independence model is defined for
+  distributions) or with `derivedAllocation: shapley`.
+
+Sketches with up to 200 values per leaf and role are exact; beyond that, quantile estimates
+carry the KLL error bounds (~1.65% rank error) and sketch compaction introduces slight
+run-to-run variation. Best suited to positive-valued metrics (latency, size, cost).
 
 ## comparison parameters
 
@@ -146,7 +177,8 @@ The two bases answer **different questions** and every output row records which 
 - `auto` (default) — `netDelta`, automatically falling back to `absoluteDelta` when the net
   change is less than 5% of the total churn. The `synthetic` marginal reference always resolves
   to `absoluteDelta` this way (its net delta is zero by construction), and `epBasis: netDelta`
-  is rejected for it at validation time.
+  is rejected for it at validation time. [Distribution measures](#distribution-measures) always
+  use `absoluteDelta` regardless of this setting (quantiles are not additive).
 
 ## engine parameters
 
@@ -183,6 +215,7 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | field             | type                                          | description                                                       |
 |-------------------|-----------------------------------------------|--------------------------------------------------------------------|
 | measure           | String                                        | Measure name                                                       |
+| quantile          | Double (nullable)                             | The analyzed quantile — set only for distribution measures (one row group per quantile) |
 | algorithm         | String                                        | `riskloc` / `adtributor` / `exhaustive`                            |
 | epBasis           | String                                        | Explanatory-power basis actually used: `netDelta` or `absoluteDelta` (see [epBasis](#epbasis)) |
 | rank              | Long                                          | 1-based rank within the measure (0 on noFinding rows)              |
@@ -191,7 +224,7 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | riskScore         | Double (nullable)                             | RiskLoc risk score (null for other algorithms)                     |
 | explanatoryPower  | Double                                        | Share of the total change explained by the slice                   |
 | surprise          | Double (nullable)                             | Jensen–Shannon divergence based distribution-change score          |
-| baseline / target / delta | Double                                | Slice sums (derived measures: the expression over slice component sums) |
+| baseline / target / delta | Double                                | Slice sums (derived measures: the expression over slice component sums; distribution measures: quantiles of the merged slice sketches) |
 | deltaRatio        | Double (nullable)                             | `delta / baseline` (null when baseline is 0)                       |
 | totalBaseline / totalTarget | Double                              | Measure totals for context                                         |
 | leafCount         | Long                                          | Number of leaves covered by the slice                              |
@@ -358,6 +391,42 @@ transforms:
         topK: 10
 ```
 
+## Example: latency tail regression (distribution measure)
+
+"The p99 latency regressed after the release — which endpoint × region × version is
+responsible?" Feed event-level rows; the module builds per-slice latency distributions
+(KLL sketches) and localizes the quantile shift.
+
+```yaml
+sources:
+  - name: requests
+    module: bigquery
+    parameters:
+      query: |
+        SELECT endpoint, region, app_version, deployed, latency_ms
+        FROM `myproject.logs.requests`
+        WHERE event_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR)
+transforms:
+  - name: latencyRegression
+    module: attribution
+    inputs: [requests]
+    parameters:
+      measures:
+        - name: latency_ms
+          type: distribution
+          quantiles: [0.5, 0.99]
+      comparison:
+        reference:
+          strategy: split
+          split:
+            by: {field: deployed, baseline: false, target: true}
+      vocabulary:
+        dimensions:
+          - name: endpoint
+          - name: region
+          - name: app_version
+```
+
 ## Execution profile and scale guidance
 
 This version runs the *small* execution profile: after an internal re-aggregation by dimension
@@ -383,6 +452,11 @@ exponentially with `guards.maxLayer`, so raise it with care.
   the module falls back to a zero cutoff toward the deviation side carrying more mass and logs
   a warning. This guard is a production default on top of the reference algorithm; it activates
   only when the reference behavior would have returned nothing.
+- **Distribution measures are approximate beyond 200 samples per leaf and role.** Up to that
+  size the KLL sketch stores all values and quantiles are exact and deterministic; beyond it,
+  estimates carry the KLL rank error bounds (~1.65%) and sketch compaction is randomized, so
+  repeated runs can differ slightly in quantile values (rarely in the localized slices). Small
+  quantile shifts below the error bound are not reliably attributable.
 - Misspelled enum values deserialize as null and silently fall back to their defaults
   (Gson behavior common to all modules); validation rejects reserved values only when
   spelled exactly.

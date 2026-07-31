@@ -726,6 +726,14 @@
       <version>${lucene.version}</version>
     </dependency>
 
+    <!-- Mergeable approximate sketches (attribution distribution measures).
+         6.2.0 is the newest version that still targets Java 21 class files. -->
+    <dependency>
+      <groupId>org.apache.datasketches</groupId>
+      <artifactId>datasketches-java</artifactId>
+      <version>6.2.0</version>
+    </dependency>
+
     <!-- https://mvnrepository.com/artifact/org.apache.pdfbox/pdfbox -->
     <dependency>
       <groupId>org.apache.pdfbox</groupId>

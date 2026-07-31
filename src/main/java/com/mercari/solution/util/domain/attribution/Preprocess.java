@@ -1,5 +1,7 @@
 package com.mercari.solution.util.domain.attribution;
 
+import org.apache.datasketches.kll.KllDoublesSketch;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -106,8 +108,9 @@ public final class Preprocess {
 
     private static LeafTable rebuild(final LeafTable table, final Relabeler relabeler) {
         final LeafTable.Builder builder = LeafTable
-                .builder(table.getDimensionNames(), table.getColumnNames());
+                .builder(table.getDimensionNames(), table.getColumnNames(), table.getDistributionNames());
         final int columnCount = table.columnCount();
+        final int distributionCount = table.distributionCount();
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
             final String[] dims = relabeler.relabel(leaf, table.dims(leaf));
             final double[] baselineValues = new double[columnCount];
@@ -118,11 +121,18 @@ public final class Preprocess {
             }
             builder.addBaseline(dims, baselineValues);
             builder.addTarget(dims, targetValues);
+            for(int d = 0; d < distributionCount; d++) {
+                builder.addBaselineSketch(dims, d, table.baselineSketch(d, leaf));
+                builder.addTargetSketch(dims, d, table.targetSketch(d, leaf));
+            }
         }
         return builder.build();
     }
 
-    /** Ranking score for maxCardinality: absolute volume plus absolute delta, summed over columns. */
+    /**
+     * Ranking score for maxCardinality: absolute volume plus absolute delta, summed over columns.
+     * Distribution columns contribute their sample counts as volume.
+     */
     private static Map<String, Double> valueScores(final LeafTable table, final int dim) {
         final Map<String, Double> scores = new LinkedHashMap<>();
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
@@ -132,6 +142,11 @@ public final class Preprocess {
                 final double v = table.targetValue(c, leaf);
                 score += Math.abs(f) + Math.abs(v) + Math.abs(v - f);
             }
+            for(int d = 0; d < table.distributionCount(); d++) {
+                final double nf = sketchN(table.baselineSketch(d, leaf));
+                final double nv = sketchN(table.targetSketch(d, leaf));
+                score += nf + nv + Math.abs(nv - nf);
+            }
             scores.merge(table.dimValue(leaf, dim), score, Double::sum);
         }
         return scores;
@@ -139,14 +154,20 @@ public final class Preprocess {
 
     /** Volume share per dimension value: max over columns of (Σ|f|+Σ|v|) / column total volume. */
     private static Map<String, Double> valueSupports(final LeafTable table, final int dim) {
-        final int columnCount = table.columnCount();
+        final int columnCount = table.columnCount() + table.distributionCount();
         final Map<String, double[]> volumes = new LinkedHashMap<>();
         final double[] totals = new double[columnCount];
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
             final double[] volume = volumes.computeIfAbsent(
                     table.dimValue(leaf, dim), k -> new double[columnCount]);
             for(int c = 0; c < columnCount; c++) {
-                final double abs = Math.abs(table.baselineValue(c, leaf)) + Math.abs(table.targetValue(c, leaf));
+                final double abs;
+                if(c < table.columnCount()) {
+                    abs = Math.abs(table.baselineValue(c, leaf)) + Math.abs(table.targetValue(c, leaf));
+                } else {
+                    final int d = c - table.columnCount();
+                    abs = sketchN(table.baselineSketch(d, leaf)) + sketchN(table.targetSketch(d, leaf));
+                }
                 volume[c] += abs;
                 totals[c] += abs;
             }
@@ -223,6 +244,10 @@ public final class Preprocess {
             return Long.toString((long) value);
         }
         return Double.toString(value);
+    }
+
+    private static double sketchN(final KllDoublesSketch sketch) {
+        return sketch == null ? 0 : sketch.getN();
     }
 
     private static Double parse(final String value) {

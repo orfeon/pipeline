@@ -1,5 +1,7 @@
 package com.mercari.solution.util.domain.attribution;
 
+import org.apache.datasketches.kll.KllDoublesSketch;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -13,29 +15,47 @@ import java.util.Set;
  * The builder sums duplicate tuples per role, so callers may feed unaggregated or multiply
  * bucketed rows (e.g. multiple time buckets per tuple). Missing dimension values are represented
  * as {@code "(null)"}; missing or NaN measure values count as 0.
+ *
+ * <p>Distribution columns hold one mergeable KLL sketch per leaf and role instead of a sum.
+ * They are fed one sample value at a time ({@code addBaselineSample}/{@code addTargetSample}) or
+ * merged wholesale ({@code addBaselineSketch}/{@code addTargetSketch}, used when re-aggregating).
+ * A sketch with up to {@value #SKETCH_K} values is exact (and deterministic); beyond that,
+ * quantile estimates carry the KLL error bounds.</p>
  */
 public final class LeafTable {
 
     public static final String NULL_VALUE = "(null)";
 
+    /** KLL sketch size parameter: ~1.65% max quantile rank error at 99% confidence. */
+    public static final int SKETCH_K = 200;
+
     private final List<String> dimensionNames;
     private final List<String> columnNames;
-    private final String[][] dimValues;   // [leaf][dim]
-    private final double[][] baseline;    // [column][leaf]
-    private final double[][] target;      // [column][leaf]
+    private final List<String> distributionNames;
+    private final String[][] dimValues;                 // [leaf][dim]
+    private final double[][] baseline;                  // [column][leaf]
+    private final double[][] target;                    // [column][leaf]
+    private final KllDoublesSketch[][] baselineSketches; // [distribution][leaf], entries may be null (no samples)
+    private final KllDoublesSketch[][] targetSketches;   // [distribution][leaf]
 
     private LeafTable(
             final List<String> dimensionNames,
             final List<String> columnNames,
+            final List<String> distributionNames,
             final String[][] dimValues,
             final double[][] baseline,
-            final double[][] target) {
+            final double[][] target,
+            final KllDoublesSketch[][] baselineSketches,
+            final KllDoublesSketch[][] targetSketches) {
 
         this.dimensionNames = dimensionNames;
         this.columnNames = columnNames;
+        this.distributionNames = distributionNames;
         this.dimValues = dimValues;
         this.baseline = baseline;
         this.target = target;
+        this.baselineSketches = baselineSketches;
+        this.targetSketches = targetSketches;
     }
 
     public List<String> getDimensionNames() {
@@ -44,6 +64,10 @@ public final class LeafTable {
 
     public List<String> getColumnNames() {
         return columnNames;
+    }
+
+    public List<String> getDistributionNames() {
+        return distributionNames;
     }
 
     public int leafCount() {
@@ -58,10 +82,22 @@ public final class LeafTable {
         return columnNames.size();
     }
 
+    public int distributionCount() {
+        return distributionNames.size();
+    }
+
     public int columnIndex(final String name) {
         final int index = columnNames.indexOf(name);
         if(index < 0) {
             throw new IllegalArgumentException("column not found: " + name + " in " + columnNames);
+        }
+        return index;
+    }
+
+    public int distributionIndex(final String name) {
+        final int index = distributionNames.indexOf(name);
+        if(index < 0) {
+            throw new IllegalArgumentException("distribution column not found: " + name + " in " + distributionNames);
         }
         return index;
     }
@@ -109,6 +145,16 @@ public final class LeafTable {
         return sum(target[column]);
     }
 
+    /** Baseline sketch of a leaf, or null when the leaf received no baseline samples. Do not mutate. */
+    public KllDoublesSketch baselineSketch(final int distribution, final int leaf) {
+        return baselineSketches[distribution][leaf];
+    }
+
+    /** Target sketch of a leaf, or null when the leaf received no target samples. Do not mutate. */
+    public KllDoublesSketch targetSketch(final int distribution, final int leaf) {
+        return targetSketches[distribution][leaf];
+    }
+
     public MeasureVector measureVector(final String columnName) {
         final int column = columnIndex(columnName);
         return MeasureVector.of(baseline[column], target[column]);
@@ -144,7 +190,8 @@ public final class LeafTable {
                         + column.length + " != " + dimValues.length);
             }
         }
-        return new LeafTable(dimensionNames, columnNames, dimValues, newBaseline, target);
+        return new LeafTable(dimensionNames, columnNames, distributionNames,
+                dimValues, newBaseline, target, baselineSketches, targetSketches);
     }
 
     private static double sum(final double[] values) {
@@ -156,24 +203,47 @@ public final class LeafTable {
     }
 
     public static Builder builder(final List<String> dimensionNames, final List<String> columnNames) {
-        return new Builder(dimensionNames, columnNames);
+        return new Builder(dimensionNames, columnNames, List.of());
+    }
+
+    public static Builder builder(
+            final List<String> dimensionNames,
+            final List<String> columnNames,
+            final List<String> distributionNames) {
+        return new Builder(dimensionNames, columnNames, distributionNames);
     }
 
     public static class Builder {
 
         private final List<String> dimensionNames;
         private final List<String> columnNames;
-        private final Map<List<String>, double[][]> accumulator = new LinkedHashMap<>();
+        private final List<String> distributionNames;
+        private final Map<List<String>, Accumulator> accumulator = new LinkedHashMap<>();
 
-        private Builder(final List<String> dimensionNames, final List<String> columnNames) {
+        private static class Accumulator {
+            final double[][] sums;                  // [role][column]
+            final KllDoublesSketch[][] sketches;    // [role][distribution]
+
+            Accumulator(final int columnCount, final int distributionCount) {
+                this.sums = new double[2][columnCount];
+                this.sketches = new KllDoublesSketch[2][distributionCount];
+            }
+        }
+
+        private Builder(
+                final List<String> dimensionNames,
+                final List<String> columnNames,
+                final List<String> distributionNames) {
             if(dimensionNames == null || dimensionNames.isEmpty()) {
                 throw new IllegalArgumentException("dimensionNames must not be empty");
             }
-            if(columnNames == null || columnNames.isEmpty()) {
-                throw new IllegalArgumentException("columnNames must not be empty");
+            if((columnNames == null || columnNames.isEmpty())
+                    && (distributionNames == null || distributionNames.isEmpty())) {
+                throw new IllegalArgumentException("columnNames and distributionNames must not both be empty");
             }
             this.dimensionNames = List.copyOf(dimensionNames);
-            this.columnNames = List.copyOf(columnNames);
+            this.columnNames = columnNames == null ? List.of() : List.copyOf(columnNames);
+            this.distributionNames = distributionNames == null ? List.of() : List.copyOf(distributionNames);
         }
 
         public Builder addBaseline(final String[] dims, final double[] values) {
@@ -184,27 +254,71 @@ public final class LeafTable {
             return add(1, dims, values);
         }
 
+        public Builder addBaselineSample(final String[] dims, final int distribution, final double value) {
+            return addSample(0, dims, distribution, value);
+        }
+
+        public Builder addTargetSample(final String[] dims, final int distribution, final double value) {
+            return addSample(1, dims, distribution, value);
+        }
+
+        public Builder addBaselineSketch(final String[] dims, final int distribution, final KllDoublesSketch sketch) {
+            return addSketch(0, dims, distribution, sketch);
+        }
+
+        public Builder addTargetSketch(final String[] dims, final int distribution, final KllDoublesSketch sketch) {
+            return addSketch(1, dims, distribution, sketch);
+        }
+
         private Builder add(final int role, final String[] dims, final double[] values) {
-            if(dims.length != dimensionNames.size()) {
-                throw new IllegalArgumentException("dimension count mismatch: "
-                        + dims.length + " != " + dimensionNames.size());
-            }
             if(values.length != columnNames.size()) {
                 throw new IllegalArgumentException("column count mismatch: "
                         + values.length + " != " + columnNames.size());
+            }
+            final Accumulator acc = accumulator(dims);
+            for(int c = 0; c < values.length; c++) {
+                if(!Double.isNaN(values[c])) {
+                    acc.sums[role][c] += values[c];
+                }
+            }
+            return this;
+        }
+
+        private Builder addSample(final int role, final String[] dims, final int distribution, final double value) {
+            if(Double.isNaN(value)) {
+                return this;
+            }
+            final Accumulator acc = accumulator(dims);
+            if(acc.sketches[role][distribution] == null) {
+                acc.sketches[role][distribution] = KllDoublesSketch.newHeapInstance(SKETCH_K);
+            }
+            acc.sketches[role][distribution].update(value);
+            return this;
+        }
+
+        private Builder addSketch(final int role, final String[] dims, final int distribution, final KllDoublesSketch sketch) {
+            if(sketch == null || sketch.isEmpty()) {
+                return this;
+            }
+            final Accumulator acc = accumulator(dims);
+            if(acc.sketches[role][distribution] == null) {
+                acc.sketches[role][distribution] = KllDoublesSketch.newHeapInstance(SKETCH_K);
+            }
+            acc.sketches[role][distribution].merge(sketch);
+            return this;
+        }
+
+        private Accumulator accumulator(final String[] dims) {
+            if(dims.length != dimensionNames.size()) {
+                throw new IllegalArgumentException("dimension count mismatch: "
+                        + dims.length + " != " + dimensionNames.size());
             }
             final List<String> key = new ArrayList<>(dims.length);
             for(final String dim : dims) {
                 key.add(dim == null ? NULL_VALUE : dim);
             }
-            final double[][] roles = accumulator.computeIfAbsent(
-                    key, k -> new double[2][columnNames.size()]);
-            for(int c = 0; c < values.length; c++) {
-                if(!Double.isNaN(values[c])) {
-                    roles[role][c] += values[c];
-                }
-            }
-            return this;
+            return accumulator.computeIfAbsent(
+                    key, k -> new Accumulator(columnNames.size(), distributionNames.size()));
         }
 
         public boolean isEmpty() {
@@ -214,19 +328,27 @@ public final class LeafTable {
         public LeafTable build() {
             final int leafCount = accumulator.size();
             final int columnCount = columnNames.size();
+            final int distributionCount = distributionNames.size();
             final String[][] dimValues = new String[leafCount][];
             final double[][] baseline = new double[columnCount][leafCount];
             final double[][] target = new double[columnCount][leafCount];
+            final KllDoublesSketch[][] baselineSketches = new KllDoublesSketch[distributionCount][leafCount];
+            final KllDoublesSketch[][] targetSketches = new KllDoublesSketch[distributionCount][leafCount];
             int leaf = 0;
-            for(final Map.Entry<List<String>, double[][]> entry : accumulator.entrySet()) {
+            for(final Map.Entry<List<String>, Accumulator> entry : accumulator.entrySet()) {
                 dimValues[leaf] = entry.getKey().toArray(new String[0]);
                 for(int c = 0; c < columnCount; c++) {
-                    baseline[c][leaf] = entry.getValue()[0][c];
-                    target[c][leaf] = entry.getValue()[1][c];
+                    baseline[c][leaf] = entry.getValue().sums[0][c];
+                    target[c][leaf] = entry.getValue().sums[1][c];
+                }
+                for(int d = 0; d < distributionCount; d++) {
+                    baselineSketches[d][leaf] = entry.getValue().sketches[0][d];
+                    targetSketches[d][leaf] = entry.getValue().sketches[1][d];
                 }
                 leaf++;
             }
-            return new LeafTable(dimensionNames, columnNames, dimValues, baseline, target);
+            return new LeafTable(dimensionNames, columnNames, distributionNames,
+                    dimValues, baseline, target, baselineSketches, targetSketches);
         }
     }
 }

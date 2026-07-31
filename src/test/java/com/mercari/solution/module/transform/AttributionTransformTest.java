@@ -730,16 +730,157 @@ public class AttributionTransformTest {
     }
 
     @Test
+    public void testDistributionMeasure() throws Exception {
+        // Event-level latency rows labeled base/cur; the region=a tail (top sample) jumps to 500
+        // while the median stays put — localized at p99, mirroring the core engine fixture
+        final StringBuilder elements = new StringBuilder();
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String category : List.of("x", "y")) {
+                for(int i = 1; i <= 10; i++) {
+                    final double base = i * 10;
+                    final double cur = switch (region) {
+                        case "a" -> i == 10 ? 500 : i * 10;
+                        case "b" -> i == 10 ? 101 : i * 10;
+                        default -> i == 10 ? 99 : i * 10;
+                    };
+                    if(!elements.isEmpty()) {
+                        elements.append(",");
+                    }
+                    elements.append(String.format(
+                            "{ \"region\": \"%s\", \"category\": \"%s\", \"window\": \"base\", \"latency\": %f },",
+                            region, category, base));
+                    elements.append(String.format(
+                            "{ \"region\": \"%s\", \"category\": \"%s\", \"window\": \"cur\", \"latency\": %f }",
+                            region, category, cur));
+                }
+            }
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ %s ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "window", "type": "string" },
+                        { "name": "latency", "type": "float64" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "measures": [
+                          { "name": "latency", "type": "distribution", "quantiles": [0.99] }
+                        ],
+                        "comparison": {
+                          "reference": {
+                            "strategy": "external",
+                            "labelField": "window",
+                            "baselineLabel": "base",
+                            "targetLabel": "cur"
+                          }
+                        },
+                        "vocabulary": {
+                          "dimensions": [
+                            { "name": "region" },
+                            { "name": "category" }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection output = outputs.get("attribution");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final List<MElement> list = toList(rows);
+            Assertions.assertEquals(1, list.size());
+            final MElement row = list.getFirst();
+            Assertions.assertEquals("latency", row.getAsString("measure"));
+            Assertions.assertEquals(0.99, row.getAsDouble("quantile"), DELTA);
+            Assertions.assertEquals("absoluteDelta", row.getAsString("epBasis"));
+            Assertions.assertEquals(false, row.getPrimitiveValue("noFinding"));
+            assertElements(row, "region=a");
+            // Values are quantiles of the merged slice sketches, not sums
+            Assertions.assertEquals(100.0, row.getAsDouble("baseline"), DELTA);
+            Assertions.assertEquals(500.0, row.getAsDouble("target"), DELTA);
+            Assertions.assertEquals(100.0, row.getAsDouble("totalBaseline"), DELTA);
+            Assertions.assertEquals(500.0, row.getAsDouble("totalTarget"), DELTA);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
     public void testValidationErrors() throws Exception {
         // [config, expected message fragment]
         final String[][] cases = {
                 {
                         // reserved measure type
                         transform("""
-                        "measures": [ { "name": "sales", "type": "distribution" } ],
+                        "measures": [ { "name": "sales", "type": "sketch" } ],
                         "vocabulary": { "dimensions": [ { "name": "region" } ] }
                         """, 2),
-                        "measures.type: distribution is reserved"
+                        "measures.type: sketch is reserved"
+                },
+                {
+                        // distribution measures take no expression
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distribution", "expression": "a / b" } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "expression must not be set for type: distribution"
+                },
+                {
+                        // quantiles out of range
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distribution", "quantiles": [1.5] } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "quantiles must be in (0, 1)"
+                },
+                {
+                        // spec constraint 6: distribution measures cannot use shapley allocation
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distribution" } ],
+                        "semantics": { "derivedAllocation": "shapley" },
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "cannot be used with derivedAllocation: shapley"
+                },
+                {
+                        // quantiles are not additive: no netDelta basis for distribution measures
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distribution" } ],
+                        "semantics": { "epBasis": "netDelta" },
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "always uses epBasis: absoluteDelta"
+                },
+                {
+                        // no independence model for distributions
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distribution" } ],
+                        "comparison": { "reference": { "strategy": "synthetic" } },
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 1),
+                        "cannot be used with the synthetic reference"
                 },
                 {
                         // reserved comparison mode
