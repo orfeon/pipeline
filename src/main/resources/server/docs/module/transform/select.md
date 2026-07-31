@@ -15,7 +15,7 @@ Supports:
 - **Row filtering** - Filter records using [Filter](../common/filter.md) conditions.
 - **Field projection** - Select, rename, and reorder fields.
 - **Type casting** - Convert field values to different types.
-- **Computed fields** - Create new fields using mathematical expressions (exp4j) or FreeMarker templates.
+- **Computed fields** - Create new fields using mathematical expressions (Lucene expressions) or FreeMarker templates.
 - **Nested structures** - Build nested elements and JSON objects.
 - **Stateful operations** - Access previous row values (lag) and compute windowed aggregations using `groupFields`.
 - **Array flattening** - Unnest array fields into multiple records.
@@ -159,7 +159,7 @@ Maps input values to replacement values using a mapping table.
 
 ### expression
 
-Evaluates a mathematical expression using [exp4j](https://www.objecthunter.net/exp4j/) syntax. Input field names are available as variables.
+Evaluates a mathematical expression using [Lucene expressions](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) (JavaScript-like) syntax. Input field names are available as variables. All values are evaluated as double precision numbers.
 
 | parameter  | optional | type   | description                                                    |
 |------------|----------|--------|----------------------------------------------------------------|
@@ -171,7 +171,22 @@ Evaluates a mathematical expression using [exp4j](https://www.objecthunter.net/e
   expression: "price * quantity * (1 + tax_rate)"
 ```
 
-Supported operators and functions: `+`, `-`, `*`, `/`, `%`, `^`, `abs()`, `ceil()`, `floor()`, `sqrt()`, `log()`, `log2()`, `log10()`, `sin()`, `cos()`, `tan()`, `min()`, `max()`, etc.
+Supported syntax:
+
+- Arithmetic operators: `+`, `-`, `*`, `/`, `%`
+- Comparison operators: `<`, `<=`, `==`, `!=`, `>=`, `>` (result is `1` for true, `0` for false)
+- Boolean operators: `&&`, `||`, `!` (non-zero is true)
+- Ternary operator: `condition ? valueIfTrue : valueIfFalse`
+- Math functions: `abs()`, `ceil()`, `floor()`, `sqrt()`, `cbrt()`, `pow(base, exp)`, `exp()`,
+  `log()` (natural), `log2()`, `log10()`, `logn(base, x)`, `min()`, `max()`, `signum()`,
+  `sin()`, `cos()`, `tan()`, `asin()`, `acos()`, `atan()`, `atan2()`, `sinh()`, `cosh()`, `tanh()`
+- Conditional functions: `if(condition, valueIfTrue, valueIfFalse)`,
+  `switchN(cond1, value1, ..., condN, valueN)` for N = 3..8 (e.g. `switch3(...)`), returning the value of the first true condition (or `0`)
+- Timestamp functions: `timestamp_to_date(epochMicros, timezoneHours)`,
+  `timestamp_diff_millisecond(a, b)`, `timestamp_diff_second(a, b)`, `timestamp_diff_minute(a, b)`, `timestamp_diff_hour(a, b)`, `timestamp_diff_day(a, b)` (arguments are epoch microseconds)
+- Constants: `pi`, `e`
+
+Note: `^` is bitwise XOR, not exponentiation. Use `pow(base, exp)` for powers.
 
 ### text
 

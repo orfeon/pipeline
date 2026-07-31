@@ -1,7 +1,5 @@
 package com.mercari.solution.util;
 
-import org.apache.commons.compress.utils.IOUtils;
-
 import java.io.*;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -16,7 +14,7 @@ public class ResourceUtil {
 
     public static byte[] getResourceFileAsBytes(final String path) {
         try(final InputStream is = Thread.currentThread().getContextClassLoader().getSystemResourceAsStream(path)) {
-            return IOUtils.toByteArray(is);
+            return is.readAllBytes();
         } catch (IOException e) {
             throw new RuntimeException("Failed to read file: " + path, e);
         }

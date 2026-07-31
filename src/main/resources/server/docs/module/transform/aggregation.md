@@ -18,7 +18,7 @@ Supports:
 - **Grouping** - Group records by one or more fields before aggregation.
 - **13 aggregation functions** - count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, regression, array_agg.
 - **Per-record conditions** - Each aggregation field can specify a filter condition to include/exclude records.
-- **Expression-based fields** - Use mathematical expressions (exp4j) instead of direct field references.
+- **Expression-based fields** - Use mathematical expressions (Lucene expressions) instead of direct field references.
 - **Weighted calculations** - avg, std, and simple_regression support weighted computations.
 - **Post-aggregation processing** - Apply filter and select to aggregation results.
 - **Output limiting** - Limit the number of output records per group key.
@@ -69,7 +69,7 @@ All aggregation functions share these common parameters.
 | name      | required | String  | Output field name for the aggregation result. Must be unique within the aggregation definition.                                                                                            |
 | op        | required | Enum    | Aggregation function. Values: `count`, `sum`, `avg`, `max`, `min`, `last`, `first`, `arg_max`, `arg_min`, `std`, `simple_regression`, `regression`, `array_agg`. Can also be specified as `func`.        |
 | field     | selective | String | Input field name to aggregate. Required for most functions (except `count`). Mutually exclusive with `expression` for functions that support expressions.                                  |
-| expression| optional | String  | Mathematical expression (exp4j syntax) to compute the value to aggregate. Available for `sum`, `avg`, `max`, `min`, `std`, `simple_regression`, `regression`. Uses input field names as variables.       |
+| expression| optional | String  | Mathematical expression (Lucene expressions syntax, see the `expression` section of the [select](select.md) module) to compute the value to aggregate. Available for `sum`, `avg`, `max`, `min`, `std`, `simple_regression`, `regression`. Uses input field names as variables.       |
 | condition | optional | Filter  | Filter condition applied per record. Only records matching the condition are included in the aggregation. Uses the same [Filter](../common/filter.md) syntax.                              |
 | ignore    | optional | Boolean | If `true`, this aggregation field is computed internally but excluded from the output schema. Default: `false`.                                                                            |
 
@@ -92,7 +92,7 @@ Computes the sum of a numeric field or expression.
 | parameter  | optional | type   | description                                               |
 |------------|----------|--------|-----------------------------------------------------------|
 | field      | selective | String | Input field name. Mutually exclusive with `expression`.  |
-| expression | selective | String | Mathematical expression (exp4j syntax).                  |
+| expression | selective | String | Mathematical expression (Lucene expressions syntax).                  |
 
 | output type | description                                                              |
 |-------------|--------------------------------------------------------------------------|
@@ -105,7 +105,7 @@ Computes the (optionally weighted) average of a numeric field or expression.
 | parameter        | optional | type   | description                                                                  |
 |------------------|----------|--------|------------------------------------------------------------------------------|
 | field            | selective | String | Input field name. Mutually exclusive with `expression`.                     |
-| expression       | selective | String | Mathematical expression (exp4j syntax).                                     |
+| expression       | selective | String | Mathematical expression (Lucene expressions syntax).                                     |
 | weightField      | optional | String | Field name for weights. When specified, computes weighted average.           |
 | weightExpression | optional | String | Expression for weights. Mutually exclusive with `weightField`.               |
 
@@ -120,7 +120,7 @@ Computes the maximum or minimum value of a numeric field or expression.
 | parameter  | optional | type   | description                                               |
 |------------|----------|--------|-----------------------------------------------------------|
 | field      | selective | String | Input field name. Mutually exclusive with `expression`.  |
-| expression | selective | String | Mathematical expression (exp4j syntax).                  |
+| expression | selective | String | Mathematical expression (Lucene expressions syntax).                  |
 
 | output type | description                                                            |
 |-------------|------------------------------------------------------------------------|
@@ -161,7 +161,7 @@ Computes the standard deviation (or variance) of a numeric field or expression. 
 | parameter        | optional | type    | description                                                                                                     |
 |------------------|----------|---------|-----------------------------------------------------------------------------------------------------------------|
 | field            | selective | String | Input field name. Mutually exclusive with `expression`.                                                        |
-| expression       | selective | String | Mathematical expression (exp4j syntax).                                                                        |
+| expression       | selective | String | Mathematical expression (Lucene expressions syntax).                                                                        |
 | ddof             | optional | Integer | Delta Degrees of Freedom. `0` for population std, `1` for sample std. Default: `1`.                            |
 | outputVar        | optional | Boolean | If `true`, outputs variance instead of standard deviation. Default: `false`.                                    |
 | weightField      | optional | String  | Field name for weights. When specified, computes weighted standard deviation.                                   |

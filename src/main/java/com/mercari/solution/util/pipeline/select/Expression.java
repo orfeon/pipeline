@@ -18,7 +18,7 @@ public class Expression implements SelectFunction {
     private final Schema.FieldType outputFieldType;
     private final boolean ignore;
 
-    private transient net.objecthunter.exp4j.Expression expression;
+    private transient ExpressionUtil.Expression expression;
 
     Expression(String name, String expressionString, Set<String> expressionVariables, Schema.FieldType outputFieldType, boolean ignore) {
         this.name = name;
@@ -84,9 +84,7 @@ public class Expression implements SelectFunction {
             final Double value = ExpressionUtil.getAsDouble(variable);
             values.put(variableName, value);
         }
-        double result = this.expression
-                .setVariables(values)
-                .evaluate();
+        double result = this.expression.evaluate(values);
         return ElementSchemaUtil.getAsPrimitive(outputFieldType, result);
     }
 

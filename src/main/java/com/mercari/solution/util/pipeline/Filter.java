@@ -9,7 +9,7 @@ import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
-import net.objecthunter.exp4j.Expression;
+import com.mercari.solution.util.ExpressionUtil.Expression;
 import org.apache.avro.util.Utf8;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -279,7 +279,7 @@ public class Filter implements Serializable {
                 final Double fieldValue = input.getAsDouble(variableName);
                 variables.put(variableName, fieldValue);
             }
-            return expression.setVariables(variables).evaluate();
+            return expression.evaluate(variables);
         }
 
         public Double evaluateExpression(final MElement input, final Map<String, Object> values) {
@@ -293,7 +293,7 @@ public class Filter implements Serializable {
                 }
                 variables.put(variableName, ExpressionUtil.getAsDouble(fieldValue));
             }
-            return expression.setVariables(variables).evaluate();
+            return expression.evaluate(variables);
         }
 
         public Set<String> getRequiredVariables() {
@@ -401,8 +401,8 @@ public class Filter implements Serializable {
             final String expression = jsonObject.get("expression").getAsString();
             leaf.key = expression;
             leaf.pattern = null;
-            leaf.expressionVariables = ExpressionUtil.estimateVariables(expression);
-            leaf.expression = ExpressionUtil.createDefaultExpression(expression, leaf.expressionVariables);
+            leaf.expression = ExpressionUtil.createDefaultExpression(expression);
+            leaf.expressionVariables = leaf.expression.getVariableNames();
             leaf.expressionString = expression;
         } else if(Op.MATCH.equals(leaf.op)) {
             leaf.key = jsonObject.get("key").getAsString();
@@ -445,7 +445,7 @@ public class Filter implements Serializable {
                                     Map.Entry::getKey,
                                     e -> ExpressionUtil.getAsDouble(e.getValue(), Double.NaN)));
                     try {
-                        final double evaluatedValue = leaf.expression.setVariables(variables).evaluate();
+                        final double evaluatedValue = leaf.expression.evaluate(variables);
                         if(Double.isNaN(evaluatedValue)) {
                             value = null;
                         } else {
