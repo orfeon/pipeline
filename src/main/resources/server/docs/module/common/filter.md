@@ -8,6 +8,42 @@ timestamp: 2026-07-17T00:00:00Z
 
 # Filter condition
 
+A filter condition can be written in two equivalent ways:
+
+* **SQL-like text** — a single string such as `price > 100 AND category IN ('a', 'b')`
+* **JSON conditions** — objects specifying the field (`key`), the comparison operator (`op`), and the value to be compared (`value`)
+
+Both are translated into the same internal condition tree at pipeline setup, so the filtering performance is identical. Use whichever is easier to read.
+
+## SQL-like condition text
+
+Instead of JSON objects, you can write the whole condition as one SQL-like string:
+
+```yaml
+filter: price > 100 AND (category IN ('a', 'b') OR name LIKE 'sale%')
+```
+
+Supported syntax:
+
+* Comparison operators: `=`, `!=`, `<>`, `>`, `>=`, `<`, `<=`
+* Logical operators: `AND`, `OR`, `NOT` (parentheses for grouping)
+* `IN (...)`, `NOT IN (...)`
+* `LIKE`, `NOT LIKE` (`%` and `_` wildcards)
+* `BETWEEN x AND y`, `NOT BETWEEN x AND y`
+* `IS NULL`, `IS NOT NULL`
+* Boolean fields can be used directly: `flag`, `NOT flag`, `flag = true`
+* **Field-to-field comparison**: both sides of a comparison can be field names, e.g. `updatedAt > createdAt` or `name != nickname`
+* Numeric arithmetic: `price * qty > total`, `(field1 - field2) / field3 >= 1` (values are evaluated as double, same as the `expression` attribute)
+* Nested fields with dots: `attr.category = 'x'`
+
+Notes:
+
+* String literals use single quotes (`'a'`). Field names that collide with SQL reserved words must be back-quoted: `` `timestamp` >= '2024-01-01T00:00:00Z' ``
+* Date/timestamp fields can be compared against string literals: `ts > '2024-01-01T00:00:00Z'`
+* Functions on strings, subqueries and other full SQL features are not supported here — use the `query` transform for those.
+
+## JSON conditions
+
 The filter condition of a record specifies three things: the field to be filtered, the comparison operator, and the value to be compared.
 
 For example, in the following description, the record with a field1 value of 0 will be selected.
@@ -51,9 +87,25 @@ It can be nested in filter conditions.
 
 Currently, the following comparison operators are supported:
 
-`=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in`
+`=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in`, `match`, `not match`
+
+`match` / `not match` test the field value against a regular expression given as `value`.
 
 The fields that can be used for comparison must be of type string or numeric or date or timestamp.
+
+## Compare two fields (`valueKey`)
+
+To compare a field against another field of the same record, use `valueKey` instead of `value`:
+
+```yaml
+filter:
+  - { key: updatedAt, op: ">", valueKey: createdAt }
+  - { key: name, op: "!=", valueKey: nickname }
+```
+
+This is the JSON equivalent of the SQL-like `updatedAt > createdAt AND name != nickname`.
+`valueKey` supports the comparison operators (`=`, `!=`, `>`, `>=`, `<`, `<=`) and compares values natively
+(numeric values are compared exactly without double conversion). It cannot be combined with `in` / `match` ops.
 
 ## Compare values by expressions
 
