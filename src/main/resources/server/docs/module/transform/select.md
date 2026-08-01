@@ -120,6 +120,10 @@ Casts a field value to a different type.
   type: string
 ```
 
+UUID values can be cast to `bytes` using their standard 16-byte representation,
+and 16-byte fields can be cast back to `uuid`. Casting a byte sequence whose
+length is not 16 to `uuid` produces an error.
+
 ### constant
 
 Creates a field with a constant value.
@@ -605,6 +609,7 @@ The following type names can be used in the `type` parameter:
 |-------------------|----------------------------|
 | `bool`, `boolean` | Boolean                    |
 | `string`          | String                     |
+| `uuid`            | UUID                       |
 | `bytes`           | Byte array                 |
 | `int32`, `integer`| 32-bit integer             |
 | `int64`, `long`   | 64-bit integer             |

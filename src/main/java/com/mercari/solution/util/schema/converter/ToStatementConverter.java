@@ -73,7 +73,7 @@ public class ToStatementConverter {
                 case ENUM, STRING -> {
                     if(LogicalTypes.uuid().equals(fieldSchema.getLogicalType())) {
                         if (isNull) {
-                            statement.setNull(index, Types.OTHER);
+                            statement.setUUID(index, null);
                         } else {
                             statement.setUUID(index, (record.get(field.name())).toString());
                         }
@@ -219,7 +219,10 @@ public class ToStatementConverter {
                     }
                 }
                 case STRING -> {
-                    if (isNull) {
+                    if(field.getOptions().hasOption("spannerType")
+                            && "UUID".equalsIgnoreCase(field.getOptions().getValue("spannerType"))) {
+                        statement.setUUID(index, isNull ? null : row.getString(field.getName()));
+                    } else if (isNull) {
                         statement.setNull(index, Types.VARCHAR);
                     } else {
                         statement.setString(index, row.getString(field.getName()));
@@ -284,6 +287,11 @@ public class ToStatementConverter {
                     } else {
                         statement.setString(index, struct.getString(field.getName()));
                     }
+                }
+                case UUID -> {
+                    statement.setUUID(index, struct.isNull(field.getName())
+                            ? null
+                            : struct.getUuid(field.getName()).toString());
                 }
                 case BYTES -> {
                     if (struct.isNull(field.getName())) {

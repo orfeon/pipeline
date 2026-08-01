@@ -286,6 +286,7 @@ public class Scrape implements SelectFunction {
 
         final Object output = switch (scrape.outputFieldType.getType()) {
             case string -> scrape.trim ? text.trim() : text;
+            case uuid -> UUID.fromString(text.trim()).toString();
             case bool -> Boolean.parseBoolean(text.trim());
             case int32 -> Integer.parseInt(text.trim().replaceAll(",", ""));
             case int64 -> Long.parseLong(text.trim().replaceAll(",", ""));

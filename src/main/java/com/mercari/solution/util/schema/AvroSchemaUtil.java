@@ -1908,7 +1908,7 @@ public class AvroSchemaUtil {
 
     private static Object read(BinaryDecoder decoder, com.mercari.solution.module.Schema.FieldType fieldType) throws IOException {
         return switch (fieldType.getType()) {
-            case string, json -> decoder.readString();
+            case string, uuid, json -> decoder.readString();
             case bool -> decoder.readBoolean();
             case bytes, decimal -> decoder.readBytes(null);
             case int32, date, enumeration -> decoder.readInt();

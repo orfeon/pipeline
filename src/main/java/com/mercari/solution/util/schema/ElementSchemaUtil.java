@@ -194,6 +194,7 @@ public class ElementSchemaUtil {
                 case ByteBuffer bb -> new String(bb.array(), StandardCharsets.UTF_8);
                 case Object o -> o.toString();
             };
+            case uuid -> java.util.UUID.fromString(primitiveValue.toString()).toString();
             case bytes -> switch (primitiveValue) {
                 case ByteBuffer bb -> bb;
                 case byte[] b -> ByteBuffer.wrap(b);

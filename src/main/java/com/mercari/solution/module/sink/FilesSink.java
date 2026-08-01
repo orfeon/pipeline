@@ -93,7 +93,7 @@ public class FilesSink extends Sink {
                     format = switch (inputField.getFieldType().getType()) {
                         case json, element, array, map -> Format.json;
                         case bytes -> Format.bytes;
-                        case string -> Format.text;
+                        case string, uuid -> Format.text;
                         default -> Format.text;
                     };
                 } else {
@@ -244,7 +244,7 @@ public class FilesSink extends Sink {
                     case json -> {
                         final Schema.Field field = ElementSchemaUtil.getInputField(content.field, inputSchema.getFields());
                         yield switch (field.getFieldType().getType()) {
-                            case string, json -> fieldValue;
+                            case string, uuid, json -> fieldValue;
                             case map -> MapToJsonConverter.convertObject((Map) fieldValue).toString();
                             case element -> ElementToJsonConverter.convert(field.getFieldType().getElementSchema(), (Map) fieldValue);
                             case null -> null;
