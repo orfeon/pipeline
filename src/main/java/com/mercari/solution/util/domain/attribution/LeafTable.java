@@ -1,6 +1,10 @@
 package com.mercari.solution.util.domain.attribution;
 
 import org.apache.datasketches.kll.KllDoublesSketch;
+import org.apache.datasketches.theta.CompactSketch;
+import org.apache.datasketches.theta.SetOperation;
+import org.apache.datasketches.theta.Union;
+import org.apache.datasketches.theta.UpdateSketch;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -21,6 +25,12 @@ import java.util.Set;
  * merged wholesale ({@code addBaselineSketch}/{@code addTargetSketch}, used when re-aggregating).
  * A sketch with up to {@value #SKETCH_K} values is exact (and deterministic); beyond that,
  * quantile estimates carry the KLL error bounds.</p>
+ *
+ * <p>Distinct columns hold one mergeable Theta sketch of identity values per leaf and role.
+ * They are fed one identity at a time ({@code addBaselineIdentity}/{@code addTargetIdentity})
+ * or merged wholesale ({@code addBaselineDistinct}/{@code addTargetDistinct}). Up to
+ * 2^{@value #THETA_LG_K} distinct identities per leaf and role the estimate is exact; beyond
+ * that, Theta error bounds apply.</p>
  */
 public final class LeafTable {
 
@@ -29,33 +39,45 @@ public final class LeafTable {
     /** KLL sketch size parameter: ~1.65% max quantile rank error at 99% confidence. */
     public static final int SKETCH_K = 200;
 
+    /** Theta sketch log2 nominal entries: exact up to 4096 identities per leaf and role. */
+    public static final int THETA_LG_K = 12;
+
     private final List<String> dimensionNames;
     private final List<String> columnNames;
     private final List<String> distributionNames;
+    private final List<String> distinctNames;
     private final String[][] dimValues;                 // [leaf][dim]
     private final double[][] baseline;                  // [column][leaf]
     private final double[][] target;                    // [column][leaf]
     private final KllDoublesSketch[][] baselineSketches; // [distribution][leaf], entries may be null (no samples)
     private final KllDoublesSketch[][] targetSketches;   // [distribution][leaf]
+    private final CompactSketch[][] baselineDistinct;    // [distinct][leaf], entries may be null (no identities)
+    private final CompactSketch[][] targetDistinct;      // [distinct][leaf]
 
     private LeafTable(
             final List<String> dimensionNames,
             final List<String> columnNames,
             final List<String> distributionNames,
+            final List<String> distinctNames,
             final String[][] dimValues,
             final double[][] baseline,
             final double[][] target,
             final KllDoublesSketch[][] baselineSketches,
-            final KllDoublesSketch[][] targetSketches) {
+            final KllDoublesSketch[][] targetSketches,
+            final CompactSketch[][] baselineDistinct,
+            final CompactSketch[][] targetDistinct) {
 
         this.dimensionNames = dimensionNames;
         this.columnNames = columnNames;
         this.distributionNames = distributionNames;
+        this.distinctNames = distinctNames;
         this.dimValues = dimValues;
         this.baseline = baseline;
         this.target = target;
         this.baselineSketches = baselineSketches;
         this.targetSketches = targetSketches;
+        this.baselineDistinct = baselineDistinct;
+        this.targetDistinct = targetDistinct;
     }
 
     public List<String> getDimensionNames() {
@@ -84,6 +106,32 @@ public final class LeafTable {
 
     public int distributionCount() {
         return distributionNames.size();
+    }
+
+    public List<String> getDistinctNames() {
+        return distinctNames;
+    }
+
+    public int distinctCount() {
+        return distinctNames.size();
+    }
+
+    public int distinctIndex(final String name) {
+        final int index = distinctNames.indexOf(name);
+        if(index < 0) {
+            throw new IllegalArgumentException("distinct column not found: " + name + " in " + distinctNames);
+        }
+        return index;
+    }
+
+    /** Baseline identity sketch of a leaf, or null when the leaf received no baseline identities. */
+    public CompactSketch baselineDistinct(final int distinct, final int leaf) {
+        return baselineDistinct[distinct][leaf];
+    }
+
+    /** Target identity sketch of a leaf, or null when the leaf received no target identities. */
+    public CompactSketch targetDistinct(final int distinct, final int leaf) {
+        return targetDistinct[distinct][leaf];
     }
 
     public int columnIndex(final String name) {
@@ -190,8 +238,9 @@ public final class LeafTable {
                         + column.length + " != " + dimValues.length);
             }
         }
-        return new LeafTable(dimensionNames, columnNames, distributionNames,
-                dimValues, newBaseline, target, baselineSketches, targetSketches);
+        return new LeafTable(dimensionNames, columnNames, distributionNames, distinctNames,
+                dimValues, newBaseline, target, baselineSketches, targetSketches,
+                baselineDistinct, targetDistinct);
     }
 
     private static double sum(final double[] values) {
@@ -203,14 +252,22 @@ public final class LeafTable {
     }
 
     public static Builder builder(final List<String> dimensionNames, final List<String> columnNames) {
-        return new Builder(dimensionNames, columnNames, List.of());
+        return new Builder(dimensionNames, columnNames, List.of(), List.of());
     }
 
     public static Builder builder(
             final List<String> dimensionNames,
             final List<String> columnNames,
             final List<String> distributionNames) {
-        return new Builder(dimensionNames, columnNames, distributionNames);
+        return new Builder(dimensionNames, columnNames, distributionNames, List.of());
+    }
+
+    public static Builder builder(
+            final List<String> dimensionNames,
+            final List<String> columnNames,
+            final List<String> distributionNames,
+            final List<String> distinctNames) {
+        return new Builder(dimensionNames, columnNames, distributionNames, distinctNames);
     }
 
     public static class Builder {
@@ -218,32 +275,69 @@ public final class LeafTable {
         private final List<String> dimensionNames;
         private final List<String> columnNames;
         private final List<String> distributionNames;
+        private final List<String> distinctNames;
         private final Map<List<String>, Accumulator> accumulator = new LinkedHashMap<>();
+
+        /** Accumulates raw identity updates and wholesale sketch merges into one Theta sketch. */
+        private static class ThetaAccumulator {
+            private UpdateSketch updates;
+            private Union merged;
+
+            void update(final String identity) {
+                if(updates == null) {
+                    updates = UpdateSketch.builder().setLogNominalEntries(THETA_LG_K).build();
+                }
+                updates.update(identity);
+            }
+
+            void merge(final CompactSketch sketch) {
+                if(merged == null) {
+                    merged = SetOperation.builder().setLogNominalEntries(THETA_LG_K).buildUnion();
+                }
+                merged.union(sketch);
+            }
+
+            CompactSketch compact() {
+                if(merged != null) {
+                    if(updates != null) {
+                        merged.union(updates.compact());
+                    }
+                    return merged.getResult();
+                }
+                return updates == null ? null : updates.compact();
+            }
+        }
 
         private static class Accumulator {
             final double[][] sums;                  // [role][column]
             final KllDoublesSketch[][] sketches;    // [role][distribution]
+            final ThetaAccumulator[][] distincts;   // [role][distinct]
 
-            Accumulator(final int columnCount, final int distributionCount) {
+            Accumulator(final int columnCount, final int distributionCount, final int distinctCount) {
                 this.sums = new double[2][columnCount];
                 this.sketches = new KllDoublesSketch[2][distributionCount];
+                this.distincts = new ThetaAccumulator[2][distinctCount];
             }
         }
 
         private Builder(
                 final List<String> dimensionNames,
                 final List<String> columnNames,
-                final List<String> distributionNames) {
+                final List<String> distributionNames,
+                final List<String> distinctNames) {
             if(dimensionNames == null || dimensionNames.isEmpty()) {
                 throw new IllegalArgumentException("dimensionNames must not be empty");
             }
             if((columnNames == null || columnNames.isEmpty())
-                    && (distributionNames == null || distributionNames.isEmpty())) {
-                throw new IllegalArgumentException("columnNames and distributionNames must not both be empty");
+                    && (distributionNames == null || distributionNames.isEmpty())
+                    && (distinctNames == null || distinctNames.isEmpty())) {
+                throw new IllegalArgumentException(
+                        "columnNames, distributionNames and distinctNames must not all be empty");
             }
             this.dimensionNames = List.copyOf(dimensionNames);
             this.columnNames = columnNames == null ? List.of() : List.copyOf(columnNames);
             this.distributionNames = distributionNames == null ? List.of() : List.copyOf(distributionNames);
+            this.distinctNames = distinctNames == null ? List.of() : List.copyOf(distinctNames);
         }
 
         public Builder addBaseline(final String[] dims, final double[] values) {
@@ -268,6 +362,22 @@ public final class LeafTable {
 
         public Builder addTargetSketch(final String[] dims, final int distribution, final KllDoublesSketch sketch) {
             return addSketch(1, dims, distribution, sketch);
+        }
+
+        public Builder addBaselineIdentity(final String[] dims, final int distinct, final String identity) {
+            return addIdentity(0, dims, distinct, identity);
+        }
+
+        public Builder addTargetIdentity(final String[] dims, final int distinct, final String identity) {
+            return addIdentity(1, dims, distinct, identity);
+        }
+
+        public Builder addBaselineDistinct(final String[] dims, final int distinct, final CompactSketch sketch) {
+            return addDistinct(0, dims, distinct, sketch);
+        }
+
+        public Builder addTargetDistinct(final String[] dims, final int distinct, final CompactSketch sketch) {
+            return addDistinct(1, dims, distinct, sketch);
         }
 
         private Builder add(final int role, final String[] dims, final double[] values) {
@@ -308,6 +418,30 @@ public final class LeafTable {
             return this;
         }
 
+        private Builder addIdentity(final int role, final String[] dims, final int distinct, final String identity) {
+            if(identity == null) {
+                return this;
+            }
+            final Accumulator acc = accumulator(dims);
+            if(acc.distincts[role][distinct] == null) {
+                acc.distincts[role][distinct] = new ThetaAccumulator();
+            }
+            acc.distincts[role][distinct].update(identity);
+            return this;
+        }
+
+        private Builder addDistinct(final int role, final String[] dims, final int distinct, final CompactSketch sketch) {
+            if(sketch == null || sketch.isEmpty()) {
+                return this;
+            }
+            final Accumulator acc = accumulator(dims);
+            if(acc.distincts[role][distinct] == null) {
+                acc.distincts[role][distinct] = new ThetaAccumulator();
+            }
+            acc.distincts[role][distinct].merge(sketch);
+            return this;
+        }
+
         private Accumulator accumulator(final String[] dims) {
             if(dims.length != dimensionNames.size()) {
                 throw new IllegalArgumentException("dimension count mismatch: "
@@ -318,7 +452,7 @@ public final class LeafTable {
                 key.add(dim == null ? NULL_VALUE : dim);
             }
             return accumulator.computeIfAbsent(
-                    key, k -> new Accumulator(columnNames.size(), distributionNames.size()));
+                    key, k -> new Accumulator(columnNames.size(), distributionNames.size(), distinctNames.size()));
         }
 
         public boolean isEmpty() {
@@ -329,11 +463,14 @@ public final class LeafTable {
             final int leafCount = accumulator.size();
             final int columnCount = columnNames.size();
             final int distributionCount = distributionNames.size();
+            final int distinctCount = distinctNames.size();
             final String[][] dimValues = new String[leafCount][];
             final double[][] baseline = new double[columnCount][leafCount];
             final double[][] target = new double[columnCount][leafCount];
             final KllDoublesSketch[][] baselineSketches = new KllDoublesSketch[distributionCount][leafCount];
             final KllDoublesSketch[][] targetSketches = new KllDoublesSketch[distributionCount][leafCount];
+            final CompactSketch[][] baselineDistinct = new CompactSketch[distinctCount][leafCount];
+            final CompactSketch[][] targetDistinct = new CompactSketch[distinctCount][leafCount];
             int leaf = 0;
             for(final Map.Entry<List<String>, Accumulator> entry : accumulator.entrySet()) {
                 dimValues[leaf] = entry.getKey().toArray(new String[0]);
@@ -345,10 +482,17 @@ public final class LeafTable {
                     baselineSketches[d][leaf] = entry.getValue().sketches[0][d];
                     targetSketches[d][leaf] = entry.getValue().sketches[1][d];
                 }
+                for(int d = 0; d < distinctCount; d++) {
+                    final ThetaAccumulator theta0 = entry.getValue().distincts[0][d];
+                    final ThetaAccumulator theta1 = entry.getValue().distincts[1][d];
+                    baselineDistinct[d][leaf] = theta0 == null ? null : theta0.compact();
+                    targetDistinct[d][leaf] = theta1 == null ? null : theta1.compact();
+                }
                 leaf++;
             }
-            return new LeafTable(dimensionNames, columnNames, distributionNames,
-                    dimValues, baseline, target, baselineSketches, targetSketches);
+            return new LeafTable(dimensionNames, columnNames, distributionNames, distinctNames,
+                    dimValues, baseline, target, baselineSketches, targetSketches,
+                    baselineDistinct, targetDistinct);
         }
     }
 }

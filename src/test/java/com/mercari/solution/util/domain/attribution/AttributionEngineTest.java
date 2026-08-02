@@ -258,6 +258,87 @@ public class AttributionEngineTest {
     }
 
     @Test
+    public void testDistinctMeasureLocalizesCardinalityDrop() {
+        // Disjoint identity spaces per leaf: every leaf has 40 baseline users; region=a target
+        // leaves drop to 12, b gains one user (asymmetric noise) and c stays flat
+        final LeafTable.Builder builder = LeafTable
+                .builder(List.of("region", "cat"), List.of(), List.of(), List.of("user"));
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String cat : List.of("x", "y")) {
+                final String[] dims = new String[]{region, cat};
+                final String leafPrefix = region + "_" + cat + "_u";
+                for(int i = 1; i <= 40; i++) {
+                    builder.addBaselineIdentity(dims, 0, leafPrefix + i);
+                }
+                final int targetUsers = switch (region) {
+                    case "a" -> 12;
+                    case "b" -> 41;
+                    default -> 40;
+                };
+                for(int i = 1; i <= targetUsers; i++) {
+                    builder.addTargetIdentity(dims, 0, leafPrefix + i);
+                }
+            }
+        }
+        final AttributionResult result = AttributionEngine.run(
+                builder.build(), flatDimensions(List.of("region", "cat")),
+                List.of(MeasureSpec.distinct("user")),
+                config(EngineConfig.Algorithm.riskloc), false);
+
+        final MeasureResult measureResult = result.results().getFirst();
+        Assertions.assertEquals("user", measureResult.measure());
+        Assertions.assertNull(measureResult.quantile());
+        Assertions.assertEquals(EngineConfig.EpBasis.absoluteDelta, measureResult.epBasis());
+        // Identity spaces are disjoint here, so union estimates equal sums (exact mode)
+        Assertions.assertEquals(240.0, measureResult.baselineTotal(), 1e-9);
+        Assertions.assertEquals(186.0, measureResult.targetTotal(), 1e-9);
+
+        Assertions.assertFalse(measureResult.findings().isEmpty());
+        final Finding finding = measureResult.findings().getFirst();
+        Assertions.assertEquals(new Slice(new int[]{0}, new String[]{"a"}), finding.slices().getFirst());
+        Assertions.assertEquals(80.0, finding.baselineSum(), 1e-9);
+        Assertions.assertEquals(24.0, finding.targetSum(), 1e-9);
+    }
+
+    @Test
+    public void testDistinctMeasureTotalsAreUnionsNotSums() {
+        // Both leaves contain the same 10 users: the total distinct count is 10, not 20,
+        // and the target drop to a shared 8-user subset yields a union of 8
+        final LeafTable.Builder builder = LeafTable
+                .builder(List.of("d"), List.of(), List.of(), List.of("user"));
+        for(final String d : List.of("a", "b")) {
+            for(int i = 1; i <= 10; i++) {
+                builder.addBaselineIdentity(new String[]{d}, 0, "u" + i);
+            }
+            for(int i = 1; i <= 8; i++) {
+                builder.addTargetIdentity(new String[]{d}, 0, "u" + i);
+            }
+        }
+        final AttributionResult result = AttributionEngine.run(
+                builder.build(), flatDimensions(List.of("d")),
+                List.of(MeasureSpec.distinct("user")),
+                config(EngineConfig.Algorithm.riskloc), false);
+
+        final MeasureResult measureResult = result.results().getFirst();
+        Assertions.assertEquals(10.0, measureResult.baselineTotal(), 1e-9);
+        Assertions.assertEquals(8.0, measureResult.targetTotal(), 1e-9);
+    }
+
+    @Test
+    public void testDistinctMeasureRejectsSyntheticMarginal() {
+        final LeafTable.Builder builder = LeafTable
+                .builder(List.of("d"), List.of(), List.of(), List.of("user"));
+        builder.addTargetIdentity(new String[]{"a"}, 0, "u1");
+        builder.addTargetIdentity(new String[]{"b"}, 0, "u2");
+        final LeafTable table = builder.build();
+
+        Assertions.assertThrows(IllegalArgumentException.class, () -> AttributionEngine.run(
+                table, flatDimensions(List.of("d")),
+                List.of(MeasureSpec.distinct("user")),
+                config(EngineConfig.Algorithm.riskloc), true));
+    }
+
+    @Test
     public void testDistributionMeasureRejectsSyntheticMarginal() {
         final LeafTable.Builder builder = LeafTable
                 .builder(List.of("d"), List.of(), List.of("latency"));

@@ -127,6 +127,32 @@ public class PreprocessTest {
         Assertions.assertNull(table.baselineSketch(0, otherLeaf));
     }
 
+    @Test
+    public void testGuardsMergeDistinctSketchesIntoOther() {
+        // c and d fall out of maxCardinality=2 (ranked by distinct mass); their identity sets
+        // overlap in "shared", so the merged "other" estimate is a union (3), not a sum (4)
+        final LeafTable.Builder builder = LeafTable
+                .builder(List.of("id"), List.of(), List.of(), List.of("user"));
+        for(int i = 1; i <= 50; i++) {
+            builder.addTargetIdentity(new String[]{"a"}, 0, "a" + i);
+        }
+        for(int i = 1; i <= 40; i++) {
+            builder.addTargetIdentity(new String[]{"b"}, 0, "b" + i);
+        }
+        builder.addTargetIdentity(new String[]{"c"}, 0, "shared");
+        builder.addTargetIdentity(new String[]{"c"}, 0, "c_only");
+        builder.addTargetIdentity(new String[]{"d"}, 0, "shared");
+        builder.addTargetIdentity(new String[]{"d"}, 0, "d_only");
+
+        final LeafTable table = Preprocess.applyGuards(
+                builder.build(), new EngineConfig.Guards(0, 3, 2));
+
+        Assertions.assertEquals(Set.of("a", "b", Preprocess.OTHER_VALUE), table.dimensionValues(0));
+        final int otherLeaf = findLeaf(table, Preprocess.OTHER_VALUE);
+        Assertions.assertEquals(3.0, table.targetDistinct(0, otherLeaf).getEstimate(), 1e-9);
+        Assertions.assertNull(table.baselineDistinct(0, otherLeaf));
+    }
+
     private static int findLeaf(final LeafTable table, final String value) {
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
             if(value.equals(table.dimValue(leaf, 0))) {

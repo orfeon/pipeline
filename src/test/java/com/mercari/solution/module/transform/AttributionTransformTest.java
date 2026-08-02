@@ -828,6 +828,108 @@ public class AttributionTransformTest {
     }
 
     @Test
+    public void testDistinctMeasure() throws Exception {
+        // Event-level rows with a user id; region=a loses most of its distinct users
+        // (10 -> 3) while b gains one (asymmetric noise) and c stays flat
+        final StringBuilder elements = new StringBuilder();
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String category : List.of("x", "y")) {
+                final int targetUsers = switch (region) {
+                    case "a" -> 3;
+                    case "b" -> 11;
+                    default -> 10;
+                };
+                for(int i = 1; i <= Math.max(10, targetUsers); i++) {
+                    final String user = region + "_" + category + "_u" + i;
+                    if(i <= 10) {
+                        if(!elements.isEmpty()) {
+                            elements.append(",");
+                        }
+                        elements.append(String.format(
+                                "{ \"region\": \"%s\", \"category\": \"%s\", \"window\": \"base\", \"user_id\": \"%s\" }",
+                                region, category, user));
+                    }
+                    if(i <= targetUsers) {
+                        elements.append(String.format(
+                                ",{ \"region\": \"%s\", \"category\": \"%s\", \"window\": \"cur\", \"user_id\": \"%s\" }",
+                                region, category, user));
+                    }
+                }
+            }
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "events",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ %s ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "window", "type": "string" },
+                        { "name": "user_id", "type": "string" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["events"],
+                      "parameters": {
+                        "measures": [
+                          { "name": "user_id", "type": "distinct" }
+                        ],
+                        "comparison": {
+                          "reference": {
+                            "strategy": "external",
+                            "labelField": "window",
+                            "baselineLabel": "base",
+                            "targetLabel": "cur"
+                          }
+                        },
+                        "vocabulary": {
+                          "dimensions": [
+                            { "name": "region" },
+                            { "name": "category" }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection output = outputs.get("attribution");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final List<MElement> list = toList(rows);
+            Assertions.assertEquals(1, list.size());
+            final MElement row = list.getFirst();
+            Assertions.assertEquals("user_id", row.getAsString("measure"));
+            Assertions.assertNull(row.getAsDouble("quantile"));
+            Assertions.assertEquals("absoluteDelta", row.getAsString("epBasis"));
+            Assertions.assertEquals(false, row.getPrimitiveValue("noFinding"));
+            assertElements(row, "region=a");
+            // Values are union distinct estimates, not sums
+            Assertions.assertEquals(20.0, row.getAsDouble("baseline"), DELTA);
+            Assertions.assertEquals(6.0, row.getAsDouble("target"), DELTA);
+            Assertions.assertEquals(60.0, row.getAsDouble("totalBaseline"), DELTA);
+            Assertions.assertEquals(48.0, row.getAsDouble("totalTarget"), DELTA);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
     public void testValidationErrors() throws Exception {
         // [config, expected message fragment]
         final String[][] cases = {
@@ -881,6 +983,32 @@ public class AttributionTransformTest {
                         "vocabulary": { "dimensions": [ { "name": "region" } ] }
                         """, 1),
                         "cannot be used with the synthetic reference"
+                },
+                {
+                        // quantiles are a distribution-only parameter
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distinct", "quantiles": [0.5] } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "quantiles must not be set for type: distinct"
+                },
+                {
+                        // distinct estimates are not additive: no netDelta basis
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distinct" } ],
+                        "semantics": { "epBasis": "netDelta" },
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "type: distinct always uses epBasis: absoluteDelta"
+                },
+                {
+                        // no independence model for identity sets
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "distinct" } ],
+                        "comparison": { "reference": { "strategy": "synthetic" } },
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 1),
+                        "type: distinct cannot be used with the synthetic reference"
                 },
                 {
                         // reserved comparison mode

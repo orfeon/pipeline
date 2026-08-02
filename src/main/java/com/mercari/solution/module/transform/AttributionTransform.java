@@ -38,7 +38,7 @@ import java.util.TreeSet;
 @Transform.Module(name="attribution")
 public class AttributionTransform extends Transform {
 
-    private enum MeasureType { fundamental, derived, distribution, sketch }
+    private enum MeasureType { fundamental, derived, distribution, distinct, sketch }
     private enum ComparisonMode { pair, series, cohort }
     private enum ReferenceStrategy { external, timeShift, split, synthetic }
     private enum SyntheticMethod { marginal, forecast }
@@ -310,6 +310,26 @@ public class AttributionTransform extends Transform {
                         errorMessages.add(prefix + "measures[" + measure.name
                                 + "] type: distribution cannot be used with the synthetic reference"
                                 + " (no independence model is defined for distributions)");
+                    }
+                } else if(MeasureType.distinct.equals(type)) {
+                    if(measure.expression != null) {
+                        errorMessages.add(prefix + "measures[" + measure.name + "].expression must not be set for type: distinct");
+                    }
+                    if(measure.quantiles != null) {
+                        errorMessages.add(prefix + "measures[" + measure.name + "].quantiles must not be set for type: distinct");
+                    }
+                    // The identity column may be of any scalar type (string ids, numeric ids, ...)
+                    validateFieldExists(prefix, errorMessages, inputSchemas, measure.name, "measures[" + measure.name + "]");
+                    // Distinct estimates are not additive: a net-change share is undefined
+                    if(semantics != null && EngineConfig.EpBasis.netDelta.equals(semantics.epBasis)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: distinct always uses epBasis: absoluteDelta; remove epBasis: netDelta");
+                    }
+                    if(comparison != null && comparison.reference != null
+                            && ReferenceStrategy.synthetic.equals(comparison.reference.strategy)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: distinct cannot be used with the synthetic reference"
+                                + " (no independence model is defined for identity sets)");
                     }
                 }
             }
@@ -661,6 +681,7 @@ public class AttributionTransform extends Transform {
         private List<MeasureSpec> measures;
         private List<String> columnNames;
         private List<String> distributionNames;
+        private List<String> distinctNames;
         private EngineConfig engineConfig;
         private String algorithm;
 
@@ -688,6 +709,7 @@ public class AttributionTransform extends Transform {
 
             final Set<String> columnNames = new LinkedHashSet<>();
             final Set<String> distributionNames = new LinkedHashSet<>();
+            final Set<String> distinctNames = new LinkedHashSet<>();
             final List<MeasureSpec> measures = new ArrayList<>();
             for(final Parameters.MeasureParameter measure : parameters.measures) {
                 if(MeasureType.derived.equals(measure.type)) {
@@ -698,6 +720,9 @@ public class AttributionTransform extends Transform {
                 } else if(MeasureType.distribution.equals(measure.type)) {
                     measures.add(MeasureSpec.distribution(measure.name, measure.quantiles));
                     distributionNames.add(measure.name);
+                } else if(MeasureType.distinct.equals(measure.type)) {
+                    measures.add(MeasureSpec.distinct(measure.name));
+                    distinctNames.add(measure.name);
                 } else {
                     measures.add(MeasureSpec.fundamental(measure.name));
                     columnNames.add(measure.name);
@@ -706,6 +731,7 @@ public class AttributionTransform extends Transform {
             task.measures = measures;
             task.columnNames = new ArrayList<>(columnNames);
             task.distributionNames = new ArrayList<>(distributionNames);
+            task.distinctNames = new ArrayList<>(distinctNames);
 
             task.algorithm = parameters.engine.algorithm.name();
             task.engineConfig = new EngineConfig(
@@ -800,7 +826,7 @@ public class AttributionTransform extends Transform {
 
                 final List<String> dimensionNames = DimensionSpec.names(task.dimensions);
                 final LeafTable.Builder builder = LeafTable
-                        .builder(dimensionNames, task.columnNames, task.distributionNames);
+                        .builder(dimensionNames, task.columnNames, task.distributionNames, task.distinctNames);
                 long dropped = 0;
                 for(final MElement element : elements) {
                     Logging.log(LOG, logs, "input", element);
@@ -834,6 +860,18 @@ public class AttributionTransform extends Transform {
                             builder.addTargetSample(dims, d, sample);
                         } else {
                             builder.addBaselineSample(dims, d, sample);
+                        }
+                    }
+                    // Distinct measures consume one identity per row (event-level input)
+                    for(int d = 0; d < task.distinctNames.size(); d++) {
+                        final String identity = element.getAsString(task.distinctNames.get(d));
+                        if(identity == null) {
+                            continue;
+                        }
+                        if(target) {
+                            builder.addTargetIdentity(dims, d, identity);
+                        } else {
+                            builder.addBaselineIdentity(dims, d, identity);
                         }
                     }
                 }

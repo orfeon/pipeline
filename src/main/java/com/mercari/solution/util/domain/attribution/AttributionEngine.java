@@ -37,9 +37,9 @@ public final class AttributionEngine {
 
         LeafTable binned = Preprocess.bin(raw, dimensions);
         if(syntheticMarginal) {
-            if(binned.distributionCount() > 0) {
+            if(binned.distributionCount() > 0 || binned.distinctCount() > 0) {
                 throw new IllegalArgumentException(
-                        "synthetic marginal baseline does not support distribution measures");
+                        "synthetic marginal baseline does not support distribution or distinct measures");
             }
             binned = SyntheticReference.marginal(binned);
         }
@@ -51,6 +51,10 @@ public final class AttributionEngine {
         for(final MeasureSpec measure : measures) {
             if(MeasureSpec.Type.distribution.equals(measure.type())) {
                 results.addAll(runDistribution(table, measure, algorithm, config));
+                continue;
+            }
+            if(MeasureSpec.Type.distinct.equals(measure.type())) {
+                results.add(runDistinct(table, measure, algorithm, config));
                 continue;
             }
             final boolean derived = MeasureSpec.Type.derived.equals(measure.type());
@@ -127,6 +131,82 @@ public final class AttributionEngine {
                     findings));
         }
         return results;
+    }
+
+    /**
+     * Localizes one distinct-count measure. Per-leaf f/v are the leaf Theta sketches' distinct
+     * estimates; the supplied explanatory power is the absolute estimate shift share
+     * {@code |v - f|} normalized to sum 1 (an absoluteDelta-basis semantic — identities can span
+     * leaves, so leaf-level deltas do not decompose the union delta exactly and a net-change
+     * share is not defined). Finding and total values are union estimates, never sums.
+     */
+    private static MeasureResult runDistinct(
+            final LeafTable table,
+            final MeasureSpec measure,
+            final AttributionAlgorithm algorithm,
+            final EngineConfig config) {
+
+        final int distinct = table.distinctIndex(measure.name());
+        final int leafCount = table.leafCount();
+        final double[] f = new double[leafCount];
+        final double[] v = new double[leafCount];
+        final double[] ep = new double[leafCount];
+        double weightSum = 0;
+        for(int leaf = 0; leaf < leafCount; leaf++) {
+            f[leaf] = estimateOf(table.baselineDistinct(distinct, leaf));
+            v[leaf] = estimateOf(table.targetDistinct(distinct, leaf));
+            ep[leaf] = Math.abs(v[leaf] - f[leaf]);
+            weightSum += ep[leaf];
+        }
+        if(weightSum > 0) {
+            for(int leaf = 0; leaf < leafCount; leaf++) {
+                ep[leaf] /= weightSum;
+            }
+        }
+        final List<Finding> findings = algorithm.localize(table, new MeasureVector(f, v, ep), config).stream()
+                .map(finding -> new Finding(
+                        finding.slices(),
+                        finding.riskScore(),
+                        finding.explanatoryPower(),
+                        finding.surprise(),
+                        unionEstimate(table, distinct, finding.slices(), true),
+                        unionEstimate(table, distinct, finding.slices(), false),
+                        finding.leafCount()))
+                .toList();
+        return new MeasureResult(
+                measure.name(),
+                unionEstimate(table, distinct, null, true),
+                unionEstimate(table, distinct, null, false),
+                EngineConfig.EpBasis.absoluteDelta,
+                findings);
+    }
+
+    private static double estimateOf(final org.apache.datasketches.theta.Sketch sketch) {
+        return sketch == null ? 0.0 : sketch.getEstimate();
+    }
+
+    /** Distinct estimate of the union of the given slices' leaf sketches ({@code null} slices = all leaves). */
+    private static double unionEstimate(
+            final LeafTable table,
+            final int distinct,
+            final List<Slice> slices,
+            final boolean baseline) {
+
+        final org.apache.datasketches.theta.Union union = org.apache.datasketches.theta.SetOperation
+                .builder().setLogNominalEntries(LeafTable.THETA_LG_K).buildUnion();
+        boolean any = false;
+        for(int leaf = 0; leaf < table.leafCount(); leaf++) {
+            if(slices == null || covered(slices, table.dims(leaf))) {
+                final org.apache.datasketches.theta.CompactSketch sketch = baseline
+                        ? table.baselineDistinct(distinct, leaf)
+                        : table.targetDistinct(distinct, leaf);
+                if(sketch != null && !sketch.isEmpty()) {
+                    union.union(sketch);
+                    any = true;
+                }
+            }
+        }
+        return any ? union.getResult().getEstimate() : 0.0;
     }
 
     private static MeasureVector distributionVector(

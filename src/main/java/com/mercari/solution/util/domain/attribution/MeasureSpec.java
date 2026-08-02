@@ -12,6 +12,9 @@ import java.util.List;
  * A {@code distribution} measure localizes shifts of the named value column's distribution at the
  * given {@code quantiles} (each in (0, 1)); per-leaf distributions are held as mergeable KLL
  * sketches (see {@link LeafTable}).
+ * A {@code distinct} measure localizes changes of the named identity column's distinct count
+ * (e.g. daily active users); per-leaf identity sets are held as mergeable Theta sketches, so a
+ * slice's distinct count is the estimate of the union of its leaves' sketches, never a sum.
  */
 public record MeasureSpec(
         String name,
@@ -27,7 +30,8 @@ public record MeasureSpec(
     public enum Type {
         fundamental,
         derived,
-        distribution
+        distribution,
+        distinct
     }
 
     public static MeasureSpec fundamental(final String name) {
@@ -49,5 +53,9 @@ public record MeasureSpec(
             }
         }
         return new MeasureSpec(name, Type.distribution, null, List.of(name), List.copyOf(quantiles));
+    }
+
+    public static MeasureSpec distinct(final String name) {
+        return new MeasureSpec(name, Type.distinct, null, List.of(name), null);
     }
 }
