@@ -1,0 +1,42 @@
+# Attribution: latency tail (p99) regression localization with a distribution measure.
+# "The p99 latency regressed after the release — which endpoint x region x version?"
+# Feeds event-level request rows; per-slice latency distributions are held as mergeable
+# KLL sketches and the quantile shifts are localized per configured quantile. The split
+# reference compares rows after the deploy (target) against rows before it (baseline).
+sources:
+  - name: requests
+    module: bigquery
+    parameters:
+      query: |
+        SELECT endpoint, region, app_version, deployed, latency_ms
+        FROM `myproject.logs.requests`
+        WHERE event_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR)
+
+transforms:
+  - name: latencyAttribution
+    module: attribution
+    inputs: [requests]
+    parameters:
+      measures:
+        - name: latency_ms
+          type: distribution
+          quantiles: [0.5, 0.99]
+      comparison:
+        reference:
+          strategy: split
+          split:
+            by: {field: deployed, baseline: false, target: true}
+      vocabulary:
+        dimensions:
+          - name: endpoint
+          - name: region
+          - name: app_version
+
+sinks:
+  - name: report
+    module: bigquery
+    inputs: [latencyAttribution]
+    parameters:
+      table: "myproject:mydataset.latency_attribution"
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND

@@ -34,6 +34,8 @@ Try to find and arrange a configuration file that is similar to the data process
     * [Cloud Storage(Spanner Backup) to Spanner](import-spanner-backup.json)
   * Data Processing
     * [Batch Aggregation (BigQuery)](bigquery-to-aggregation-to-bigquery.json)
+    * [Attribution: KPI change root cause analysis (week over week)](bigquery-to-attribution-to-bigquery.yaml)
+    * [Attribution: latency tail (p99) regression localization](bigquery-to-attribution-latency-to-bigquery.yaml)
     * [BeamSQL: Join BigQuery and Spanner table](beamsql-join-bigquery-and-spanner-to-spanner.json)
     * [Onnx batch inference](bigquery-to-onnx-to-vectorsearch.json)
     * [AutoML(Vertex AI endpoints) batch prediction](bigquery-to-automl-to-spanner.json)

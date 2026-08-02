@@ -20,6 +20,12 @@ group-by style) step: the input rows are expected to be **already leaf-aggregate
 (dimension columns + numeric measure columns). Rows with identical dimension values are summed,
 so multiple time buckets or partial aggregates per dimension tuple are fine.
 
+> **Scope note**: "attribution" here means multi-dimensional KPI-change / root-cause
+> attribution (the Adtributor / RiskLoc family). It is **not** marketing multi-touch
+> attribution — there is no notion of user journeys or per-touchpoint conversion credit
+> (the `shapley` option allocates a derived measure across its component variables, not
+> across channels) — and not ML feature attribution (SHAP-style model explanation).
+
 Supports:
 
 - **RiskLoc algorithm** (default) — multi-dimensional root cause localization by weighted risk
@@ -258,6 +264,27 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
   `riskloc` result is not a search artifact.
 - **`squeeze`** (reserved) — will target forecast-based baselines with very high cardinality;
   until then use `riskloc` with `guards.maxCardinality`.
+
+### Calibrating riskThreshold with the exhaustive oracle
+
+When onboarding a new data domain, use `exhaustive` once to calibrate `riskloc` instead of
+guessing thresholds:
+
+1. Take a representative sample of the comparison (restrict to the vocabulary dimensions,
+   `guards: {maxLayer: 2}`, and keep the leaf count small — up to roughly thousands of
+   distinct tuples — so the full enumeration stays cheap).
+2. Run the config twice, changing only `engine.algorithm`: `exhaustive` produces the exact
+   explanatory-power ranking (the ground truth), `riskloc` the production candidate.
+3. Compare the top slices. If `riskloc` misses culprits that sit high in the exhaustive
+   ranking, lower `riskThreshold` in steps of ~0.05 and re-run; single-leaf culprits in
+   particular sit on the 0.5 boundary (see [Known limitations](#known-limitations)). If
+   `riskloc` reports slices the exhaustive ranking assigns negligible explanatory power,
+   raise the threshold instead.
+4. Fix the calibrated threshold in the production config and drop `exhaustive`. Re-calibrate
+   when the data regime changes (new dimensions, cardinality growth, different noise level).
+
+The same two-run comparison also distinguishes "the algorithm missed it" from "the signal is
+not in the data" when a production run returns an unexpected no-finding.
 
 For derived measures, keep `derivedAllocation: gre` (default) for ordinary ratio KPIs.
 `partialDerivative` is a cheap linearization that is adequate while changes are small relative
