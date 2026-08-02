@@ -107,10 +107,12 @@ public final class Preprocess {
     }
 
     private static LeafTable rebuild(final LeafTable table, final Relabeler relabeler) {
-        final LeafTable.Builder builder = LeafTable
-                .builder(table.getDimensionNames(), table.getColumnNames(), table.getDistributionNames());
+        final LeafTable.Builder builder = LeafTable.builder(
+                table.getDimensionNames(), table.getColumnNames(),
+                table.getDistributionNames(), table.getDistinctNames());
         final int columnCount = table.columnCount();
         final int distributionCount = table.distributionCount();
+        final int distinctCount = table.distinctCount();
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
             final String[] dims = relabeler.relabel(leaf, table.dims(leaf));
             final double[] baselineValues = new double[columnCount];
@@ -124,6 +126,10 @@ public final class Preprocess {
             for(int d = 0; d < distributionCount; d++) {
                 builder.addBaselineSketch(dims, d, table.baselineSketch(d, leaf));
                 builder.addTargetSketch(dims, d, table.targetSketch(d, leaf));
+            }
+            for(int d = 0; d < distinctCount; d++) {
+                builder.addBaselineDistinct(dims, d, table.baselineDistinct(d, leaf));
+                builder.addTargetDistinct(dims, d, table.targetDistinct(d, leaf));
             }
         }
         return builder.build();
@@ -147,6 +153,11 @@ public final class Preprocess {
                 final double nv = sketchN(table.targetSketch(d, leaf));
                 score += nf + nv + Math.abs(nv - nf);
             }
+            for(int d = 0; d < table.distinctCount(); d++) {
+                final double nf = estimate(table.baselineDistinct(d, leaf));
+                final double nv = estimate(table.targetDistinct(d, leaf));
+                score += nf + nv + Math.abs(nv - nf);
+            }
             scores.merge(table.dimValue(leaf, dim), score, Double::sum);
         }
         return scores;
@@ -154,7 +165,7 @@ public final class Preprocess {
 
     /** Volume share per dimension value: max over columns of (Σ|f|+Σ|v|) / column total volume. */
     private static Map<String, Double> valueSupports(final LeafTable table, final int dim) {
-        final int columnCount = table.columnCount() + table.distributionCount();
+        final int columnCount = table.columnCount() + table.distributionCount() + table.distinctCount();
         final Map<String, double[]> volumes = new LinkedHashMap<>();
         final double[] totals = new double[columnCount];
         for(int leaf = 0; leaf < table.leafCount(); leaf++) {
@@ -164,9 +175,12 @@ public final class Preprocess {
                 final double abs;
                 if(c < table.columnCount()) {
                     abs = Math.abs(table.baselineValue(c, leaf)) + Math.abs(table.targetValue(c, leaf));
-                } else {
+                } else if(c < table.columnCount() + table.distributionCount()) {
                     final int d = c - table.columnCount();
                     abs = sketchN(table.baselineSketch(d, leaf)) + sketchN(table.targetSketch(d, leaf));
+                } else {
+                    final int d = c - table.columnCount() - table.distributionCount();
+                    abs = estimate(table.baselineDistinct(d, leaf)) + estimate(table.targetDistinct(d, leaf));
                 }
                 volume[c] += abs;
                 totals[c] += abs;
@@ -248,6 +262,10 @@ public final class Preprocess {
 
     private static double sketchN(final KllDoublesSketch sketch) {
         return sketch == null ? 0 : sketch.getN();
+    }
+
+    private static double estimate(final org.apache.datasketches.theta.Sketch sketch) {
+        return sketch == null ? 0 : sketch.getEstimate();
     }
 
     private static Double parse(final String value) {

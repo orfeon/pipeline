@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Attribution Transform Module
-description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
+description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), distinct-count measures (cardinality change localization via mergeable Theta sketches), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
 tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches]
 timestamp: 2026-07-12T00:00:00Z
 ---
@@ -40,6 +40,9 @@ Supports:
   distributions are held as mergeable [Apache DataSketches](https://datasketches.apache.org/)
   KLL sketches and quantile shifts are localized per configured quantile. See
   [Distribution measures](#distribution-measures).
+- **Distinct-count measures** — "DAU dropped — which slice?" Per-leaf identity sets are held as
+  mergeable Theta sketches; distinct counts are not sum-additive, and the sketch union is what
+  makes slice evaluation possible. See [Distinct-count measures](#distinct-count-measures).
 - **Four reference (baseline) strategies** — two-input `external`, single-input `external` with a
   label column, `timeShift` (period-over-period), `split` (by a row attribute), and
   `synthetic` marginal (interaction discovery against an independence model).
@@ -73,8 +76,8 @@ Array of measures to explain. Each measure is analyzed independently.
 
 | parameter  | optional | type   | description                                                                                                     |
 |------------|----------|--------|-----------------------------------------------------------------------------------------------------------------|
-| name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. For `distribution`, the numeric input field whose per-row values form the distribution. |
-| type       | optional | Enum   | `fundamental` (default), `derived` or `distribution`. (`sketch` is **reserved**.)                                |
+| name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. For `distribution`, the numeric input field whose per-row values form the distribution. For `distinct`, the identity field (any scalar type) whose distinct count is analyzed. |
+| type       | optional | Enum   | `fundamental` (default), `derived`, `distribution` or `distinct`. (`sketch` is **reserved**.)                    |
 | expression | required for derived | String | Arithmetic expression (Lucene expressions, JavaScript-like syntax) over numeric input fields, e.g. `"orders / sessions"`. All variables must exist as numeric input fields. |
 | quantiles  | optional (distribution only) | Array<Double\> | Quantiles in (0, 1) to analyze, e.g. `[0.5, 0.99]`. Each quantile is localized independently and produces its own result rows. Default `[0.5]`. |
 
@@ -107,6 +110,31 @@ Semantics per configured quantile `q`:
 Sketches with up to 200 values per leaf and role are exact; beyond that, quantile estimates
 carry the KLL error bounds (~1.65% rank error) and sketch compaction introduces slight
 run-to-run variation. Best suited to positive-valued metrics (latency, size, cost).
+
+### Distinct-count measures
+
+A `distinct` measure localizes a **change in a distinct count** (e.g. "DAU dropped — which
+slice?"). Distinct counts are not sum-additive — the same identity can appear in many leaves —
+so they cannot be declared as `fundamental` measures over pre-computed `COUNT(DISTINCT ...)`
+columns. Instead, feed **event-level rows**: each row contributes its value of the `name` field
+(any scalar type — string ids, numeric ids) as one identity to its dimension tuple's set,
+held as a mergeable Theta sketch. A slice's distinct count is the estimate of the **union** of
+its leaves' sketches, never a sum.
+
+Semantics:
+
+- Per-leaf baseline/target values are the leaf sketches' distinct estimates; the localization
+  algorithms then run unchanged on those values.
+- Explanatory power is the **absolute estimate shift** share `|Δestimate|`, normalized to sum 1.
+  Because identities can span leaves, leaf-level deltas do not decompose the union delta
+  exactly; distinct measures therefore always report `epBasis: absoluteDelta` (requesting
+  `netDelta` is a validation error).
+- Reported `baseline` / `target` values (per finding and totals) are union estimates.
+- Not combinable with the `synthetic` reference; `quantiles` is a distribution-only parameter.
+
+Up to 4096 distinct identities per leaf and role the estimate is exact (and deterministic);
+beyond that, Theta error bounds apply (~1.6% RSE) and the union of many estimating sketches
+compounds slightly.
 
 ## comparison parameters
 
@@ -230,7 +258,7 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | riskScore         | Double (nullable)                             | RiskLoc risk score (null for other algorithms)                     |
 | explanatoryPower  | Double                                        | Share of the total change explained by the slice                   |
 | surprise          | Double (nullable)                             | Jensen–Shannon divergence based distribution-change score          |
-| baseline / target / delta | Double                                | Slice sums (derived measures: the expression over slice component sums; distribution measures: quantiles of the merged slice sketches) |
+| baseline / target / delta | Double                                | Slice sums (derived measures: the expression over slice component sums; distribution measures: quantiles of the merged slice sketches; distinct measures: union distinct estimates) |
 | deltaRatio        | Double (nullable)                             | `delta / baseline` (null when baseline is 0)                       |
 | totalBaseline / totalTarget | Double                              | Measure totals for context                                         |
 | leafCount         | Long                                          | Number of leaves covered by the slice                              |
@@ -484,6 +512,11 @@ exponentially with `guards.maxLayer`, so raise it with care.
   estimates carry the KLL rank error bounds (~1.65%) and sketch compaction is randomized, so
   repeated runs can differ slightly in quantile values (rarely in the localized slices). Small
   quantile shifts below the error bound are not reliably attributable.
+- **Distinct measures are approximate beyond 4096 identities per leaf and role** (Theta error
+  bounds, ~1.6% RSE). Leaf-level distinct deltas do not decompose the union delta exactly when
+  identities span leaves — explanatory power ranks leaves by their own estimate shifts, which
+  can over- or under-state a slice's contribution to the overall distinct change. The reported
+  slice values (union estimates) are always the consistent quantity.
 - Misspelled enum values deserialize as null and silently fall back to their defaults
   (Gson behavior common to all modules); validation rejects reserved values only when
   spelled exactly.
