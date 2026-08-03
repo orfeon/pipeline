@@ -52,15 +52,12 @@ This module differs from the [Files Source Module](files.md): the Files module o
 | skipHeaderLines | optional | Integer | Number of header lines to skip at the beginning of each file. For example, set to `1` to skip a single header row in CSV files.                                       |
 | delimiter       | optional | String  | Custom record delimiter. Default is newline (`\n`). Use this when records are separated by a character or string other than newline.                                   |
 
-### S3 parameters
+### Reading from AWS S3
 
-When reading from AWS S3, provide AWS credentials via the `s3` parameter block, or configure credentials at the pipeline settings level.
-
-| parameter      | optional | type   | description                                     |
-|----------------|----------|--------|-------------------------------------------------|
-| s3.accessKey   | required | String | AWS access key ID for S3 authentication.        |
-| s3.secretKey   | required | String | AWS secret access key for S3 authentication.    |
-| s3.region      | required | String | AWS region of the S3 bucket (e.g. `us-west-2`). |
+When reading from AWS S3 (`s3://...`), configure credentials and region at the pipeline settings
+level (`options.aws` — see the aws options reference). Both schema sampling and the actual read
+use the same credential source. The former per-module `s3` parameter block
+(`s3.accessKey` / `s3.secretKey` / `s3.region`) has been removed.
 
 ## Schema behavior
 

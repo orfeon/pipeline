@@ -228,13 +228,13 @@ would need per-IO wiring via its `ClientConfiguration`; noted in §8.
 
 ### 5.3 `S3Util` unification
 
-`S3Util.storage(accessKey, secretKey, region)` and `StorageSource.S3Parameters` static keys are
-deprecated. Construction-time schema sampling now goes through Beam `FileSystems`
-(`FileSchemaUtil`), i.e. literally the same s3 filesystem, credential chain, and glob resolution
-as the runtime IO — removing the split-brain of §1.3 and covering `gcpFederation` automatically.
-Only when the deprecated `S3Parameters` are present does sampling fall back to a dedicated client
-built via `S3Util.storage(...)` (warning at assembly); this keeps working for one deprecation
-cycle.
+`S3Util.storage(accessKey, secretKey, region)` and the `StorageSource.S3Parameters` static keys
+went through their deprecation cycle and have been removed. Construction-time schema sampling
+now goes through Beam `FileSystems` (`FileSchemaUtil`), i.e. literally the same s3 filesystem,
+credential chain, and glob resolution as the runtime IO — removing the split-brain of §1.3 and
+covering `gcpFederation` automatically. `S3Util.storage(PipelineOptions)` remains for modules
+that need a direct client (e.g. the files sink), built through the same
+`S3Options.s3ClientFactoryClass` chain.
 
 ## 6. Common layers
 

@@ -127,15 +127,4 @@ public class FileSchemaUtilTest {
         Assertions.assertTrue(e.getMessage().contains("could not be read"), "unexpected message: " + e.getMessage());
     }
 
-    @Test
-    public void testGetParquetSchemaFromBytes() throws Exception {
-        final Path file = tempDir.resolve("test.parquet");
-        writeParquetFile(file);
-
-        final Schema schema = FileSchemaUtil.getParquetSchema(Files.readAllBytes(file));
-
-        Assertions.assertNotNull(schema.getField("id"));
-        Assertions.assertNotNull(schema.getField("name"));
-    }
-
 }

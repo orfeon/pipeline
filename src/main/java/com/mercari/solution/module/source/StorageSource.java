@@ -2,7 +2,6 @@ package com.mercari.solution.module.source;
 
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
-import com.mercari.solution.util.cloud.amazon.S3Util;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.FileSchemaUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
@@ -19,9 +18,6 @@ import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.transforms.*;
 import org.apache.beam.sdk.values.*;
 import org.joda.time.Instant;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import software.amazon.awssdk.services.s3.S3Client;
 
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
@@ -30,8 +26,6 @@ import java.util.*;
 
 @Source.Module(name="storage", schema=true)
 public class StorageSource extends Source {
-
-    private static final Logger LOG = LoggerFactory.getLogger(StorageSource.class);
 
     private static class Parameters implements Serializable {
 
@@ -47,15 +41,6 @@ public class StorageSource extends Source {
         private String filterPrefix;
         private Integer skipHeaderLines;
         private String delimiter;
-
-        // for AWS S3
-        private S3Parameters s3;
-
-        private static class S3Parameters implements Serializable {
-            private String accessKey;
-            private String secretKey;
-            private String region;
-        }
 
         public void validate() {
             final List<String> errorMessages = new ArrayList<>();
@@ -108,7 +93,7 @@ public class StorageSource extends Source {
                 switch (parameters.format) {
                     case avro -> {
                         final org.apache.avro.Schema readSchema = getAvroSchema(
-                                parameters.input, getSchema(), parameters.s3, begin.getPipeline().getOptions());
+                                parameters.input, getSchema());
                         // fields projection (schema-redesign.md P3): the projected reader schema makes
                         // Avro schema resolution skip unlisted writer fields during decode
                         outputAvroSchema = createProjectionSchema(readSchema, parameters.fields);
@@ -135,7 +120,7 @@ public class StorageSource extends Source {
                     }
                     case parquet -> {
                         final org.apache.avro.Schema inputAvroSchema = getParquetSchema(
-                                parameters.input, getSchema(), parameters.s3, begin.getPipeline().getOptions());
+                                parameters.input, getSchema());
                         if(parameters.fields.isEmpty()) {
                             outputAvroSchema = inputAvroSchema;
                         } else {
@@ -375,92 +360,24 @@ public class StorageSource extends Source {
 
     }
 
-    // The sampling client and the runtime IO (Beam s3 filesystem) share the credential source
-    // configured in options.aws; per-module static keys remain only as a deprecated fallback.
-    private static S3Client createS3Client(
-            final Parameters.S3Parameters s3,
-            final org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
-
-        if(s3 != null && (s3.accessKey != null || s3.secretKey != null)) {
-            LOG.warn("parameters.s3.accessKey/secretKey are deprecated and apply only to schema sampling. "
-                    + "Configure options.aws.credentials instead (docs/config/options/aws.md)");
-            return S3Util.storage(s3.accessKey, s3.secretKey, s3.region);
-        }
-        if(s3 != null && s3.region != null
-                && pipelineOptions.as(org.apache.beam.sdk.io.aws2.options.AwsOptions.class).getAwsRegion() == null) {
-            LOG.warn("parameters.s3.region is deprecated. Configure options.aws.region instead (docs/config/options/aws.md)");
-            return S3Util.storage(null, null, s3.region);
-        }
-        return S3Util.storage(pipelineOptions);
-    }
-
-    // Deprecated per-module s3 parameters force a dedicated sampling client (they are not visible
-    // to the Beam s3 filesystem); everything else samples through FileSystems so path/glob
-    // resolution and credentials match the runtime IO exactly.
-    private static boolean useLegacyS3Client(
-            final Parameters.S3Parameters s3,
-            final org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
-
-        if(s3 == null) {
-            return false;
-        }
-        if(s3.accessKey != null || s3.secretKey != null) {
-            return true;
-        }
-        return s3.region != null
-                && pipelineOptions.as(org.apache.beam.sdk.io.aws2.options.AwsOptions.class).getAwsRegion() == null;
-    }
-
+    // Sampling goes through Beam FileSystems (FileSchemaUtil), so path/glob resolution and
+    // credentials (options.aws for s3://) match the runtime IO exactly.
     private static org.apache.avro.Schema getAvroSchema(
             final String input,
-            final Schema inputSchema,
-            final Parameters.S3Parameters s3,
-            final org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            final Schema inputSchema) {
 
         if(inputSchema != null) {
             return inputSchema.getAvroSchema();
-        }
-
-        if(input.startsWith("s3://") && useLegacyS3Client(s3, pipelineOptions)) {
-            final S3Client client = createS3Client(s3, pipelineOptions);
-            final org.apache.avro.Schema avroSchema = S3Util.getAvroSchema(client, input);
-            if(avroSchema != null) {
-                return avroSchema;
-            }
-            final String bucket = S3Util.getBucketName(input);
-            return S3Util.listFiles(client, input)
-                    .stream()
-                    .map(object -> S3Util.getAvroSchema(client, bucket, object))
-                    .filter(Objects::nonNull)
-                    .findAny()
-                    .orElseThrow(() -> new IllegalStateException("Avro schema not found for input: " + input));
         }
         return FileSchemaUtil.getAvroSchema(input);
     }
 
     private static org.apache.avro.Schema getParquetSchema(
             final String input,
-            final Schema inputSchema,
-            final Parameters.S3Parameters s3,
-            final org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+            final Schema inputSchema) {
 
         if(inputSchema != null) {
             return inputSchema.getAvroSchema();
-        }
-
-        if(input.startsWith("s3://") && useLegacyS3Client(s3, pipelineOptions)) {
-            final S3Client client = createS3Client(s3, pipelineOptions);
-            final org.apache.avro.Schema avroSchema = S3Util.getParquetSchema(client, input);
-            if(avroSchema != null) {
-                return avroSchema;
-            }
-            final String bucket = S3Util.getBucketName(input);
-            return S3Util.listFiles(client, input)
-                    .stream()
-                    .map(path -> S3Util.getParquetSchema(client, bucket, path))
-                    .filter(Objects::nonNull)
-                    .findAny()
-                    .orElseThrow(() -> new IllegalStateException("Parquet schema not found for input: " + input));
         }
         return FileSchemaUtil.getParquetSchema(input);
     }

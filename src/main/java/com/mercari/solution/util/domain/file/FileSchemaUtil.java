@@ -68,14 +68,6 @@ public class FileSchemaUtil {
                 "Parquet schema could not be read from any of the " + files.size() + " files matching: " + pathOrPattern);
     }
 
-    public static Schema getParquetSchema(final byte[] bytes) {
-        try(final ParquetFileReader reader = ParquetFileReader.open(new ByteArrayInputFile(bytes), READ_OPTIONS)) {
-            return new AvroSchemaConverter().convert(reader.getFooter().getFileMetaData().getSchema());
-        } catch (final IOException e) {
-            throw new RuntimeException("Failed to read parquet schema from bytes", e);
-        }
-    }
-
     private static Schema readParquetSchema(final MatchResult.Metadata metadata) throws IOException {
         try(final ReadableByteChannel channel = FileSystems.open(metadata.resourceId())) {
             // ParquetFileReader only reads the footer when the input is seekable
@@ -147,11 +139,11 @@ public class FileSchemaUtil {
         }
     }
 
-    public static class ByteArrayInputFile implements InputFile {
+    private static class ByteArrayInputFile implements InputFile {
 
         private final byte[] data;
 
-        public ByteArrayInputFile(final byte[] data) {
+        ByteArrayInputFile(final byte[] data) {
             this.data = data;
         }
 
