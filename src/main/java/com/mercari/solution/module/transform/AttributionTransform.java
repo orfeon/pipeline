@@ -7,14 +7,30 @@ import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.attribution.*;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.ListCoder;
+import org.apache.beam.sdk.coders.SerializableCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Metrics;
+import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.Max;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
+import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.datasketches.kll.KllDoublesSketch;
+import org.apache.datasketches.memory.Memory;
+import org.apache.datasketches.theta.SetOperation;
+import org.apache.datasketches.theta.Sketches;
 
 import java.io.Serializable;
 import java.time.Duration;
@@ -652,21 +668,55 @@ public class AttributionTransform extends Transform {
         final Task task = Task.of(parameters, inputs.getAllInputs());
         final Schema outputSchema = createOutputSchema();
 
+        // Input rows may be raw events or pre-aggregated leaves: leaf aggregation (sums, KLL and
+        // Theta sketches, row counts) runs distributed per dimension tuple with combiner lifting,
+        // so only the distinct leaf aggregates reach the single-worker localization step.
+        final PCollection<MElement> unioned = inputs
+                .apply("Union", Union.flatten()
+                        .withWaits(getWaits())
+                        .withStrategy(getStrategy()));
+
+        // timeShift anchors its two comparison windows at the max time in the data,
+        // computed up-front as a side input so runs stay deterministic and reproducible
+        PCollectionView<List<Long>> maxTimeView = null;
+        if(ReferenceStrategy.timeShift.equals(task.strategy)) {
+            maxTimeView = unioned
+                    .apply("ExtractEventTime", ParDo.of(new ExtractTimeDoFn(task)))
+                    .apply("MaxEventTime", Max.longsGlobally().withoutDefaults())
+                    .apply("MaxEventTimeView", View.asList());
+        }
+
+        final TupleTag<KV<List<String>, LeafContribution>> contributionTag = new TupleTag<>() {};
+        final TupleTag<BadRecord> resolveFailureTag = new TupleTag<>() {};
+        ParDo.MultiOutput<MElement, KV<List<String>, LeafContribution>> resolvePar = ParDo
+                .of(new ContributionDoFn(task, getLoggings(), getFailFast(), resolveFailureTag, maxTimeView))
+                .withOutputTags(contributionTag, TupleTagList.of(resolveFailureTag));
+        if(maxTimeView != null) {
+            resolvePar = resolvePar.withSideInputs(maxTimeView);
+        }
+        final PCollectionTuple resolved = unioned.apply("ResolveRoles", resolvePar);
+
+        final KvCoder<List<String>, LeafAggregate> leafCoder = KvCoder.of(
+                ListCoder.of(StringUtf8Coder.of()), SerializableCoder.of(LeafAggregate.class));
+        final PCollection<KV<List<String>, LeafAggregate>> leaves = resolved.get(contributionTag)
+                .setCoder(KvCoder.of(
+                        ListCoder.of(StringUtf8Coder.of()), SerializableCoder.of(LeafContribution.class)))
+                .apply("AggregateLeaves", Combine.perKey(new LeafCombineFn(
+                        task.columnNames.size(), task.distributionNames.size(), task.distinctNames.size())))
+                .setCoder(leafCoder);
+
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
         final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
-
-        // Small execution profile: collect the (already aggregated) leaves into a single group
-        // and run the attribution core in one worker
-        final PCollectionTuple outputs = inputs
-                .apply("Union", Union.withKeys(List.of())
-                        .withWaits(getWaits())
-                        .withStrategy(getStrategy()))
-                .apply("GroupAll", GroupByKey.create())
+        final PCollectionTuple outputs = leaves
+                .apply("WithGatherKey", WithKeys.of(""))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), leafCoder))
+                .apply("GatherLeaves", GroupByKey.create())
                 .apply("Attribute", ParDo
                         .of(new AttributionDoFn(task, getLoggings(), getFailFast(), failureTag))
                         .withOutputTags(outputTag, TupleTagList.of(failureTag)));
 
         if(errorHandler != null) {
+            errorHandler.addError(resolved.get(resolveFailureTag));
             errorHandler.addError(outputs.get(failureTag));
         }
 
@@ -778,128 +828,118 @@ public class AttributionTransform extends Transform {
 
     private enum Role { TARGET, BASELINE, DROP }
 
-    private static class AttributionDoFn extends DoFn<KV<String, Iterable<MElement>>, MElement> {
+    /** Key marker for the target role in the leaf aggregation key (first key element). */
+    private static final String ROLE_TARGET = "t";
+    private static final String ROLE_BASELINE = "b";
+
+    private static Long extractEpochMillis(final Task task, final MElement element) {
+        if(task.timeField == null) {
+            return element.getEpochMillis();
+        }
+        final org.joda.time.Instant instant = element.getAsJodaInstant(task.timeField);
+        return instant == null ? null : instant.getMillis();
+    }
+
+    private static class ExtractTimeDoFn extends DoFn<MElement, Long> {
+
+        private final Task task;
+
+        ExtractTimeDoFn(final Task task) {
+            this.task = task;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final Long epochMillis = extractEpochMillis(task, c.element());
+            if(epochMillis != null) {
+                c.output(epochMillis);
+            }
+        }
+    }
+
+    /** Per-row contribution to one leaf: measure sums, distribution samples and identities. */
+    static class LeafContribution implements Serializable {
+
+        final double[] columns;      // measure column values (0.0 for missing)
+        final double[] samples;      // distribution samples (NaN = absent)
+        final String[] identities;   // distinct identities (null = absent)
+
+        LeafContribution(final double[] columns, final double[] samples, final String[] identities) {
+            this.columns = columns;
+            this.samples = samples;
+            this.identities = identities;
+        }
+    }
+
+    /** Resolves each row's comparison role and emits its keyed leaf contribution. */
+    private static class ContributionDoFn extends DoFn<MElement, KV<List<String>, LeafContribution>> {
 
         private final Task task;
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
-        private final Schema outputSchema;
+        private final PCollectionView<List<Long>> maxTimeView;
+        private final Counter droppedRows = Metrics.counter(AttributionTransform.class, "attributionDroppedRows");
 
-        AttributionDoFn(
+        ContributionDoFn(
                 final Task task,
                 final List<Logging> logs,
                 final boolean failFast,
-                final TupleTag<BadRecord> failureTag) {
+                final TupleTag<BadRecord> failureTag,
+                final PCollectionView<List<Long>> maxTimeView) {
 
             this.task = task;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
             this.failureTag = failureTag;
-            this.outputSchema = createOutputSchema();
-        }
-
-        @Setup
-        public void setup() {
-            this.outputSchema.setup();
+            this.maxTimeView = maxTimeView;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
             try {
-                final Iterable<MElement> elements = c.element().getValue();
-
-                // timeShift anchors its two comparison windows at the max time in the data,
-                // so runs are deterministic and reproducible with no extra configuration
+                Logging.log(LOG, logs, "input", element);
                 Long maxEpochMillis = null;
-                if(ReferenceStrategy.timeShift.equals(task.strategy)) {
-                    for(final MElement element : elements) {
-                        final Long epochMillis = extractEpochMillis(element);
-                        if(epochMillis != null && (maxEpochMillis == null || epochMillis > maxEpochMillis)) {
-                            maxEpochMillis = epochMillis;
-                        }
-                    }
-                    if(maxEpochMillis == null) {
+                if(maxTimeView != null) {
+                    final List<Long> maxTimes = c.sideInput(maxTimeView);
+                    if(maxTimes.isEmpty()) {
+                        droppedRows.inc();
                         return;
                     }
+                    maxEpochMillis = maxTimes.getFirst();
                 }
-
-                final List<String> dimensionNames = DimensionSpec.names(task.dimensions);
-                final LeafTable.Builder builder = LeafTable
-                        .builder(dimensionNames, task.columnNames, task.distributionNames, task.distinctNames);
-                long dropped = 0;
-                for(final MElement element : elements) {
-                    Logging.log(LOG, logs, "input", element);
-                    final Role role = resolve(element, maxEpochMillis);
-                    if(Role.DROP.equals(role)) {
-                        dropped++;
-                        continue;
-                    }
-                    final String[] dims = new String[dimensionNames.size()];
-                    for(int i = 0; i < dims.length; i++) {
-                        dims[i] = element.getAsString(dimensionNames.get(i));
-                    }
-                    final double[] values = new double[task.columnNames.size()];
-                    for(int i = 0; i < values.length; i++) {
-                        final Double value = element.getAsDouble(task.columnNames.get(i));
-                        values[i] = value == null ? 0.0 : value;
-                    }
-                    final boolean target = Role.TARGET.equals(role);
-                    if(target) {
-                        builder.addTarget(dims, values);
-                    } else {
-                        builder.addBaseline(dims, values);
-                    }
-                    // Distribution measures consume one sample per row (event-level input)
-                    for(int d = 0; d < task.distributionNames.size(); d++) {
-                        final Double sample = element.getAsDouble(task.distributionNames.get(d));
-                        if(sample == null || !Double.isFinite(sample)) {
-                            continue;
-                        }
-                        if(target) {
-                            builder.addTargetSample(dims, d, sample);
-                        } else {
-                            builder.addBaselineSample(dims, d, sample);
-                        }
-                    }
-                    // Distinct measures consume one identity per row (event-level input)
-                    for(int d = 0; d < task.distinctNames.size(); d++) {
-                        final String identity = element.getAsString(task.distinctNames.get(d));
-                        if(identity == null) {
-                            continue;
-                        }
-                        if(target) {
-                            builder.addTargetIdentity(dims, d, identity);
-                        } else {
-                            builder.addBaselineIdentity(dims, d, identity);
-                        }
-                    }
-                }
-                if(dropped > 0) {
-                    LOG.info("attribution dropped {} rows not matching the {} reference", dropped, task.strategy);
-                }
-                if(builder.isEmpty()) {
+                final Role role = resolve(element, maxEpochMillis);
+                if(Role.DROP.equals(role)) {
+                    droppedRows.inc();
                     return;
                 }
 
-                final AttributionResult result = AttributionEngine.run(
-                        builder.build(), task.dimensions, task.measures, task.engineConfig, task.syntheticMarginal);
-
-                for(final MeasureResult measureResult : result.results()) {
-                    int rank = 1;
-                    for(final Finding finding : measureResult.findings()) {
-                        final MElement output = createFindingElement(measureResult, finding, rank++, c.timestamp());
-                        Logging.log(LOG, logs, "output", output);
-                        c.output(output);
-                    }
-                    if(measureResult.findings().isEmpty() && task.emitNoFinding) {
-                        final MElement output = createNoFindingElement(measureResult, c.timestamp());
-                        Logging.log(LOG, logs, "output", output);
-                        c.output(output);
-                    }
+                final List<String> dimensionNames = DimensionSpec.names(task.dimensions);
+                final List<String> key = new ArrayList<>(dimensionNames.size() + 1);
+                key.add(Role.TARGET.equals(role) ? ROLE_TARGET : ROLE_BASELINE);
+                for(final String dimension : dimensionNames) {
+                    final String value = element.getAsString(dimension);
+                    key.add(value == null ? LeafTable.NULL_VALUE : value);
                 }
+
+                final double[] columns = new double[task.columnNames.size()];
+                for(int i = 0; i < columns.length; i++) {
+                    final Double value = element.getAsDouble(task.columnNames.get(i));
+                    columns[i] = value == null ? 0.0 : value;
+                }
+                final double[] samples = new double[task.distributionNames.size()];
+                for(int i = 0; i < samples.length; i++) {
+                    final Double sample = element.getAsDouble(task.distributionNames.get(i));
+                    samples[i] = sample == null ? Double.NaN : sample;
+                }
+                final String[] identities = new String[task.distinctNames.size()];
+                for(int i = 0; i < identities.length; i++) {
+                    identities[i] = element.getAsString(task.distinctNames.get(i));
+                }
+                c.output(KV.of(key, new LeafContribution(columns, samples, identities)));
             } catch (final Throwable e) {
-                final BadRecord badRecord = processError("Failed to run attribution", Map.of("groupKey", c.element().getKey()), e, failFast);
+                final BadRecord badRecord = processError("Failed to resolve attribution role", element, e, failFast);
                 c.output(failureTag, badRecord);
             }
         }
@@ -929,7 +969,7 @@ public class AttributionTransform extends Transform {
                     yield Role.DROP;
                 }
                 case timeShift -> {
-                    final Long epochMillis = extractEpochMillis(element);
+                    final Long epochMillis = extractEpochMillis(task, element);
                     if(epochMillis == null) {
                         yield Role.DROP;
                     }
@@ -943,13 +983,283 @@ public class AttributionTransform extends Transform {
                 case synthetic -> Role.TARGET;
             };
         }
+    }
 
-        private Long extractEpochMillis(final MElement element) {
-            if(task.timeField == null) {
-                return element.getEpochMillis();
+    /** Distributed per-leaf aggregate: row count, measure sums and serialized sketches. */
+    static class LeafAggregate implements Serializable {
+
+        final long rows;
+        final double[] sums;
+        final byte[][] kll;    // serialized KLL sketches per distribution column (null = empty)
+        final byte[][] theta;  // serialized Theta sketches per distinct column (null = empty)
+
+        LeafAggregate(final long rows, final double[] sums, final byte[][] kll, final byte[][] theta) {
+            this.rows = rows;
+            this.sums = sums;
+            this.kll = kll;
+            this.theta = theta;
+        }
+    }
+
+    /** Combines leaf contributions with combiner lifting; sketches accumulate on the mappers. */
+    static class LeafCombineFn extends Combine.CombineFn<LeafContribution, LeafCombineFn.Accumulator, LeafAggregate> {
+
+        private final int columnCount;
+        private final int distributionCount;
+        private final int distinctCount;
+
+        LeafCombineFn(final int columnCount, final int distributionCount, final int distinctCount) {
+            this.columnCount = columnCount;
+            this.distributionCount = distributionCount;
+            this.distinctCount = distinctCount;
+        }
+
+        static class Accumulator implements Serializable {
+
+            long rows;
+            double[] sums;
+            transient KllDoublesSketch[] kll;
+            transient org.apache.datasketches.theta.Union[] theta;
+
+            Accumulator(final int columnCount, final int distributionCount, final int distinctCount) {
+                this.rows = 0;
+                this.sums = new double[columnCount];
+                this.kll = new KllDoublesSketch[distributionCount];
+                this.theta = new org.apache.datasketches.theta.Union[distinctCount];
             }
-            final org.joda.time.Instant instant = element.getAsJodaInstant(task.timeField);
-            return instant == null ? null : instant.getMillis();
+
+            private void writeObject(final java.io.ObjectOutputStream out) throws java.io.IOException {
+                out.defaultWriteObject();
+                out.writeInt(kll.length);
+                for(final KllDoublesSketch sketch : kll) {
+                    writeBytes(out, sketch == null || sketch.isEmpty() ? null : sketch.toByteArray());
+                }
+                out.writeInt(theta.length);
+                for(final org.apache.datasketches.theta.Union union : theta) {
+                    writeBytes(out, union == null ? null : union.getResult().toByteArray());
+                }
+            }
+
+            private void readObject(final java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+                in.defaultReadObject();
+                this.kll = new KllDoublesSketch[in.readInt()];
+                for(int i = 0; i < kll.length; i++) {
+                    final byte[] bytes = readBytes(in);
+                    kll[i] = bytes == null ? null : KllDoublesSketch.heapify(Memory.wrap(bytes));
+                }
+                this.theta = new org.apache.datasketches.theta.Union[in.readInt()];
+                for(int i = 0; i < theta.length; i++) {
+                    final byte[] bytes = readBytes(in);
+                    if(bytes != null) {
+                        theta[i] = newUnion();
+                        theta[i].union(Sketches.heapifySketch(Memory.wrap(bytes)));
+                    }
+                }
+            }
+
+            private static void writeBytes(final java.io.ObjectOutputStream out, final byte[] bytes) throws java.io.IOException {
+                out.writeInt(bytes == null ? -1 : bytes.length);
+                if(bytes != null) {
+                    out.write(bytes);
+                }
+            }
+
+            private static byte[] readBytes(final java.io.ObjectInputStream in) throws java.io.IOException {
+                final int length = in.readInt();
+                if(length < 0) {
+                    return null;
+                }
+                final byte[] bytes = new byte[length];
+                in.readFully(bytes);
+                return bytes;
+            }
+        }
+
+        private static org.apache.datasketches.theta.Union newUnion() {
+            return SetOperation.builder().setLogNominalEntries(LeafTable.THETA_LG_K).buildUnion();
+        }
+
+        @Override
+        public Accumulator createAccumulator() {
+            return new Accumulator(columnCount, distributionCount, distinctCount);
+        }
+
+        @Override
+        public Accumulator addInput(final Accumulator acc, final LeafContribution input) {
+            acc.rows++;
+            for(int i = 0; i < columnCount; i++) {
+                if(!Double.isNaN(input.columns[i])) {
+                    acc.sums[i] += input.columns[i];
+                }
+            }
+            for(int i = 0; i < distributionCount; i++) {
+                final double sample = input.samples[i];
+                if(Double.isFinite(sample)) {
+                    if(acc.kll[i] == null) {
+                        acc.kll[i] = KllDoublesSketch.newHeapInstance(LeafTable.SKETCH_K);
+                    }
+                    acc.kll[i].update(sample);
+                }
+            }
+            for(int i = 0; i < distinctCount; i++) {
+                final String identity = input.identities[i];
+                if(identity != null) {
+                    if(acc.theta[i] == null) {
+                        acc.theta[i] = newUnion();
+                    }
+                    acc.theta[i].update(identity);
+                }
+            }
+            return acc;
+        }
+
+        @Override
+        public Accumulator mergeAccumulators(final Iterable<Accumulator> accumulators) {
+            Accumulator merged = null;
+            for(final Accumulator acc : accumulators) {
+                if(merged == null) {
+                    merged = acc;
+                    continue;
+                }
+                merged.rows += acc.rows;
+                for(int i = 0; i < columnCount; i++) {
+                    merged.sums[i] += acc.sums[i];
+                }
+                for(int i = 0; i < distributionCount; i++) {
+                    if(acc.kll[i] == null || acc.kll[i].isEmpty()) {
+                        continue;
+                    }
+                    if(merged.kll[i] == null) {
+                        merged.kll[i] = KllDoublesSketch.newHeapInstance(LeafTable.SKETCH_K);
+                    }
+                    merged.kll[i].merge(acc.kll[i]);
+                }
+                for(int i = 0; i < distinctCount; i++) {
+                    if(acc.theta[i] == null) {
+                        continue;
+                    }
+                    if(merged.theta[i] == null) {
+                        merged.theta[i] = newUnion();
+                    }
+                    merged.theta[i].union(acc.theta[i].getResult());
+                }
+            }
+            return merged == null ? createAccumulator() : merged;
+        }
+
+        @Override
+        public LeafAggregate extractOutput(final Accumulator acc) {
+            final byte[][] kll = new byte[distributionCount][];
+            for(int i = 0; i < distributionCount; i++) {
+                kll[i] = acc.kll[i] == null || acc.kll[i].isEmpty() ? null : acc.kll[i].toByteArray();
+            }
+            final byte[][] theta = new byte[distinctCount][];
+            for(int i = 0; i < distinctCount; i++) {
+                theta[i] = acc.theta[i] == null ? null : acc.theta[i].getResult().toByteArray();
+            }
+            return new LeafAggregate(acc.rows, acc.sums, kll, theta);
+        }
+
+        @Override
+        public org.apache.beam.sdk.coders.Coder<Accumulator> getAccumulatorCoder(
+                final org.apache.beam.sdk.coders.CoderRegistry registry,
+                final org.apache.beam.sdk.coders.Coder<LeafContribution> inputCoder) {
+            return SerializableCoder.of(Accumulator.class);
+        }
+    }
+
+    private static class AttributionDoFn extends DoFn<KV<String, Iterable<KV<List<String>, LeafAggregate>>>, MElement> {
+
+        private final Task task;
+        private final Map<String, Logging> logs;
+        private final boolean failFast;
+        private final TupleTag<BadRecord> failureTag;
+        private final Schema outputSchema;
+
+        AttributionDoFn(
+                final Task task,
+                final List<Logging> logs,
+                final boolean failFast,
+                final TupleTag<BadRecord> failureTag) {
+
+            this.task = task;
+            this.logs = Logging.map(logs);
+            this.failFast = failFast;
+            this.failureTag = failureTag;
+            this.outputSchema = createOutputSchema();
+        }
+
+        @Setup
+        public void setup() {
+            this.outputSchema.setup();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            try {
+                final List<String> dimensionNames = DimensionSpec.names(task.dimensions);
+                final LeafTable.Builder builder = LeafTable
+                        .builder(dimensionNames, task.columnNames, task.distributionNames, task.distinctNames);
+                for(final KV<List<String>, LeafAggregate> leaf : c.element().getValue()) {
+                    final List<String> key = leaf.getKey();
+                    final boolean target = ROLE_TARGET.equals(key.getFirst());
+                    final String[] dims = key.subList(1, key.size()).toArray(new String[0]);
+                    final LeafAggregate aggregate = leaf.getValue();
+                    if(target) {
+                        builder.addTarget(dims, aggregate.sums);
+                        builder.addTargetRows(dims, aggregate.rows);
+                    } else {
+                        builder.addBaseline(dims, aggregate.sums);
+                        builder.addBaselineRows(dims, aggregate.rows);
+                    }
+                    for(int d = 0; d < task.distributionNames.size(); d++) {
+                        if(aggregate.kll[d] == null) {
+                            continue;
+                        }
+                        final KllDoublesSketch sketch = KllDoublesSketch.heapify(Memory.wrap(aggregate.kll[d]));
+                        if(target) {
+                            builder.addTargetSketch(dims, d, sketch);
+                        } else {
+                            builder.addBaselineSketch(dims, d, sketch);
+                        }
+                    }
+                    for(int d = 0; d < task.distinctNames.size(); d++) {
+                        if(aggregate.theta[d] == null) {
+                            continue;
+                        }
+                        final org.apache.datasketches.theta.Sketch sketch =
+                                Sketches.heapifySketch(Memory.wrap(aggregate.theta[d]));
+                        if(target) {
+                            builder.addTargetDistinct(dims, d, sketch);
+                        } else {
+                            builder.addBaselineDistinct(dims, d, sketch);
+                        }
+                    }
+                }
+                if(builder.isEmpty()) {
+                    return;
+                }
+
+                final AttributionResult result = AttributionEngine.run(
+                        builder.build(), task.dimensions, task.measures, task.engineConfig, task.syntheticMarginal);
+
+                for(final MeasureResult measureResult : result.results()) {
+                    int rank = 1;
+                    for(final Finding finding : measureResult.findings()) {
+                        final MElement output = createFindingElement(measureResult, finding, rank++, c.timestamp());
+                        Logging.log(LOG, logs, "output", output);
+                        c.output(output);
+                    }
+                    if(measureResult.findings().isEmpty() && task.emitNoFinding) {
+                        final MElement output = createNoFindingElement(measureResult, c.timestamp());
+                        Logging.log(LOG, logs, "output", output);
+                        c.output(output);
+                    }
+                }
+            } catch (final Throwable e) {
+                final BadRecord badRecord = processError("Failed to run attribution", Map.of("groupKey", c.element().getKey()), e, failFast);
+                c.output(failureTag, badRecord);
+            }
         }
 
         private MElement createFindingElement(

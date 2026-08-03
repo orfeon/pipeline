@@ -930,6 +930,39 @@ public class AttributionTransformTest {
     }
 
     @Test
+    public void testLeafCombineFnMergeAndAccumulatorRoundTrip() {
+        // The accumulator must survive Java serialization (Beam fusion boundaries) with its
+        // KLL and Theta sketches intact, and merging must be equivalent to direct accumulation
+        final AttributionTransform.LeafCombineFn fn = new AttributionTransform.LeafCombineFn(1, 1, 1);
+
+        AttributionTransform.LeafCombineFn.Accumulator first = fn.createAccumulator();
+        first = fn.addInput(first, new AttributionTransform.LeafContribution(
+                new double[]{2.0}, new double[]{10.0}, new String[]{"u1"}));
+        first = fn.addInput(first, new AttributionTransform.LeafContribution(
+                new double[]{3.0}, new double[]{20.0}, new String[]{"u2"}));
+        final AttributionTransform.LeafCombineFn.Accumulator restored =
+                org.apache.beam.sdk.util.SerializableUtils.clone(first);
+
+        AttributionTransform.LeafCombineFn.Accumulator second = fn.createAccumulator();
+        second = fn.addInput(second, new AttributionTransform.LeafContribution(
+                new double[]{5.0}, new double[]{30.0}, new String[]{"u2"}));
+
+        final AttributionTransform.LeafAggregate aggregate =
+                fn.extractOutput(fn.mergeAccumulators(List.of(restored, second)));
+
+        Assertions.assertEquals(3L, aggregate.rows);
+        Assertions.assertEquals(10.0, aggregate.sums[0], DELTA);
+        final org.apache.datasketches.kll.KllDoublesSketch kll = org.apache.datasketches.kll.KllDoublesSketch
+                .heapify(org.apache.datasketches.memory.Memory.wrap(aggregate.kll[0]));
+        Assertions.assertEquals(3L, kll.getN());
+        Assertions.assertEquals(30.0, kll.getQuantile(0.99), DELTA);
+        // u2 appears twice: the distinct estimate must be 2
+        Assertions.assertEquals(2.0, org.apache.datasketches.theta.Sketches
+                .heapifySketch(org.apache.datasketches.memory.Memory.wrap(aggregate.theta[0]))
+                .getEstimate(), DELTA);
+    }
+
+    @Test
     public void testValidationErrors() throws Exception {
         // [config, expected message fragment]
         final String[][] cases = {
