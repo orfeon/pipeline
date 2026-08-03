@@ -659,11 +659,21 @@
 
     <!-- Big Data -->
     <!-- Required by ParquetIO at runtime and by parquet writer API signatures (hadoop Path) at compile time.
-         Beam declares hadoop as provided. Shaded, no transitive deps. -->
+         Beam declares hadoop as provided. Shaded, no transitive deps.
+         hadoop-client-api and hadoop-client-runtime are a pair: the api jar holds the public classes
+         (Configuration, Path), the runtime jar holds the shaded third-party classes they reference
+         (org.apache.hadoop.shaded.* — e.g. woodstox for Configuration's XML parsing). Without the
+         runtime jar, ParquetIO reads fail at execution with NoClassDefFoundError. -->
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client-api</artifactId>
       <version>${hadoop.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-runtime</artifactId>
+      <version>${hadoop.version}</version>
+      <scope>runtime</scope>
     </dependency>
 
     <!-- Test-only: HBaseBytesTest verifies the in-repo codec against the real HBase Bytes.

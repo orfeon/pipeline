@@ -52,28 +52,28 @@ This module differs from the [Files Source Module](files.md): the Files module o
 | skipHeaderLines | optional | Integer | Number of header lines to skip at the beginning of each file. For example, set to `1` to skip a single header row in CSV files.                                       |
 | delimiter       | optional | String  | Custom record delimiter. Default is newline (`\n`). Use this when records are separated by a character or string other than newline.                                   |
 
-### S3 parameters
+### Reading from AWS S3
 
-When reading from AWS S3, provide AWS credentials via the `s3` parameter block, or configure credentials at the pipeline settings level.
-
-| parameter      | optional | type   | description                                     |
-|----------------|----------|--------|-------------------------------------------------|
-| s3.accessKey   | required | String | AWS access key ID for S3 authentication.        |
-| s3.secretKey   | required | String | AWS secret access key for S3 authentication.    |
-| s3.region      | required | String | AWS region of the S3 bucket (e.g. `us-west-2`). |
+When reading from AWS S3 (`s3://...`), configure credentials and region at the pipeline settings
+level (`options.aws` — see the aws options reference). Both schema sampling and the actual read
+use the same credential source. The former per-module `s3` parameter block
+(`s3.accessKey` / `s3.secretKey` / `s3.region`) has been removed.
 
 ## Schema behavior
 
 ### Avro and Parquet formats
 
-Schema is automatically inferred from the file metadata. No `schema` parameter is needed. The module reads the first matching file's embedded schema and uses it for all files.
+Schema is automatically inferred from the file metadata (the Avro header or the Parquet footer —
+files are never downloaded in full). Sampling resolves paths and glob patterns the same way as the
+actual read, works for `gs://`, `s3://`, and local paths, skips zero-length placeholder files
+(e.g. `_SUCCESS`), and uses the first readable file's embedded schema for all files.
 
 If a `schema` parameter is explicitly provided, it takes priority over the auto-inferred schema.
 For Avro it acts as the [reader schema](https://avro.apache.org/docs/current/specification/#schema-resolution):
 declaring a subset of the file's fields projects the output to that subset (unlisted columns are
 skipped during decode), and Avro schema resolution rules (default filling, type promotion) apply.
 Declaring an explicit schema also makes the pipeline robust against files whose schema evolves,
-and skips the sampling step entirely (which also enables reading from local file systems).
+and skips the sampling step entirely.
 
 For Avro with `fields` specified, the output contains only the selected columns.
 For Parquet with `fields` specified, only the selected columns are read (column projection), and

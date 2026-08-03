@@ -9,6 +9,10 @@ import org.apache.avro.file.DataFileWriter;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
+import org.apache.parquet.avro.AvroParquetWriter;
+import org.apache.parquet.conf.PlainParquetConfiguration;
+import org.apache.parquet.hadoop.ParquetWriter;
+import org.apache.parquet.io.LocalOutputFile;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
@@ -22,10 +26,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Tests for the storage source's fields projection semantics (schema-redesign.md Phase 4).
+ * Tests for the storage source's fields projection semantics (schema-redesign.md Phase 4)
+ * and schema sampling.
  *
- * Reading local Avro files needs no schema sampling as long as a schema is declared
- * (sampling itself is gs://・s3:// only), so these run on the DirectRunner without GCS.
+ * Schema sampling goes through Beam FileSystems (FileSchemaUtil), so it resolves local paths
+ * and globs the same way as the runtime IOs — these run on the DirectRunner without GCS.
  * The Avro record name of the declared schema is "root" (ElementToAvroConverter), so the
  * test files are written with a writer schema named "root" to satisfy Avro name resolution.
  */
@@ -60,10 +65,33 @@ public class StorageSourceTest {
                 writer.append(record);
             }
         }
-        // Beam FileSystems misreads a Windows drive letter ("C:/...") as a URI scheme,
-        // so local test files are addressed relative to the working directory
+        return relativize(file.toPath());
+    }
+
+    private String writeParquetFile() throws Exception {
+        final Path file = tempDir.resolve("test.parquet");
+        try(final ParquetWriter<GenericRecord> writer = AvroParquetWriter
+                .<GenericRecord>builder(new LocalOutputFile(file))
+                .withConf(new PlainParquetConfiguration())
+                .withDataModel(GenericData.get())
+                .withSchema(WRITER_SCHEMA)
+                .build()) {
+            for(int i = 1; i <= 3; i++) {
+                final GenericRecord record = new GenericData.Record(WRITER_SCHEMA);
+                record.put("id", (long) i);
+                record.put("name", "name" + i);
+                record.put("category", "category" + i);
+                writer.write(record);
+            }
+        }
+        return relativize(file);
+    }
+
+    // Beam FileSystems misreads a Windows drive letter ("C:/...") as a URI scheme,
+    // so local test files are addressed relative to the working directory
+    private static String relativize(final Path path) {
         final Path workingDir = Path.of("").toAbsolutePath();
-        return workingDir.relativize(file.toPath().toAbsolutePath()).toString().replace('\\', '/');
+        return workingDir.relativize(path.toAbsolutePath()).toString().replace('\\', '/');
     }
 
     @Test
@@ -154,6 +182,85 @@ public class StorageSourceTest {
             final Set<Long> ids = new HashSet<>();
             for(final MElement element : elements) {
                 ids.add(element.getAsLong("id"));
+            }
+            Assertions.assertEquals(Set.of(1L, 2L, 3L), ids);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testSchemaSampledFromAvroFile() throws Exception {
+        // no declared schema: the schema is sampled from the file itself through FileSystems
+        final String path = writeAvroFile();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "storageinput",
+                      "module": "storage",
+                      "parameters": {
+                        "input": "%s",
+                        "format": "avro"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(path);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("storageinput");
+        Assertions.assertTrue(output.getSchema().hasField("id"));
+        Assertions.assertTrue(output.getSchema().hasField("name"));
+        Assertions.assertTrue(output.getSchema().hasField("category"));
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Set<Long> ids = new HashSet<>();
+            for(final MElement element : elements) {
+                ids.add(element.getAsLong("id"));
+            }
+            Assertions.assertEquals(Set.of(1L, 2L, 3L), ids);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testSchemaSampledFromParquetFile() throws Exception {
+        // no declared schema: the parquet footer is sampled (footer-only read via FileSystems)
+        final String path = writeParquetFile();
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "storageinput",
+                      "module": "storage",
+                      "parameters": {
+                        "input": "%s",
+                        "format": "parquet"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(path);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("storageinput");
+        Assertions.assertTrue(output.getSchema().hasField("id"));
+        Assertions.assertTrue(output.getSchema().hasField("name"));
+        Assertions.assertTrue(output.getSchema().hasField("category"));
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Set<Long> ids = new HashSet<>();
+            for(final MElement element : elements) {
+                ids.add(element.getAsLong("id"));
+                Assertions.assertNotNull(element.getAsString("name"));
             }
             Assertions.assertEquals(Set.of(1L, 2L, 3L), ids);
             return null;
