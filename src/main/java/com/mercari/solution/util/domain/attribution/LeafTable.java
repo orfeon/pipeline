@@ -53,6 +53,8 @@ public final class LeafTable {
     private final KllDoublesSketch[][] targetSketches;   // [distribution][leaf]
     private final CompactSketch[][] baselineDistinct;    // [distinct][leaf], entries may be null (no identities)
     private final CompactSketch[][] targetDistinct;      // [distinct][leaf]
+    private final long[] baselineRows;                   // [leaf] contributing row/event counts (0 = unknown)
+    private final long[] targetRows;                     // [leaf]
 
     private LeafTable(
             final List<String> dimensionNames,
@@ -65,7 +67,9 @@ public final class LeafTable {
             final KllDoublesSketch[][] baselineSketches,
             final KllDoublesSketch[][] targetSketches,
             final CompactSketch[][] baselineDistinct,
-            final CompactSketch[][] targetDistinct) {
+            final CompactSketch[][] targetDistinct,
+            final long[] baselineRows,
+            final long[] targetRows) {
 
         this.dimensionNames = dimensionNames;
         this.columnNames = columnNames;
@@ -78,6 +82,8 @@ public final class LeafTable {
         this.targetSketches = targetSketches;
         this.baselineDistinct = baselineDistinct;
         this.targetDistinct = targetDistinct;
+        this.baselineRows = baselineRows;
+        this.targetRows = targetRows;
     }
 
     public List<String> getDimensionNames() {
@@ -132,6 +138,20 @@ public final class LeafTable {
     /** Target identity sketch of a leaf, or null when the leaf received no target identities. */
     public CompactSketch targetDistinct(final int distinct, final int leaf) {
         return targetDistinct[distinct][leaf];
+    }
+
+    /**
+     * Number of baseline rows/events that contributed to a leaf, when the caller supplied it
+     * (see {@code Builder.addBaselineRows}); {@code 0} means unknown. Not used by the
+     * localization algorithms yet — retained as the basis for future uncertainty estimation.
+     */
+    public long baselineRows(final int leaf) {
+        return baselineRows[leaf];
+    }
+
+    /** Number of target rows/events that contributed to a leaf ({@code 0} = unknown). */
+    public long targetRows(final int leaf) {
+        return targetRows[leaf];
     }
 
     public int columnIndex(final String name) {
@@ -240,7 +260,7 @@ public final class LeafTable {
         }
         return new LeafTable(dimensionNames, columnNames, distributionNames, distinctNames,
                 dimValues, newBaseline, target, baselineSketches, targetSketches,
-                baselineDistinct, targetDistinct);
+                baselineDistinct, targetDistinct, baselineRows, targetRows);
     }
 
     private static double sum(final double[] values) {
@@ -290,7 +310,7 @@ public final class LeafTable {
                 updates.update(identity);
             }
 
-            void merge(final CompactSketch sketch) {
+            void merge(final org.apache.datasketches.theta.Sketch sketch) {
                 if(merged == null) {
                     merged = SetOperation.builder().setLogNominalEntries(THETA_LG_K).buildUnion();
                 }
@@ -312,6 +332,7 @@ public final class LeafTable {
             final double[][] sums;                  // [role][column]
             final KllDoublesSketch[][] sketches;    // [role][distribution]
             final ThetaAccumulator[][] distincts;   // [role][distinct]
+            final long[] rows = new long[2];        // [role] explicit row counts (addRows only)
 
             Accumulator(final int columnCount, final int distributionCount, final int distinctCount) {
                 this.sums = new double[2][columnCount];
@@ -372,12 +393,23 @@ public final class LeafTable {
             return addIdentity(1, dims, distinct, identity);
         }
 
-        public Builder addBaselineDistinct(final String[] dims, final int distinct, final CompactSketch sketch) {
+        public Builder addBaselineDistinct(final String[] dims, final int distinct, final org.apache.datasketches.theta.Sketch sketch) {
             return addDistinct(0, dims, distinct, sketch);
         }
 
-        public Builder addTargetDistinct(final String[] dims, final int distinct, final CompactSketch sketch) {
+        public Builder addTargetDistinct(final String[] dims, final int distinct, final org.apache.datasketches.theta.Sketch sketch) {
             return addDistinct(1, dims, distinct, sketch);
+        }
+
+        /** Records how many rows/events contributed to a leaf's baseline (see {@link LeafTable#baselineRows}). */
+        public Builder addBaselineRows(final String[] dims, final long rows) {
+            accumulator(dims).rows[0] += rows;
+            return this;
+        }
+
+        public Builder addTargetRows(final String[] dims, final long rows) {
+            accumulator(dims).rows[1] += rows;
+            return this;
         }
 
         private Builder add(final int role, final String[] dims, final double[] values) {
@@ -430,7 +462,7 @@ public final class LeafTable {
             return this;
         }
 
-        private Builder addDistinct(final int role, final String[] dims, final int distinct, final CompactSketch sketch) {
+        private Builder addDistinct(final int role, final String[] dims, final int distinct, final org.apache.datasketches.theta.Sketch sketch) {
             if(sketch == null || sketch.isEmpty()) {
                 return this;
             }
@@ -471,9 +503,13 @@ public final class LeafTable {
             final KllDoublesSketch[][] targetSketches = new KllDoublesSketch[distributionCount][leafCount];
             final CompactSketch[][] baselineDistinct = new CompactSketch[distinctCount][leafCount];
             final CompactSketch[][] targetDistinct = new CompactSketch[distinctCount][leafCount];
+            final long[] baselineRows = new long[leafCount];
+            final long[] targetRows = new long[leafCount];
             int leaf = 0;
             for(final Map.Entry<List<String>, Accumulator> entry : accumulator.entrySet()) {
                 dimValues[leaf] = entry.getKey().toArray(new String[0]);
+                baselineRows[leaf] = entry.getValue().rows[0];
+                targetRows[leaf] = entry.getValue().rows[1];
                 for(int c = 0; c < columnCount; c++) {
                     baseline[c][leaf] = entry.getValue().sums[0][c];
                     target[c][leaf] = entry.getValue().sums[1][c];
@@ -492,7 +528,7 @@ public final class LeafTable {
             }
             return new LeafTable(dimensionNames, columnNames, distributionNames, distinctNames,
                     dimValues, baseline, target, baselineSketches, targetSketches,
-                    baselineDistinct, targetDistinct);
+                    baselineDistinct, targetDistinct, baselineRows, targetRows);
         }
     }
 }

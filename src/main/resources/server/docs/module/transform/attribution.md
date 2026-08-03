@@ -15,10 +15,13 @@ it automatically localizes the difference to a concise set of dimension-value co
 single declarative step.
 
 Where aggregation modules answer "what happened", this module answers "**where and why it
-changed**". It is designed to be placed directly downstream of a `aggregation` (or any
-group-by style) step: the input rows are expected to be **already leaf-aggregated**
-(dimension columns + numeric measure columns). Rows with identical dimension values are summed,
-so multiple time buckets or partial aggregates per dimension tuple are fine.
+changed**". Input rows can be **raw events or pre-aggregated leaves** (dimension columns +
+numeric measure columns): leaf aggregation by dimension tuple runs inside the module,
+distributed across workers, and rows with identical dimension values are always merged — so
+multiple time buckets, partial aggregates or event-level rows per tuple are all fine. For very
+large raw datasets, pre-aggregating at the source (e.g. `GROUP BY` in the BigQuery query)
+remains worthwhile purely to cut read I/O — but never aggregate **coarser** than the declared
+dimensions, or culprits in the aggregated-away dimensions become unlocalizable.
 
 Supports:
 
@@ -457,13 +460,28 @@ transforms:
 
 ## Execution profile and scale guidance
 
-This version runs the *small* execution profile: after an internal re-aggregation by dimension
-tuple, all leaves are gathered into a single group and the localization runs on one worker.
-This is the right shape for attribution — inputs are aggregates, not raw events — but means the
-leaf count (distinct dimension tuples) should stay roughly below a few million rows. Control it
-with `guards.maxCardinality` / `minSupport` and by limiting `vocabulary.dimensions`.
-Search cost is dominated by (number of cuboids) × (leaf count); the cuboid count grows
-exponentially with `guards.maxLayer`, so raise it with care.
+The pipeline runs in two stages:
+
+1. **Distributed leaf aggregation** — rows are keyed by (role, dimension tuple) and combined
+   with combiner lifting: measure sums, KLL / Theta sketches and row counts accumulate on the
+   mappers, so shuffle volume is proportional to the number of **distinct leaf tuples**, not
+   input rows. Event-level input at scale is handled here.
+2. **Single-worker localization** — only the leaf aggregates are gathered to one worker where
+   the search runs. Measured on the seeded synthetic benchmark
+   (`AttributionEngineBenchmarkTest`, single thread, default engine config):
+
+| leaves (3 dims) | riskloc localization |
+|---|---|
+| 10,000 | ~40 ms |
+| 100,000 | ~150 ms |
+| 1,000,000 | ~1.4 s |
+
+   Runtime is near-linear in leaf count and stays around one second at a million leaves even
+   at 6 dimensions / 41 cuboids (element pruning keeps the cuboid-count effect sublinear), so
+   the single-worker step is not the bottleneck for realistic vocabularies. Memory is the
+   practical limit: keep distinct leaf tuples roughly below a few million with
+   `guards.maxCardinality` / `minSupport` and by limiting `vocabulary.dimensions`. The cuboid
+   count grows exponentially with `guards.maxLayer`, so raise it with care.
 
 ## Known limitations
 

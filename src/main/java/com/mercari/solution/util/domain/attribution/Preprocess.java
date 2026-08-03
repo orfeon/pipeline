@@ -131,6 +131,8 @@ public final class Preprocess {
                 builder.addBaselineDistinct(dims, d, table.baselineDistinct(d, leaf));
                 builder.addTargetDistinct(dims, d, table.targetDistinct(d, leaf));
             }
+            builder.addBaselineRows(dims, table.baselineRows(leaf));
+            builder.addTargetRows(dims, table.targetRows(leaf));
         }
         return builder.build();
     }
