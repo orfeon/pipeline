@@ -66,14 +66,17 @@ When reading from AWS S3, provide AWS credentials via the `s3` parameter block, 
 
 ### Avro and Parquet formats
 
-Schema is automatically inferred from the file metadata. No `schema` parameter is needed. The module reads the first matching file's embedded schema and uses it for all files.
+Schema is automatically inferred from the file metadata (the Avro header or the Parquet footer —
+files are never downloaded in full). Sampling resolves paths and glob patterns the same way as the
+actual read, works for `gs://`, `s3://`, and local paths, skips zero-length placeholder files
+(e.g. `_SUCCESS`), and uses the first readable file's embedded schema for all files.
 
 If a `schema` parameter is explicitly provided, it takes priority over the auto-inferred schema.
 For Avro it acts as the [reader schema](https://avro.apache.org/docs/current/specification/#schema-resolution):
 declaring a subset of the file's fields projects the output to that subset (unlisted columns are
 skipped during decode), and Avro schema resolution rules (default filling, type promotion) apply.
 Declaring an explicit schema also makes the pipeline robust against files whose schema evolves,
-and skips the sampling step entirely (which also enables reading from local file systems).
+and skips the sampling step entirely.
 
 For Avro with `fields` specified, the output contains only the selected columns.
 For Parquet with `fields` specified, only the selected columns are read (column projection), and

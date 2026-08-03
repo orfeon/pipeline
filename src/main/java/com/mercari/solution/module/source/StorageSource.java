@@ -4,7 +4,7 @@ import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.cloud.amazon.S3Util;
 import com.mercari.solution.util.coder.ElementCoder;
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.FileSchemaUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.CsvToElementConverter;
 import com.mercari.solution.util.schema.converter.JsonToElementConverter;
@@ -394,6 +394,23 @@ public class StorageSource extends Source {
         return S3Util.storage(pipelineOptions);
     }
 
+    // Deprecated per-module s3 parameters force a dedicated sampling client (they are not visible
+    // to the Beam s3 filesystem); everything else samples through FileSystems so path/glob
+    // resolution and credentials match the runtime IO exactly.
+    private static boolean useLegacyS3Client(
+            final Parameters.S3Parameters s3,
+            final org.apache.beam.sdk.options.PipelineOptions pipelineOptions) {
+
+        if(s3 == null) {
+            return false;
+        }
+        if(s3.accessKey != null || s3.secretKey != null) {
+            return true;
+        }
+        return s3.region != null
+                && pipelineOptions.as(org.apache.beam.sdk.io.aws2.options.AwsOptions.class).getAwsRegion() == null;
+    }
+
     private static org.apache.avro.Schema getAvroSchema(
             final String input,
             final Schema inputSchema,
@@ -404,18 +421,7 @@ public class StorageSource extends Source {
             return inputSchema.getAvroSchema();
         }
 
-        if(input.startsWith("gs://")) {
-            final org.apache.avro.Schema avroSchema = StorageUtil.getAvroSchema(input);
-            if(avroSchema != null) {
-                return avroSchema;
-            }
-            return StorageUtil.listFiles(input)
-                    .stream()
-                    .map(StorageUtil::getAvroSchema)
-                    .filter(Objects::nonNull)
-                    .findAny()
-                    .orElseThrow(() -> new IllegalStateException("Avro schema not found!"));
-        } else if(input.startsWith("s3://")) {
+        if(input.startsWith("s3://") && useLegacyS3Client(s3, pipelineOptions)) {
             final S3Client client = createS3Client(s3, pipelineOptions);
             final org.apache.avro.Schema avroSchema = S3Util.getAvroSchema(client, input);
             if(avroSchema != null) {
@@ -427,11 +433,9 @@ public class StorageSource extends Source {
                     .map(object -> S3Util.getAvroSchema(client, bucket, object))
                     .filter(Objects::nonNull)
                     .findAny()
-                    .orElseThrow(() -> new IllegalStateException("Avro schema not found!"));
-        } else {
-            throw new IllegalArgumentException("Avro schema not found for input: " + input);
+                    .orElseThrow(() -> new IllegalStateException("Avro schema not found for input: " + input));
         }
-
+        return FileSchemaUtil.getAvroSchema(input);
     }
 
     private static org.apache.avro.Schema getParquetSchema(
@@ -444,18 +448,7 @@ public class StorageSource extends Source {
             return inputSchema.getAvroSchema();
         }
 
-        if(input.startsWith("gs://")) {
-            final org.apache.avro.Schema avroSchema = StorageUtil.getParquetSchema(input);
-            if(avroSchema != null) {
-                return avroSchema;
-            }
-            return StorageUtil.listFiles(input)
-                    .stream()
-                    .map(StorageUtil::getParquetSchema)
-                    .filter(Objects::nonNull)
-                    .findAny()
-                    .orElseThrow(() -> new IllegalStateException("Avro schema not found!"));
-        } else if(input.startsWith("s3://")) {
+        if(input.startsWith("s3://") && useLegacyS3Client(s3, pipelineOptions)) {
             final S3Client client = createS3Client(s3, pipelineOptions);
             final org.apache.avro.Schema avroSchema = S3Util.getParquetSchema(client, input);
             if(avroSchema != null) {
@@ -467,11 +460,9 @@ public class StorageSource extends Source {
                     .map(path -> S3Util.getParquetSchema(client, bucket, path))
                     .filter(Objects::nonNull)
                     .findAny()
-                    .orElseThrow(() -> new IllegalStateException("Avro schema not found!"));
-        } else {
-            throw new IllegalArgumentException("Avro schema not found for input: " + input);
+                    .orElseThrow(() -> new IllegalStateException("Parquet schema not found for input: " + input));
         }
-
+        return FileSchemaUtil.getParquetSchema(input);
     }
 
 }

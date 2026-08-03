@@ -1,6 +1,6 @@
 package com.mercari.solution.util.cloud.amazon;
 
-import com.mercari.solution.util.cloud.google.StorageUtil;
+import com.mercari.solution.util.domain.file.FileSchemaUtil;
 import org.apache.avro.Schema;
 import org.apache.beam.sdk.io.aws2.options.S3ClientBuilderFactory;
 import org.apache.beam.sdk.io.aws2.options.S3Options;
@@ -10,11 +10,8 @@ import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.DatumReader;
-import org.apache.parquet.avro.AvroSchemaConverter;
-import org.apache.parquet.hadoop.ParquetFileReader;
-import org.apache.parquet.io.DelegatingSeekableInputStream;
-import org.apache.parquet.io.InputFile;
-import org.apache.parquet.io.SeekableInputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -22,7 +19,6 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -32,6 +28,8 @@ import java.util.Map;
 
 
 public class S3Util {
+
+    private static final Logger LOG = LoggerFactory.getLogger(S3Util.class);
 
     /**
      * Builds the client through the same factory chain as Beam's s3 filesystem
@@ -162,6 +160,7 @@ public class S3Util {
             final DataFileStream<GenericRecord> dataFileReader = new DataFileStream<>(is, datumReader)) {
             return dataFileReader.getSchema();
         } catch (Exception e) {
+            LOG.warn("Failed to read avro schema from file: s3://{}/{} cause: {}", bucket, object, e.toString());
             return null;
         }
     }
@@ -179,15 +178,12 @@ public class S3Util {
     }
 
     public static Schema getParquetSchema(final S3Client s3, final String bucket, final String object) {
-        final byte[] bytes;
+        // legacy sampling path for the deprecated per-module credentials; the default path
+        // samples through Beam FileSystems (FileSchemaUtil) with footer-only reads
         try {
-            bytes = readBytes(s3, bucket, object);
+            return FileSchemaUtil.getParquetSchema(readBytes(s3, bucket, object));
         } catch (Exception e) {
-            return null;
-        }
-        try(final ParquetFileReader f = ParquetFileReader.open(new ParquetStream(bytes))) {
-            return new AvroSchemaConverter().convert(f.getFooter().getFileMetaData().getSchema());
-        } catch (Exception e) {
+            LOG.warn("Failed to read parquet schema from file: s3://{}/{} cause: {}", bucket, object, e.toString());
             return null;
         }
     }
@@ -252,51 +248,6 @@ public class S3Util {
             return objects;
         } catch (Exception e) {
             throw new RuntimeException(e);
-        }
-    }
-
-    public static class ParquetStream implements InputFile {
-        private final byte[] data;
-
-        public class SeekableByteArrayInputStream extends ByteArrayInputStream {
-
-            public SeekableByteArrayInputStream(byte[] buf) {
-                super(buf);
-            }
-
-            public void setPos(int pos) {
-                this.pos = pos;
-            }
-
-            public int getPos() {
-                return this.pos;
-            }
-        }
-
-        public ParquetStream(final byte[] data) {
-            this.data = data;
-        }
-
-        @Override
-        public long getLength() {
-            return this.data.length;
-        }
-
-        @Override
-        public SeekableInputStream newStream() {
-            return new DelegatingSeekableInputStream(new ParquetStream.SeekableByteArrayInputStream(this.data)) {
-
-                @Override
-                public void seek(long newPos) {
-                    ((StorageUtil.ParquetStream.SeekableByteArrayInputStream) this.getStream()).setPos(Long.valueOf(newPos).intValue());
-                }
-
-                @Override
-                public long getPos() {
-
-                    return Integer.valueOf(((StorageUtil.ParquetStream.SeekableByteArrayInputStream) this.getStream()).getPos()).longValue();
-                }
-            };
         }
     }
 
