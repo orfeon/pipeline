@@ -327,12 +327,25 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | layer             | Long                                          | Number of dimensions combined in the slice                         |
 | riskScore         | Double (nullable)                             | RiskLoc risk score (null for other algorithms)                     |
 | explanatoryPower  | Double                                        | Share of the total change explained by the slice                   |
+| unexplainedShare  | Double                                        | Share of the measure's change (on its `epBasis`) that the reported findings do **not** explain, clamped to [0, 1]. Same value on every row of a measure. See below. |
 | surprise          | Double (nullable)                             | Jensen–Shannon divergence based distribution-change score          |
 | baseline / target / delta | Double                                | Slice sums (derived measures: the expression over slice component sums; distribution measures: quantiles of the merged slice sketches; distinct measures: union distinct estimates) |
 | deltaRatio        | Double (nullable)                             | `delta / baseline` (null when baseline is 0)                       |
 | totalBaseline / totalTarget | Double                              | Measure totals for context                                         |
 | leafCount         | Long                                          | Number of leaves covered by the slice                              |
 | noFinding         | Boolean                                       | `true` only on explicit no-finding rows                            |
+
+### Reading unexplainedShare (external root cause signal)
+
+A high `unexplainedShare` **together with a substantial `totalTarget − totalBaseline` delta**
+is evidence of an *external root cause*: the change is real, but it is not localizable in the
+declared dimensions (the culprit lives in a dimension you did not declare), or it was
+suppressed by thresholds/guards. The right reaction is to add candidate dimensions or lower
+`riskThreshold` — not to trust the reported slices as the full story. Downstream agents can
+branch on it: `noFinding AND |delta| large AND unexplainedShare ≈ 1` → "investigate elsewhere",
+versus `noFinding AND |delta| ≈ 0` → "nothing happened" (with no findings the share is 1 by
+definition, so always read it together with the delta). A principled probabilistic version of
+this judgment is planned with the `squeeze` (PSqueeze) algorithm.
 
 ## Choosing an algorithm
 

@@ -149,6 +149,9 @@ public class AttributionEngineTest {
 
         // The marginal baseline preserves totals, so auto must resolve to absoluteDelta
         Assertions.assertEquals(EngineConfig.EpBasis.absoluteDelta, result.results().getFirst().epBasis());
+        // The two reported under-performing cells each explain 0.25 of the churn; the two
+        // over-performing counterparts are not reported, so half the churn stays unexplained
+        Assertions.assertEquals(0.5, result.results().getFirst().unexplainedShare(), 1e-9);
         final List<Finding> findings = result.results().getFirst().findings();
         Assertions.assertEquals(2, findings.size());
         final List<Slice> slices = findings.stream().map(finding -> finding.slices().getFirst()).toList();
@@ -298,6 +301,8 @@ public class AttributionEngineTest {
         Assertions.assertEquals(new Slice(new int[]{0}, new String[]{"a"}), finding.slices().getFirst());
         Assertions.assertEquals(80.0, finding.baselineSum(), 1e-9);
         Assertions.assertEquals(24.0, finding.targetSum(), 1e-9);
+        // region=a explains 56 of the 58 units of absolute estimate shift (b noise = 2)
+        Assertions.assertEquals(2.0 / 58.0, measureResult.unexplainedShare(), 1e-9);
     }
 
     @Test
@@ -364,6 +369,9 @@ public class AttributionEngineTest {
                     List.of(MeasureSpec.fundamental("m")), config(algorithm), false);
             Assertions.assertTrue(result.results().getFirst().findings().isEmpty(),
                     "algorithm " + algorithm);
+            // No findings -> unexplainedShare is 1 by definition; consumers must read it
+            // together with the total delta (here 0: nothing to explain)
+            Assertions.assertEquals(1.0, result.results().getFirst().unexplainedShare(), 1e-9);
         }
     }
 }

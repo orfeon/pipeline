@@ -110,6 +110,7 @@ public class AttributionTransformTest {
             Assertions.assertEquals(600.0, row.getAsDouble("totalBaseline"), DELTA);
             Assertions.assertEquals(1000.0, row.getAsDouble("totalTarget"), DELTA);
             Assertions.assertEquals(1.0, row.getAsDouble("explanatoryPower"), DELTA);
+            Assertions.assertEquals(0.0, row.getAsDouble("unexplainedShare"), DELTA);
             Assertions.assertEquals(2.0 / 3.0, row.getAsDouble("riskScore"), DELTA);
             Assertions.assertEquals(2L, row.getAsLong("leafCount"));
             return null;
