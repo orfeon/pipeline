@@ -290,7 +290,7 @@ public class BigQuerySource extends Source {
                     .orElseGet(() -> BigQueryUtil.getPreferReadMethod(tableSchema));
             read = read.withMethod(method);
 
-            errorHandler.apply(read);
+            read = errorHandler.apply(read);
 
             return KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
         } else if(parameters.table != null || (parameters.datasetId != null)) {
@@ -312,7 +312,7 @@ public class BigQuerySource extends Source {
                     .orElse(BigQueryIO.TypedRead.Method.DIRECT_READ);
             read = read.withMethod(method);
 
-            errorHandler.apply(read);
+            read = errorHandler.apply(read);
 
             return switch (runner) {
                 case direct -> {

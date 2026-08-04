@@ -89,58 +89,70 @@ public class MErrorHandler implements AutoCloseable, Serializable {
         }
     }
 
-    public void apply(final PubsubIO.Write<?> write) {
+    // The Beam IO builders are immutable: with*ErrorHandler returns a new instance,
+    // so every apply must return it and callers must reassign.
+
+    public <T> PubsubIO.Write<T> apply(final PubsubIO.Write<T> write) {
         if(this.errorHandler != null && write != null) {
-            write.withErrorHandler(errorHandler);
+            return write.withErrorHandler(errorHandler);
         }
+        return write;
     }
 
-    public void apply(final PubsubIO.Read<?> read) {
+    public <T> PubsubIO.Read<T> apply(final PubsubIO.Read<T> read) {
         if(this.errorHandler != null && read != null) {
-            read.withErrorHandler(errorHandler);
+            return read.withErrorHandler(errorHandler);
         }
+        return read;
     }
 
-    public void apply(final KafkaIO.Read<?,?> read) {
+    public <K,V> KafkaIO.Read<K,V> apply(final KafkaIO.Read<K,V> read) {
         if(this.errorHandler != null && read != null) {
-            read.withBadRecordErrorHandler(errorHandler);
+            return read.withBadRecordErrorHandler(errorHandler);
         }
+        return read;
     }
 
-    public void apply(final KafkaIO.Write<?,?> write) {
+    public <K,V> KafkaIO.Write<K,V> apply(final KafkaIO.Write<K,V> write) {
         if(this.errorHandler != null && write != null) {
-            write.withBadRecordErrorHandler(errorHandler);
+            return write.withBadRecordErrorHandler(errorHandler);
         }
+        return write;
     }
 
-    public void apply(final BigtableIO.Write write) {
+    public BigtableIO.Write apply(final BigtableIO.Write write) {
         if(this.errorHandler != null && write != null) {
-            write.withErrorHandler(errorHandler);
+            return write.withErrorHandler(errorHandler);
         }
+        return write;
     }
 
-    public void apply(final FileIO.Write<?,?> write) {
+    public <DestinationT, UserT> FileIO.Write<DestinationT, UserT> apply(final FileIO.Write<DestinationT, UserT> write) {
         if(this.errorHandler != null && write != null) {
-            write.withBadRecordErrorHandler(errorHandler);
+            return write.withBadRecordErrorHandler(errorHandler);
         }
+        return write;
     }
 
-    public void apply(final BigQueryIO.Write<?> write) {
+    public <T> BigQueryIO.Write<T> apply(final BigQueryIO.Write<T> write) {
         if(this.errorHandler != null && write != null) {
-            write.withErrorHandler(errorHandler);
+            return write.withErrorHandler(errorHandler);
         }
+        return write;
     }
 
-    public void apply(final BigQueryIO.TypedRead<?> read) {
+    public <T> BigQueryIO.TypedRead<T> apply(final BigQueryIO.TypedRead<T> read) {
         if(this.errorHandler != null && read != null) {
-            read.withErrorHandler(errorHandler);
+            return read.withErrorHandler(errorHandler);
         }
+        return read;
     }
 
-    public void apply(final SqlTransform transform) {
+    public SqlTransform apply(final SqlTransform transform) {
         if(this.errorHandler != null && transform != null) {
-            //transform.withErrorsTransformer(errorHandler);
+            //return transform.withErrorsTransformer(errorHandler);
         }
+        return transform;
     }
 
 }

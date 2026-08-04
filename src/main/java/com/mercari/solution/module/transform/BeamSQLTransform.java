@@ -220,9 +220,7 @@ public class BeamSQLTransform extends Transform {
                 .registerUdaf("MDT_COUNT_DISTINCT_FLOAT64", new AggregateFunctions.CountDistinctFloat64Fn())
                 .registerUdaf("MDT_COUNT_DISTINCT_INT64", new AggregateFunctions.CountDistinctInt64Fn());
 
-        errorHandler.apply(transform);
-
-        return transform;
+        return errorHandler.apply(transform);
     }
 
     private static class ConvertRowDoFn extends DoFn<MElement, Row> {

@@ -657,14 +657,7 @@ public class BigQuerySink extends Sink {
             }
         }
 
-        /*
-        if(errorHandler != null) {
-            write = write.withErrorHandler(errorHandler);
-        }
-         */
-        errorHandler.apply(write);
-
-        return write;
+        return errorHandler.apply(write);
     }
 
     private static class SuccessfulTableLoadsDoFn extends DoFn<TableDestination, MElement> {

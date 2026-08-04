@@ -355,9 +355,7 @@ public class PubSubSource extends Source {
             read = read.withTimestampAttribute(timestampAttribute);
         }
 
-        errorHandler.apply(read);
-
-        return read;
+        return errorHandler.apply(read);
     }
 
     private static Schema createDeserializedInputSchema(Parameters parameters, Schema schema) {

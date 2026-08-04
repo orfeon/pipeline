@@ -259,9 +259,7 @@ public class BigtableSink extends Sink {
             write = write.withEmulator(emulatorHost);
         }
 
-        errorHandler.apply(write);
-
-        return write;
+        return errorHandler.apply(write);
     }
 
     private static class MutationDoFn extends DoFn<MElement, KV<ByteString, Iterable<Mutation>>> {
