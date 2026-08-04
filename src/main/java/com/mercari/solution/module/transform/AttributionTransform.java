@@ -55,6 +55,7 @@ import java.util.TreeSet;
 public class AttributionTransform extends Transform {
 
     private enum MeasureType { fundamental, derived, distribution, distinct, sketch }
+    private enum SketchFormat { kll, theta }
     private enum ComparisonMode { pair, series, cohort }
     private enum ReferenceStrategy { external, timeShift, split, synthetic }
     private enum SyntheticMethod { marginal, forecast }
@@ -79,7 +80,8 @@ public class AttributionTransform extends Transform {
             private String name;
             private MeasureType type;
             private String expression;
-            private List<Double> quantiles; // type: distribution only. default: [0.5]
+            private List<Double> quantiles; // type: distribution / sketch(kll) only. default: [0.5]
+            private SketchFormat format;    // type: sketch only. kll | theta
         }
 
         private static class ComparisonParameter implements Serializable {
@@ -196,13 +198,6 @@ public class AttributionTransform extends Transform {
         // re-instate those checks verbatim when the corresponding values are unlocked.
         // Constraint 6 (distribution measures cannot use shapley) lives in validateMeasures.
         private void validateReserved(final String prefix, final List<String> errorMessages) {
-            if(measures != null) {
-                for(final MeasureParameter measure : measures) {
-                    if(MeasureType.sketch.equals(measure.type)) {
-                        errorMessages.add(prefix + "measures.type: " + measure.type + " is reserved and not implemented yet");
-                    }
-                }
-            }
             if(comparison != null) {
                 if(comparison.mode != null && !ComparisonMode.pair.equals(comparison.mode)) {
                     errorMessages.add(prefix + "comparison.mode: " + comparison.mode + " is reserved and not implemented yet");
@@ -346,6 +341,44 @@ public class AttributionTransform extends Transform {
                         errorMessages.add(prefix + "measures[" + measure.name
                                 + "] type: distinct cannot be used with the synthetic reference"
                                 + " (no independence model is defined for identity sets)");
+                    }
+                } else if(MeasureType.sketch.equals(type)) {
+                    if(measure.format == null) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "].format parameter is required for type: sketch (kll or theta)");
+                        continue;
+                    }
+                    if(measure.expression != null) {
+                        errorMessages.add(prefix + "measures[" + measure.name + "].expression must not be set for type: sketch");
+                    }
+                    validateSketchField(prefix, errorMessages, inputSchemas, measure.name, "measures[" + measure.name + "]");
+                    if(SketchFormat.kll.equals(measure.format)) {
+                        if(measure.quantiles != null) {
+                            for(final Double quantile : measure.quantiles) {
+                                if(quantile == null || !(quantile > 0 && quantile < 1)) {
+                                    errorMessages.add(prefix + "measures[" + measure.name
+                                            + "].quantiles must be in (0, 1) exclusive: " + measure.quantiles);
+                                    break;
+                                }
+                            }
+                        }
+                        // Spec constraint 6 applies: a kll sketch measure is a distribution measure
+                        if(semantics != null && DerivedAllocation.Method.shapley.equals(semantics.derivedAllocation)) {
+                            errorMessages.add(prefix + "measures[" + measure.name
+                                    + "] type: sketch (kll) cannot be used with derivedAllocation: shapley");
+                        }
+                    } else if(measure.quantiles != null) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "].quantiles must not be set for format: theta");
+                    }
+                    if(semantics != null && EngineConfig.EpBasis.netDelta.equals(semantics.epBasis)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: sketch always uses epBasis: absoluteDelta; remove epBasis: netDelta");
+                    }
+                    if(comparison != null && comparison.reference != null
+                            && ReferenceStrategy.synthetic.equals(comparison.reference.strategy)) {
+                        errorMessages.add(prefix + "measures[" + measure.name
+                                + "] type: sketch cannot be used with the synthetic reference");
                     }
                 }
             }
@@ -533,6 +566,25 @@ public class AttributionTransform extends Transform {
             }
         }
 
+        private static void validateSketchField(
+                final String prefix, final List<String> errorMessages,
+                final Map<String, Schema> inputSchemas, final String field, final String location) {
+
+            for(final Map.Entry<String, Schema> entry : inputSchemas.entrySet()) {
+                if(!entry.getValue().hasField(field)) {
+                    errorMessages.add(prefix + location + " field: " + field
+                            + " does not exist in input: " + entry.getKey());
+                } else {
+                    final Schema.Type fieldType = entry.getValue().getField(field).getFieldType().getType();
+                    if(!Schema.Type.bytes.equals(fieldType) && !Schema.Type.string.equals(fieldType)) {
+                        errorMessages.add(prefix + location + " field: " + field
+                                + " must be a bytes (serialized sketch) or string (base64) type in input: "
+                                + entry.getKey());
+                    }
+                }
+            }
+        }
+
         private static boolean isNumeric(final Schema.Type type) {
             return switch (type) {
                 case int8, int16, int32, int64, float8, float16, float32, float64, decimal -> true;
@@ -549,7 +601,8 @@ public class AttributionTransform extends Transform {
                 if(measure.type == null) {
                     measure.type = MeasureType.fundamental;
                 }
-                if(MeasureType.distribution.equals(measure.type)
+                if((MeasureType.distribution.equals(measure.type)
+                        || (MeasureType.sketch.equals(measure.type) && SketchFormat.kll.equals(measure.format)))
                         && (measure.quantiles == null || measure.quantiles.isEmpty())) {
                     measure.quantiles = List.of(0.5);
                 }
@@ -732,6 +785,10 @@ public class AttributionTransform extends Transform {
         private List<String> columnNames;
         private List<String> distributionNames;
         private List<String> distinctNames;
+        // Parallel to distributionNames/distinctNames: true when the column is fed by
+        // pre-serialized sketch bytes (measures.type: sketch) instead of raw samples/identities
+        private boolean[] distributionFromSketch;
+        private boolean[] distinctFromSketch;
         private EngineConfig engineConfig;
         private String algorithm;
 
@@ -758,8 +815,10 @@ public class AttributionTransform extends Transform {
                     .toList();
 
             final Set<String> columnNames = new LinkedHashSet<>();
-            final Set<String> distributionNames = new LinkedHashSet<>();
-            final Set<String> distinctNames = new LinkedHashSet<>();
+            final List<String> distributionNames = new ArrayList<>();
+            final List<String> distinctNames = new ArrayList<>();
+            final List<Boolean> distributionFromSketch = new ArrayList<>();
+            final List<Boolean> distinctFromSketch = new ArrayList<>();
             final List<MeasureSpec> measures = new ArrayList<>();
             for(final Parameters.MeasureParameter measure : parameters.measures) {
                 if(MeasureType.derived.equals(measure.type)) {
@@ -770,9 +829,23 @@ public class AttributionTransform extends Transform {
                 } else if(MeasureType.distribution.equals(measure.type)) {
                     measures.add(MeasureSpec.distribution(measure.name, measure.quantiles));
                     distributionNames.add(measure.name);
+                    distributionFromSketch.add(false);
                 } else if(MeasureType.distinct.equals(measure.type)) {
                     measures.add(MeasureSpec.distinct(measure.name));
                     distinctNames.add(measure.name);
+                    distinctFromSketch.add(false);
+                } else if(MeasureType.sketch.equals(measure.type)) {
+                    // Pre-serialized sketch input: joins the distribution / distinct column family
+                    // of the core depending on the sketch format — the engine sees no difference
+                    if(SketchFormat.kll.equals(measure.format)) {
+                        measures.add(MeasureSpec.distribution(measure.name, measure.quantiles));
+                        distributionNames.add(measure.name);
+                        distributionFromSketch.add(true);
+                    } else {
+                        measures.add(MeasureSpec.distinct(measure.name));
+                        distinctNames.add(measure.name);
+                        distinctFromSketch.add(true);
+                    }
                 } else {
                     measures.add(MeasureSpec.fundamental(measure.name));
                     columnNames.add(measure.name);
@@ -780,8 +853,10 @@ public class AttributionTransform extends Transform {
             }
             task.measures = measures;
             task.columnNames = new ArrayList<>(columnNames);
-            task.distributionNames = new ArrayList<>(distributionNames);
-            task.distinctNames = new ArrayList<>(distinctNames);
+            task.distributionNames = distributionNames;
+            task.distinctNames = distinctNames;
+            task.distributionFromSketch = toArray(distributionFromSketch);
+            task.distinctFromSketch = toArray(distinctFromSketch);
 
             task.algorithm = parameters.engine.algorithm.name();
             task.engineConfig = new EngineConfig(
@@ -824,6 +899,14 @@ public class AttributionTransform extends Transform {
             task.emitNoFinding = parameters.output.emitNoFinding;
             return task;
         }
+
+        private static boolean[] toArray(final List<Boolean> flags) {
+            final boolean[] array = new boolean[flags.size()];
+            for(int i = 0; i < flags.size(); i++) {
+                array[i] = flags.get(i);
+            }
+            return array;
+        }
     }
 
     private enum Role { TARGET, BASELINE, DROP }
@@ -863,11 +946,25 @@ public class AttributionTransform extends Transform {
         final double[] columns;      // measure column values (0.0 for missing)
         final double[] samples;      // distribution samples (NaN = absent)
         final String[] identities;   // distinct identities (null = absent)
+        final byte[][] kllSketches;   // pre-serialized KLL sketches per distribution column (null = absent)
+        final byte[][] thetaSketches; // pre-serialized Theta sketches per distinct column (null = absent)
 
         LeafContribution(final double[] columns, final double[] samples, final String[] identities) {
+            this(columns, samples, identities,
+                    new byte[samples.length][], new byte[identities.length][]);
+        }
+
+        LeafContribution(
+                final double[] columns,
+                final double[] samples,
+                final String[] identities,
+                final byte[][] kllSketches,
+                final byte[][] thetaSketches) {
             this.columns = columns;
             this.samples = samples;
             this.identities = identities;
+            this.kllSketches = kllSketches;
+            this.thetaSketches = thetaSketches;
         }
     }
 
@@ -929,19 +1026,61 @@ public class AttributionTransform extends Transform {
                     columns[i] = value == null ? 0.0 : value;
                 }
                 final double[] samples = new double[task.distributionNames.size()];
+                final byte[][] kllSketches = new byte[task.distributionNames.size()][];
                 for(int i = 0; i < samples.length; i++) {
-                    final Double sample = element.getAsDouble(task.distributionNames.get(i));
-                    samples[i] = sample == null ? Double.NaN : sample;
+                    if(task.distributionFromSketch[i]) {
+                        samples[i] = Double.NaN;
+                        final byte[] bytes = readSketchBytes(element, task.distributionNames.get(i));
+                        if(bytes != null) {
+                            // Validate here so corrupt sketches route to the failure output
+                            // (deserialization failures inside Combine would fail the pipeline)
+                            KllDoublesSketch.heapify(Memory.wrap(bytes));
+                            kllSketches[i] = bytes;
+                        }
+                    } else {
+                        final Double sample = element.getAsDouble(task.distributionNames.get(i));
+                        samples[i] = sample == null ? Double.NaN : sample;
+                    }
                 }
                 final String[] identities = new String[task.distinctNames.size()];
+                final byte[][] thetaSketches = new byte[task.distinctNames.size()][];
                 for(int i = 0; i < identities.length; i++) {
-                    identities[i] = element.getAsString(task.distinctNames.get(i));
+                    if(task.distinctFromSketch[i]) {
+                        final byte[] bytes = readSketchBytes(element, task.distinctNames.get(i));
+                        if(bytes != null) {
+                            Sketches.heapifySketch(Memory.wrap(bytes));
+                            thetaSketches[i] = bytes;
+                        }
+                    } else {
+                        identities[i] = element.getAsString(task.distinctNames.get(i));
+                    }
                 }
-                c.output(KV.of(key, new LeafContribution(columns, samples, identities)));
+                c.output(KV.of(key, new LeafContribution(columns, samples, identities, kllSketches, thetaSketches)));
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed to resolve attribution role", element, e, failFast);
                 c.output(failureTag, badRecord);
             }
+        }
+
+        /** Reads serialized sketch bytes from a bytes field, or base64 from a string field. */
+        private static byte[] readSketchBytes(final MElement element, final String field) {
+            final Object value = element.getPrimitiveValue(field);
+            return switch (value) {
+                case null -> null;
+                case java.nio.ByteBuffer buffer -> {
+                    final byte[] bytes = new byte[buffer.remaining()];
+                    buffer.asReadOnlyBuffer().get(bytes);
+                    yield bytes;
+                }
+                case byte[] bytes -> bytes;
+                case String base64 -> base64.isEmpty() ? null : java.util.Base64.getDecoder().decode(base64);
+                case org.apache.avro.util.Utf8 utf8 -> {
+                    final String base64 = utf8.toString();
+                    yield base64.isEmpty() ? null : java.util.Base64.getDecoder().decode(base64);
+                }
+                default -> throw new IllegalArgumentException(
+                        "sketch field " + field + " has unsupported value type: " + value.getClass());
+            };
         }
 
         private Role resolve(final MElement element, final Long maxEpochMillis) {
@@ -1108,6 +1247,23 @@ public class AttributionTransform extends Transform {
                         acc.theta[i] = newUnion();
                     }
                     acc.theta[i].update(identity);
+                }
+            }
+            // Pre-serialized sketch contributions (measures.type: sketch) merge wholesale
+            for(int i = 0; i < distributionCount; i++) {
+                if(input.kllSketches[i] != null) {
+                    if(acc.kll[i] == null) {
+                        acc.kll[i] = KllDoublesSketch.newHeapInstance(LeafTable.SKETCH_K);
+                    }
+                    acc.kll[i].merge(KllDoublesSketch.heapify(Memory.wrap(input.kllSketches[i])));
+                }
+            }
+            for(int i = 0; i < distinctCount; i++) {
+                if(input.thetaSketches[i] != null) {
+                    if(acc.theta[i] == null) {
+                        acc.theta[i] = newUnion();
+                    }
+                    acc.theta[i].union(Sketches.heapifySketch(Memory.wrap(input.thetaSketches[i])));
                 }
             }
             return acc;
