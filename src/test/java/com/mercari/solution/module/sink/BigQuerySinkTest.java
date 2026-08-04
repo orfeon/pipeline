@@ -1,12 +1,17 @@
 package com.mercari.solution.module.sink;
 
+import com.google.api.services.bigquery.model.TableRow;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.MCollection;
+import com.mercari.solution.module.MElement;
+import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -51,6 +56,70 @@ public class BigQuerySinkTest {
                         "projectId": "myproject",
                         "datasetId": "mydataset",
                         "tableId": "mytable",
+                        "method": "STREAMING_INSERTS",
+                        "writeDisposition": "WRITE_APPEND",
+                        "createDisposition": "CREATE_NEVER",
+                        "outputResult": false
+                      }
+                    }
+                  ]
+                }
+                """.formatted(CREATE_SOURCE_JSON);
+
+        final TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
+        Assertions.assertFalse(outputs.containsKey("bigquerySink"));
+    }
+
+    @Test
+    public void testDestinationFunctionWithTemplate() {
+        final SerializableFunction<TableRow, String> fn = BigQuerySink.createDestinationFunction(
+                null, "myproject.mydataset.table_${category}", List.of("category"));
+
+        final TableRow rowA = new TableRow().set("category", "a");
+        Assertions.assertEquals("myproject.mydataset.table_a", fn.apply(rowA));
+        // repeated calls reuse the cached template
+        Assertions.assertEquals("myproject.mydataset.table_a", fn.apply(rowA));
+        Assertions.assertEquals(
+                "myproject.mydataset.table_b",
+                fn.apply(new TableRow().set("category", "b")));
+    }
+
+    @Test
+    public void testDestinationFunctionWithElement() {
+        final Schema schema = Schema.builder()
+                .withField(Schema.Field.of("category", Schema.FieldType.STRING.withNullable(false)))
+                .build();
+        final SerializableFunction<MElement, String> fn = BigQuerySink.createDestinationFunction(
+                schema, "myproject.mydataset.table_${category}", List.of("category"));
+
+        final MElement element = MElement.of(schema, Map.of("category", "a"), 0L);
+        Assertions.assertEquals("myproject.mydataset.table_a", fn.apply(element));
+    }
+
+    @Test
+    public void testDestinationFunctionStatic() {
+        final SerializableFunction<TableRow, String> fn = BigQuerySink.createDestinationFunction(
+                null, "myproject.mydataset.mytable", List.of());
+        Assertions.assertEquals(
+                "myproject.mydataset.mytable",
+                fn.apply(new TableRow().set("category", "a")));
+    }
+
+    @Test
+    public void testDynamicDestinationTableTemplate() throws Exception {
+        // table with a template expression routes through DynamicDestinationFunc at graph build
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "sinks": [
+                    {
+                      "name": "bigquerySink",
+                      "module": "bigquery",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "myproject",
+                        "table": "myproject.mydataset.table_${id}",
                         "method": "STREAMING_INSERTS",
                         "writeDisposition": "WRITE_APPEND",
                         "createDisposition": "CREATE_NEVER",

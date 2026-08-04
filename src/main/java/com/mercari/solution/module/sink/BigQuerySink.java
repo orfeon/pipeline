@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
+import freemarker.template.Template;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.cloud.google.BigQueryUtil;
 import com.mercari.solution.util.schema.*;
@@ -434,14 +435,47 @@ public class BigQuerySink extends Sink {
         }
     }
 
-    private static <InputT> SerializableFunction<InputT, String>  createDestinationFunction(
+    static <InputT> SerializableFunction<InputT, String> createDestinationFunction(
             final Schema schema,
             final String destination,
             final Collection<String> variables) {
 
-        return (InputT input) -> {
+        return new DestinationFn<>(schema, destination, variables);
+    }
+
+    // The FreeMarker template is parsed once per deserialized instance; evaluating the
+    // destination via the template-text overload would re-parse it for every record.
+    private static class DestinationFn<InputT> implements SerializableFunction<InputT, String> {
+
+        private final Schema schema;
+        private final String destination;
+        private final Collection<String> variables;
+
+        private transient volatile Template template;
+
+        DestinationFn(
+                final Schema schema,
+                final String destination,
+                final Collection<String> variables) {
+
+            this.schema = schema;
+            this.destination = destination;
+            this.variables = variables;
+        }
+
+        @Override
+        public String apply(final InputT input) {
             if(variables == null || variables.isEmpty()) {
                 return destination;
+            }
+            Template t = template;
+            if(t == null) {
+                synchronized (this) {
+                    if(template == null) {
+                        template = TemplateUtil.createStrictTemplate("destinationTemplate", destination);
+                    }
+                    t = template;
+                }
             }
             final Map<String, Object> values = switch (input) {
                 case MElement element -> element.asStandardMap(schema, variables);
@@ -450,8 +484,9 @@ public class BigQuerySink extends Sink {
                 case TableRow tableRow -> tableRow;
                 default -> throw new IllegalArgumentException();
             };
-            return TemplateUtil.executeStrictTemplate(destination, values);
-        };
+            return TemplateUtil.executeStrictTemplate(t, values);
+        }
+
     }
 
         /*
