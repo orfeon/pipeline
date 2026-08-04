@@ -23,7 +23,6 @@ Sink module to write the input data to a specified file storage path.
 | codec              | optional | Enum    | (Only for `avro`,`parquet` format) Select the codec of the file. One of `SNAPPY`, `ZIP`, `GZIP`, `BZIP2`, `ZSTD`, or `UNCOMPRESSED`. The default is `SNAPPY`.                           |
 | tempDirectory      | optional | String  | The GCS path of the temporary file export destination. If not specified, the bucket creation permission is required.                                                                    |
 | outputNotify       | optional | String  | Specify the GCS path if you want to also write out a list of destination file paths after the writing is finished. Even if the number of writes is zero, an empty file will be created. |
-| outputEmpty        | optional | Boolean | Specifies whether to output an empty file even if there are no write records. Default is false.                                                                                         |
 
 ## Deprecated Storage sink module parameters
 

@@ -2,6 +2,7 @@ package com.mercari.solution.module.sink;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
+import com.mercari.solution.module.IllegalModuleException;
 import org.apache.avro.file.DataFileReader;
 import org.apache.avro.file.SeekableFileInput;
 import org.apache.avro.generic.GenericDatumReader;
@@ -361,6 +362,97 @@ public class StorageSinkTest {
                 .filter(p -> p.toString().replace('\\', '/').endsWith("dt=20241120/data.json"))
                 .findFirst().orElseThrow(() -> new AssertionError("dt=20241120/data.json not found in " + files));
         Assertions.assertEquals(1, countLines(file1120));
+    }
+
+    @Test
+    public void testWriteJsonDynamicDestinationMaxNumWritersPerBundle() throws Exception {
+        final String dir = BASE_DIR + "/dynamic-json-maxwriters";
+        cleanDir(dir);
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "sinks": [
+                    {
+                      "name": "storage",
+                      "module": "storage",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "%s/category_${category}/data",
+                        "format": "json",
+                        "suffix": ".json",
+                        "maxNumWritersPerBundle": 4
+                      }
+                    }
+                  ]
+                }
+                """.formatted(createCategorySourceJson(), dir);
+
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+        pipeline.run();
+
+        long totalA = 0;
+        long totalB = 0;
+        for (final Path file : listFiles(dir)) {
+            final String path = file.toString().replace('\\', '/');
+            if (path.contains("/category_a/")) {
+                totalA += countLines(file);
+            } else if (path.contains("/category_b/")) {
+                totalB += countLines(file);
+            } else {
+                Assertions.fail("unexpected output file: " + path);
+            }
+        }
+        Assertions.assertEquals(3, totalA);
+        Assertions.assertEquals(2, totalB);
+    }
+
+    @Test
+    public void testValidationRejectsNoSpillingWithMaxNumWritersPerBundle() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "sinks": [
+                    {
+                      "name": "storage",
+                      "module": "storage",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "%s/data",
+                        "format": "json",
+                        "noSpilling": true,
+                        "maxNumWritersPerBundle": 4
+                      }
+                    }
+                  ]
+                }
+                """.formatted(createSourceJson(), BASE_DIR + "/validation");
+
+        final Config config = Config.load(configJson);
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+    }
+
+    @Test
+    public void testValidationRejectsOutputWithoutObjectPath() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [%s],
+                  "sinks": [
+                    {
+                      "name": "storage",
+                      "module": "storage",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "gs://bucket-without-object-path",
+                        "format": "json"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(createSourceJson());
+
+        final Config config = Config.load(configJson);
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
     }
 
     @Test
