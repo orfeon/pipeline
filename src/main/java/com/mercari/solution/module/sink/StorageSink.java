@@ -174,11 +174,9 @@ public class StorageSink extends Sink {
         final WriteFilesResult writeFilesResult;
         if(TemplateUtil.isTemplateText(object)) {
             final FileIO.Write<String, KV<String, MElement>> write = createDynamicWrite(parameters, errorHandler);
-            errorHandler.apply(write);
             writeFilesResult = withKey.apply(label + "Dynamic", write.via(sink));
         } else {
             final FileIO.Write<Void, KV<String, MElement>> write = createWrite(parameters, errorHandler);
-            errorHandler.apply(write);
             writeFilesResult = withKey.apply(label, write.via(sink));
         }
 
@@ -218,9 +216,7 @@ public class StorageSink extends Sink {
             write = write.withNoSpilling();
         }
 
-        errorHandler.apply(write);
-
-        return write;
+        return errorHandler.apply(write);
     }
 
     private static FileIO.Write<String, KV<String, MElement>> createDynamicWrite(
@@ -251,9 +247,7 @@ public class StorageSink extends Sink {
             write = write.withCompression(parameters.compression);
         }
 
-        errorHandler.apply(write);
-
-        return write;
+        return errorHandler.apply(write);
     }
 
     private static class ObjectNameDoFn extends DoFn<MElement, KV<String, MElement>> {

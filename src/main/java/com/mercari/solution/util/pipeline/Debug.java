@@ -78,12 +78,12 @@ public class Debug {
 
             writeAvroSchemaFile(outputSinkDirPath + "/schema.avro", outputAvroSchema);
 
-            final FileIO.Write<Void, GenericRecord> write = FileIO
+            FileIO.Write<Void, GenericRecord> write = FileIO
                     .<GenericRecord>write()
                     .to(outputSinkDirPath)
                     .via(AvroIO.sink(outputAvroSchema))
                     .withTempDirectory(tempSinkDirPath);
-            errorHandler.apply(write);
+            write = errorHandler.apply(write);
 
             PCollection<GenericRecord> records = input
                     .apply("Format", ParDo.of(new FormatDoFn(inputSchema)))

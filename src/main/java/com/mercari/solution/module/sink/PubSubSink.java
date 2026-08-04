@@ -641,9 +641,7 @@ public class PubSubSink extends Sink {
             write = write.withMaxBatchBytesSize(parameters.maxBatchBytesSize);
         }
 
-        errorHandler.apply(write);
-
-        return write;
+        return errorHandler.apply(write);
     }
 
     private static final SerializableFunction<ValueInSingleWindow<PubsubMessage>,String> topicFunction = (ValueInSingleWindow<PubsubMessage> m) -> {

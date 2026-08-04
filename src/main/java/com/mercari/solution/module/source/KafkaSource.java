@@ -221,9 +221,7 @@ public class KafkaSource extends Source {
             read.withoutMetadata();
         }
 
-        errorHandler.apply(read);
-
-        return read;
+        return errorHandler.apply(read);
     }
 
     private static class OutputDoFn extends DoFn<KafkaRecord<byte[], byte[]>, MElement> {

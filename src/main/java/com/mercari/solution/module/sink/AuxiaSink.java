@@ -144,9 +144,7 @@ public class AuxiaSink extends Sink {
                 write = write.withMaxBatchBytesSize(maxBatchBytesSize);
             }
 
-            errorHandler.apply(write);
-
-            return write;
+            return errorHandler.apply(write);
         }
     }
 
