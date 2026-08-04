@@ -196,7 +196,10 @@ self-contained (parameters, examples) — the agent reads one file per module.
 - `TestPipeline` is used standalone (no `@Rule`):
   `private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);`
 - Module tests are config-driven e2e: `Config.load(json)` → `MPipeline.apply(pipeline, config)` →
-  `PAssert` → `pipeline.run()` (see `SelectTransformTest`).
+  `PAssert` → `pipeline.run()` (see `SelectTransformTest`). File-writing sinks assert by reading the
+  output files back from a directory under `target/` instead of `PAssert` (see `StorageSinkTest`).
+- kafka-clients is NOT on the test classpath (Beam's KafkaIO marks it provided): constructing any
+  `KafkaIO` transform in a unit test fails with `NoClassDefFoundError`; Kafka modules need ITs.
 - Tests run in parallel (4 threads) via JUnit Platform config in the surefire plugin.
 - Coverage: JaCoCo runs with `mvn test`; report at `target/site/jacoco/index.html` (CSV/XML alongside).
 - Integration tests (`*IT.java`, Testcontainers emulators, requires Docker) are skipped by default:
