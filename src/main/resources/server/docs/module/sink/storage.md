@@ -35,10 +35,10 @@ This module differs from the [Files Sink Module](files.md): the Files module wri
 | compression   | optional | Enum    | File-level compression. Values: `ZIP`, `GZIP`, `BZIP2`, `ZSTD`, `LZO`, `LZOP`, `DEFLATE`, `UNCOMPRESSED`, `AUTO`. Default: `AUTO`.                                                                               |
 | codec         | optional | Enum    | Internal codec for Avro/Parquet formats. See [Codec values](#codec-values). Default: `SNAPPY`.                                                                                                                      |
 | tempDirectory | optional | String  | Temporary directory path for intermediate files. If not specified, the runner creates one automatically (may require bucket creation permission).                                                                    |
-| noSpilling    | optional | Boolean | If `true`, disables file spilling. Default: `false`.                                                                                                                                                                |
+| noSpilling    | optional | Boolean | If `true`, disables file spilling. Cannot be combined with `maxNumWritersPerBundle`. Default: `false`.                                                                                                              |
+| maxNumWritersPerBundle | optional | Integer | Maximum number of concurrently open file writers per bundle before records spill to a shuffle (Beam default: 20). Raising it reduces spilling for high-cardinality [dynamic output paths](#dynamic-output-paths) at the cost of worker memory. Cannot be combined with `noSpilling`. |
 | header        | optional | Boolean | (CSV only) If `true`, writes a CSV header row. Default: `false`.                                                                                                                                                    |
 | bom           | optional | Boolean | (CSV/JSON only) If `true`, writes a UTF-8 BOM at the beginning of the file. Default: `false`.                                                                                                                       |
-| outputEmpty   | optional | Boolean | If `true`, writes an empty file even when there are no input records. Default: `false`.                                                                                                                              |
 
 ### Format details
 

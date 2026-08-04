@@ -7,13 +7,13 @@ import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.file.FileUtil;
 import com.mercari.solution.util.pipeline.Union;
 import freemarker.template.Template;
-import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.Compression;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.WriteFilesResult;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.IntervalWindow;
@@ -43,11 +43,11 @@ public class StorageSink extends Sink {
         private Compression compression;
         private FileUtil.CodecName codec;
         private Boolean noSpilling;
+        private Integer maxNumWritersPerBundle;
 
         // csv
         private Boolean header;
         private Boolean bom;
-        private Boolean outputEmpty;
 
         // inner use
         private List<String> outputTemplateArgs;
@@ -57,6 +57,11 @@ public class StorageSink extends Sink {
             if(this.output == null) {
                 errorMessages.add("parameters.output must not be null");
             } else {
+                final String prefix = getPrefix(this.output);
+                final String[] paths = this.output.replaceFirst(prefix, "").split("/", 2);
+                if(paths.length < 2 || paths[1].isEmpty()) {
+                    errorMessages.add("parameters.output[" + this.output + "] must contain an object path after the bucket, e.g. gs://bucket/path/to/object");
+                }
                 if(this.output.startsWith("gs://")) {
                     /*
                     final String bucketName = StorageUtil.getBucketName(this.output);
@@ -72,6 +77,9 @@ public class StorageSink extends Sink {
             }
             if(this.format == null) {
                 errorMessages.add("parameters.format must not be null");
+            }
+            if(Boolean.TRUE.equals(this.noSpilling) && this.maxNumWritersPerBundle != null) {
+                errorMessages.add("parameters.noSpilling and parameters.maxNumWritersPerBundle must not be set together");
             }
 
             if(!errorMessages.isEmpty()) {
@@ -89,9 +97,6 @@ public class StorageSink extends Sink {
             }
             if(this.noSpilling == null) {
                 this.noSpilling = false;
-            }
-            if(this.outputEmpty == null) {
-                this.outputEmpty = false;
             }
 
             // For CSV format
@@ -137,16 +142,7 @@ public class StorageSink extends Sink {
 
         final String object = getObject(parameters.output);
 
-        final List<String> outputTemplateArgs = Optional
-                .ofNullable(parameters.outputTemplateArgs)
-                .orElseGet(() -> TemplateUtil.extractTemplateArgs(object, inputSchema));
-
-        final PCollection<KV<String, MElement>> withKey = input
-                .apply("WithObjectName", ParDo.of(new ObjectNameDoFn(
-                        name, object, inputSchema, outputTemplateArgs)))
-                .setCoder(KvCoder.of(StringUtf8Coder.of(), input.getCoder()));
-
-        final FileIO.Sink<KV<String, MElement>> sink = switch (parameters.format) {
+        final FileIO.Sink<MElement> sink = switch (parameters.format) {
             case csv -> {
                 final List<String> fields = outputSchema.getFields().stream()
                         .map(Schema.Field::getName)
@@ -173,11 +169,15 @@ public class StorageSink extends Sink {
 
         final WriteFilesResult writeFilesResult;
         if(TemplateUtil.isTemplateText(object)) {
-            final FileIO.Write<String, KV<String, MElement>> write = createDynamicWrite(parameters, errorHandler);
-            writeFilesResult = withKey.apply(label + "Dynamic", write.via(sink));
+            final List<String> outputTemplateArgs = Optional
+                    .ofNullable(parameters.outputTemplateArgs)
+                    .orElseGet(() -> TemplateUtil.extractTemplateArgs(object, inputSchema));
+            final FileIO.Write<String, MElement> write = createDynamicWrite(
+                    name, parameters, inputSchema, outputTemplateArgs, errorHandler);
+            writeFilesResult = input.apply(label + "Dynamic", write.via(sink));
         } else {
-            final FileIO.Write<Void, KV<String, MElement>> write = createWrite(parameters, errorHandler);
-            writeFilesResult = withKey.apply(label, write.via(sink));
+            final FileIO.Write<Void, MElement> write = createWrite(parameters, errorHandler);
+            writeFilesResult = input.apply(label, write.via(sink));
         }
 
         final PCollection<KV> rows = writeFilesResult.getPerDestinationOutputFilenames();
@@ -186,7 +186,7 @@ public class StorageSink extends Sink {
                 .setCoder(ElementCoder.of(OutputDoFn.schema));
     }
 
-    private static FileIO.Write<Void, KV<String, MElement>> createWrite(
+    private static FileIO.Write<Void, MElement> createWrite(
             final Parameters parameters,
             final MErrorHandler errorHandler) {
 
@@ -195,10 +195,40 @@ public class StorageSink extends Sink {
         final String suffix = parameters.suffix;
         final Integer numShards = parameters.numShards;
 
-        FileIO.Write<Void, KV<String, MElement>> write = FileIO
-                .<KV<String, MElement>>write()
+        final FileIO.Write<Void, MElement> write = FileIO
+                .<MElement>write()
                 .to(bucket)
                 .withNaming(getFileNaming(object, suffix, numShards));
+
+        return applyWriteOptions(write, parameters, errorHandler);
+    }
+
+    private static FileIO.Write<String, MElement> createDynamicWrite(
+            final String name,
+            final Parameters parameters,
+            final Schema inputSchema,
+            final List<String> outputTemplateArgs,
+            final MErrorHandler errorHandler) {
+
+        final String bucket = getBucket(parameters.output);
+        final String object = getObject(parameters.output);
+        final String suffix = parameters.suffix;
+        final Integer numShards = parameters.numShards;
+
+        final FileIO.Write<String, MElement> write = FileIO
+                .<String, MElement>writeDynamic()
+                .to(bucket)
+                .by(new DestinationFn(name, object, inputSchema, outputTemplateArgs))
+                .withDestinationCoder(StringUtf8Coder.of())
+                .withNaming(key -> getFileNaming(key, suffix, numShards));
+
+        return applyWriteOptions(write, parameters, errorHandler);
+    }
+
+    private static <DestinationT> FileIO.Write<DestinationT, MElement> applyWriteOptions(
+            FileIO.Write<DestinationT, MElement> write,
+            final Parameters parameters,
+            final MErrorHandler errorHandler) {
 
         if(parameters.numShards == null || parameters.numShards < 1) {
             write = write.withAutoSharding();
@@ -215,52 +245,25 @@ public class StorageSink extends Sink {
         if(parameters.noSpilling) {
             write = write.withNoSpilling();
         }
-
-        return errorHandler.apply(write);
-    }
-
-    private static FileIO.Write<String, KV<String, MElement>> createDynamicWrite(
-            final Parameters parameters,
-            final MErrorHandler errorHandler) {
-
-        final String bucket = getBucket(parameters.output);
-        final String suffix = parameters.suffix;
-        final Integer numShards = parameters.numShards;
-
-        FileIO.Write<String, KV<String, MElement>> write = FileIO
-                .<String, KV<String, MElement>>writeDynamic()
-                .to(bucket)
-                .by(KV::getKey)
-                .withDestinationCoder(StringUtf8Coder.of())
-                .withNaming(key -> getFileNaming(key, suffix, numShards));
-
-        if(parameters.numShards == null || parameters.numShards < 1) {
-            write = write.withAutoSharding();
-        } else {
-            write = write.withNumShards(parameters.numShards);
-        }
-
-        if(parameters.tempDirectory != null) {
-            write = write.withTempDirectory(parameters.tempDirectory);
-        }
-        if(parameters.compression != null) {
-            write = write.withCompression(parameters.compression);
+        if(parameters.maxNumWritersPerBundle != null) {
+            write = write.withMaxNumWritersPerBundle(parameters.maxNumWritersPerBundle);
         }
 
         return errorHandler.apply(write);
     }
 
-    private static class ObjectNameDoFn extends DoFn<MElement, KV<String, MElement>> {
+    // Destinations are evaluated inside FileIO's dynamic write instead of being pre-computed
+    // into a KV key, so the destination string is not duplicated into every shuffled element.
+    private static class DestinationFn implements SerializableFunction<MElement, String> {
 
         private final String name;
         private final String path;
         private final Schema inputSchema;
         private final List<String> templateArgs;
-        private final boolean useTemplate;
 
-        private transient Template pathTemplate;
+        private transient volatile Template pathTemplate;
 
-        public ObjectNameDoFn(
+        DestinationFn(
                 final String name,
                 final String path,
                 final Schema inputSchema,
@@ -270,31 +273,23 @@ public class StorageSink extends Sink {
             this.path = path;
             this.inputSchema = inputSchema;
             this.templateArgs = templateArgs;
-            this.useTemplate = TemplateUtil.isTemplateText(this.path);
         }
 
-        @Setup
-        public void setup() {
-            if(useTemplate) {
-                this.pathTemplate = TemplateUtil.createSafeTemplate("pathTemplate" + name, path);
+        @Override
+        public String apply(final MElement element) {
+            Template template = pathTemplate;
+            if(template == null) {
+                synchronized (this) {
+                    if(pathTemplate == null) {
+                        pathTemplate = TemplateUtil.createSafeTemplate("pathTemplate" + name, path);
+                    }
+                    template = pathTemplate;
+                }
             }
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement element = c.element();
-            if(element == null) {
-                return;
-            }
-            if(useTemplate) {
-                final Map<String, Object> values = element.asStandardMap(inputSchema, templateArgs);
-                TemplateUtil.setFunctions(values);
-                values.put("__timestamp", Instant.ofEpochMilli(c.timestamp().getMillis()));
-                final String key = TemplateUtil.executeStrictTemplate(pathTemplate, values);
-                c.output(KV.of(key, element));
-            } else {
-                c.output(KV.of(this.path, element));
-            }
+            final Map<String, Object> values = element.asStandardMap(inputSchema, templateArgs);
+            TemplateUtil.setFunctions(values);
+            values.put("__timestamp", Instant.ofEpochMilli(element.getEpochMillis()));
+            return TemplateUtil.executeStrictTemplate(template, values);
         }
 
     }
@@ -345,7 +340,7 @@ public class StorageSink extends Sink {
 
         private final String path;
         private final String suffix;
-        private transient Template suffixTemplate;
+        private transient volatile Template suffixTemplate;
 
         private TemplateFileNaming(final String path, final String suffix) {
             this.path = path;
@@ -358,8 +353,14 @@ public class StorageSink extends Sink {
                                   final int shardIndex,
                                   final Compression compression) {
 
-            if(suffixTemplate == null) {
-                this.suffixTemplate = TemplateUtil.createStrictTemplate("TemplateFileNaming", suffix);
+            Template template = suffixTemplate;
+            if(template == null) {
+                synchronized (this) {
+                    if(suffixTemplate == null) {
+                        suffixTemplate = TemplateUtil.createStrictTemplate("TemplateFileNaming", suffix);
+                    }
+                    template = suffixTemplate;
+                }
             }
 
             final Map<String,Object> values = new HashMap<>();
@@ -382,9 +383,9 @@ public class StorageSink extends Sink {
 
             TemplateUtil.setFunctions(values);
 
-            final String filename = TemplateUtil.executeStrictTemplate(suffixTemplate, values);
+            final String filename = TemplateUtil.executeStrictTemplate(template, values);
             final String fullPath = this.path + filename;
-            LOG.info("templateFilename: {}", fullPath);
+            LOG.debug("templateFilename: {}", fullPath);
             return fullPath;
         }
 
