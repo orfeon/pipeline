@@ -78,10 +78,23 @@ public class NetManDatasetHarnessTest {
         int falseNegative = 0;
         int cases = 0;
 
-        for(final String[] injection : readCsv(folder.resolve("injection_info.csv"))) {
-            final String timestamp = injection[0];
-            // Ground truth root cause sets are in the last column: "a1&b2;a3" style
-            final Set<String> truth = parseRootCauseSets(injection[injection.length - 1]);
+        final List<String[]> injections = readCsv(folder.resolve("injection_info.csv"));
+        // Column order varies across datasets (Squeeze A: "set,timestamp"; riskloc generator:
+        // "timestamp,set,<metadata...>") — resolve both by header name
+        final String[] infoHeader = injections.getFirst();
+        int setIndex = infoHeader.length - 1;
+        int timestampIndex = 0;
+        for(int i = 0; i < infoHeader.length; i++) {
+            if("set".equals(infoHeader[i])) {
+                setIndex = i;
+            } else if("timestamp".equals(infoHeader[i])) {
+                timestampIndex = i;
+            }
+        }
+
+        for(final String[] injection : injections.subList(1, injections.size())) {
+            final String timestamp = injection[timestampIndex];
+            final Set<String> truth = parseRootCauseSets(injection[setIndex]);
 
             final Path caseFile = folder.resolve(timestamp + ".csv");
             if(!Files.exists(caseFile)) {
@@ -140,17 +153,21 @@ public class NetManDatasetHarnessTest {
             builder.addTarget(dims, new double[]{Double.parseDouble(row[realIndex])});
         }
 
+        // Reference-parity configuration: the published algorithms run without support/cardinality
+        // guards, search all layers, report every root cause (no top-K truncation) and have no
+        // degenerate-cutoff guard (our production default) — disabled here so the scores are
+        // directly comparable with the paper and the Python reference implementation
         final AttributionResult result = AttributionEngine.run(
                 builder.build(),
                 dimNames.stream().map(DimensionSpec::flat).toList(),
                 List.of(MeasureSpec.fundamental("m")),
                 new EngineConfig(
                         EngineConfig.Algorithm.riskloc,
-                        EngineConfig.RiskLocParams.defaults(),
+                        new EngineConfig.RiskLocParams(0.5, 0.02, 1, false),
                         EngineConfig.AdtributorParams.defaults(),
-                        EngineConfig.Guards.defaults(),
+                        new EngineConfig.Guards(0, dimNames.size(), 0),
                         DerivedAllocation.Method.gre,
-                        5),
+                        Integer.MAX_VALUE),
                 false);
 
         final Set<String> predicted = new HashSet<>();
@@ -162,14 +179,23 @@ public class NetManDatasetHarnessTest {
         return predicted;
     }
 
-    /** Parses "a1&b2;a3" into canonical slice strings with sorted values. */
+    /**
+     * Parses ground truth root cause sets into canonical slice strings with sorted values.
+     * Handles both notations: "a1&b2;a3" (Squeeze datasets) and "a=a1&b=b2;a=a3"
+     * (riskloc generate_dataset.py) — dimension prefixes are stripped.
+     */
     private static Set<String> parseRootCauseSets(final String rootCauses) {
         final Set<String> sets = new HashSet<>();
         for(final String sliceText : rootCauses.split(";")) {
             if(sliceText.isBlank()) {
                 continue;
             }
-            sets.add(String.join("&", new TreeSet<>(List.of(sliceText.trim().split("&")))));
+            final Set<String> values = new TreeSet<>();
+            for(final String element : sliceText.trim().split("&")) {
+                final int eq = element.indexOf('=');
+                values.add(eq < 0 ? element : element.substring(eq + 1));
+            }
+            sets.add(String.join("&", values));
         }
         return sets;
     }
