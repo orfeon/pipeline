@@ -930,6 +930,162 @@ public class AttributionTransformTest {
     }
 
     @Test
+    public void testSketchMeasures() throws Exception {
+        // Pre-aggregated sketch input (e.g. BigQuery-side aggregation): one row per leaf and
+        // role carrying base64 KLL and Theta sketch bytes. The (a, x) baseline arrives as two
+        // partial sketches to prove wholesale merging. Fixture values mirror the event-level
+        // distribution / distinct tests: region=a tail jumps to 500 and loses 7 of 10 users.
+        final StringBuilder elements = new StringBuilder();
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String category : List.of("x", "y")) {
+                final String prefix = region + "_" + category + "_u";
+                if("a".equals(region) && "x".equals(category)) {
+                    // baseline split into two partial aggregates
+                    appendSketchRow(elements, region, category, "base",
+                            kllBase64(10, 50), thetaBase64(prefix, 1, 5));
+                    appendSketchRow(elements, region, category, "base",
+                            kllBase64(60, 100), thetaBase64(prefix, 6, 10));
+                } else {
+                    appendSketchRow(elements, region, category, "base",
+                            kllBase64(10, 100), thetaBase64(prefix, 1, 10));
+                }
+                final double curTop = switch (region) {
+                    case "a" -> 500;
+                    case "b" -> 101;
+                    default -> 99;
+                };
+                final int curUsers = switch (region) {
+                    case "a" -> 3;
+                    case "b" -> 11;
+                    default -> 10;
+                };
+                appendSketchRow(elements, region, category, "cur",
+                        kllBase64WithTop(curTop), thetaBase64(prefix, 1, curUsers));
+            }
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "aggregates",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ %s ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "window", "type": "string" },
+                        { "name": "lat_sk", "type": "string" },
+                        { "name": "users_sk", "type": "string" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["aggregates"],
+                      "parameters": {
+                        "measures": [
+                          { "name": "lat_sk", "type": "sketch", "format": "kll", "quantiles": [0.99] },
+                          { "name": "users_sk", "type": "sketch", "format": "theta" }
+                        ],
+                        "comparison": {
+                          "reference": {
+                            "strategy": "external",
+                            "labelField": "window",
+                            "baselineLabel": "base",
+                            "targetLabel": "cur"
+                          }
+                        },
+                        "vocabulary": {
+                          "dimensions": [
+                            { "name": "region" },
+                            { "name": "category" }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection output = outputs.get("attribution");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final List<MElement> list = toList(rows);
+            Assertions.assertEquals(2, list.size());
+            for(final MElement row : list) {
+                Assertions.assertEquals("absoluteDelta", row.getAsString("epBasis"));
+                Assertions.assertEquals(false, row.getPrimitiveValue("noFinding"));
+                assertElements(row, "region=a");
+                if("lat_sk".equals(row.getAsString("measure"))) {
+                    Assertions.assertEquals(0.99, row.getAsDouble("quantile"), DELTA);
+                    Assertions.assertEquals(100.0, row.getAsDouble("baseline"), DELTA);
+                    Assertions.assertEquals(500.0, row.getAsDouble("target"), DELTA);
+                } else {
+                    Assertions.assertEquals("users_sk", row.getAsString("measure"));
+                    Assertions.assertNull(row.getAsDouble("quantile"));
+                    Assertions.assertEquals(20.0, row.getAsDouble("baseline"), DELTA);
+                    Assertions.assertEquals(6.0, row.getAsDouble("target"), DELTA);
+                    Assertions.assertEquals(60.0, row.getAsDouble("totalBaseline"), DELTA);
+                    Assertions.assertEquals(48.0, row.getAsDouble("totalTarget"), DELTA);
+                }
+            }
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    private static void appendSketchRow(
+            final StringBuilder elements, final String region, final String category,
+            final String window, final String latSketch, final String usersSketch) {
+        if(!elements.isEmpty()) {
+            elements.append(",");
+        }
+        elements.append(String.format(
+                "{ \"region\": \"%s\", \"category\": \"%s\", \"window\": \"%s\", \"lat_sk\": \"%s\", \"users_sk\": \"%s\" }",
+                region, category, window, latSketch, usersSketch));
+    }
+
+    /** KLL sketch of values from..to in steps of 10, base64-encoded. */
+    private static String kllBase64(final double from, final double to) {
+        final org.apache.datasketches.kll.KllDoublesSketch sketch =
+                org.apache.datasketches.kll.KllDoublesSketch.newHeapInstance(200);
+        for(double v = from; v <= to; v += 10) {
+            sketch.update(v);
+        }
+        return java.util.Base64.getEncoder().encodeToString(sketch.toByteArray());
+    }
+
+    /** KLL sketch of 10..90 plus the given top value, base64-encoded. */
+    private static String kllBase64WithTop(final double top) {
+        final org.apache.datasketches.kll.KllDoublesSketch sketch =
+                org.apache.datasketches.kll.KllDoublesSketch.newHeapInstance(200);
+        for(double v = 10; v <= 90; v += 10) {
+            sketch.update(v);
+        }
+        sketch.update(top);
+        return java.util.Base64.getEncoder().encodeToString(sketch.toByteArray());
+    }
+
+    /** Theta sketch of identities prefix+from .. prefix+to, base64-encoded. */
+    private static String thetaBase64(final String prefix, final int from, final int to) {
+        final org.apache.datasketches.theta.UpdateSketch sketch =
+                org.apache.datasketches.theta.UpdateSketch.builder().build();
+        for(int i = from; i <= to; i++) {
+            sketch.update(prefix + i);
+        }
+        return java.util.Base64.getEncoder().encodeToString(sketch.compact().toByteArray());
+    }
+
+    @Test
     public void testLeafCombineFnMergeAndAccumulatorRoundTrip() {
         // The accumulator must survive Java serialization (Beam fusion boundaries) with its
         // KLL and Theta sketches intact, and merging must be equivalent to direct accumulation
@@ -963,17 +1119,38 @@ public class AttributionTransformTest {
     }
 
     @Test
+    public void testLeafCombineFnMergesPreSerializedSketchesWithRawInputs() {
+        // A column can receive raw samples/identities and pre-serialized sketches in any mix
+        final AttributionTransform.LeafCombineFn fn = new AttributionTransform.LeafCombineFn(0, 1, 1);
+
+        final org.apache.datasketches.kll.KllDoublesSketch kll =
+                org.apache.datasketches.kll.KllDoublesSketch.newHeapInstance(200);
+        kll.update(20);
+        kll.update(30);
+        final org.apache.datasketches.theta.UpdateSketch theta =
+                org.apache.datasketches.theta.UpdateSketch.builder().build();
+        theta.update("u2");
+        theta.update("u3");
+
+        AttributionTransform.LeafCombineFn.Accumulator acc = fn.createAccumulator();
+        acc = fn.addInput(acc, new AttributionTransform.LeafContribution(
+                new double[0], new double[]{10.0}, new String[]{"u1"}));
+        acc = fn.addInput(acc, new AttributionTransform.LeafContribution(
+                new double[0], new double[]{Double.NaN}, new String[]{null},
+                new byte[][]{kll.toByteArray()}, new byte[][]{theta.compact().toByteArray()}));
+
+        final AttributionTransform.LeafAggregate aggregate = fn.extractOutput(acc);
+        Assertions.assertEquals(3L, org.apache.datasketches.kll.KllDoublesSketch
+                .heapify(org.apache.datasketches.memory.Memory.wrap(aggregate.kll[0])).getN());
+        Assertions.assertEquals(3.0, org.apache.datasketches.theta.Sketches
+                .heapifySketch(org.apache.datasketches.memory.Memory.wrap(aggregate.theta[0]))
+                .getEstimate(), DELTA);
+    }
+
+    @Test
     public void testValidationErrors() throws Exception {
         // [config, expected message fragment]
         final String[][] cases = {
-                {
-                        // reserved measure type
-                        transform("""
-                        "measures": [ { "name": "sales", "type": "sketch" } ],
-                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
-                        """, 2),
-                        "measures.type: sketch is reserved"
-                },
                 {
                         // distribution measures take no expression
                         transform("""
@@ -1042,6 +1219,30 @@ public class AttributionTransformTest {
                         "vocabulary": { "dimensions": [ { "name": "region" } ] }
                         """, 1),
                         "type: distinct cannot be used with the synthetic reference"
+                },
+                {
+                        // sketch measures require a format
+                        transform("""
+                        "measures": [ { "name": "region", "type": "sketch" } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "format parameter is required for type: sketch"
+                },
+                {
+                        // quantiles are meaningless for theta sketches
+                        transform("""
+                        "measures": [ { "name": "region", "type": "sketch", "format": "theta", "quantiles": [0.5] } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "quantiles must not be set for format: theta"
+                },
+                {
+                        // sketch fields must carry serialized bytes (or base64 strings)
+                        transform("""
+                        "measures": [ { "name": "sales", "type": "sketch", "format": "kll" } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] }
+                        """, 2),
+                        "must be a bytes (serialized sketch) or string (base64) type"
                 },
                 {
                         // reserved comparison mode

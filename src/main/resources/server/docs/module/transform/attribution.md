@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Attribution Transform Module
-description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), distinct-count measures (cardinality change localization via mergeable Theta sketches), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
+description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), distinct-count measures (cardinality change localization via mergeable Theta sketches), pre-serialized sketch input (aggregate at the source, ship only sketch bytes), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
 tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches]
 timestamp: 2026-07-12T00:00:00Z
 ---
@@ -46,6 +46,9 @@ Supports:
 - **Distinct-count measures** — "DAU dropped — which slice?" Per-leaf identity sets are held as
   mergeable Theta sketches; distinct counts are not sum-additive, and the sketch union is what
   makes slice evaluation possible. See [Distinct-count measures](#distinct-count-measures).
+- **Sketch measures** — pre-serialized DataSketches bytes as input: aggregate at the source
+  (e.g. BigQuery DataSketches UDFs) and ship only sketch bytes. See
+  [Sketch measures](#sketch-measures-pre-aggregated-sketch-input).
 - **Four reference (baseline) strategies** — two-input `external`, single-input `external` with a
   label column, `timeShift` (period-over-period), `split` (by a row attribute), and
   `synthetic` marginal (interaction discovery against an independence model).
@@ -53,9 +56,9 @@ Supports:
   `maxLayer` bounding the search depth, to control cost and spurious findings.
 - **Binned dimensions** — numeric columns bucketed by quantile or equal width before search.
 
-Batch only. Streaming mode, the distributed (large) execution profile, and the parameter values
-marked **reserved** below are planned for future versions; reserved values are accepted by the
-schema but rejected at validation time with a "not implemented" error.
+Batch only. Streaming mode and the parameter values marked **reserved** below are planned for
+future versions; reserved values are accepted by the schema but rejected at validation time
+with a "not implemented" error.
 
 ## Transform module common parameters
 
@@ -79,10 +82,11 @@ Array of measures to explain. Each measure is analyzed independently.
 
 | parameter  | optional | type   | description                                                                                                     |
 |------------|----------|--------|-----------------------------------------------------------------------------------------------------------------|
-| name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. For `distribution`, the numeric input field whose per-row values form the distribution. For `distinct`, the identity field (any scalar type) whose distinct count is analyzed. |
-| type       | optional | Enum   | `fundamental` (default), `derived`, `distribution` or `distinct`. (`sketch` is **reserved**.)                    |
+| name       | required | String | Measure name. For `fundamental`, the numeric input field to sum. For `derived`, the output name of the expression. For `distribution`, the numeric input field whose per-row values form the distribution. For `distinct`, the identity field (any scalar type) whose distinct count is analyzed. For `sketch`, the field carrying serialized sketch bytes. |
+| type       | optional | Enum   | `fundamental` (default), `derived`, `distribution`, `distinct` or `sketch`.                                      |
 | expression | required for derived | String | Arithmetic expression (Lucene expressions, JavaScript-like syntax) over numeric input fields, e.g. `"orders / sessions"`. All variables must exist as numeric input fields. |
-| quantiles  | optional (distribution only) | Array<Double\> | Quantiles in (0, 1) to analyze, e.g. `[0.5, 0.99]`. Each quantile is localized independently and produces its own result rows. Default `[0.5]`. |
+| quantiles  | optional (distribution / sketch kll) | Array<Double\> | Quantiles in (0, 1) to analyze, e.g. `[0.5, 0.99]`. Each quantile is localized independently and produces its own result rows. Default `[0.5]`. |
+| format     | required for sketch | Enum | `kll` (quantiles sketch — analyzed like a [distribution measure](#distribution-measures)) or `theta` (identity set sketch — analyzed like a [distinct-count measure](#distinct-count-measures)). |
 
 Fundamental measures and derived-expression variables must be **sum-additive** (counts, amounts).
 Declare ratios as `derived` with their additive components as variables — do not feed
@@ -138,6 +142,69 @@ Semantics:
 Up to 4096 distinct identities per leaf and role the estimate is exact (and deterministic);
 beyond that, Theta error bounds apply (~1.6% RSE) and the union of many estimating sketches
 compounds slightly.
+
+### Sketch measures (pre-aggregated sketch input)
+
+A `sketch` measure accepts **pre-serialized Apache DataSketches bytes** instead of raw
+samples/identities: the heavy per-event aggregation runs at the source (e.g. a BigQuery
+`GROUP BY` over billions of events) and only the compact sketch bytes cross the wire — the
+best of source-side aggregation (minimal read I/O) and sketch semantics. Rows carry the
+sketch in the `name` field as a `bytes` column, or a `string` column holding base64.
+
+After merging, the measure behaves exactly like its raw-fed counterpart — same analysis, same
+output, same constraints (always `epBasis: absoluteDelta`, no `synthetic` reference):
+
+- `format: kll` — a KLL **doubles** quantiles sketch, analyzed like a
+  [distribution measure](#distribution-measures) at the configured `quantiles`.
+- `format: theta` — a Theta identity-set sketch, analyzed like a
+  [distinct-count measure](#distinct-count-measures).
+
+Partial aggregates are fine: multiple sketch rows per dimension tuple (and even a mix of
+sketch rows and raw event rows feeding *different* measures) merge correctly. Corrupt sketch
+bytes are routed to the failure output (`outputFailure` / `failureSinks`).
+
+**Serialization compatibility** — the bytes must be the Apache DataSketches serial format:
+
+- `theta` interoperates with the
+  [Apache DataSketches BigQuery UDFs](https://github.com/apache/datasketches-bigquery)
+  (`bqutil.datasketches.theta_sketch_agg_string(...)` etc.) and any DataSketches
+  Java/C++/Python producer.
+- `kll` expects a **`kll_sketch<double>`** (Java `KllDoublesSketch`). Note the BigQuery UDFs
+  currently serialize **float** KLL sketches (`kll_sketch_float_build`), which are a
+  *different, incompatible* format — KLL sketch input therefore currently requires a
+  doubles-sketch producer (DataSketches Java/C++/Python, another pipeline stage, …).
+  BigQuery's native `KLL_QUANTILES.*` functions are also not compatible.
+
+```yaml
+sources:
+  - name: dailySketches
+    module: bigquery
+    parameters:
+      query: |
+        SELECT region, category, window,
+               bqutil.datasketches.theta_sketch_agg_string(user_id, STRUCT(12)) AS users_sk
+        FROM `myproject.logs.events`
+        GROUP BY region, category, window
+transforms:
+  - name: dauAttribution
+    module: attribution
+    inputs: [dailySketches]
+    parameters:
+      measures:
+        - name: users_sk
+          type: sketch
+          format: theta
+      comparison:
+        reference:
+          strategy: external
+          labelField: window
+          baselineLabel: last_week
+          targetLabel: this_week
+      vocabulary:
+        dimensions:
+          - name: region
+          - name: category
+```
 
 ## comparison parameters
 
