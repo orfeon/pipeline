@@ -44,6 +44,30 @@ public class AttributionEngineBenchmarkTest {
                     result.results().getFirst().findings().size());
         }
 
+        // Squeeze scaling on the same tables: the KDE amplitude filter is O(leaves x 1000)
+        // and dominates at scale
+        System.out.println("cardinality | leaves | squeeze_ms | findings");
+        for(final int cardinality : cardinalities) {
+            final LeafTable table = generate(cardinality);
+            final long runStart = System.nanoTime();
+            final AttributionResult result = AttributionEngine.run(
+                    table,
+                    SyntheticDataGenerator.dimensionNames(3).stream().map(DimensionSpec::flat).toList(),
+                    List.of(MeasureSpec.fundamental("m")),
+                    new EngineConfig(
+                            EngineConfig.Algorithm.squeeze,
+                            EngineConfig.RiskLocParams.defaults(),
+                            EngineConfig.AdtributorParams.defaults(),
+                            EngineConfig.Guards.defaults(),
+                            DerivedAllocation.Method.gre,
+                            3),
+                    false);
+            final long runMs = (System.nanoTime() - runStart) / 1_000_000;
+            System.out.printf("%11d | %6d | %10d | %d%n",
+                    cardinality, table.leafCount(), runMs,
+                    result.results().getFirst().findings().size());
+        }
+
         // Cuboid-count effect: ~1M leaves at growing dimension counts (maxLayer 3:
         // 3 dims = 7 cuboids, 4 dims = 14, 5 dims = 25, 6 dims = 41)
         System.out.println("dims | cardinality | leaves | cuboids<=3 | riskloc_ms");
