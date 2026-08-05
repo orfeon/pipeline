@@ -1425,14 +1425,16 @@ public class AttributionTransform extends Transform {
                         builder.build(), task.dimensions, task.measures, task.engineConfig, task.syntheticMarginal);
 
                 for(final MeasureResult measureResult : result.results()) {
+                    final boolean external = AttributionEngine
+                            .externalRootCauseCandidate(measureResult, task.engineConfig);
                     int rank = 1;
                     for(final Finding finding : measureResult.findings()) {
-                        final MElement output = createFindingElement(measureResult, finding, rank++, c.timestamp());
+                        final MElement output = createFindingElement(measureResult, finding, rank++, external, c.timestamp());
                         Logging.log(LOG, logs, "output", output);
                         c.output(output);
                     }
                     if(measureResult.findings().isEmpty() && task.emitNoFinding) {
-                        final MElement output = createNoFindingElement(measureResult, c.timestamp());
+                        final MElement output = createNoFindingElement(measureResult, external, c.timestamp());
                         Logging.log(LOG, logs, "output", output);
                         c.output(output);
                     }
@@ -1447,6 +1449,7 @@ public class AttributionTransform extends Transform {
                 final MeasureResult measureResult,
                 final Finding finding,
                 final int rank,
+                final boolean externalCandidate,
                 final org.joda.time.Instant timestamp) {
 
             final List<MElement> elements = new ArrayList<>();
@@ -1468,6 +1471,7 @@ public class AttributionTransform extends Transform {
                     .withInt64("layer", (long) finding.layer())
                     .withFloat64("explanatoryPower", finding.explanatoryPower())
                     .withFloat64("unexplainedShare", measureResult.unexplainedShare())
+                    .withBool("externalCandidate", externalCandidate)
                     .withFloat64("baseline", finding.baselineSum())
                     .withFloat64("target", finding.targetSum())
                     .withFloat64("delta", delta)
@@ -1492,9 +1496,11 @@ public class AttributionTransform extends Transform {
 
         private MElement createNoFindingElement(
                 final MeasureResult measureResult,
+                final boolean externalCandidate,
                 final org.joda.time.Instant timestamp) {
 
-            final MElement.Builder builder = MElement.builder();
+            final MElement.Builder builder = MElement.builder()
+                    .withBool("externalCandidate", externalCandidate);
             if(measureResult.quantile() != null) {
                 builder.withFloat64("quantile", measureResult.quantile());
             }
@@ -1555,6 +1561,7 @@ public class AttributionTransform extends Transform {
                 .withField("riskScore", Schema.FieldType.FLOAT64.withNullable(true))
                 .withField("explanatoryPower", Schema.FieldType.FLOAT64)
                 .withField("unexplainedShare", Schema.FieldType.FLOAT64)
+                .withField("externalCandidate", Schema.FieldType.BOOLEAN)
                 .withField("surprise", Schema.FieldType.FLOAT64.withNullable(true))
                 .withField("baseline", Schema.FieldType.FLOAT64)
                 .withField("target", Schema.FieldType.FLOAT64)

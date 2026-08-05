@@ -111,6 +111,7 @@ public class AttributionTransformTest {
             Assertions.assertEquals(1000.0, row.getAsDouble("totalTarget"), DELTA);
             Assertions.assertEquals(1.0, row.getAsDouble("explanatoryPower"), DELTA);
             Assertions.assertEquals(0.0, row.getAsDouble("unexplainedShare"), DELTA);
+            Assertions.assertEquals(false, row.getPrimitiveValue("externalCandidate"));
             Assertions.assertEquals(2.0 / 3.0, row.getAsDouble("riskScore"), DELTA);
             Assertions.assertEquals(2L, row.getAsLong("leafCount"));
             return null;
@@ -1164,13 +1165,98 @@ public class AttributionTransformTest {
             Assertions.assertEquals("squeeze", row.getAsString("algorithm"));
             Assertions.assertEquals(false, row.getPrimitiveValue("noFinding"));
             assertElements(row, "region=a");
-            Assertions.assertNull(row.getAsDouble("riskScore"));
+            Assertions.assertEquals(1.0, row.getAsDouble("riskScore"), DELTA);
             Assertions.assertNull(row.getAsDouble("surprise"));
             Assertions.assertEquals(1.0, row.getAsDouble("explanatoryPower"), DELTA);
             Assertions.assertEquals(0.0, row.getAsDouble("unexplainedShare"), DELTA);
+            Assertions.assertEquals(false, row.getPrimitiveValue("externalCandidate"));
             Assertions.assertEquals(200.0, row.getAsDouble("baseline"), DELTA);
             Assertions.assertEquals(600.0, row.getAsDouble("target"), DELTA);
             Assertions.assertEquals(2L, row.getAsLong("leafCount"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testExternalCandidateOnUnlocalizableShift() throws Exception {
+        // Uniform +10% on every leaf: the change is real but not localizable in the declared
+        // dimensions -> a noFinding row flagged as an external root cause candidate
+        final String config = """
+                {
+                  "sources": [
+                    {
+                      "name": "target",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "region": "a", "category": "x", "sales": 110 },
+                          { "region": "a", "category": "y", "sales": 110 },
+                          { "region": "b", "category": "x", "sales": 110 },
+                          { "region": "b", "category": "y", "sales": 110 },
+                          { "region": "c", "category": "x", "sales": 110 },
+                          { "region": "c", "category": "y", "sales": 110 }
+                        ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "sales", "type": "float64" }
+                      ] }
+                    },
+                    {
+                      "name": "baseline",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "region": "a", "category": "x", "sales": 100 },
+                          { "region": "a", "category": "y", "sales": 100 },
+                          { "region": "b", "category": "x", "sales": 100 },
+                          { "region": "b", "category": "y", "sales": 100 },
+                          { "region": "c", "category": "x", "sales": 100 },
+                          { "region": "c", "category": "y", "sales": 100 }
+                        ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "sales", "type": "float64" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["target", "baseline"],
+                      "parameters": {
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": {
+                          "dimensions": [ { "name": "region" }, { "name": "category" } ]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config loaded = Config.load(config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, loaded);
+        final MCollection output = outputs.get("attribution");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final List<MElement> list = toList(rows);
+            Assertions.assertEquals(1, list.size());
+            final MElement row = list.getFirst();
+            Assertions.assertEquals(true, row.getPrimitiveValue("noFinding"));
+            Assertions.assertEquals(true, row.getPrimitiveValue("externalCandidate"));
+            Assertions.assertEquals(1.0, row.getAsDouble("unexplainedShare"), DELTA);
+            Assertions.assertEquals(600.0, row.getAsDouble("totalBaseline"), DELTA);
+            Assertions.assertEquals(660.0, row.getAsDouble("totalTarget"), DELTA);
             return null;
         });
 
