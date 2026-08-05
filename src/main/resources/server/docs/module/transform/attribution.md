@@ -596,10 +596,12 @@ The pipeline runs in two stages:
 
    Runtime is near-linear in leaf count and stays around one second at a million leaves even
    at 6 dimensions / 41 cuboids (element pruning keeps the cuboid-count effect sublinear), so
-   the single-worker step is not the bottleneck for realistic vocabularies. Memory is the
-   practical limit: keep distinct leaf tuples roughly below a few million with
-   `guards.maxCardinality` / `minSupport` and by limiting `vocabulary.dimensions`. The cuboid
-   count grows exponentially with `guards.maxLayer`, so raise it with care.
+   the single-worker step is not the bottleneck for realistic vocabularies. `squeeze` is
+   heavier — ~150 ms at 10k and ~9 s at one million leaves (its KDE amplitude filter is
+   O(leaves × 1000)) — but still single-worker viable. Memory is the practical limit: keep
+   distinct leaf tuples roughly below a few million with `guards.maxCardinality` /
+   `minSupport` and by limiting `vocabulary.dimensions`. The cuboid count grows exponentially
+   with `guards.maxLayer`, so raise it with care.
 
 ## Known limitations
 
