@@ -122,6 +122,7 @@ public class ElementToAvroConverter {
         final org.apache.avro.Schema fieldSchema = switch (fieldType.getType()) {
             case bool -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.BOOLEAN);
             case string -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.STRING);
+            case uuid -> LogicalTypes.uuid().addToSchema(org.apache.avro.Schema.create(org.apache.avro.Schema.Type.STRING));
             case bytes -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.BYTES);
             case decimal -> LogicalTypes.decimal(38, 9).addToSchema(org.apache.avro.Schema.create(org.apache.avro.Schema.Type.BYTES));
             case int8, int16, int32 -> org.apache.avro.Schema.create(org.apache.avro.Schema.Type.INT);

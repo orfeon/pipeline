@@ -6,9 +6,11 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
 import org.joda.time.Instant;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class Cast implements SelectFunction {
 
@@ -81,7 +83,39 @@ public class Cast implements SelectFunction {
     @Override
     public Object apply(Map<String, Object> input, Instant timestamp) {
         final Object value = ElementSchemaUtil.getValue(input, field);
+        final Schema.Type inputType = inputFields.getFirst().getFieldType().getType();
+        if(Schema.Type.uuid.equals(outputFieldType.getType()) && Schema.Type.bytes.equals(inputType)) {
+            return bytesToUuid(value);
+        } else if(Schema.Type.bytes.equals(outputFieldType.getType()) && Schema.Type.uuid.equals(inputType)) {
+            return uuidToBytes(value);
+        }
         return ElementSchemaUtil.getAsPrimitive(outputFieldType, value);
+    }
+
+    private static String bytesToUuid(final Object value) {
+        if(value == null) {
+            return null;
+        }
+        final ByteBuffer buffer = switch (value) {
+            case ByteBuffer b -> b.duplicate();
+            case byte[] b -> ByteBuffer.wrap(b);
+            default -> throw new IllegalArgumentException("UUID bytes value must be byte[] or ByteBuffer");
+        };
+        if(buffer.remaining() != 16) {
+            throw new IllegalArgumentException("UUID bytes value must be exactly 16 bytes");
+        }
+        return new UUID(buffer.getLong(), buffer.getLong()).toString();
+    }
+
+    private static ByteBuffer uuidToBytes(final Object value) {
+        if(value == null) {
+            return null;
+        }
+        final UUID uuid = UUID.fromString(value.toString());
+        return ByteBuffer.allocate(16)
+                .putLong(uuid.getMostSignificantBits())
+                .putLong(uuid.getLeastSignificantBits())
+                .flip();
     }
 
 }

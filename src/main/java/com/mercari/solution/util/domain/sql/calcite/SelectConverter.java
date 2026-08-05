@@ -26,7 +26,7 @@ public class SelectConverter {
                 System.out.println("literal: " + type + " value: " + literal.toValue());
                 switch (type) {
                     case bool -> jsonObject.addProperty("value", literal.booleanValue());
-                    case string -> jsonObject.addProperty("value", literal.toValue());
+                    case string, uuid -> jsonObject.addProperty("value", literal.toValue());
                     case int8, int16, int32 -> jsonObject.addProperty("value", literal.intValue(true));
                     case int64 -> jsonObject.addProperty("value", literal.longValue(true));
                     case decimal -> jsonObject.addProperty("value", literal.bigDecimalValue());

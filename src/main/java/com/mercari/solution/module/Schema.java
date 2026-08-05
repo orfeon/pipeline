@@ -739,6 +739,7 @@ public class Schema implements Serializable {
 
         public static FieldType BOOLEAN = FieldType.type(Type.bool);
         public static FieldType STRING = FieldType.type(Type.string);
+        public static FieldType UUID = FieldType.type(Type.uuid);
         public static FieldType JSON = FieldType.type(Type.json);
         public static FieldType BYTES = FieldType.type(Type.bytes);
         public static FieldType INT32 = FieldType.type(Type.int32);
@@ -1496,6 +1497,7 @@ public class Schema implements Serializable {
     public enum Type {
         bool,
         string,
+        uuid,
         json,
         bytes,
         int8,
@@ -1526,6 +1528,7 @@ public class Schema implements Serializable {
                 case "bool", "boolean" -> Type.bool;
                 case "bytes", "blob" -> Type.bytes;
                 case "string", "char" -> Type.string;
+                case "uuid" -> Type.uuid;
                 case "json" -> Type.json;
                 case "byte", "int8" -> Type.int8;
                 case "short", "int16" -> Type.int16;
@@ -1556,6 +1559,7 @@ public class Schema implements Serializable {
                 case "float", "float32" -> value.getAsFloat();
                 case "double", "float64" -> value.getAsDouble();
                 case "string", "json" -> value.getAsString();
+                case "uuid" -> UUID.fromString(value.getAsString()).toString();
                 case "date" -> Long.valueOf(DateTimeUtil.toLocalDate(value.getAsString()).toEpochDay()).intValue();
                 case "time" -> DateTimeUtil.toLocalTime(value.getAsString()).toNanoOfDay() / 1000L;
                 case "timestamp" -> DateTimeUtil.toJodaInstant(value.getAsString()).getMillis() * 1000L;

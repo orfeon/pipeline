@@ -83,7 +83,7 @@ public class ElementToEntityConverter {
                     yield Value.newBuilder().setBlobValue(byteString);
                 }
             }
-            case string, enumeration -> {
+            case string, uuid, enumeration -> {
                 final String stringValue = value.toString();
                 if(stringValue.getBytes().length >= DatastoreUtil.QUOTE_VALUE_SIZE) {
                     yield Value.newBuilder().setStringValue(stringValue).setExcludeFromIndexes(true);

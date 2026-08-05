@@ -11,6 +11,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class Bytes implements SelectFunction {
 
@@ -110,6 +111,7 @@ public class Bytes implements SelectFunction {
         return switch (type) {
             case bool -> HBaseBytes.toBoolean(bytes);
             case string, json -> HBaseBytes.toString(bytes);
+            case uuid -> UUID.fromString(HBaseBytes.toString(bytes)).toString();
             case int16 -> HBaseBytes.toShort(bytes);
             case int32, date -> HBaseBytes.toInt(bytes);
             case int64, time, timestamp -> HBaseBytes.toLong(bytes);

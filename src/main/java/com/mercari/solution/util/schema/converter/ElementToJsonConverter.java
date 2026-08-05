@@ -116,7 +116,7 @@ public class ElementToJsonConverter {
                                 + " for value: " + primitiveValue + " is not supported");
                     }
                 }
-                case string, json -> obj.addProperty(fieldName, primitiveValue.toString());
+                case string, uuid, json -> obj.addProperty(fieldName, primitiveValue.toString());
                 case bytes -> {
                     final byte[] bytes = switch (primitiveValue) {
                         case ByteBuffer b -> b.array();
@@ -197,7 +197,7 @@ public class ElementToJsonConverter {
                         }
                     })
                     .forEach(array::add);
-            case string, json -> arrayValue.stream()
+            case string, uuid, json -> arrayValue.stream()
                     .filter(Objects::nonNull)
                     .map(Object::toString)
                     .forEach(array::add);
@@ -258,7 +258,7 @@ public class ElementToJsonConverter {
             switch (mapValueType.getType()) {
                 case bool -> mapObject.addProperty(name, (Boolean) entry.getValue());
                 case int8, int16, int32, int64, float8, float16, float32, float64 -> mapObject.addProperty(name, (Number) entry.getValue());
-                case string, json -> mapObject.addProperty(name, entry.getValue().toString());
+                case string, uuid, json -> mapObject.addProperty(name, entry.getValue().toString());
                 case bytes -> mapObject.addProperty(name, java.util.Base64.getEncoder().encodeToString(((ByteBuffer)entry.getValue()).array()));
                 case date -> mapObject.addProperty(name, LocalDate.ofEpochDay((Integer)entry.getValue()).toString());
                 case time -> mapObject.addProperty(name, LocalTime.ofNanoOfDay((Long)entry.getValue() / 1000L).toString());

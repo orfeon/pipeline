@@ -1028,7 +1028,7 @@ public class BigtableSchemaUtil {
             return null;
         }
         return switch (dynamicType) {
-            case string, json -> primitiveValue.toString();
+            case string, uuid, json -> primitiveValue.toString();
             case bool -> switch (primitiveValue) {
                 case String s -> Boolean.parseBoolean(s);
                 case Utf8 u -> Boolean.parseBoolean(u.toString());
@@ -1113,7 +1113,7 @@ public class BigtableSchemaUtil {
         final byte[] bytes = byteString.toByteArray();
         return switch (fieldtype.getType()) {
             case bool -> HBaseBytes.toBoolean(bytes);
-            case string, json -> HBaseBytes.toString(bytes);
+            case string, uuid, json -> HBaseBytes.toString(bytes);
             case bytes -> ByteBuffer.wrap(bytes);
             case int16 -> HBaseBytes.toShort(bytes);
             case int32, date, enumeration -> HBaseBytes.toInt(bytes);

@@ -64,7 +64,7 @@ public class ElementToTableRowConverter {
                 case Number n -> n.doubleValue() > 0;
                 default -> throw new IllegalArgumentException();
             };
-            case string, json -> switch (value) {
+            case string, uuid, json -> switch (value) {
                 case String s -> s;
                 default -> value.toString();
             };
@@ -168,7 +168,7 @@ public class ElementToTableRowConverter {
                 .setMode(mode);
         return switch (fieldType.getType()) {
             case bool -> tableFieldSchema.setName(name).setType("BOOLEAN");
-            case string, enumeration -> tableFieldSchema.setName(name).setType("STRING");
+            case string, uuid, enumeration -> tableFieldSchema.setName(name).setType("STRING");
             case geography -> tableFieldSchema.setName(name).setType("GEOGRAPHY");
             case json -> tableFieldSchema.setName(name).setType("JSON");
             case bytes -> tableFieldSchema.setName(name).setType("BYTES");

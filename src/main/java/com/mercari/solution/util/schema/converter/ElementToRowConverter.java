@@ -73,7 +73,7 @@ public class ElementToRowConverter {
     public static org.apache.beam.sdk.schemas.Schema.FieldType convertFieldType(final Schema.FieldType fieldType) {
         final org.apache.beam.sdk.schemas.Schema.FieldType rowFieldType = switch (fieldType.getType()) {
             case bytes -> org.apache.beam.sdk.schemas.Schema.FieldType.BYTES;
-            case string, json -> org.apache.beam.sdk.schemas.Schema.FieldType.STRING;
+            case string, uuid, json -> org.apache.beam.sdk.schemas.Schema.FieldType.STRING;
             case int8 -> org.apache.beam.sdk.schemas.Schema.FieldType.BYTE;
             case int16 -> org.apache.beam.sdk.schemas.Schema.FieldType.INT16;
             case int32 -> org.apache.beam.sdk.schemas.Schema.FieldType.INT32;

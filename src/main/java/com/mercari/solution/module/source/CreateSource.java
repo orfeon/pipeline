@@ -583,6 +583,7 @@ public class CreateSource extends Source {
         final String elementValue = elements.get(sequence.intValue());
         return switch (elementFieldType.getType()) {
             case string -> elementValue;
+            case uuid -> UUID.fromString(elementValue).toString();
             case bytes -> ByteBuffer.wrap(Base64.getDecoder().decode(elementValue));
             case date -> Long.valueOf(DateTimeUtil.toLocalDate(elementValue.replaceAll("\"", "")).toEpochDay()).intValue();
             case time -> DateTimeUtil.toLocalTime(elementValue.replaceAll("\"", "")).toNanoOfDay() / 1000L;
