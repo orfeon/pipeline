@@ -103,6 +103,10 @@ public class NetManDatasetHarnessTest {
             }
             final Set<String> predicted = localize(caseFile);
             cases++;
+            if(Boolean.getBoolean("attribution.netman.dump")) {
+                System.out.println("CASE " + timestamp + ": predicted=" + new TreeSet<>(predicted)
+                        + " truth=" + new TreeSet<>(truth));
+            }
 
             for(final String slice : predicted) {
                 if(truth.contains(slice)) {
@@ -156,13 +160,16 @@ public class NetManDatasetHarnessTest {
         // Reference-parity configuration: the published algorithms run without support/cardinality
         // guards, search all layers, report every root cause (no top-K truncation) and have no
         // degenerate-cutoff guard (our production default) — disabled here so the scores are
-        // directly comparable with the paper and the Python reference implementation
+        // directly comparable with the paper and the Python reference implementation.
+        // The evaluated algorithm defaults to riskloc; override with -Dattribution.netman.algorithm
+        final EngineConfig.Algorithm algorithm = EngineConfig.Algorithm.valueOf(
+                System.getProperty("attribution.netman.algorithm", "riskloc"));
         final AttributionResult result = AttributionEngine.run(
                 builder.build(),
                 dimNames.stream().map(DimensionSpec::flat).toList(),
                 List.of(MeasureSpec.fundamental("m")),
                 new EngineConfig(
-                        EngineConfig.Algorithm.riskloc,
+                        algorithm,
                         new EngineConfig.RiskLocParams(0.5, 0.02, 1, false),
                         EngineConfig.AdtributorParams.defaults(),
                         new EngineConfig.Guards(0, dimNames.size(), 0),

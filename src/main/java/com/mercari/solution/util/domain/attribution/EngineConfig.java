@@ -11,10 +11,22 @@ public record EngineConfig(
         Algorithm algorithm,
         RiskLocParams riskloc,
         AdtributorParams adtributor,
+        SqueezeParams squeeze,
         Guards guards,
         DerivedAllocation.Method derivedAllocation,
         EpBasis epBasis,
         int topK) implements Serializable {
+
+    public EngineConfig(
+            final Algorithm algorithm,
+            final RiskLocParams riskloc,
+            final AdtributorParams adtributor,
+            final Guards guards,
+            final DerivedAllocation.Method derivedAllocation,
+            final EpBasis epBasis,
+            final int topK) {
+        this(algorithm, riskloc, adtributor, SqueezeParams.defaults(), guards, derivedAllocation, epBasis, topK);
+    }
 
     public EngineConfig(
             final Algorithm algorithm,
@@ -29,6 +41,7 @@ public record EngineConfig(
     public enum Algorithm {
         riskloc,
         adtributor,
+        squeeze,
         exhaustive
     }
 
@@ -68,6 +81,25 @@ public record EngineConfig(
 
         public static AdtributorParams defaults() {
             return new AdtributorParams(0.1, 0.67);
+        }
+    }
+
+    /**
+     * Squeeze (ISSRE 2019) parameters, defaults per the reference implementation's SqueezeOption:
+     * {@code psUpperBound} stops the layer search once a candidate's generalized potential score
+     * exceeds it; {@code maxNumElementsSingleCluster} caps the elements tried per cuboid;
+     * {@code maxNormalDeviation} drops density clusters whose mean |deviation| is below it
+     * (treated as normal fluctuation); {@code enableFilter} applies the knee-point amplitude
+     * filter before clustering.
+     */
+    public record SqueezeParams(
+            double psUpperBound,
+            int maxNumElementsSingleCluster,
+            double maxNormalDeviation,
+            boolean enableFilter) implements Serializable {
+
+        public static SqueezeParams defaults() {
+            return new SqueezeParams(0.90, 12, 0.20, true);
         }
     }
 

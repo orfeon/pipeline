@@ -148,7 +148,15 @@ public class AttributionTransform extends Transform {
             private Algorithm algorithm;
             private RiskLocParameter riskloc;
             private AdtributorParameter adtributor;
+            private SqueezeParameter squeeze;
             private GuardsParameter guards;
+        }
+
+        private static class SqueezeParameter implements Serializable {
+            private Double psUpperBound;
+            private Integer maxNumElementsSingleCluster;
+            private Double maxNormalDeviation;
+            private Boolean enableFilter;
         }
 
         private static class RiskLocParameter implements Serializable {
@@ -230,9 +238,6 @@ public class AttributionTransform extends Transform {
                 errorMessages.add(prefix + "semantics.basis: " + semantics.basis + " is reserved and not implemented yet");
             }
             if(engine != null) {
-                if(Algorithm.squeeze.equals(engine.algorithm)) {
-                    errorMessages.add(prefix + "engine.algorithm: squeeze is reserved and not implemented yet");
-                }
                 if(engine.guards != null && FdrControl.bh.equals(engine.guards.fdrControl)) {
                     errorMessages.add(prefix + "engine.guards.fdrControl: bh is reserved and not implemented yet");
                 }
@@ -672,6 +677,21 @@ public class AttributionTransform extends Transform {
             if(engine.adtributor.tep == null) {
                 engine.adtributor.tep = 0.67;
             }
+            if(engine.squeeze == null) {
+                engine.squeeze = new SqueezeParameter();
+            }
+            if(engine.squeeze.psUpperBound == null) {
+                engine.squeeze.psUpperBound = 0.90;
+            }
+            if(engine.squeeze.maxNumElementsSingleCluster == null) {
+                engine.squeeze.maxNumElementsSingleCluster = 12;
+            }
+            if(engine.squeeze.maxNormalDeviation == null) {
+                engine.squeeze.maxNormalDeviation = 0.20;
+            }
+            if(engine.squeeze.enableFilter == null) {
+                engine.squeeze.enableFilter = true;
+            }
             if(engine.guards == null) {
                 engine.guards = new GuardsParameter();
             }
@@ -868,6 +888,11 @@ public class AttributionTransform extends Transform {
                     new EngineConfig.AdtributorParams(
                             parameters.engine.adtributor.teep,
                             parameters.engine.adtributor.tep),
+                    new EngineConfig.SqueezeParams(
+                            parameters.engine.squeeze.psUpperBound,
+                            parameters.engine.squeeze.maxNumElementsSingleCluster,
+                            parameters.engine.squeeze.maxNormalDeviation,
+                            parameters.engine.squeeze.enableFilter),
                     new EngineConfig.Guards(
                             parameters.engine.guards.minSupport,
                             parameters.engine.guards.maxLayer,
