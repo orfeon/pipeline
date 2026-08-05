@@ -1,4 +1,6 @@
-package com.mercari.solution.util.domain.attribution;
+package com.mercari.solution.util.domain.attribution.algorithm;
+
+import com.mercari.solution.util.domain.attribution.*;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -43,7 +45,7 @@ public class Adtributor implements AttributionAlgorithm {
             }
             final List<Element> elements = new ArrayList<>();
             for(final Map.Entry<String, double[]> entry : merged.entrySet()) {
-                final double surprise = jsDivergence(
+                final double surprise = Scores.jsDivergence(
                         entry.getValue()[1], entry.getValue()[2], baselineTotal, targetTotal);
                 elements.add(new Element(entry.getKey(), entry.getValue()[0], surprise,
                         entry.getValue()[1], entry.getValue()[2], (int) entry.getValue()[3]));
@@ -90,17 +92,5 @@ public class Adtributor implements AttributionAlgorithm {
                 .sorted(Comparator.comparingDouble((Finding finding) -> finding.surprise()).reversed())
                 .limit(config.topK())
                 .toList();
-    }
-
-    /**
-     * Jensen-Shannon divergence term of one element:
-     * {@code 0.5 * (p*ln(2p/(p+q)) + q*ln(2q/(p+q)))} with non-finite terms treated as 0.
-     */
-    static double jsDivergence(final double f, final double v, final double baselineTotal, final double targetTotal) {
-        final double p = baselineTotal == 0 ? 0 : f / baselineTotal;
-        final double q = targetTotal == 0 ? 0 : v / targetTotal;
-        final double pTerm = p * Math.log(2 * p / (p + q));
-        final double qTerm = q * Math.log(2 * q / (p + q));
-        return 0.5 * ((Double.isFinite(pTerm) ? pTerm : 0) + (Double.isFinite(qTerm) ? qTerm : 0));
     }
 }

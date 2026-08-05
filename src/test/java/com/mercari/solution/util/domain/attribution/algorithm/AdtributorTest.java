@@ -1,4 +1,6 @@
-package com.mercari.solution.util.domain.attribution;
+package com.mercari.solution.util.domain.attribution.algorithm;
+
+import com.mercari.solution.util.domain.attribution.*;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -77,11 +79,11 @@ public class AdtributorTest {
     @Test
     public void testJsDivergenceZeroSafety() {
         // p = 0: p-term drops, q-term = q * ln(2)
-        final double surprise = Adtributor.jsDivergence(0, 50, 100, 100);
+        final double surprise = Scores.jsDivergence(0, 50, 100, 100);
         Assertions.assertEquals(0.5 * 0.5 * Math.log(2), surprise, 1e-9);
         // p = q = 0
-        Assertions.assertEquals(0.0, Adtributor.jsDivergence(0, 0, 100, 100), 1e-9);
+        Assertions.assertEquals(0.0, Scores.jsDivergence(0, 0, 100, 100), 1e-9);
         // identical distributions
-        Assertions.assertEquals(0.0, Adtributor.jsDivergence(50, 50, 100, 100), 1e-9);
+        Assertions.assertEquals(0.0, Scores.jsDivergence(50, 50, 100, 100), 1e-9);
     }
 }

@@ -1,4 +1,6 @@
-package com.mercari.solution.util.domain.attribution;
+package com.mercari.solution.util.domain.attribution.algorithm;
+
+import com.mercari.solution.util.domain.attribution.*;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
