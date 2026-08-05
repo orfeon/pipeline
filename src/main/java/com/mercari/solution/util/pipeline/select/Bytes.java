@@ -10,6 +10,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class Bytes implements SelectFunction {
 
@@ -109,6 +110,7 @@ public class Bytes implements SelectFunction {
         return switch (type) {
             case bool -> org.apache.hadoop.hbase.util.Bytes.toBoolean(bytes);
             case string, json -> org.apache.hadoop.hbase.util.Bytes.toString(bytes);
+            case uuid -> UUID.fromString(org.apache.hadoop.hbase.util.Bytes.toString(bytes)).toString();
             case int16 -> org.apache.hadoop.hbase.util.Bytes.toShort(bytes);
             case int32, date -> org.apache.hadoop.hbase.util.Bytes.toInt(bytes);
             case int64, time, timestamp -> org.apache.hadoop.hbase.util.Bytes.toLong(bytes);

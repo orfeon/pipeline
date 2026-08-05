@@ -364,7 +364,7 @@ public class MElement implements Serializable {
                 case Number n -> n.doubleValue() > 0;
                 default -> throw new IllegalArgumentException();
             };
-            case string, json -> switch (primitiveValue) {
+            case string, uuid, json -> switch (primitiveValue) {
                 case String s -> s;
                 case ByteBuffer bb -> new String(Base64.getDecoder().decode(bb.array()), StandardCharsets.UTF_8);
                 case byte[] b -> new String(b, StandardCharsets.UTF_8);

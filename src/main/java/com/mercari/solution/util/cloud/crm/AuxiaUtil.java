@@ -540,7 +540,7 @@ public class AuxiaUtil {
             final DynamicMessage.Builder builder = DynamicMessage.newBuilder(propertyValueMessage);
             switch (fieldType.getType()) {
                 case bool -> builder.setField(propertyValueBooleanField, value);
-                case string, json -> builder.setField(propertyValueStringField, value);
+                case string, uuid, json -> builder.setField(propertyValueStringField, value);
                 case float32 -> builder.setField(propertyValueDoubleField, ((Float)value).doubleValue());
                 case float64 -> builder.setField(propertyValueDoubleField, value);
                 case int32 -> builder.setField(propertyValueLongField, ((Integer) value).longValue());

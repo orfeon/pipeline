@@ -12,6 +12,8 @@ import java.time.LocalTime;
 import java.util.Base64;
 import java.util.List;
 
+import static org.junit.Assert.assertEquals;
+
 public class ElementToJsonConverterTest {
 
     @Test
@@ -21,6 +23,7 @@ public class ElementToJsonConverterTest {
                 .builder()
                 .withField("booleanField", Schema.FieldType.BOOLEAN)
                 .withField("stringField", Schema.FieldType.STRING)
+                .withField("uuidField", Schema.FieldType.UUID)
                 .withField("int32Field", Schema.FieldType.INT32)
                 .withField("int64Field", Schema.FieldType.INT64)
                 .withField("float32Field", Schema.FieldType.FLOAT32)
@@ -40,6 +43,7 @@ public class ElementToJsonConverterTest {
         final MElement element = MElement.builder()
                 .withBool("booleanField", true)
                 .withString("stringField", "abc")
+                .withString("uuidField", "550e8400-e29b-41d4-a716-446655440000")
                 .withInt32("int32Field", 10)
                 .withInt64("int64Field", 10L)
                 .withBytes("bytesField", "OKOKOK".getBytes(StandardCharsets.UTF_8))
@@ -54,6 +58,7 @@ public class ElementToJsonConverterTest {
                 .build();
 
         final JsonObject jsonObject = ElementToJsonConverter.convert(schema, element.asPrimitiveMap());
+        assertEquals("550e8400-e29b-41d4-a716-446655440000", jsonObject.get("uuidField").getAsString());
     }
 
 }

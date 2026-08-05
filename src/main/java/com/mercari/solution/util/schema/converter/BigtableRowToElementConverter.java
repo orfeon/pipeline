@@ -31,7 +31,7 @@ public class BigtableRowToElementConverter {
         final Schema.Field keyField = schema.getField(KEY_FIELD_NAME);
         if(keyField != null) {
             switch (keyField.getFieldType().getType()) {
-                case string -> values.put(KEY_FIELD_NAME, row.getKey().toStringUtf8());
+                case string, uuid -> values.put(KEY_FIELD_NAME, row.getKey().toStringUtf8());
                 case bytes -> values.put(KEY_FIELD_NAME, ByteBuffer.wrap(row.getKey().toByteArray()));
             }
         }

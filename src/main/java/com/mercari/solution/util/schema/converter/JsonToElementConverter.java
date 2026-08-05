@@ -66,6 +66,7 @@ public class JsonToElementConverter {
         }
         return switch (fieldType.getType()) {
             case string, json -> jsonElement.isJsonPrimitive() ? jsonElement.getAsString() : jsonElement.toString();
+            case uuid -> UUID.fromString(jsonElement.getAsString()).toString();
             case bytes -> jsonElement.isJsonPrimitive() ? Base64.getDecoder().decode(jsonElement.getAsString()) : null;
             case int8 -> jsonElement.isJsonPrimitive() ? jsonElement.getAsByte() : null;
             case int16 -> jsonElement.isJsonPrimitive() ? jsonElement.getAsShort() : null;

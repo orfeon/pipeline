@@ -55,7 +55,7 @@ public class ElementToDocumentConverter {
         }
         return switch (fieldType.getType()) {
             case bool -> getValue(fieldType, Boolean.valueOf(strValue));
-            case string -> getValue(fieldType, strValue);
+            case string, uuid -> getValue(fieldType, strValue);
             case bytes -> getValue(fieldType, Base64.getDecoder().decode(strValue));
             case int16 -> getValue(fieldType, Short.valueOf(strValue));
             case int32 -> getValue(fieldType, Integer.valueOf(strValue));
@@ -77,7 +77,7 @@ public class ElementToDocumentConverter {
         }
         return switch (fieldType.getType()) {
             case bool -> Value.newBuilder().setBooleanValue(((Boolean) v)).build();
-            case string -> Value.newBuilder().setStringValue(((String) v)).build();
+            case string, uuid -> Value.newBuilder().setStringValue(((String) v)).build();
             case bytes -> Value.newBuilder().setBytesValue(ByteString.copyFrom((byte[]) v)).build();
             case int8 -> Value.newBuilder().setIntegerValue(((Byte) v).longValue()).build();
             case int16 -> Value.newBuilder().setIntegerValue(((Short) v).longValue()).build();

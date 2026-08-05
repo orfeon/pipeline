@@ -150,8 +150,12 @@ public class PreparedStatementTemplate implements Serializable {
         public void setUUID(int index, String value) throws java.sql.SQLException {
             List<Integer> mappedIndices = placeholderMappings.getMappings().get(index);
             for (Integer placeholderIndex : mappedIndices) {
-                final UUID uuid = UUID.fromString(value);
-                preparedStatement.setObject(placeholderIndex, uuid, Types.OTHER);
+                if(value == null) {
+                    preparedStatement.setNull(placeholderIndex, Types.OTHER, "uuid");
+                } else {
+                    final UUID uuid = UUID.fromString(value);
+                    preparedStatement.setObject(placeholderIndex, uuid, Types.OTHER);
+                }
             }
         }
 
@@ -298,4 +302,3 @@ public class PreparedStatementTemplate implements Serializable {
         }
     }
 }
-

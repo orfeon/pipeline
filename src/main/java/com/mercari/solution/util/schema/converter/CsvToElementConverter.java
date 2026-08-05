@@ -14,6 +14,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class CsvToElementConverter {
 
@@ -49,6 +50,7 @@ public class CsvToElementConverter {
             return switch (fieldType.getType()) {
                 case bool -> Boolean.valueOf(str.trim());
                 case string, json, enumeration -> str;
+                case uuid -> UUID.fromString(str).toString();
                 case bytes -> ByteBuffer.wrap(Base64.getDecoder().decode(str));
                 case int32 -> Integer.parseInt(str);
                 case int64 -> Long.parseLong(str);

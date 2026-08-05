@@ -1040,7 +1040,7 @@ public class BigtableSchemaUtil {
             return null;
         }
         return switch (dynamicType) {
-            case string, json -> primitiveValue.toString();
+            case string, uuid, json -> primitiveValue.toString();
             case bool -> switch (primitiveValue) {
                 case String s -> Boolean.parseBoolean(s);
                 case Utf8 u -> Boolean.parseBoolean(u.toString());
@@ -1126,7 +1126,7 @@ public class BigtableSchemaUtil {
         final byte[] bytes = byteString.toByteArray();
         return switch (fieldtype.getType()) {
             case bool -> Bytes.toBoolean(bytes);
-            case string, json -> Bytes.toString(bytes);
+            case string, uuid, json -> Bytes.toString(bytes);
             case bytes -> ByteBuffer.wrap(bytes);
             case int16 -> Bytes.toShort(bytes);
             case int32, date, enumeration -> Bytes.toInt(bytes);
@@ -1212,7 +1212,7 @@ public class BigtableSchemaUtil {
             case int64, time, timestamp -> new VLongWritable();
             case float32 -> new FloatWritable();
             case float64 -> new DoubleWritable();
-            case string, json -> new Text();
+            case string, uuid, json -> new Text();
             case bytes -> new BytesWritable();
             case map, element -> new MapWritable();
             case array -> {
@@ -1229,7 +1229,7 @@ public class BigtableSchemaUtil {
         }
         return switch (fieldType.getType()) {
             case bool -> BooleanWritable.class;
-            case string, json -> Text.class;
+            case string, uuid, json -> Text.class;
             case bytes -> BytesWritable.class;
             case int16 -> ShortWritable.class;
             case int32, date, enumeration -> VIntWritable.class;
@@ -1238,7 +1238,7 @@ public class BigtableSchemaUtil {
             case float64 -> DoubleWritable.class;
             case array -> switch (fieldType.getArrayValueType().getType()) {
                 case bool -> BoolArrayWritable.class;
-                case string, json -> TextArrayWritable.class;
+                case string, uuid, json -> TextArrayWritable.class;
                 case bytes -> BytesArrayWritable.class;
                 case int16 -> ShortArrayWritable.class;
                 case int32, date, enumeration -> IntArrayWritable.class;
