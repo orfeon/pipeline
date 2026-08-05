@@ -1,4 +1,6 @@
-package com.mercari.solution.util.domain.attribution;
+package com.mercari.solution.util.domain.attribution.algorithm;
+
+import com.mercari.solution.util.domain.attribution.*;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

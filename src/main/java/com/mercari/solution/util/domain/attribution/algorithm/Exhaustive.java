@@ -1,4 +1,6 @@
-package com.mercari.solution.util.domain.attribution;
+package com.mercari.solution.util.domain.attribution.algorithm;
+
+import com.mercari.solution.util.domain.attribution.*;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -42,7 +44,7 @@ public class Exhaustive implements AttributionAlgorithm {
                     continue;
                 }
                 final Slice slice = new Slice(cuboid, entry.getKey().toArray(new String[0]));
-                final double surprise = Adtributor.jsDivergence(
+                final double surprise = Scores.jsDivergence(
                         entry.getValue()[1], entry.getValue()[2], baselineTotal, targetTotal);
                 findings.add(new Finding(List.of(slice), null, epSum, surprise,
                         entry.getValue()[1], entry.getValue()[2], (int) entry.getValue()[3]));
