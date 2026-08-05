@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Attribution Transform Module
-description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), distinct-count measures (cardinality change localization via mergeable Theta sketches), pre-serialized sketch input (aggregate at the source, ship only sketch bytes), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
+description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc, Squeeze and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), distinct-count measures (cardinality change localization via mergeable Theta sketches), pre-serialized sketch input (aggregate at the source, ship only sketch bytes), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
 tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches]
 timestamp: 2026-07-12T00:00:00Z
 ---
@@ -35,6 +35,9 @@ Supports:
   (Kalander, arXiv:2205.10004): finds culprit slices at any cuboid depth, e.g. `region=a AND category=x`.
 - **Adtributor algorithm** — the classic single-dimension attribution (Bhagwan et al., NSDI 2014)
   using explanatory power + Jensen–Shannon surprise. Also `exhaustive` as a brute-force baseline.
+- **Squeeze algorithm** — deviation-magnitude clustering + potential-score search
+  (Li et al., ISSRE 2019), ported from the reference implementation; a second opinion with
+  different failure modes than RiskLoc.
 - **Derived measures** — ratio/expression measures such as `cvr = orders / sessions` declared as
   [Lucene expressions](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html)
   (JavaScript-like syntax), allocated to their components by `gre` (generalized ripple effect, default),
@@ -288,9 +291,10 @@ The two bases answer **different questions** and every output row records which 
 
 | parameter  | optional | type       | description                                                                    |
 |------------|----------|------------|--------------------------------------------------------------------------------|
-| algorithm  | optional | Enum       | `riskloc` (default), `adtributor`, `exhaustive`. (`squeeze` is **reserved**.)  |
+| algorithm  | optional | Enum       | `riskloc` (default), `adtributor`, `squeeze`, `exhaustive`.                    |
 | riskloc    | optional | RiskLoc    | `{ riskThreshold: 0.5, pepThreshold: 0.02, pruningLayers: 1 }`. `riskThreshold` is the minimum risk score for a slice to qualify; `pepThreshold` stops the iteration once the remaining unexplained share drops below it; `pruningLayers` only speeds up search (never changes results, `0` disables). |
 | adtributor | optional | Adtributor | `{ teep: 0.1, tep: 0.67 }` — per-value and cumulative explanatory power thresholds (NSDI 2014). |
+| squeeze    | optional | Squeeze    | `{ psUpperBound: 0.9, maxNumElementsSingleCluster: 12, maxNormalDeviation: 0.2, enableFilter: true }` — reference-implementation defaults (ISSRE 2019): potential-score early-exit bound, per-cuboid element cap, minimum mean deviation for a cluster to count as anomalous, and the knee-point amplitude filter. |
 | guards     | optional | Guards     | See below.                                                                     |
 
 ### guards parameters
@@ -349,12 +353,12 @@ this judgment is planned with the `squeeze` (PSqueeze) algorithm.
 
 ## Choosing an algorithm
 
-| | `riskloc` (default) | `adtributor` | `exhaustive` |
-|---|---|---|---|
-| Root causes it finds | Cross-dimension slices, multiple independent causes | Elements within a single dimension | Everything (exact EP ranking) |
-| Cost | Medium | Light | Heavy (combinatorial) |
-| Output shape | Minimal culprit slice set | Per-dimension value ranking | Full slice ranking |
-| Typical use | Incident investigation, KPI deep-dive | Recurring reports, screening dashboards | Calibration, small-data exact answers |
+| | `riskloc` (default) | `adtributor` | `squeeze` | `exhaustive` |
+|---|---|---|---|---|
+| Root causes it finds | Cross-dimension slices, multiple independent causes | Elements within a single dimension | Cross-dimension element sets, clustered per deviation magnitude | Everything (exact EP ranking) |
+| Cost | Medium | Light | Medium | Heavy (combinatorial) |
+| Output shape | Minimal culprit slice set | Per-dimension value ranking | One finding per anomaly cluster (its element set as slices) | Full slice ranking |
+| Typical use | Incident investigation, KPI deep-dive | Recurring reports, screening dashboards | Second opinion, forecast baselines, simultaneous multi-cause | Calibration, small-data exact answers |
 
 - **`riskloc`** — start here and keep it unless you have a reason not to. It is the only
   implemented algorithm that finds cross-dimension culprits (`region=a AND category=x`) and
@@ -373,8 +377,15 @@ this judgment is planned with the `squeeze` (PSqueeze) algorithm.
   with `maxLayer` ≤ 2) it produces the exact EP ranking, which makes it the tool for
   calibrating `riskThreshold` when onboarding a new data domain, and for verifying that a
   `riskloc` result is not a search artifact.
-- **`squeeze`** (reserved) — will target forecast-based baselines with very high cardinality;
-  until then use `riskloc` with `guards.maxCardinality`.
+- **`squeeze`** — the other major published localization algorithm (Li et al., ISSRE 2019),
+  ported from the reference implementation. It first clusters leaves by deviation magnitude
+  and then searches each cluster independently, so **simultaneously active causes with
+  different magnitudes** land in separate findings in one pass (riskloc separates them by
+  iterative removal instead), and one finding can carry a multi-element slice set. It has no
+  risk-threshold knob (selection is potential-score driven) and pairs naturally with
+  forecast-style baselines. On the public benchmarks riskloc scores higher overall — use
+  squeeze as a **second opinion**: agreement between the two raises confidence, disagreement
+  flags a case for manual review.
 
 ### Calibrating riskThreshold with the exhaustive oracle
 

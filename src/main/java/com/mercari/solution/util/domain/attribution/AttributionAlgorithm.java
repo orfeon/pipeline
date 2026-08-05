@@ -3,6 +3,7 @@ package com.mercari.solution.util.domain.attribution;
 import com.mercari.solution.util.domain.attribution.algorithm.Adtributor;
 import com.mercari.solution.util.domain.attribution.algorithm.Exhaustive;
 import com.mercari.solution.util.domain.attribution.algorithm.RiskLoc;
+import com.mercari.solution.util.domain.attribution.algorithm.Squeeze;
 
 import java.util.List;
 
@@ -17,6 +18,7 @@ public interface AttributionAlgorithm {
     static AttributionAlgorithm of(final EngineConfig.Algorithm algorithm) {
         return switch (algorithm) {
             case riskloc -> new RiskLoc();
+            case squeeze -> new Squeeze();
             case adtributor -> new Adtributor();
             case exhaustive -> new Exhaustive();
         };

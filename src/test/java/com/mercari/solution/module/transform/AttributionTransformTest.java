@@ -1087,6 +1087,97 @@ public class AttributionTransformTest {
     }
 
     @Test
+    public void testSqueezeAlgorithm() throws Exception {
+        // Same fixture as testExternalTwoInputs, localized by squeeze: one cluster of the two
+        // region=a leaves, selected at layer 1 with a perfect potential score
+        final String config = """
+                {
+                  "sources": [
+                    {
+                      "name": "target",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "region": "a", "category": "x", "sales": 300 },
+                          { "region": "a", "category": "y", "sales": 300 },
+                          { "region": "b", "category": "x", "sales": 100 },
+                          { "region": "b", "category": "y", "sales": 100 },
+                          { "region": "c", "category": "x", "sales": 100 },
+                          { "region": "c", "category": "y", "sales": 100 }
+                        ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "sales", "type": "float64" }
+                      ] }
+                    },
+                    {
+                      "name": "baseline",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "region": "a", "category": "x", "sales": 100 },
+                          { "region": "a", "category": "y", "sales": 100 },
+                          { "region": "b", "category": "x", "sales": 100 },
+                          { "region": "b", "category": "y", "sales": 100 },
+                          { "region": "c", "category": "x", "sales": 100 },
+                          { "region": "c", "category": "y", "sales": 100 }
+                        ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "region", "type": "string" },
+                        { "name": "category", "type": "string" },
+                        { "name": "sales", "type": "float64" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["target", "baseline"],
+                      "parameters": {
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": {
+                          "dimensions": [ { "name": "region" }, { "name": "category" } ]
+                        },
+                        "engine": { "algorithm": "squeeze" }
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config loaded = Config.load(config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, loaded);
+        final MCollection output = outputs.get("attribution");
+        Assertions.assertNotNull(output);
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final List<MElement> list = toList(rows);
+            Assertions.assertEquals(1, list.size());
+            final MElement row = list.getFirst();
+            Assertions.assertEquals("sales", row.getAsString("measure"));
+            Assertions.assertEquals("squeeze", row.getAsString("algorithm"));
+            Assertions.assertEquals(false, row.getPrimitiveValue("noFinding"));
+            assertElements(row, "region=a");
+            Assertions.assertNull(row.getAsDouble("riskScore"));
+            Assertions.assertNull(row.getAsDouble("surprise"));
+            Assertions.assertEquals(1.0, row.getAsDouble("explanatoryPower"), DELTA);
+            Assertions.assertEquals(0.0, row.getAsDouble("unexplainedShare"), DELTA);
+            Assertions.assertEquals(200.0, row.getAsDouble("baseline"), DELTA);
+            Assertions.assertEquals(600.0, row.getAsDouble("target"), DELTA);
+            Assertions.assertEquals(2L, row.getAsLong("leafCount"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
     public void testLeafCombineFnMergeAndAccumulatorRoundTrip() {
         // The accumulator must survive Java serialization (Beam fusion boundaries) with its
         // KLL and Theta sketches intact, and merging must be equivalent to direct accumulation
