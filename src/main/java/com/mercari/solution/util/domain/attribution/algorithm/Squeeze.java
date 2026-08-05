@@ -423,7 +423,9 @@ public class Squeeze implements AttributionAlgorithm {
                 }
             }
         }
-        return new Finding(slices, null, epSum, null, baselineSum, targetSum, leafCount);
+        // riskScore carries the cluster's generalized potential score (the selection confidence,
+        // also the input of the external-root-cause judgment)
+        return new Finding(slices, result.score, epSum, null, baselineSum, targetSum, leafCount);
     }
 
     // ------------------------------------------------------------------

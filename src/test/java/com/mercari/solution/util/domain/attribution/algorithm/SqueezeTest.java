@@ -38,7 +38,8 @@ public class SqueezeTest {
         Assertions.assertEquals(1, findings.size());
         final Finding finding = findings.getFirst();
         Assertions.assertEquals(List.of(new Slice(new int[]{0}, new String[]{"a"})), finding.slices());
-        Assertions.assertNull(finding.riskScore());
+        // riskScore carries the generalized potential score (perfect explanation here)
+        Assertions.assertEquals(1.0, finding.riskScore(), 1e-9);
         Assertions.assertNull(finding.surprise());
         Assertions.assertEquals(2, finding.leafCount());
         Assertions.assertEquals(200.0, finding.baselineSum(), 1e-9);

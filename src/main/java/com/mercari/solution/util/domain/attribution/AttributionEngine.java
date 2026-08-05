@@ -25,7 +25,61 @@ public final class AttributionEngine {
      */
     public static final double AUTO_ABSOLUTE_FALLBACK_RATIO = 0.05;
 
+    /** External judgment: minimum relative net change for a measure to count as "moved". */
+    public static final double EXTERNAL_MIN_CHANGE_RATIO = 0.05;
+
+    /**
+     * External judgment for squeeze: findings whose minimum generalized potential score is below
+     * this are considered weak explanations (the PSqueeze reference's fallback threshold; its
+     * data-driven per-dataset calibration is not applicable to a single run).
+     */
+    public static final double EXTERNAL_SCORE_THRESHOLD = 0.8;
+
+    /**
+     * External judgment for the other algorithms: reports explaining less than 65% of the change
+     * are considered weak (adapted from the PSqueeze reference's {@code ep < 0.65} criterion).
+     */
+    public static final double EXTERNAL_UNEXPLAINED_THRESHOLD = 0.35;
+
     private AttributionEngine() {
+    }
+
+    /**
+     * Judges whether a measure's change is likely caused by an <b>external root cause</b> —
+     * real, but not localizable in the declared dimensions. Adapted from PSqueeze's external
+     * root cause determination (ADR-10): the measure must have moved (relative net change ≥
+     * {@value #EXTERNAL_MIN_CHANGE_RATIO}); it is then external when no findings were reported,
+     * when squeeze's weakest finding scores below {@value #EXTERNAL_SCORE_THRESHOLD}, or when
+     * the report leaves more than {@value #EXTERNAL_UNEXPLAINED_THRESHOLD} of the change
+     * unexplained (skipped when the findings were truncated at {@code topK}, where the
+     * unexplained share is inflated by design).
+     *
+     * <p>Measures whose totals cancel by construction (synthetic marginal) never qualify as
+     * "moved" and always return false.</p>
+     */
+    public static boolean externalRootCauseCandidate(final MeasureResult result, final EngineConfig config) {
+        final double delta = Math.abs(result.targetTotal() - result.baselineTotal());
+        final boolean moved = result.baselineTotal() == 0
+                ? result.targetTotal() != 0
+                : delta / Math.abs(result.baselineTotal()) >= EXTERNAL_MIN_CHANGE_RATIO;
+        if(!moved) {
+            return false;
+        }
+        if(result.findings().isEmpty()) {
+            return true;
+        }
+        if(EngineConfig.Algorithm.squeeze.equals(config.algorithm())) {
+            // Faithful to the reference: squeeze judges on its scores alone
+            double minScore = Double.POSITIVE_INFINITY;
+            for(final Finding finding : result.findings()) {
+                if(finding.riskScore() != null) {
+                    minScore = Math.min(minScore, finding.riskScore());
+                }
+            }
+            return minScore < EXTERNAL_SCORE_THRESHOLD;
+        }
+        final boolean truncated = result.findings().size() >= config.topK();
+        return !truncated && result.unexplainedShare() > EXTERNAL_UNEXPLAINED_THRESHOLD;
     }
 
     public static AttributionResult run(

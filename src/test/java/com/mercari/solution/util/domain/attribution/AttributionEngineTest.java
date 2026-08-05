@@ -358,6 +358,81 @@ public class AttributionEngineTest {
     }
 
     @Test
+    public void testExternalRootCauseCandidate() {
+        // Uniform +10% on every leaf: the change is real but has no localizable slice
+        // (all deviations equal -> nothing passes the risk gate) -> external candidate
+        final LeafTable.Builder uniform = LeafTable.builder(List.of("region", "cat"), List.of("m"));
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String cat : List.of("x", "y")) {
+                uniform.addBaseline(new String[]{region, cat}, new double[]{100});
+                uniform.addTarget(new String[]{region, cat}, new double[]{110});
+            }
+        }
+        final EngineConfig config = config(EngineConfig.Algorithm.riskloc);
+        final AttributionResult uniformResult = AttributionEngine.run(
+                uniform.build(), flatDimensions(List.of("region", "cat")),
+                List.of(MeasureSpec.fundamental("m")), config, false);
+        Assertions.assertTrue(uniformResult.results().getFirst().findings().isEmpty());
+        Assertions.assertTrue(AttributionEngine.externalRootCauseCandidate(
+                uniformResult.results().getFirst(), config));
+
+        // A cleanly localized culprit is not external
+        final LeafTable.Builder localized = LeafTable.builder(List.of("region", "cat"), List.of("m"));
+        for(final String region : List.of("a", "b", "c")) {
+            for(final String cat : List.of("x", "y")) {
+                localized.addBaseline(new String[]{region, cat}, new double[]{100});
+                localized.addTarget(new String[]{region, cat}, new double[]{"a".equals(region) ? 300 : 100});
+            }
+        }
+        final AttributionResult localizedResult = AttributionEngine.run(
+                localized.build(), flatDimensions(List.of("region", "cat")),
+                List.of(MeasureSpec.fundamental("m")), config, false);
+        Assertions.assertFalse(localizedResult.results().getFirst().findings().isEmpty());
+        Assertions.assertFalse(AttributionEngine.externalRootCauseCandidate(
+                localizedResult.results().getFirst(), config));
+
+        // An unchanged measure has no findings but is not external either (nothing moved)
+        final LeafTable.Builder flat = LeafTable.builder(List.of("d"), List.of("m"));
+        flat.addBaseline(new String[]{"a"}, new double[]{100});
+        flat.addTarget(new String[]{"a"}, new double[]{100});
+        final AttributionResult flatResult = AttributionEngine.run(
+                flat.build(), flatDimensions(List.of("d")),
+                List.of(MeasureSpec.fundamental("m")), config, false);
+        Assertions.assertFalse(AttributionEngine.externalRootCauseCandidate(
+                flatResult.results().getFirst(), config));
+    }
+
+    @Test
+    public void testExternalRootCauseCandidateJudgesSqueezeOnScores() {
+        final EngineConfig config = config(EngineConfig.Algorithm.squeeze);
+        final Finding weak = new Finding(
+                List.of(new Slice(new int[]{0}, new String[]{"a"})), 0.5, 0.9, null, 100, 200, 1);
+        final Finding strong = new Finding(
+                List.of(new Slice(new int[]{0}, new String[]{"a"})), 0.95, 0.9, null, 100, 200, 1);
+
+        // The reference judges squeeze on its minimum potential score alone (fallback 0.8)
+        Assertions.assertTrue(AttributionEngine.externalRootCauseCandidate(
+                new MeasureResult("m", 100, 200, EngineConfig.EpBasis.netDelta, List.of(weak)), config));
+        Assertions.assertFalse(AttributionEngine.externalRootCauseCandidate(
+                new MeasureResult("m", 100, 200, EngineConfig.EpBasis.netDelta, List.of(strong)), config));
+    }
+
+    @Test
+    public void testExternalRootCauseCandidateSkipsTruncatedReports() {
+        // topK-truncated reports inflate the unexplained share by design: not judged external
+        final EngineConfig config = config(EngineConfig.Algorithm.riskloc); // topK = 3
+        final Finding partial = new Finding(
+                List.of(new Slice(new int[]{0}, new String[]{"a"})), 0.6, 0.2, null, 100, 200, 1);
+        Assertions.assertFalse(AttributionEngine.externalRootCauseCandidate(
+                new MeasureResult("m", 100, 200, EngineConfig.EpBasis.netDelta,
+                        List.of(partial, partial, partial)), config));
+        // The same weak explanation without truncation is external
+        Assertions.assertTrue(AttributionEngine.externalRootCauseCandidate(
+                new MeasureResult("m", 100, 200, EngineConfig.EpBasis.netDelta,
+                        List.of(partial)), config));
+    }
+
+    @Test
     public void testNoChangeYieldsEmptyFindings() {
         final LeafTable.Builder builder = LeafTable.builder(List.of("d"), List.of("m"));
         builder.addBaseline(new String[]{"a"}, new double[]{100});

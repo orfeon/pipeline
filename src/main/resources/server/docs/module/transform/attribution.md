@@ -329,9 +329,10 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | rank              | Long                                          | 1-based rank within the measure (0 on noFinding rows)              |
 | elements          | Array<Struct{dimension: String, value: String}\> | The slice conjunction (Adtributor: the selected values of the culprit dimension) |
 | layer             | Long                                          | Number of dimensions combined in the slice                         |
-| riskScore         | Double (nullable)                             | RiskLoc risk score (null for other algorithms)                     |
+| riskScore         | Double (nullable)                             | Algorithm confidence score: RiskLoc's risk score, or Squeeze's generalized potential score (null for other algorithms) |
 | explanatoryPower  | Double                                        | Share of the total change explained by the slice                   |
 | unexplainedShare  | Double                                        | Share of the measure's change (on its `epBasis`) that the reported findings do **not** explain, clamped to [0, 1]. Same value on every row of a measure. See below. |
+| externalCandidate | Boolean                                       | `true` when the measure's change looks caused by an **external root cause** — real, but not localizable in the declared dimensions. Same value on every row of a measure. See below. |
 | surprise          | Double (nullable)                             | Jensen–Shannon divergence based distribution-change score          |
 | baseline / target / delta | Double                                | Slice sums (derived measures: the expression over slice component sums; distribution measures: quantiles of the merged slice sketches; distinct measures: union distinct estimates) |
 | deltaRatio        | Double (nullable)                             | `delta / baseline` (null when baseline is 0)                       |
@@ -339,17 +340,28 @@ One row per finding per measure (plus one `noFinding` row per measure when appli
 | leafCount         | Long                                          | Number of leaves covered by the slice                              |
 | noFinding         | Boolean                                       | `true` only on explicit no-finding rows                            |
 
-### Reading unexplainedShare (external root cause signal)
+### External root cause detection (externalCandidate / unexplainedShare)
 
-A high `unexplainedShare` **together with a substantial `totalTarget − totalBaseline` delta**
-is evidence of an *external root cause*: the change is real, but it is not localizable in the
-declared dimensions (the culprit lives in a dimension you did not declare), or it was
-suppressed by thresholds/guards. The right reaction is to add candidate dimensions or lower
-`riskThreshold` — not to trust the reported slices as the full story. Downstream agents can
-branch on it: `noFinding AND |delta| large AND unexplainedShare ≈ 1` → "investigate elsewhere",
-versus `noFinding AND |delta| ≈ 0` → "nothing happened" (with no findings the share is 1 by
-definition, so always read it together with the delta). A principled probabilistic version of
-this judgment is planned with the `squeeze` (PSqueeze) algorithm.
+`externalCandidate: true` means the measure's change looks caused by an **external root
+cause**: it is real, but not localizable in the declared dimensions — the culprit lives in a
+dimension you did not declare, or affects everything at once (a global shift). The right
+reaction is to add candidate dimensions or investigate outside this dataset — not to trust
+the reported slices as the full story. Downstream agents can branch directly on the flag.
+
+The judgment (adapted from PSqueeze's external root cause determination) requires the measure
+to have actually moved (relative net change ≥ 5%), and then flags it when:
+
+- **no findings were reported** — a real change that nothing localized; or
+- **`algorithm: squeeze`**: the weakest finding's potential score (`riskScore`) is below 0.8
+  (the reference implementation's criterion; its per-dataset threshold calibration does not
+  apply to a single run, so the reference's fallback value is used); or
+- **other algorithms**: `unexplainedShare` exceeds 0.35 (adapted from the reference's
+  "explains less than 65%" criterion) — skipped when the findings were truncated at
+  `output.topK`, where the unexplained share is inflated by design.
+
+`unexplainedShare` itself stays available as the raw quantity behind the judgment (with no
+findings it is 1 by definition — read it together with the delta). Measures whose totals
+cancel by construction (`synthetic` marginal) never qualify as "moved" and are never flagged.
 
 ## Choosing an algorithm
 
