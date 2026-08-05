@@ -103,6 +103,10 @@ public class NetManDatasetHarnessTest {
             }
             final Set<String> predicted = localize(caseFile);
             cases++;
+            if(Boolean.getBoolean("attribution.netman.dump")) {
+                System.out.println("CASE " + timestamp + ": predicted=" + new TreeSet<>(predicted)
+                        + " truth=" + new TreeSet<>(truth));
+            }
 
             for(final String slice : predicted) {
                 if(truth.contains(slice)) {
