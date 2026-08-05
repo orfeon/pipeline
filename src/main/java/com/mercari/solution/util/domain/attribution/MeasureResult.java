@@ -28,4 +28,20 @@ public record MeasureResult(
             final List<Finding> findings) {
         this(measure, null, baselineTotal, targetTotal, epBasis, findings);
     }
+
+    /**
+     * Share of the measure's change (on the recorded {@code epBasis}) that the reported findings
+     * do <b>not</b> explain, clamped to [0, 1]. A high value together with a substantial
+     * total delta is evidence of an <b>external root cause</b>: the change is real but not
+     * localizable in the declared dimensions (or was suppressed by thresholds/guards).
+     * With no findings this is 1 — interpret it together with the total delta, since an
+     * unchanged measure also reports no findings.
+     */
+    public double unexplainedShare() {
+        double explained = 0;
+        for(final Finding finding : findings) {
+            explained += Math.abs(finding.explanatoryPower());
+        }
+        return Math.max(0.0, Math.min(1.0, 1.0 - explained));
+    }
 }
