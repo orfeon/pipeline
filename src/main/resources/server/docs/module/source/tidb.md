@@ -1,8 +1,8 @@
 ---
 type: Source Module
 title: TiDB Source Module
-description: .
-tags: [source, postgres, batch]
+description: Reads records from TiDB (or MySQL compatible) databases in parallel. The table is split into chunks by TiKV region boundaries (with numeric MIN/MAX and whole-table fallbacks) and read by distributed workers under a consistent tidb_snapshot, so all workers see the same MVCC version without locking.
+tags: [source, tidb, mysql, batch, database, sql]
 timestamp: 2026-06-21T14:30:00Z
 ---
 

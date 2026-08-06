@@ -23,12 +23,18 @@ sources:
   - title: http
     description: Sends HTTP requests and outputs the responses. Supports GET/POST/PUT/DELETE methods, FreeMarker template expressions for endpoint/params/headers/body, loop-based pagination, request chaining with input dependencies, response format handling (text/json/xml/bytes), backoff/retry configuration, and rate limiting.
     tags: [source, http, batch, api, rest]
+  - title: iceberg
+    description: Reads records from an Apache Iceberg table through a configurable Iceberg catalog. The table is specified as a catalog table identifier, and catalog connection settings are passed as catalog/config property maps. Experimental - the Beam IcebergIO integration is still under development and the module is not yet functional.
+    tags: [source, iceberg, batch, lakehouse, experimental]
   - title: jdbc
     description: Reads data from relational databases via JDBC queries. Supports MySQL, PostgreSQL and other JDBC-compatible databases with parallel reads over split queries.
     tags: [source, jdbc, batch, database, sql, mysql, postgresql]
+  - title: kafka
+    description: Reads messages from Apache Kafka topics in streaming mode. Connects to brokers via bootstrapServers and subscribes to a single topic, a list of topics, or a regex topic pattern. Message values can be deserialized as JSON, Avro, or Protocol Buffers according to the declared schema. Supports bounded reads via maxNumRecords/maxReadTime and Kafka read options such as read-committed isolation and log-append-time timestamps.
+    tags: [source, kafka, streaming, messaging]
   - title: postgres
-    description: .
-    tags: [source, postgres, batch]
+    description: Reads records from PostgreSQL (or compatible) databases in parallel using COPY BINARY format. The table is split into physical block (ctid) ranges read concurrently by distributed workers via TID range scans, giving higher throughput than the generic jdbc source.
+    tags: [source, postgres, batch, database, sql, copy]
   - title: pubsub
     description: Reads messages from Google Cloud Pub/Sub topics or subscriptions. Supports JSON, Avro, Protocol Buffers, and raw message formats. Includes attribute-based filtering, partition routing with inline filter/select/flatten, additional metadata field injection, seek-based replay, and multi-partition output.
     tags: [source, pubsub, streaming, gcp, messaging]
@@ -39,8 +45,8 @@ sources:
     description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, and JSON formats with schema auto-inference for binary formats. Includes column projection for Parquet, header skipping and line filtering for CSV, and compression support for text formats.
     tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json]
   - title: tidb
-    description: .
-    tags: [source, postgres, batch]
+    description: Reads records from TiDB (or MySQL compatible) databases in parallel. The table is split into chunks by TiKV region boundaries (with numeric MIN/MAX and whole-table fallbacks) and read by distributed workers under a consistent tidb_snapshot, so all workers see the same MVCC version without locking.
+    tags: [source, tidb, mysql, batch, database, sql]
 transforms:
   - title: aggregation
     description: Performs aggregation processing on multiple inputs with grouping, filtering, and field selection. Supports 12 aggregation functions (count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, array_agg) with per-record conditions, expression-based fields, weighted calculations, and configurable output limiting. Works consistently in both batch and streaming modes.
@@ -51,9 +57,21 @@ transforms:
   - title: beamsql
     description: Processes and combines input data using SQL queries based on Apache Beam SQL (Calcite). Supports JOIN across multiple inputs, aggregation with windowing, built-in UDFs/UDAFs, and inline lookup joins against external sources (JDBC / Spanner / Bigtable / REST) registered via the sources parameter.
     tags: [transform, beamsql, batch, streaming, sql, join, aggregation, lookup, jdbc, spanner, bigtable, rest]
+  - title: compare
+    description: Compares records from multiple inputs by primary key and outputs mismatch reports. Records from all inputs are grouped by the specified primaryKeyFields, and for each key the transform detects inputs missing a record, inputs contributing duplicate records, and field-level value differences across inputs. Only keys with at least one mismatch produce an output record, which makes the module useful for data migration validation and cross-datastore consistency checks.
+    tags: [transform, compare, validation, consistency, migration, batch]
+  - title: onnx
+    description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model file from Google Cloud Storage or a local path, maps record fields to model inputs and model outputs to record fields, and appends the inference results to each record. Supports optional filter conditions, select-based pre/post-processing, micro-batching via bufferSize, and chained multi-step mappings. Works in both batch and streaming pipelines.
+    tags: [transform, onnx, ml, inference, machinelearning, batch, streaming]
+  - title: onnx_gen
+    description: Experimental transform that runs text generation for each input record with an ONNX Runtime GenAI model (e.g. Phi-family models). Loads the generative model files from a Google Cloud Storage directory or local path, renders a FreeMarker prompt template with each record's field values, and generates a response with configurable search options. Currently the generated text is only written to worker logs; the module produces no downstream output collection.
+    tags: [transform, onnx, genai, llm, generation, experimental]
   - title: partition
     description: Splits input data into multiple named outputs based on filter conditions. Each partition can have its own filter and optional select processing. Supports exclusive routing (first match only) or non-exclusive routing (multiple matches). Unmatched records are routed to an excluded output. Optionally merges all partitions into a single union output.
     tags: [transform, partition, filter, routing, batch, streaming]
+  - title: pdfextract
+    description: Extracts text and document metadata (title, author, page count, dates, etc.) from PDF content using Apache PDFBox. The PDF is read from a byte-array field or from a GCS path given in a string field. Extracted fields are appended to the input record, with an optional field-name prefix and optional select post-processing. Parse failures are reported in-record via Failed/ErrorMessage fields, and EPUB content is handled as a fallback.
+    tags: [transform, pdfextract, pdf, text, extraction, pdfbox, epub]
   - title: query
     description: Runs Calcite SQL over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL so aggregation, ORDER BY/LIMIT and set operations (UNION/INTERSECT/EXCEPT) run over the per-element collection. External tables (JDBC / Spanner / Bigtable / Datastore / Firestore / REST) can be joined on their keys as batched lookup-joins that never scan the external table - point, key-prefix or bounded-range fetches, and correlated LATERAL blocks whose aggregation/ORDER BY/LIMIT run over each key's fetched rows inside the DoFn. Spanner sources also expose parameterized GoogleSQL/GQL statements as key-driven query tables (Spanner Graph traversals, full-text SEARCH, arbitrary parameterized queries). A buffer source exposes the transform's own past input elements, accumulated per group key in Beam state, as a lookup table - per-key history, sequence detection and funnels with no external store; its insertSql defines the buffered rows by SQL, and insertOutput/restoreSql/dedupFields keep an external copy and rebuild state from it after a pipeline restart (state as a cache over the external store). Multiple named queries can run per element in one session - later queries reference earlier results as tables, each output query becomes a named module output, and exclusive mode routes each element to its first matching output. One element yields zero or more output rows (fan-out or fold), and windowing/timestamps are preserved so batch and streaming behave identically.
     tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, datastore, firestore, rest, graph, search, buffer, state, history, cep, routing, multi-output]
@@ -64,6 +82,9 @@ transforms:
     description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
     tags: [transform, select, filter, batch, streaming, field, projection]
 sinks:
+  - title: action
+    description: Executes an operation against an external Google Cloud service at a point in the pipeline. Supported services are BigQuery (run a query job or load job), Vertex AI Gemini (launch a batch prediction job), and Dataflow (template launch, currently a placeholder). The sink can run with no inputs, using waits to trigger the action after other steps complete.
+    tags: [sink, action, bigquery, dataflow, vertexai, gemini, job, trigger, batch]
   - title: auxia
     description: Sends input data as events to the Auxia platform via its ingestion API.
     tags: [sink, auxia, batch, streaming, event, api]
@@ -85,9 +106,15 @@ sinks:
   - title: firestore
     description: Writes or deletes documents in Google Cloud Firestore. Supports flexible document name generation from fields, templates, or auto-generated UUIDs. Includes RPC QoS tuning for write throughput control.
     tags: [sink, firestore, batch, streaming, gcp, nosql, document]
+  - title: iceberg
+    description: Writes input records to an Apache Iceberg table through a configurable Iceberg catalog. The destination table is specified as a catalog table identifier, catalog connection settings are passed as catalog/config property maps (config type defaults to hadoop), and streaming writes can set a triggering frequency. Experimental - the Beam IcebergIO integration is still under development and the module currently performs no write.
+    tags: [sink, iceberg, batch, streaming, lakehouse, experimental]
   - title: jdbc
     description: Writes data to relational databases via JDBC statements. Supports MySQL, PostgreSQL and other JDBC-compatible databases with batching and configurable write operations.
     tags: [sink, jdbc, batch, streaming, database, sql, mysql, postgresql]
+  - title: localH2
+    description: Builds a local H2 database file from input records on the pipeline workers and uploads it as a zip archive to Cloud Storage (GCS). Supports multiple inputs written to separate tables, user-supplied DDL statements, INSERT/UPSERT/DELETE operations, batched JDBC writes, optionally seeding from an existing database zip, and grouping records into separate database files by key fields.
+    tags: [sink, localH2, h2, database, jdbc, gcs, batch, embedded]
   - title: pubsub
     description: Publishes input data as messages to Google Cloud Pub/Sub topics. Supports JSON, Avro, and Protocol Buffers serialization formats. Includes dynamic topic routing via FreeMarker templates, custom message attributes with template expressions, message ID and ordering key control, batch size tuning, and passthrough of PubsubMessage inputs.
     tags: [sink, pubsub, batch, streaming, gcp, messaging]
@@ -97,3 +124,6 @@ sinks:
   - title: storage
     description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
     tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
+  - title: tasks
+    description: Planned sink for enqueueing input records as Google Cloud Tasks HTTP tasks. NOT YET IMPLEMENTED - the module is registered but its execution unconditionally fails, so it cannot be used in pipelines yet. Parameter definitions (queue, format, attributes, batching) exist as a design placeholder.
+    tags: [sink, tasks, cloudtasks, gcp, unimplemented]

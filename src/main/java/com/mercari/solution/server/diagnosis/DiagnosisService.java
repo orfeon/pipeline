@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * Receives Dataflow job-failure events (Cloud Logging Log Router -&gt; Pub/Sub push) at
  * /webhook/events/dataflow, diagnoses the failed job with the agent, and notifies the
- * configured endpoints. See docs/deploy/diagnosis.md for the required GCP setup.
+ * configured endpoints. See src/main/resources/server/docs/deploy/diagnosis.md for the required GCP setup.
  */
 public class DiagnosisService {
 

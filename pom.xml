@@ -347,10 +347,6 @@
             <artifactId>maven-war-plugin</artifactId>
             <configuration>
               <webResources>
-                <resource>
-                  <directory>docs/config</directory>
-                  <targetPath>docs/config</targetPath>
-                </resource>
                 <!-- Framework sources for the agent/MCP code-reading tools (CodeRepository).
                      Placed under WEB-INF so they are never served over HTTP. -->
                 <resource>

@@ -138,7 +138,8 @@ Built with the `server` Maven profile (WAR, Jetty EE11 12). Surfaces:
 `src/main/resources/server/docs/` is the **canonical location for user-facing docs**: the agent's
 `DocsReader` tool reads `module/<type>/<name>.md` from the classpath (front-matter `title:` is used for
 listings), `module/index.yaml` is the module catalog, and MCP `DocsResources` exposes the files as
-`docs://` resources. Legacy user docs under `docs/config/` are being migrated here.
+`docs://` resources (read from the same classpath tree). All user-facing docs (config reference,
+`options/`, `deploy/`, `exec/`) live in this tree; `docs/` in the repo root keeps only developer docs.
 
 ## 7. Where to look
 
@@ -153,4 +154,4 @@ listings), `module/index.yaml` is the module catalog, and MCP `DocsResources` ex
 | SQL (BeamSQL / Calcite)                | `util/domain/sql/`                                     |
 | Server / MCP / API                     | `server/`                                              |
 | Runnable examples                      | `examples/` (`examples/README.md`)                    |
-| Per-module config reference            | `docs/config/module/`                                  |
+| Per-module config reference            | `src/main/resources/server/docs/module/`               |

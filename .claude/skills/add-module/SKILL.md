@@ -117,5 +117,5 @@ User-facing docs are read by the bundled AI agent from the classpath — this is
   be annotated or startup fails.
 - Forgetting `.withEventTime(...)` on built `MElement`s causes runtime failures.
 - `failFast` defaults to `true` in batch and `false` in streaming — don't assume one mode.
-- Don't add docs under `docs/config/module/` — that tree is legacy; `src/main/resources/server/docs/` is
-  canonical.
+- Docs go under `src/main/resources/server/docs/` — the single tree read by humans (GitHub), the AI
+  agent, MCP server, and Pipeline Builder UI. The legacy `docs/config/` tree no longer exists.
