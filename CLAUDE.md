@@ -161,32 +161,32 @@ sinks:
 
 ## Documentation Map
 
-There are two doc trees with distinct audiences:
+### User-facing docs — `src/main/resources/server/docs/` (canonical, single tree)
 
-### User-facing docs — `src/main/resources/server/docs/` (canonical, agent-readable)
+All user-facing documentation lives here — read on GitHub by humans AND at runtime (bundled on the
+classpath) by the AI agent, MCP server, and Pipeline Builder UI:
 
-User-facing documentation is being **migrated here from `docs/`** because the bundled AI agent and MCP
-server read docs from this location (bundled on the classpath):
-
+- `README.md` — config file structure reference (entry point).
 - `module/<type>/<name>.md` — per-module config reference, read by the agent's `DocsReader` tool
   (`listModules` / `getModule`). Each file needs YAML front-matter with `title:`.
+- `module/README.md` — human-browsable module list; `module/common/` — shared parameter docs
+  (schema, filter, select, strategy, union, …); `module/failure/` — failure (dead-letter) modules.
 - `module/index.yaml` — module catalog (`title` / `description` / `tags` per module), used for discovery.
   It is also the source of the Pipeline Builder UI's module list (`/api/spec`) — a module missing here
   does not appear in the GUI editor.
-- `system.md` — `system` block reference.
-- MCP `DocsResources` also exposes these files as `docs://` resources.
+- `system.md` — `system` block reference; `options/` — pipeline options (per-runner pages).
+- `deploy/`, `exec/` — deploy/execute guides (human-oriented; harmless to the agent).
+- MCP `DocsResources` exposes every `.md` in this tree as `docs://<path>` resources (same classpath
+  source as `DocsReader`).
 
-When adding or updating user-facing/module documentation, **write it here first**. Keep files
+When adding or updating user-facing/module documentation, **write it here**. Keep files
 self-contained (parameters, examples) — the agent reads one file per module.
 
-### Developer docs — `docs/` (and legacy user docs pending migration)
+### Developer docs — `docs/`
 
 - `docs/developer/` — developer docs: [architecture.md](docs/developer/architecture.md) (internals),
   `server/frontend.md`.
-- `docs/config/` — legacy user-facing config reference (`module/`, `options/`, `system.md`); being migrated
-  to `src/main/resources/server/docs/`. When touching a page here, prefer migrating it rather than
-  duplicating edits in both trees.
-- `docs/deploy/`, `docs/exec/`, `docs/README.md` — deploy/execute guides.
+- `docs/images/` — images referenced by the root README.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).
 
 ## Testing Conventions

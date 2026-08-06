@@ -66,6 +66,7 @@ schema:
 | mode      | optional | Enum   | `nullable` (default), `required`, `repeated`.                                 |
 | fields    | selective | Array | Nested fields (for `element` type).                                           |
 | symbols   | selective | Array<String\> | Enum symbols (for `enum` type).                                       |
+| defaultValue | optional | Primitive | Value substituted when the field is missing or null. For `repeated` mode it replaces null elements inside the array. |
 | shape     | selective | Array<Integer\> | Dimensions (for `matrix` type). Required; positive integers.         |
 | valueType | selective | Enum   | Element type (for `matrix` type): a numeric type. Default: `float64`.         |
 

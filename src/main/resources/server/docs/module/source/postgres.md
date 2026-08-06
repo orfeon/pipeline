@@ -1,8 +1,8 @@
 ---
 type: Source Module
 title: Postgres Source Module
-description: .
-tags: [source, postgres, batch]
+description: Reads records from PostgreSQL (or compatible) databases in parallel using COPY BINARY format. The table is split into physical block (ctid) ranges read concurrently by distributed workers via TID range scans, giving higher throughput than the generic jdbc source.
+tags: [source, postgres, batch, database, sql, copy]
 timestamp: 2026-06-21T14:30:00Z
 ---
 

@@ -4,20 +4,20 @@ import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
 
-import java.io.File;
-import java.net.URL;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.util.List;
+import java.util.Set;
 
-/*
 @Tool.Module(
     name="describe-module",
     title="Describe Pipeline Module",
     description= """
-        Get detailed specification of the module specified by parameter 'id'.
-        The response is in JSON format and includes the detailed module specification.
+        Get the full documentation (parameters, examples) of the module specified by parameter 'id'.
+        The id format is '{type}/{name}' where type is one of source, transform, sink
+        (e.g. 'source/bigquery', 'transform/select', 'sink/spanner').
+        Use tool 'list-modules' to discover available module names.
+        Shared documents referenced from module docs (e.g. module/common/filter.md) can be read
+        with tool 'read-docs'.
         """,
     inputSchema = """
         {
@@ -25,7 +25,7 @@ import java.util.List;
           "properties": {
             "id": {
               "type": "string",
-              "description": "Specify module id."
+              "description": "Module id in '{type}/{name}' format, e.g. 'source/bigquery'."
             }
           },
           "required": ["id"]
@@ -34,23 +34,14 @@ import java.util.List;
     outputSchema = """
         """
 )
-
- */
 public class DescribeModuleTool implements Tool {
 
-    private File docsDir;
+    // Same docs tree as the agent's DocsReader (src/main/resources/server/docs)
+    private static final String DOCS_MODULE_PATH = "/server/docs/module/";
+    private static final Set<String> MODULE_TYPES = Set.of("source", "transform", "sink");
 
     @Override
     public void init(ServletContext servletContext) {
-        try {
-            final URL docsUrl = servletContext.getResource("/docs");
-            if(docsUrl == null || !docsUrl.getProtocol().equals("file")) {
-                this.docsDir = null;
-            }
-            this.docsDir = new File(docsUrl.toURI());
-        } catch (Throwable e){
-            System.out.println("error: " + e.getMessage());
-        }
     }
 
     @Override
@@ -58,41 +49,42 @@ public class DescribeModuleTool implements Tool {
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
 
-        if(!request.arguments().containsKey("id")) {
+        final Object idObj = request.arguments().get("id");
+        if(idObj == null || idObj.toString().isBlank()) {
             return McpSchema.CallToolResult.builder()
-                    .addTextContent("describe-module mcp tool requires id parameter")
+                    .addTextContent("describe-module mcp tool requires id parameter in '{type}/{name}' format, e.g. 'source/bigquery'")
                     .isError(true)
                     .build();
         }
 
-        final String id = request.arguments().get("id").toString();
-        try {
-            final File file = Paths
-                    .get(docsDir.getPath(), "/config/module/" + id + ".md")
-                    .toFile();
-            if(!file.exists()) {
+        final String id = idObj.toString().trim();
+        final String[] parts = id.split("/");
+        if(parts.length != 2 || !MODULE_TYPES.contains(parts[0]) || parts[1].isBlank()) {
+            return McpSchema.CallToolResult.builder()
+                    .addTextContent("Invalid module id: '" + id + "'. Specify '{type}/{name}' where type is one of source, transform, sink (e.g. 'source/bigquery').")
+                    .isError(true)
+                    .build();
+        }
+
+        final String resourcePath = DOCS_MODULE_PATH + parts[0] + "/" + parts[1].toLowerCase() + ".md";
+        try (final InputStream is = getClass().getResourceAsStream(resourcePath)) {
+            if(is == null) {
                 return McpSchema.CallToolResult.builder()
-                        .addTextContent("Not found module: " + id)
+                        .addTextContent("Not found module: " + id + ". Use tool 'list-modules' to see available modules.")
                         .isError(true)
                         .build();
             }
-
-            final List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
-            final String content = getContent(lines);
+            final String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             return McpSchema.CallToolResult.builder()
                     .addTextContent(content)
                     .isError(false)
                     .build();
         } catch (Exception e) {
             return McpSchema.CallToolResult.builder()
-                    .addTextContent("Not found module: " + id + ", cause: " + e.getMessage())
+                    .addTextContent("Failed to read documentation for module: " + id + ", cause: " + e.getMessage())
                     .isError(true)
                     .build();
         }
-    }
-
-    private static String getContent(final List<String> lines) {
-        return String.join("\n", lines);
     }
 
 }

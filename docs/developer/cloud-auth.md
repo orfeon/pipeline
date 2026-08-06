@@ -2,7 +2,7 @@
 
 Status: **Accepted — Phase 0 done (AWS options wiring: `options.aws` region/endpoint/credentials
 mapped onto Beam `AwsOptions` with `default`/`static`/`assumeRole` providers; user docs at
-`docs/config/options/aws.md`),
+`src/main/resources/server/docs/options/aws.md`),
 Phase 1 done (`GcpCredentialsCache` central provider with `options.gcp.credentials` /
 `MERCARI_PIPELINE_GCP_CREDENTIALS` sources, `MCredentialFactory` for Beam GCP IOs, metadata-server
 guard `IAMUtil.isOnGcp()`, explicit-project error in `OptionUtil.getDefaultProject`; all direct
@@ -25,7 +25,7 @@ schemas and SQL now load from `s3://` as well as `gs://` and local paths; GCS-on
 streaming/listing loaders intentionally kept on `StorageUtil`, see §6.2 notes),
 Phase 5 done (Vault auth methods `VAULT_AUTH: gcp | aws-iam | token` with external tokens never
 revoked and the gcp login-endpoint URL bug fixed; deploy guide at
-`docs/deploy/cross-cloud-auth.md`; `AwsAuthIT` (LocalStack: s3 filesystem wiring, Secrets
+`src/main/resources/server/src/main/resources/server/docs/deploy/cross-cloud-auth.md`; `AwsAuthIT` (LocalStack: s3 filesystem wiring, Secrets
 Manager, STS federated exchange) and `VaultIT` (token auth) — **all phases complete**)**
 Scope: how pipelines obtain GCP and AWS credentials so that a pipeline can run on either cloud and
 access sources/sinks/secrets on the other one — Dataflow (GCP) reading/writing AWS resources, and
@@ -160,7 +160,7 @@ Validated at assembly time.
 - **EMR (Flink on YARN)**: ship files + env, same idea.
 - **MSF**: jar-bundled `classpath:` config via `options.gcp.credentials` (§4.1).
 
-These become deploy-guide documentation (`docs/deploy/`), not code.
+These become deploy-guide documentation (`src/main/resources/server/docs/deploy/`), not code.
 
 ## 5. Direction B — running on GCP (Dataflow), accessing AWS resources
 
@@ -336,4 +336,4 @@ referencing this document.
   stubbed ID token) and `VaultIT` (dev-mode Vault — `vault://` resolution with token auth,
   non-revocation of external tokens). GCP WIF cannot be emulated locally; Direction A gets
   coverage via unit tests around resolution order plus the setup guide
-  (`docs/deploy/cross-cloud-auth.md`).
+  (`src/main/resources/server/src/main/resources/server/docs/deploy/cross-cloud-auth.md`).
