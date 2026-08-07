@@ -105,6 +105,12 @@ public class SpannerIT {
                             "CREATE TABLE QueryTablesC ( " +
                                     "id STRING(64) NOT NULL, " +
                                     "value INT64 " +
+                                    ") PRIMARY KEY (id)",
+                            // dedicated table for the FLOAT32/UUID column type support test
+                            "CREATE TABLE TypesTableE ( " +
+                                    "id STRING(64) NOT NULL, " +
+                                    "f32 FLOAT32, " +
+                                    "uid UUID " +
                                     ") PRIMARY KEY (id)"))
                     .get(60, TimeUnit.SECONDS);
         }
@@ -576,6 +582,106 @@ public class SpannerIT {
                     default -> Assertions.fail("unexpected id: " + row.getAsString("id"));
                 }
                 Assertions.assertNotNull(row.getPrimitiveValue("snapshot_at"));
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        readPipeline.run().waitUntilFinish();
+    }
+
+    /** FLOAT32 and UUID columns round-trip through the sink and the all-tables source. */
+    @Test
+    public void testFloat32AndUuidColumns() throws Exception {
+        final String uuidA = "0f4657bd-0e6b-4f8e-a0b1-8fca47b4b5d4";
+        final String uuidB = "9d2c6a1e-3f5b-4c7d-8e9f-0a1b2c3d4e5f";
+
+        // pipeline 1: write rows including float32 and uuid fields
+        final String sinkConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "e1", "f32": 1.5, "uid": "%s" },
+                          { "id": "e2", "f32": -2.25, "uid": "%s" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "f32", "type": "float32" },
+                          { "name": "uid", "type": "uuid" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "spannerSink",
+                      "module": "spanner",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "table": "TypesTableE",
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(uuidA, uuidB, PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline writePipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(writePipeline, Config.load(sinkConfigJson));
+        writePipeline.run().waitUntilFinish();
+
+        // pipeline 2: all-tables source; the schema comes from INFORMATION_SCHEMA (FLOAT32/UUID parsing)
+        final String sourceConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "spannerAll",
+                      "module": "spanner",
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "tables": ["TypesTable*"],
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline readPipeline = createReadPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(readPipeline, Config.load(sourceConfigJson));
+
+        final MCollection output = outputs.get("spannerAll.TypesTableE");
+        Assertions.assertNotNull(output, "spannerAll.TypesTableE not found in: " + outputs.keySet());
+        Assertions.assertNotNull(output.getSchema().getField("f32"));
+        Assertions.assertNotNull(output.getSchema().getField("uid"));
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                switch (row.getAsString("id")) {
+                    case "e1" -> {
+                        Assertions.assertEquals(1.5F, (Float) row.getPrimitiveValue("f32"), (float) DELTA);
+                        Assertions.assertEquals(uuidA, row.getPrimitiveValue("uid"));
+                    }
+                    case "e2" -> {
+                        Assertions.assertEquals(-2.25F, (Float) row.getPrimitiveValue("f32"), (float) DELTA);
+                        Assertions.assertEquals(uuidB, row.getPrimitiveValue("uid"));
+                    }
+                    default -> Assertions.fail("unexpected id: " + row.getAsString("id"));
+                }
                 count++;
             }
             Assertions.assertEquals(2, count);

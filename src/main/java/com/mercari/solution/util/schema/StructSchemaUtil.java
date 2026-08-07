@@ -77,6 +77,7 @@ public class StructSchemaUtil {
             case BOOL -> struct.getBoolean(fieldName);
             case BYTES -> struct.getBytes(fieldName).toByteArray();
             case STRING -> struct.getString(fieldName);
+            case UUID -> struct.getUuid(fieldName).toString();
             case JSON -> struct.getJson(fieldName);
             case INT64 -> struct.getLong(fieldName);
             case FLOAT32 -> struct.getFloat(fieldName);
@@ -93,6 +94,7 @@ public class StructSchemaUtil {
                 case BOOL -> struct.getBooleanList(fieldName);
                 case BYTES -> struct.getBytesList(fieldName).stream().map(ByteArray::toByteArray).toList();
                 case STRING -> struct.getStringList(fieldName);
+                case UUID -> struct.getUuidList(fieldName).stream().map(java.util.UUID::toString).toList();
                 case JSON -> struct.getJsonList(fieldName);
                 case INT64 -> struct.getLongList(fieldName);
                 case FLOAT32 -> struct.getFloatList(fieldName);
@@ -126,6 +128,7 @@ public class StructSchemaUtil {
             case BOOL -> struct.getBoolean(fieldName);
             case BYTES -> struct.getBytes(fieldName);
             case STRING -> struct.getString(fieldName);
+            case UUID -> struct.getUuid(fieldName);
             case JSON -> struct.getJson(fieldName);
             case INT64 -> struct.getLong(fieldName);
             case FLOAT32 -> struct.getFloat(fieldName);
@@ -140,6 +143,7 @@ public class StructSchemaUtil {
                 case BOOL -> struct.getBooleanList(fieldName);
                 case BYTES -> struct.getBytesList(fieldName);
                 case STRING -> struct.getStringList(fieldName);
+                case UUID -> struct.getUuidList(fieldName);
                 case JSON -> struct.getJsonList(fieldName);
                 case INT64 -> struct.getLongList(fieldName);
                 case FLOAT32 -> struct.getFloatList(fieldName);
@@ -176,6 +180,7 @@ public class StructSchemaUtil {
             case BOOL -> struct.getBoolean(field);
             case BYTES -> struct.getBytes(field).toBase64();
             case STRING -> struct.getString(field);
+            case UUID -> struct.getUuid(field).toString();
             case JSON -> struct.getJson(field);
             case INT64 -> struct.getLong(field);
             case FLOAT32 -> struct.getFloat(field);
@@ -206,6 +211,7 @@ public class StructSchemaUtil {
             case PG_NUMERIC -> Value.pgNumeric(struct.getString(field));
             case PG_JSONB -> Value.pgJsonb(struct.getString(field));
             case STRING -> Value.string(struct.getString(field));
+            case UUID -> Value.uuid(struct.getUuid(field));
             case JSON -> Value.json(struct.getJson(field));
             case INT64 -> Value.int64(struct.getLong(field));
             case FLOAT32 -> Value.float32(struct.getFloat(field));
@@ -221,6 +227,7 @@ public class StructSchemaUtil {
                 case PG_NUMERIC -> Value.pgNumericArray(struct.getStringList(field));
                 case PG_JSONB -> Value.pgJsonbArray(struct.getStringList(field));
                 case STRING -> Value.stringArray(struct.getStringList(field));
+                case UUID -> Value.uuidArray(struct.getUuidList(field));
                 case JSON -> Value.jsonArray(struct.getJsonList(field));
                 case INT64 -> Value.int64Array(struct.getLongArray(field));
                 case FLOAT32 -> Value.float32Array(struct.getFloatArray(field));
@@ -253,6 +260,7 @@ public class StructSchemaUtil {
             case BOOL -> Boolean.toString(struct.getBoolean(field));
             case BYTES -> struct.getBytes(field).toBase64();
             case STRING, PG_JSONB, PG_NUMERIC -> struct.getString(field);
+            case UUID -> struct.getUuid(field).toString();
             case JSON -> struct.getJson(field);
             case INT64 -> Long.toString(struct.getLong(field));
             case FLOAT32 -> Float.toString(struct.getFloat(field));
@@ -265,6 +273,7 @@ public class StructSchemaUtil {
                 case BOOL -> Arrays.toString(struct.getBooleanArray(field));
                 case BYTES -> struct.getBytesList(field).stream().map(ByteArray::toBase64).collect(Collectors.joining(","));
                 case STRING, PG_JSONB, PG_NUMERIC -> String.join(",", struct.getStringList(field));
+                case UUID -> struct.getUuidList(field).stream().map(java.util.UUID::toString).collect(Collectors.joining(","));
                 case JSON -> String.join(",", struct.getJsonList(field));
                 case INT64 -> struct.getLongList(field).stream().map(l -> Long.toString(l)).collect(Collectors.joining(","));
                 case FLOAT32 -> struct.getFloatList(field).stream().map(l -> Float.toString(l)).collect(Collectors.joining(","));
@@ -680,6 +689,8 @@ public class StructSchemaUtil {
         }
         return switch (value.getType().getCode()) {
             case STRING -> value.getAsString();
+            // the pipeline uuid field type holds its value as a String
+            case UUID -> value.getUuid().toString();
             case BOOL -> value.getBool();
             case JSON -> value.getJson();
             case INT64 -> value.getInt64();
@@ -694,6 +705,7 @@ public class StructSchemaUtil {
             case ARRAY ->
                 switch (value.getType().getArrayElementType().getCode()) {
                     case STRING -> value.getAsStringList();
+                    case UUID -> value.getUuidArray().stream().map(java.util.UUID::toString).collect(Collectors.toList());
                     case BOOL -> value.getBoolArray();
                     case JSON -> value.getJsonArray();
                     case INT64 -> value.getInt64Array();
@@ -717,6 +729,7 @@ public class StructSchemaUtil {
         }
         return switch (value.getType().getCode()) {
             case STRING -> value.getAsString();
+            case UUID -> value.getUuid().toString();
             case BOOL -> value.getBool();
             case JSON -> value.getJson();
             case INT64 -> value.getInt64();
@@ -731,6 +744,7 @@ public class StructSchemaUtil {
             case ARRAY ->
                     switch (value.getType().getArrayElementType().getCode()) {
                         case STRING -> value.getAsStringList();
+                        case UUID -> value.getUuidArray().stream().map(java.util.UUID::toString).collect(Collectors.toList());
                         case BOOL -> value.getBoolArray();
                         case JSON -> value.getJsonArray();
                         case INT64 -> value.getInt64Array();

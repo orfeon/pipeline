@@ -208,7 +208,16 @@ public class StructToAvroConverter {
             case BOOLEAN -> builder.set(fieldName, struct.getBoolean(fieldName));
             case FLOAT -> builder.set(fieldName, struct.getFloat(fieldName));
             case DOUBLE -> builder.set(fieldName, struct.getDouble(fieldName));
-            case ENUM, STRING -> builder.set(fieldName, struct.getString(fieldName));
+            case ENUM, STRING -> {
+                // UUID and JSON columns share the avro string schema but need their own getters
+                if (Type.uuid().equals(type)) {
+                    builder.set(fieldName, struct.getUuid(fieldName).toString());
+                } else if (Type.json().equals(type)) {
+                    builder.set(fieldName, struct.getJson(fieldName));
+                } else {
+                    builder.set(fieldName, struct.getString(fieldName));
+                }
+            }
             case FIXED, BYTES -> builder.set(fieldName, struct.getBytes(fieldName).asReadOnlyByteBuffer());
             case INT -> {
                 if (Type.date().equals(type)) {
@@ -263,7 +272,17 @@ public class StructToAvroConverter {
             case BOOLEAN -> builder.set(fieldName, struct.getBooleanList(fieldName));
             case FLOAT -> builder.set(fieldName, struct.getFloatList(fieldName));
             case DOUBLE -> builder.set(fieldName, struct.getDoubleList(fieldName));
-            case ENUM, STRING -> builder.set(fieldName, struct.getStringList(fieldName));
+            case ENUM, STRING -> {
+                if (Type.array(Type.uuid()).equals(type)) {
+                    builder.set(fieldName, struct.getUuidList(fieldName).stream()
+                            .map(u -> u == null ? null : u.toString())
+                            .collect(Collectors.toList()));
+                } else if (Type.array(Type.json()).equals(type)) {
+                    builder.set(fieldName, struct.getJsonList(fieldName));
+                } else {
+                    builder.set(fieldName, struct.getStringList(fieldName));
+                }
+            }
             case FIXED, BYTES -> builder.set(fieldName, struct.getBytesList(fieldName)
                         .stream()
                         .map(ByteArray::asReadOnlyByteBuffer)
@@ -317,8 +336,12 @@ public class StructToAvroConverter {
             }
             case INT64:
                 return nullable ? AvroSchemaUtil.NULLABLE_LONG : AvroSchemaUtil.REQUIRED_LONG;
+            case FLOAT32:
+                return nullable ? AvroSchemaUtil.NULLABLE_FLOAT : AvroSchemaUtil.REQUIRED_FLOAT;
             case FLOAT64:
                 return nullable ? AvroSchemaUtil.NULLABLE_DOUBLE : AvroSchemaUtil.REQUIRED_DOUBLE;
+            case UUID:
+                return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_UUID_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_UUID_TYPE;
             case NUMERIC:
             case PG_NUMERIC:
                 return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_DECIMAL_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_DECIMAL_TYPE;

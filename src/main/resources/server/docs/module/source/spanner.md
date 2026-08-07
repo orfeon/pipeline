@@ -22,6 +22,8 @@ Additionally, the following special execution modes are available:
 
 Schema is automatically inferred from the query result or table definition; no `schema` parameter is needed.
 
+Supported column types (GoogleSQL): `BOOL`, `INT64`, `FLOAT32`, `FLOAT64`, `NUMERIC`, `STRING`, `BYTES`, `DATE`, `TIMESTAMP`, `JSON`, `UUID`, `ARRAY` of these, and `STRUCT` (query results). Not supported: `INTERVAL`, `PROTO`, `ENUM`, `TOKENLIST` — reading a table or query containing them fails at launch.
+
 ## Source module common parameters
 
 | parameter          | optional | type                | description                                                                                                                  |

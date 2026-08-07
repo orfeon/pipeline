@@ -394,18 +394,14 @@ public class SpannerSource extends Source {
         parameters.tables = null;
         final String queryTemplate = loadTablesQueryTemplate(getName(), tablesParameter);
 
-        final Map<String, Type> tableTypes = SpannerUtil.getBaseTableTypesFromDatabase(
-                parameters.projectId, parameters.instanceId, parameters.databaseId, parameters.emulator);
+        final SpannerUtil.BaseTables baseTables = SpannerUtil.getBaseTableTypesFromDatabase(
+                parameters.projectId, parameters.instanceId, parameters.databaseId, parameters.emulator,
+                tablesParameter::matches);
 
-        final Map<String, Type> matched = new LinkedHashMap<>();
-        for(final Map.Entry<String, Type> entry : tableTypes.entrySet()) {
-            if(tablesParameter.matches(entry.getKey())) {
-                matched.put(entry.getKey(), entry.getValue());
-            }
-        }
+        final Map<String, Type> matched = baseTables.matchedTypes();
         if(matched.isEmpty()) {
             throw new IllegalModuleException(
-                    "spanner source module[" + getName() + "].tables matched no table. database tables: " + tableTypes.keySet());
+                    "spanner source module[" + getName() + "].tables matched no table. database tables: " + baseTables.allTables());
         }
         LOG.info("spanner source module[{}] reads {} tables: {}", getName(), matched.size(), matched.keySet());
 
