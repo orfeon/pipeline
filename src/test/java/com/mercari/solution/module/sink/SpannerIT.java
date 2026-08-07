@@ -90,6 +90,21 @@ public class SpannerIT {
                                     "longvalue INT64, " +
                                     "createdat TIMESTAMP, " +
                                     "birthday DATE " +
+                                    ") PRIMARY KEY (id)",
+                            // dedicated tables for the all-tables (tables parameter) source test
+                            "CREATE TABLE AllTablesA ( " +
+                                    "id STRING(64) NOT NULL, " +
+                                    "value INT64 " +
+                                    ") PRIMARY KEY (id)",
+                            "CREATE TABLE AllTablesB ( " +
+                                    "id STRING(64) NOT NULL, " +
+                                    "label STRING(64) " +
+                                    ") PRIMARY KEY (id)",
+                            // dedicated table for the tables.query (common per-table query) test;
+                            // named so the other test's "AllTables*" pattern does not match it
+                            "CREATE TABLE QueryTablesC ( " +
+                                    "id STRING(64) NOT NULL, " +
+                                    "value INT64 " +
                                     ") PRIMARY KEY (id)"))
                     .get(60, TimeUnit.SECONDS);
         }
@@ -161,7 +176,7 @@ public class SpannerIT {
         MPipeline.apply(pipeline, Config.load(sinkConfigJson));
         pipeline.run().waitUntilFinish();
 
-        // pipeline 2: spanner source (query) -> assert
+        // pipeline 2: spanner source (table read; the query path is covered by the other tests) -> assert
         final String sourceConfigJson = """
                 {
                   "sources": [
@@ -172,7 +187,7 @@ public class SpannerIT {
                         "projectId": "%s",
                         "instanceId": "%s",
                         "databaseId": "%s",
-                        "query": "SELECT id, longvalue, doublevalue, boolvalue, createdat FROM RoundTrip",
+                        "table": "RoundTrip",
                         "emulator": true
                       }
                     }
@@ -305,6 +320,262 @@ public class SpannerIT {
                     }
                     default -> Assertions.fail("unexpected id: " + row.getAsString("id"));
                 }
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        readPipeline.run().waitUntilFinish();
+    }
+
+    /**
+     * The all-tables batch mode: the source lists matching base tables at assembly time and
+     * outputs one tagged collection per table ({@code spannerAll.AllTablesA}, ...), each carrying
+     * the {@code table} attribute. The storage sink consumes them via a wildcard input and fans
+     * out per table using the assembly-time {@code ${input.table}} template.
+     */
+    @Test
+    public void testAllTablesReadFanOutToStorage() throws Exception {
+        // pipeline 1: populate the two dedicated tables
+        final String sinkConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "createA",
+                      "module": "create",
+                      "outputType": "AVRO",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "a1", "value": 1 },
+                          { "id": "a2", "value": 2 },
+                          { "id": "a3", "value": 3 }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "value", "type": "int64" }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "createB",
+                      "module": "create",
+                      "outputType": "AVRO",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "b1", "label": "x" },
+                          { "id": "b2", "label": "y" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "label", "type": "string" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "sinkA",
+                      "module": "spanner",
+                      "inputs": ["createA"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "table": "AllTablesA",
+                        "emulator": true
+                      }
+                    },
+                    {
+                      "name": "sinkB",
+                      "module": "spanner",
+                      "inputs": ["createB"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "table": "AllTablesB",
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE, PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline writePipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(writePipeline, Config.load(sinkConfigJson));
+        writePipeline.run().waitUntilFinish();
+
+        // pipeline 2: all-tables source -> wildcard fan-out storage sink (per-table json files)
+        final String outputDir = "target/spanner-it-alltables";
+        final java.nio.file.Path outputPath = java.nio.file.Path.of(outputDir);
+        if (java.nio.file.Files.exists(outputPath)) {
+            try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(outputPath)) {
+                walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            }
+        }
+
+        final String sourceConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "spannerAll",
+                      "module": "spanner",
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "tables": {
+                          "includes": ["AllTables*"]
+                        },
+                        "emulator": true
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "storage",
+                      "module": "storage",
+                      "inputs": ["spannerAll.*"],
+                      "parameters": {
+                        "output": "%s/${input.table}/data",
+                        "format": "json",
+                        "suffix": ".json",
+                        "numShards": 1
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE, outputDir);
+
+        final TestPipeline readPipeline = createReadPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(readPipeline, Config.load(sourceConfigJson));
+
+        // one tagged output per matched table, with per-table schema and the table attribute
+        final MCollection outputA = outputs.get("spannerAll.AllTablesA");
+        Assertions.assertNotNull(outputA, "spannerAll.AllTablesA not found in: " + outputs.keySet());
+        Assertions.assertEquals("AllTablesA", outputA.getAttributes().get("table"));
+        Assertions.assertNotNull(outputA.getSchema().getField("value"));
+        final MCollection outputB = outputs.get("spannerAll.AllTablesB");
+        Assertions.assertNotNull(outputB, "spannerAll.AllTablesB not found in: " + outputs.keySet());
+        Assertions.assertNotNull(outputB.getSchema().getField("label"));
+
+        readPipeline.run().waitUntilFinish();
+
+        final java.util.List<String> filesA;
+        try (java.util.stream.Stream<String> lines = java.nio.file.Files.lines(
+                java.nio.file.Path.of(outputDir, "AllTablesA", "data.json"))) {
+            filesA = lines.filter(l -> !l.isBlank()).toList();
+        }
+        Assertions.assertEquals(3, filesA.size(), "unexpected AllTablesA content: " + filesA);
+        Assertions.assertTrue(filesA.stream().allMatch(l -> l.contains("\"id\":\"a")), "unexpected AllTablesA content: " + filesA);
+
+        final java.util.List<String> filesB;
+        try (java.util.stream.Stream<String> lines = java.nio.file.Files.lines(
+                java.nio.file.Path.of(outputDir, "AllTablesB", "data.json"))) {
+            filesB = lines.filter(l -> !l.isBlank()).toList();
+        }
+        Assertions.assertEquals(2, filesB.size(), "unexpected AllTablesB content: " + filesB);
+        Assertions.assertTrue(filesB.stream().allMatch(l -> l.contains("\"id\":\"b")), "unexpected AllTablesB content: " + filesB);
+    }
+
+    /**
+     * The tables.query parameter: a common per-table query template ({@code ${table}} required)
+     * replaces the generated default {@code SELECT * FROM <table>}; the output schema is then
+     * resolved from the query, so computed columns such as a snapshot timestamp appear in it.
+     */
+    @Test
+    public void testAllTablesCustomQuery() throws Exception {
+        // pipeline 1: populate the dedicated table
+        final String sinkConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "outputType": "AVRO",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "id": "c1", "value": 10 },
+                          { "id": "c2", "value": 20 }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "string" },
+                          { "name": "value", "type": "int64" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "spannerSink",
+                      "module": "spanner",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "table": "QueryTablesC",
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline writePipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(writePipeline, Config.load(sinkConfigJson));
+        writePipeline.run().waitUntilFinish();
+
+        // pipeline 2: tables mode with a common query adding a computed column
+        final String sourceConfigJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "spannerAll",
+                      "module": "spanner",
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "tables": {
+                          "includes": ["QueryTables*"],
+                          "query": "SELECT id, value, CURRENT_TIMESTAMP() AS snapshot_at FROM ${table}"
+                        },
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(PROJECT, INSTANCE, DATABASE);
+
+        final TestPipeline readPipeline = createReadPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(readPipeline, Config.load(sourceConfigJson));
+
+        final MCollection output = outputs.get("spannerAll.QueryTablesC");
+        Assertions.assertNotNull(output, "spannerAll.QueryTablesC not found in: " + outputs.keySet());
+        Assertions.assertEquals("QueryTablesC", output.getAttributes().get("table"));
+        // the schema comes from the query, so the computed column must be present
+        Assertions.assertNotNull(output.getSchema().getField("snapshot_at"));
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for(final MElement row : rows) {
+                switch (row.getAsString("id")) {
+                    case "c1" -> Assertions.assertEquals(10L, row.getAsLong("value"));
+                    case "c2" -> Assertions.assertEquals(20L, row.getAsLong("value"));
+                    default -> Assertions.fail("unexpected id: " + row.getAsString("id"));
+                }
+                Assertions.assertNotNull(row.getPrimitiveValue("snapshot_at"));
                 count++;
             }
             Assertions.assertEquals(2, count);

@@ -82,6 +82,29 @@ public class SpannerUtil {
             "WHERE " +
             "  TABLE_TYPE != 'VIEW' ";
 
+    private static final String EXTRACT_ALL_BASE_TABLE_SCHEMA_QUERY = """
+            SELECT
+              C.TABLE_SCHEMA,
+              C.TABLE_NAME,
+              ARRAY_AGG(STRUCT(C.COLUMN_NAME, C.ORDINAL_POSITION, C.SPANNER_TYPE, C.IS_NULLABLE)) AS FIELDS
+            FROM
+              INFORMATION_SCHEMA.COLUMNS C
+            JOIN
+              INFORMATION_SCHEMA.TABLES T
+            ON
+              C.TABLE_CATALOG = T.TABLE_CATALOG
+              AND C.TABLE_SCHEMA = T.TABLE_SCHEMA
+              AND C.TABLE_NAME = T.TABLE_NAME
+            WHERE
+              T.TABLE_TYPE = 'BASE TABLE'
+              AND C.TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA','SPANNER_SYS','PG_CATALOG')
+              AND NOT STARTS_WITH(C.TABLE_NAME, 'CDC_Partitions_Metadata_')
+            GROUP BY
+              C.TABLE_SCHEMA, C.TABLE_NAME
+            ORDER BY
+              C.TABLE_SCHEMA, C.TABLE_NAME
+            """;
+
 
     /**
      * Resolves the Spanner emulator host used when a module is configured with emulator=true.
@@ -320,6 +343,43 @@ public class SpannerUtil {
                     final List<Struct> fields = struct.getStructList("FIELDS");
                     final Type type = convertTypeFromInformationSchema(fields, null);
                     types.put(name, type);
+                }
+                return types;
+            }
+        }
+    }
+
+    /**
+     * Lists all base tables (excluding views and system tables) with their struct types.
+     * Table keys are schema-qualified except for the default schema ({@code sch1.Users} / {@code Users});
+     * the returned map preserves TABLE_SCHEMA, TABLE_NAME order. GoogleSQL dialect databases only.
+     */
+    public static Map<String, Type> getBaseTableTypesFromDatabase(final String projectId,
+                                                                  final String instanceId,
+                                                                  final String databaseId,
+                                                                  final boolean emulator) {
+
+        final DatabaseId database = DatabaseId.of(projectId, instanceId, databaseId);
+        try(final Spanner spanner = connectSpanner(projectId, 1, 1, 1, false, emulator)) {
+            final DatabaseClient client = spanner.getDatabaseClient(database);
+            if(!Dialect.GOOGLE_STANDARD_SQL.equals(client.getDialect())) {
+                throw new IllegalArgumentException(
+                        "listing all tables is currently supported only for GoogleSQL dialect databases: " + database);
+            }
+            try(final ReadOnlyTransaction transaction = client.singleUseReadOnlyTransaction();
+                final ResultSet resultSet = transaction.executeQuery(Statement.of(EXTRACT_ALL_BASE_TABLE_SCHEMA_QUERY))) {
+
+                final Map<String, Type> types = new LinkedHashMap<>();
+                while(resultSet.next()) {
+                    final Struct struct = resultSet.getCurrentRowAsStruct();
+                    final String tableSchema = struct.getString("TABLE_SCHEMA");
+                    final String tableName = struct.getString("TABLE_NAME");
+                    final String table = tableSchema.isEmpty() ? tableName : tableSchema + "." + tableName;
+                    final List<Struct> fields = struct.getStructList("FIELDS")
+                            .stream()
+                            .sorted(Comparator.comparingLong(s -> s.getLong("ORDINAL_POSITION")))
+                            .toList();
+                    types.put(table, convertTypeFromInformationSchema(fields, null));
                 }
                 return types;
             }

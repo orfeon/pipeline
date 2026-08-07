@@ -60,6 +60,9 @@ public class SpannerSource extends Source {
         private List<String> fields;
         private List<KeyRangeParameter> keyRange;
 
+        // for all-tables batch parameters
+        private JsonElement tables;
+
         // for change stream parameter
         private ChangeStreamParameter changeStream;
 
@@ -68,6 +71,92 @@ public class SpannerSource extends Source {
 
         // for view parameter
         private ViewParameter view;
+
+        private static class TablesParameter implements Serializable {
+
+            private final List<String> includes;
+            private final List<String> excludes;
+            // common per-table query template (inline or gs:// path); null means the generated
+            // default `SELECT * FROM <table>`
+            private final String query;
+
+            private TablesParameter(List<String> includes, List<String> excludes, String query) {
+                this.includes = includes;
+                this.excludes = excludes;
+                this.query = query;
+            }
+
+            /**
+             * Accepts either a pattern list shorthand {@code tables: ["Users", "Item*"]}
+             * or the full form {@code tables: {includes: [...], excludes: [...]}}.
+             * Missing includes defaults to all tables; {@code *} matches any sequence.
+             */
+            static TablesParameter of(final JsonElement json) {
+                final List<String> includes;
+                final List<String> excludes;
+                final String query;
+                if(json.isJsonArray()) {
+                    includes = toStringList(json);
+                    excludes = new ArrayList<>();
+                    query = null;
+                } else if(json.isJsonObject()) {
+                    includes = json.getAsJsonObject().has("includes")
+                            ? toStringList(json.getAsJsonObject().get("includes"))
+                            : new ArrayList<>();
+                    excludes = json.getAsJsonObject().has("excludes")
+                            ? toStringList(json.getAsJsonObject().get("excludes"))
+                            : new ArrayList<>();
+                    if(json.getAsJsonObject().has("query")) {
+                        final JsonElement queryElement = json.getAsJsonObject().get("query");
+                        if(!queryElement.isJsonPrimitive() || !queryElement.getAsJsonPrimitive().isString()) {
+                            throw new IllegalArgumentException("'tables.query' must be a string: " + json);
+                        }
+                        query = queryElement.getAsString();
+                    } else {
+                        query = null;
+                    }
+                } else {
+                    throw new IllegalArgumentException(
+                            "'tables' must be a pattern array or an object with 'includes', 'excludes' and 'query': " + json);
+                }
+                if(includes.isEmpty()) {
+                    includes.add("*");
+                }
+                return new TablesParameter(includes, excludes, query);
+            }
+
+            private static List<String> toStringList(final JsonElement json) {
+                if(!json.isJsonArray()) {
+                    throw new IllegalArgumentException("'tables' patterns must be a string array: " + json);
+                }
+                final List<String> list = new ArrayList<>();
+                for(final JsonElement element : json.getAsJsonArray()) {
+                    if(!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) {
+                        throw new IllegalArgumentException("'tables' patterns must be a string array: " + json);
+                    }
+                    list.add(element.getAsString());
+                }
+                return list;
+            }
+
+            boolean matches(final String table) {
+                return includes.stream().anyMatch(p -> matchesGlob(p, table))
+                        && excludes.stream().noneMatch(p -> matchesGlob(p, table));
+            }
+
+            private static boolean matchesGlob(final String pattern, final String value) {
+                final String[] literals = pattern.split("\\*", -1);
+                final StringBuilder regex = new StringBuilder();
+                for(int i = 0; i < literals.length; i++) {
+                    if(i > 0) {
+                        regex.append(".*");
+                    }
+                    regex.append(java.util.regex.Pattern.quote(literals[i]));
+                }
+                return value.matches(regex.toString());
+            }
+
+        }
 
         private static class KeyRangeParameter {
 
@@ -179,8 +268,21 @@ public class SpannerSource extends Source {
                     }
                 }
                 case null, default -> {
-                    if(query == null && table == null) {
-                        errorMessages.add("spanner source module[" + name + "] requires 'query' or 'table' parameter if mode is 'batch' or default");
+                    if(query == null && table == null && tables == null) {
+                        errorMessages.add("spanner source module[" + name + "] requires 'query', 'table' or 'tables' parameter if mode is 'batch' or default");
+                    }
+                    if(tables != null) {
+                        if(query != null || table != null) {
+                            errorMessages.add("spanner source module[" + name + "] must not set 'tables' together with 'query' or 'table'");
+                        }
+                        if(fields != null || keyRange != null) {
+                            errorMessages.add("spanner source module[" + name + "] does not support 'fields' or 'keyRange' with 'tables'");
+                        }
+                        try {
+                            TablesParameter.of(tables);
+                        } catch (final IllegalArgumentException e) {
+                            errorMessages.add("spanner source module[" + name + "] " + e.getMessage());
+                        }
                     }
                 }
             }
@@ -231,6 +333,9 @@ public class SpannerSource extends Source {
 
         return switch (getMode()) {
             case batch -> {
+                if(parameters.tables != null) {
+                    yield expandAllTables(begin, parameters);
+                }
                 final Type type;
                 final PCollection<Struct> structs;
                 if(parameters.query != null) {
@@ -277,6 +382,139 @@ public class SpannerSource extends Source {
         };
     }
 
+    // matches ${table} (with optional spaces or FreeMarker builtins such as ${table?lower_case})
+    private static final java.util.regex.Pattern TABLES_QUERY_TABLE_VARIABLE =
+            java.util.regex.Pattern.compile("\\$\\{\\s*table\\b");
+
+    private MCollectionTuple expandAllTables(final PBegin begin, final Parameters parameters) {
+
+        final Parameters.TablesParameter tablesParameter = Parameters.TablesParameter.of(parameters.tables);
+        // JsonElement is not java-serializable and the query DoFns below capture Parameters,
+        // so drop the already-parsed raw JSON before building the graph
+        parameters.tables = null;
+        final String queryTemplate = loadTablesQueryTemplate(getName(), tablesParameter);
+
+        final Map<String, Type> tableTypes = SpannerUtil.getBaseTableTypesFromDatabase(
+                parameters.projectId, parameters.instanceId, parameters.databaseId, parameters.emulator);
+
+        final Map<String, Type> matched = new LinkedHashMap<>();
+        for(final Map.Entry<String, Type> entry : tableTypes.entrySet()) {
+            if(tablesParameter.matches(entry.getKey())) {
+                matched.put(entry.getKey(), entry.getValue());
+            }
+        }
+        if(matched.isEmpty()) {
+            throw new IllegalModuleException(
+                    "spanner source module[" + getName() + "].tables matched no table. database tables: " + tableTypes.keySet());
+        }
+        LOG.info("spanner source module[{}] reads {} tables: {}", getName(), matched.size(), matched.keySet());
+
+        // one shared batch transaction: every per-table partitioned query attaches to it,
+        // so all tables are read at the same snapshot
+        final PCollectionView<Transaction> transactionView = QuerySource.createTransactionView(begin, parameters);
+
+        MCollectionTuple tuple = MCollectionTuple.empty(begin.getPipeline());
+        for(final Map.Entry<String, Type> entry : matched.entrySet()) {
+            final String table = entry.getKey();
+            final String query = renderTableQuery(queryTemplate, getTemplateArgs(), table);
+            final Type type = queryTemplate == null
+                    ? entry.getValue()
+                    : SpannerUtil.getTypeFromQuery(
+                            parameters.projectId, parameters.instanceId, parameters.databaseId, query, parameters.emulator);
+
+            final PCollection<MElement> output = QuerySource
+                    .applyPartitionedQuery(begin, "." + table, parameters, query, transactionView)
+                    .apply("Format." + table, ParDo.of(new WithTimestampDoFn(
+                            getTimestampAttribute(), DateTimeUtil.toJodaInstant(getTimestampDefault()))));
+
+            tuple = tuple.and(table, output, Schema.of(type), Map.of(
+                    "table", table,
+                    "projectId", parameters.projectId,
+                    "instanceId", parameters.instanceId,
+                    "databaseId", parameters.databaseId));
+        }
+        return tuple;
+    }
+
+    /**
+     * Returns the resolved tables.query template, or null when not set (the generated default
+     * {@code SELECT * FROM <table>} is used and the output type comes from INFORMATION_SCHEMA
+     * without per-table analyzeQuery round trips).
+     */
+    private static String loadTablesQueryTemplate(final String name, final Parameters.TablesParameter tablesParameter) {
+        if(tablesParameter.query == null) {
+            return null;
+        }
+        final String template = ResourceUtil.isStorageUri(tablesParameter.query)
+                ? ResourceUtil.readString(tablesParameter.query)
+                : tablesParameter.query;
+        if(!TABLES_QUERY_TABLE_VARIABLE.matcher(template).find()) {
+            throw new IllegalModuleException(
+                    "spanner source module[" + name + "].tables.query must reference ${table}: " + template);
+        }
+        if(template.contains(QuerySource.SQL_SPLITTER)) {
+            throw new IllegalModuleException(
+                    "spanner source module[" + name + "].tables.query does not support " + QuerySource.SQL_SPLITTER);
+        }
+        return template;
+    }
+
+    private static String renderTableQuery(
+            final String queryTemplate,
+            final Map<String, String> templateArgs,
+            final String table) {
+
+        if(queryTemplate == null) {
+            return "SELECT * FROM " + quoteTableIdentifier(table);
+        }
+        final Map<String, Object> model = new HashMap<>();
+        if(templateArgs != null) {
+            model.putAll(templateArgs);
+        }
+        model.put("table", table);
+        return TemplateUtil.executeStrictTemplate(queryTemplate, model);
+    }
+
+    // backquotes each path segment so reserved-word or named-schema tables stay valid GoogleSQL
+    private static String quoteTableIdentifier(final String table) {
+        return Arrays.stream(table.split("\\."))
+                .map(part -> "`" + part + "`")
+                .collect(Collectors.joining("."));
+    }
+
+    private static List<String> tableColumns(final Type type) {
+        return type.getStructFields().stream()
+                .map(Type.StructField::getName)
+                .collect(Collectors.toList());
+    }
+
+    // Shared by the single-table (table) and all-tables (tables) batch paths.
+    private static SpannerIO.Read createTableRead(
+            final Parameters parameters,
+            final String table,
+            final List<String> columns,
+            final KeySet keySet,
+            final TimestampBound timestampBound) {
+
+        SpannerConfig config = SpannerConfig.create()
+                .withProjectId(parameters.projectId)
+                .withInstanceId(parameters.instanceId)
+                .withDatabaseId(parameters.databaseId)
+                .withDataBoostEnabled(ValueProvider.StaticValueProvider.of(parameters.enableDataBoost))
+                .withRpcPriority(parameters.priority);
+        if(parameters.emulator) {
+            config = config.withEmulatorHost(ValueProvider.StaticValueProvider.of(SpannerUtil.getEmulatorHost()));
+        }
+
+        return SpannerIO.read()
+                .withSpannerConfig(config)
+                .withTable(table)
+                .withKeySet(keySet)
+                .withColumns(columns)
+                .withBatching(true)
+                .withTimestampBound(timestampBound);
+    }
+
     private static class QuerySource extends PTransform<PBegin, PCollection<Struct>> {
 
         private static final String SQL_SPLITTER = "--SPLITTER--";
@@ -304,30 +542,49 @@ public class SpannerSource extends Source {
             final String query = TemplateUtil.executeStrictTemplate(rawQuery, templateArgs);
             this.type = SpannerUtil.getTypeFromQuery(parameters.projectId, parameters.instanceId, parameters.databaseId, query, parameters.emulator);
 
-            final PCollectionView<Transaction> transactionView = begin
+            final PCollectionView<Transaction> transactionView = createTransactionView(begin, parameters);
+            return applyPartitionedQuery(begin, "", parameters, query, transactionView);
+        }
+
+        static PCollectionView<Transaction> createTransactionView(final PBegin begin, final Parameters parameters) {
+            return begin
                     .apply(Create.of(1L))
                     .apply("CreateTransaction", ParDo.of(new CreateTransactionFn(parameters)))
                     .apply("AsView", View.asSingleton());
+        }
+
+        /**
+         * Builds the partitioned-query read branch (partitionQuery via a shared
+         * BatchReadOnlyTransaction, shuffled per partition, batch endpoint). Shared by the
+         * single-query batch path and the all-tables (tables) path, which appends one branch
+         * per table with {@code nameSuffix} and the same transaction view.
+         */
+        static PCollection<Struct> applyPartitionedQuery(
+                final PBegin begin,
+                final String nameSuffix,
+                final Parameters parameters,
+                final String query,
+                final PCollectionView<Transaction> transactionView) {
 
             final TupleTag<KV<String, KV<BatchTransactionId, Partition>>> tagPartition = new TupleTag<>(){};
             final TupleTag<Struct> tagStruct = new TupleTag<>(){};
 
             final PCollectionTuple results = begin
-                    .apply("SupplyQuery", Create.of(query))
-                    .apply("SplitQuery", FlatMapElements.into(TypeDescriptors.strings()).via(s -> Arrays.asList(s.split(SQL_SPLITTER))))
-                    .apply("ExecuteQuery", ParDo.of(new QueryPartitionDoFn(
+                    .apply("SupplyQuery" + nameSuffix, Create.of(query))
+                    .apply("SplitQuery" + nameSuffix, FlatMapElements.into(TypeDescriptors.strings()).via(s -> Arrays.asList(s.split(SQL_SPLITTER))))
+                    .apply("ExecuteQuery" + nameSuffix, ParDo.of(new QueryPartitionDoFn(
                                     parameters, transactionView, tagStruct))
                             .withSideInput("transactionView", transactionView)
                             .withOutputTags(tagPartition, TupleTagList.of(tagStruct)));
 
             final PCollection<Struct> struct1 = results.get(tagPartition)
-                    .apply("GroupByPartition", GroupByKey.create())
-                    .apply("ReadStruct", ParDo.of(new ReadStructDoFn(parameters, transactionView))
+                    .apply("GroupByPartition" + nameSuffix, GroupByKey.create())
+                    .apply("ReadStruct" + nameSuffix, ParDo.of(new ReadStructDoFn(parameters, transactionView))
                             .withSideInput("transactionView", transactionView))
                     .setCoder(SerializableCoder.of(Struct.class));
             final PCollection<Struct> struct2 = results.get(tagStruct);
             return PCollectionList.of(struct1).and(struct2)
-                    .apply(Flatten.pCollections());
+                    .apply("FlattenStructs" + nameSuffix, Flatten.pCollections());
         }
 
         public static class CreateTransactionFn extends DoFn<Object, Transaction> {
@@ -528,30 +785,10 @@ public class SpannerSource extends Source {
                     parameters.table, parameters.fields, parameters.emulator);
 
             // TODO check columns exists in table
-            final List<String> columns = type.getStructFields().stream()
-                    .map(Type.StructField::getName)
-                    .collect(Collectors.toList());
-            final List<Parameters.KeyRangeParameter> keyRanges = parameters.keyRange;
             final KeySet keySet = createKeySet(parameters, type);
-
-            SpannerConfig config = SpannerConfig.create()
-                    .withProjectId(parameters.projectId)
-                    .withInstanceId(parameters.instanceId)
-                    .withDatabaseId(parameters.databaseId)
-                    .withDataBoostEnabled(ValueProvider.StaticValueProvider.of(parameters.enableDataBoost))
-                    .withRpcPriority(parameters.priority);
-
-            if(parameters.emulator) {
-                config = config.withEmulatorHost(ValueProvider.StaticValueProvider.of(SpannerUtil.getEmulatorHost()));
-            }
-
-            final SpannerIO.Read read = SpannerIO.read()
-                    .withSpannerConfig(config)
-                    .withTable(parameters.table)
-                    .withKeySet(keySet)
-                    .withColumns(columns)
-                    .withBatching(true)
-                    .withTimestampBound(toTimestampBound(parameters.timestampBound));
+            final SpannerIO.Read read = createTableRead(
+                    parameters, parameters.table, tableColumns(type), keySet,
+                    toTimestampBound(parameters.timestampBound));
 
             return begin.apply("ReadSpannerTable", read);
         }

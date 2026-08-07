@@ -12,15 +12,22 @@ public class MCollection extends PValueBase implements PValue {
     private final String name;
     private final Schema schema;
     private final PCollection<MElement> collection;
+    // pipeline-assembly-time metadata (e.g. source table name), usable before execution starts
+    private final Map<String, String> attributes;
 
-    private MCollection(String name, PCollection<MElement> collection, Schema schema) {
+    private MCollection(String name, PCollection<MElement> collection, Schema schema, Map<String, String> attributes) {
         this.name = name;
         this.collection = collection;//.setCoder(ElementCoder.of(schema));
         this.schema = schema;
+        this.attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
     }
 
     public static MCollection of(String name, PCollection<MElement> collection, Schema schema) {
-        return new MCollection(name, collection, schema);
+        return new MCollection(name, collection, schema, null);
+    }
+
+    public static MCollection of(String name, PCollection<MElement> collection, Schema schema, Map<String, String> attributes) {
+        return new MCollection(name, collection, schema, attributes);
     }
 
     @Override
@@ -39,6 +46,10 @@ public class MCollection extends PValueBase implements PValue {
 
     public Schema getSchema() {
         return schema;
+    }
+
+    public Map<String, String> getAttributes() {
+        return attributes;
     }
 
     @Override

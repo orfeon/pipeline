@@ -73,6 +73,32 @@ Additionally, the built-in variable `${__timestamp}` is available, representing 
 
 Example: `gs://my-bucket/${category}/${region}/data` will produce separate output directories for each unique combination of `category` and `region` field values.
 
+### Assembly-time `${input.*}` template with wildcard inputs
+
+When the sink declares a wildcard input (`inputs: [module.*]`), the reserved `${input.*}` namespace in `output` (and any other parameter) is resolved **at pipeline launch**, once per matched input: the sink fans out into one instance per input collection, each writing with its own schema. Use it to split per-source-table outputs without a runtime shuffle — e.g. the spanner source's all-tables mode:
+
+```yaml
+sources:
+  - name: db
+    module: spanner
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: mydatabase
+      tables:
+        excludes: ["backup_*"]
+
+sinks:
+  - name: export
+    module: storage
+    inputs: [db.*]
+    parameters:
+      format: parquet
+      output: gs://mybucket/export/${input.table}/data
+```
+
+`${input.name}` (full input name), `${input.tag}` (wildcard-matched part) and upstream-provided attributes such as `${input.table}` are available; runtime expressions like `${category}` can be combined in the same path. See the config README for details.
+
 ### Suffix template variables
 
 When `suffix` contains FreeMarker template expressions, the following variables are available for constructing dynamic file names (useful for windowed streaming output):
