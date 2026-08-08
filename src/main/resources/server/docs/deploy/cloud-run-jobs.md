@@ -32,9 +32,10 @@ gcloud run jobs create {job_name} \
   --args="--config=gs://{bucket}/{path/to/config.yaml}"
 ```
 
-* `--memory`: the image's entrypoint fixes the JVM heap at `-Xmx4096m`, so allocate at least
-  5GiB (6GiB recommended) or the task will be OOM-killed. Changing the heap size requires
-  rebuilding the image (the value is set in the `direct` profile's jib entrypoint in `pom.xml`).
+* `--memory`: the JVM heap scales to 75% of the container memory
+  (`-XX:MaxRAMPercentage=75.0` in the image entrypoint), the rest being left for metaspace,
+  thread stacks and gRPC direct buffers. Size `--memory` to your data volume — DirectRunner
+  holds pipeline data in memory (e.g. `--memory=6Gi` gives a ~4.5GiB heap).
 * `--task-timeout`: the Cloud Run default is 10 minutes; raise it to cover your batch runtime.
 * `--cpu`: DirectRunner parallelism defaults to the number of available cores
   (tune with the `options.direct.targetParallelism` config option).
