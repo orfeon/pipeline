@@ -126,6 +126,57 @@ The common settings of the sink module are as follows
 | inputs     | Array<String\> | required | Specify the name of the module from which you want to output data. source or transform name.                                |
 | sideInputs | Array<String\> | optional | Specify the name of the input when additional information is needed for writing.                                            |
 
+## Wildcard inputs and the assembly-time `${input.*}` template
+
+A module that produces multiple named outputs (for example the `partition` transform, or the spanner source in all-tables mode) registers them as `<moduleName>.<tag>`. A downstream module can bind **all** of them at once with a wildcard input:
+
+```yaml
+sinks:
+  - name: export
+    module: storage
+    inputs: [db.*]     # every tagged output of module "db" (failure outputs excluded)
+```
+
+The wildcard is resolved when the pipeline is assembled — that is, **at launch time**. Matching no output is a launch-time error.
+
+When (and only when) a sink declares a wildcard input, the reserved `${input.*}` namespace becomes available in its `parameters`. The sink is then built once **per matched input**, and each instance (named `<sinkName>.<tag>`) resolves `${input.*}` expressions against that input's assembly-time context:
+
+| variable            | description                                                                                        |
+|---------------------|-----------------------------------------------------------------------------------------------------|
+| `${input.name}`     | Full input collection name (e.g. `db.Users`).                                                      |
+| `${input.tag}`      | The wildcard-matched part of the name (e.g. `Users` for `db.Users` via `db.*`).                    |
+| `${input.<attr>}`   | Assembly-time attributes attached by the upstream module (e.g. `${input.table}` from the spanner source's all-tables mode). |
+
+```yaml
+sources:
+  - name: db
+    module: spanner
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: mydatabase
+      tables:
+        excludes: ["backup_*"]
+
+sinks:
+  - name: export
+    module: storage
+    inputs: [db.*]
+    parameters:
+      format: parquet
+      output: gs://mybucket/export/${input.table}/dt=${date}/data
+```
+
+The expressions are FreeMarker templates, so builtins work (`${input.table?lower_case}`). Every other `${...}` expression — `${date}` above — is left untouched and keeps its usual runtime (per-element) meaning; only the `input` namespace is consumed at launch. Without a wildcard input, `${input.*}` is not treated specially at all, so existing configs are unaffected.
+
+Template phases at a glance:
+
+| phase                  | notation             | resolved when                        | resolved from                                             |
+|------------------------|----------------------|--------------------------------------|-----------------------------------------------------------|
+| Config load            | `${args.*}`          | Config file is loaded                | `system.args` and runtime `args.*` parameters             |
+| Pipeline assembly      | `${input.*}`         | Pipeline is assembled at launch      | The wildcard-matched input (name, tag, attributes)        |
+| Execution              | any other `${...}`   | Per element while the pipeline runs  | Element field values (module-dependent)                   |
+
 ## Rewriting the configuration file at runtime
 
 In the configuration file, you can use the Template Engine, [Apache FreeMarker](https://freemarker.apache.org/), to assign variables at runtime, or you can even rewrite the file itself.

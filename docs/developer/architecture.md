@@ -30,6 +30,17 @@ any module whose dependencies are already available in the `outputs` map (`name 
 
 This makes config authoring order-independent and lets transforms/sinks reference any upstream module by name.
 
+Two assembly-time extensions build on this loop (`resolveInputNames` / `applyFanOutSinks` in `MPipeline`):
+
+- **Wildcard inputs** — `inputs: ["module.*"]` waits until `module` is in `executedModuleNames`, then expands
+  to every registered `module.<tag>` output (sorted; `.failures` excluded). Matching nothing throws.
+- **`${input.*}` fan-out (sinks only)** — if a sink both declares a wildcard input and references the reserved
+  `${input.*}` namespace in its parameters, it is instantiated once per matched input (`<sinkName>.<tag>`),
+  with the expressions resolved against that input's `MCollection.getAttributes()` plus `name`/`tag` before
+  `Sink.create`. Only `${input.…}` expressions are consumed (`TemplateUtil.executeInputTemplate`); all other
+  `${...}` text survives for runtime templating. `MCollection`/`MCollectionTuple` carry the per-tag
+  `attributes` map (e.g. `table` from the spanner source's all-tables mode) through `withSource`/merges.
+
 ### Failure fallback
 
 `apply` wraps the build in a try/catch. If assembly throws and `system.failure.alterConfig` is set, that

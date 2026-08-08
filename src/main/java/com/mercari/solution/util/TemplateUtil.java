@@ -74,6 +74,30 @@ public class TemplateUtil {
         return text.contains("${") && text.contains("}");
     }
 
+    // Pipeline-assembly-time template expressions over the reserved `input` namespace,
+    // e.g. ${input.table}. Only these expressions are resolved when a module declares
+    // wildcard inputs; every other ${...} is left for runtime per-element evaluation.
+    private static final java.util.regex.Pattern INPUT_TEMPLATE_PATTERN =
+            java.util.regex.Pattern.compile("\\$\\{\\s*input\\.[^}]+}");
+
+    public static boolean containsInputTemplate(final String text) {
+        if(text == null) {
+            return false;
+        }
+        return INPUT_TEMPLATE_PATTERN.matcher(text).find();
+    }
+
+    public static String executeInputTemplate(final String text, final Map<String, Object> input) {
+        final java.util.regex.Matcher matcher = INPUT_TEMPLATE_PATTERN.matcher(text);
+        final StringBuilder sb = new StringBuilder();
+        while(matcher.find()) {
+            final String resolved = executeStrictTemplate(matcher.group(), Map.of("input", input));
+            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(resolved));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
     public static List<String> extractTemplateArgs(final String text, final Schema inputSchema) {
         return extractTemplateArgs(text, inputSchema.getFields());
     }

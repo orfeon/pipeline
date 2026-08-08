@@ -30,4 +30,38 @@ public class TemplateUtilTest {
         final String output4 = TemplateUtil.executeStrictTemplate(text4, values);
     }
 
+    @Test
+    public void testContainsInputTemplate() {
+        Assertions.assertTrue(TemplateUtil.containsInputTemplate("gs://bucket/${input.table}/data"));
+        Assertions.assertTrue(TemplateUtil.containsInputTemplate("${ input.tag }"));
+        // runtime templates and other namespaces must not activate the input namespace
+        Assertions.assertFalse(TemplateUtil.containsInputTemplate("gs://bucket/${table}/data"));
+        Assertions.assertFalse(TemplateUtil.containsInputTemplate("${args.table}"));
+        Assertions.assertFalse(TemplateUtil.containsInputTemplate("${inputs.table}"));
+        Assertions.assertFalse(TemplateUtil.containsInputTemplate("${input}"));
+        Assertions.assertFalse(TemplateUtil.containsInputTemplate(null));
+    }
+
+    @Test
+    public void testExecuteInputTemplate() {
+        final Map<String, Object> input = Map.of(
+                "name", "db.Users",
+                "tag", "Users",
+                "table", "Users");
+
+        Assertions.assertEquals(
+                "gs://bucket/export/Users/data",
+                TemplateUtil.executeInputTemplate("gs://bucket/export/${input.table}/data", input));
+
+        // FreeMarker builtins work inside a resolved expression
+        Assertions.assertEquals(
+                "users",
+                TemplateUtil.executeInputTemplate("${input.table?lower_case}", input));
+
+        // runtime template expressions in the same text survive untouched
+        Assertions.assertEquals(
+                "gs://bucket/Users/${category}/dt=${__timestamp}/data",
+                TemplateUtil.executeInputTemplate("gs://bucket/${input.tag}/${category}/dt=${__timestamp}/data", input));
+    }
+
 }

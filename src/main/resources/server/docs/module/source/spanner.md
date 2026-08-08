@@ -12,6 +12,7 @@ Source Module for reading data from [Google Cloud Spanner](https://cloud.google.
 
 - **Query read**: Execute a SQL query. The query is automatically partitioned for parallel execution across workers.
 - **Table read**: Read directly from a table with optional field selection and key range filtering using `SpannerIO.read()`.
+- **All-tables read**: Read every base table matching the `tables` patterns, producing one named output per table (`<moduleName>.<tableName>`).
 
 Additionally, the following special execution modes are available:
 
@@ -20,6 +21,8 @@ Additionally, the following special execution modes are available:
 - **Microbatch mode**: Execute time-ranged queries at regular intervals for near real-time data ingestion.
 
 Schema is automatically inferred from the query result or table definition; no `schema` parameter is needed.
+
+Supported column types (GoogleSQL): `BOOL`, `INT64`, `FLOAT32`, `FLOAT64`, `NUMERIC`, `STRING`, `BYTES`, `DATE`, `TIMESTAMP`, `JSON`, `UUID`, `ARRAY` of these, and `STRUCT` (query results). Not supported: `INTERVAL`, `PROTO`, `ENUM`, `TOKENLIST` — reading a table or query containing them fails at launch.
 
 ## Source module common parameters
 
@@ -73,6 +76,28 @@ Multiple SQL statements can be concatenated with the separator `--SPLITTER--` to
 | endType   | optional | Enum           | End boundary type. Values: `closed` (inclusive, default), `open` (exclusive).                                                              |
 | startKeys | optional | JSON           | Start key values. A single value for single-column primary key, or a JSON array for composite keys. Supports STRING, INT64, FLOAT64, BOOL, DATE, TIMESTAMP types. |
 | endKeys   | optional | JSON           | End key values. Same format as `startKeys`.                                                                                                |
+
+### All-tables read parameters
+
+Read all base tables matching the given patterns in a single module. Exactly one of `query`, `table` or `tables` must be specified (`fields` and `keyRange` are not supported with `tables`).
+
+| parameter        | optional           | type            | description                                                                                                                                                     |
+|------------------|--------------------|-----------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| tables           | selective required | Object or Array | Table name patterns. Either an object with `includes`/`excludes`/`query`, or an array shorthand for `includes`. `*` in a pattern matches any character sequence. |
+| tables.includes  | optional           | Array<String\>  | Patterns of tables to read. Default: `["*"]` (all base tables).                                                                                                 |
+| tables.excludes  | optional           | Array<String\>  | Patterns of tables to exclude. Default: `[]`.                                                                                                                    |
+| tables.query     | optional           | String          | Common query template applied to every matched table; **must reference `${table}`**. Inline SQL or a GCS path (`gs://...`). Default: `SELECT * FROM <table>`. Module-level `args` are also available as template variables. `--SPLITTER--` is not supported here. |
+
+Behavior:
+
+- The table list and each table's schema are resolved **at pipeline launch** from `INFORMATION_SCHEMA` (views and system tables are excluded). Matching no table is a launch-time error.
+- The module outputs one collection per table, named `<moduleName>.<tableName>` (tables in a named schema are qualified as `<schema>.<table>`). Downstream modules can consume a single table (`inputs: [mySpanner.Users]`) or all of them with a wildcard (`inputs: [mySpanner.*]`).
+- Each output carries assembly-time attributes (`table`, `projectId`, `instanceId`, `databaseId`) usable in downstream sinks via the `${input.*}` template (see the config README).
+- Every table is read as a **partitioned query** (same machinery as the `query` parameter: `partitionQuery` + per-partition parallel reads via the batch endpoint), all attached to **one shared `BatchReadOnlyTransaction`** — so the per-table outputs form a mutually consistent snapshot at that transaction's read timestamp (`timestampBound` applies to it).
+- With a custom `tables.query`, the output schema is resolved from the query (`analyzeQuery`), one round trip **per table** at launch — expect slower launches on databases with many tables. Without it, schemas come from the single bulk `INFORMATION_SCHEMA` query.
+- Keep a custom `tables.query` [root-partitionable](https://cloud.google.com/spanner/docs/reads#read_data_in_parallel) (simple scan + projection + filter; no aggregation/JOIN/ORDER BY). A non-partitionable query does not fail — it falls back to a single serial read for that table (a WARN is logged), losing the parallelism.
+- A query referencing specific columns (e.g. `WHERE updated_at > ...`) fails at launch for tables lacking that column; narrow the target with `includes` in that case.
+- GoogleSQL dialect databases only (PostgreSQL dialect databases are not yet supported).
 
 ### Change stream parameters
 
@@ -162,7 +187,56 @@ sources:
         - email
 ```
 
-### Example 4: Read with key range filtering
+### Example 4: Export all tables to per-table parquet files
+
+Read every table except backup tables, and let the storage sink fan out per table using the assembly-time `${input.table}` template. The wildcard input `db.*` binds all per-table outputs of the source.
+
+```yaml
+sources:
+  - name: db
+    module: spanner
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: mydatabase
+      tables:
+        excludes: ["backup_*"]
+
+sinks:
+  - name: export
+    module: storage
+    inputs: [db.*]
+    parameters:
+      format: parquet
+      output: gs://mybucket/export/${input.table}/data
+```
+
+### Example 5: All-tables export with a common per-table query
+
+Add a fixed snapshot column to every table while exporting. `${table}` is replaced with each matched table name at launch.
+
+```yaml
+sources:
+  - name: db
+    module: spanner
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: mydatabase
+      tables:
+        excludes: ["backup_*"]
+        query: "SELECT *, CURRENT_TIMESTAMP() AS exported_at FROM ${table}"
+
+sinks:
+  - name: export
+    module: storage
+    inputs: [db.*]
+    parameters:
+      format: parquet
+      output: gs://mybucket/export/${input.table}/data
+```
+
+### Example 6: Read with key range filtering
 
 Read a subset of rows by primary key range.
 
@@ -182,7 +256,7 @@ sources:
           endKeys: "M"
 ```
 
-### Example 5: Read with composite key range
+### Example 7: Read with composite key range
 
 Filter by a composite primary key using JSON arrays.
 
@@ -200,7 +274,7 @@ sources:
           endKeys: ["order_001", 100]
 ```
 
-### Example 6: Load query from GCS with template variables
+### Example 8: Load query from GCS with template variables
 
 ```yaml
 system:
@@ -217,7 +291,7 @@ sources:
       query: "gs://my-bucket/queries/daily_report.sql"
 ```
 
-### Example 7: Read with Data Boost and priority
+### Example 9: Read with Data Boost and priority
 
 Use Data Boost for independent compute and HIGH priority.
 
@@ -235,7 +309,7 @@ sources:
       requestTag: "daily-export-job"
 ```
 
-### Example 8: Stale read with timestamp bound
+### Example 10: Stale read with timestamp bound
 
 Read data as of a specific timestamp.
 
@@ -251,7 +325,7 @@ sources:
       timestampBound: "2024-01-15T10:00:00Z"
 ```
 
-### Example 9: Change stream for CDC
+### Example 11: Change stream for CDC
 
 Read change data capture events from a Spanner change stream.
 
@@ -269,7 +343,7 @@ sources:
         inclusiveStartAt: "2024-01-01T00:00:00Z"
 ```
 
-### Example 10: View mode for lookup data
+### Example 12: View mode for lookup data
 
 Periodically refresh lookup data from Spanner.
 
@@ -288,7 +362,7 @@ sources:
         intervalMinute: 30
 ```
 
-### Example 11: Spanner to BigQuery pipeline
+### Example 13: Spanner to BigQuery pipeline
 
 ```yaml
 sources:

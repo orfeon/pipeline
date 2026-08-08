@@ -21,6 +21,7 @@ public class StructToElementConverter {
         final Schema.FieldType fieldType = switch (type.getCode()) {
             case BOOL -> Schema.FieldType.BOOLEAN;
             case STRING -> Schema.FieldType.STRING;
+            case UUID -> Schema.FieldType.UUID;
             case JSON, PG_JSONB -> Schema.FieldType.JSON;
             case BYTES -> Schema.FieldType.BYTES;
             case INT64 -> Schema.FieldType.INT64;

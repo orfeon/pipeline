@@ -1,7 +1,13 @@
 package com.mercari.solution;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.mercari.solution.config.*;
 import com.mercari.solution.module.*;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
@@ -185,13 +191,14 @@ public class MPipeline {
                     .toList();
 
             // Add queue if inputs not done.
-            final List<String> inputNames = switch (moduleConfig) {
+            final List<String> rawInputNames = switch (moduleConfig) {
                 case TransformConfig transformConfig -> transformConfig.getInputs();
                 case SinkConfig sinkConfig -> sinkConfig.getInputs();
-                default -> new ArrayList<>();
+                default -> new ArrayList<String>();
             };
 
-            if(!outputs.keySet().containsAll(inputNames)) {
+            final List<String> inputNames = resolveInputNames(rawInputNames, outputs, executedModuleNames);
+            if(inputNames == null || !outputs.keySet().containsAll(inputNames)) {
                 notDoneModules.add(moduleConfig);
                 continue;
             }
@@ -209,6 +216,10 @@ public class MPipeline {
                                 .apply(moduleConfig.getName(), source);
                     }
                     case TransformConfig transformConfig -> {
+                        if(containsInputTemplate(transformConfig, rawInputNames)) {
+                            throw new IllegalModuleException(
+                                    "assembly-time ${input.*} template is currently supported only for sink modules with wildcard inputs");
+                        }
                         final Transform transform = Transform.create(
                                 transformConfig, pipeline.getOptions(), waits, sideInputs, errorHandler);
                         yield MCollectionTuple
@@ -216,6 +227,9 @@ public class MPipeline {
                                 .apply(moduleConfig.getName(), transform);
                     }
                     case SinkConfig sinkConfig -> {
+                        if(containsInputTemplate(sinkConfig, rawInputNames)) {
+                            yield applyFanOutSinks(pipeline, sinkConfig, rawInputNames, inputs, waits, errorHandler);
+                        }
                         final Sink sink = Sink.create(
                                 sinkConfig, pipeline.getOptions(), waits, errorHandler);
                         final MCollectionTuple input = inputs.isEmpty()
@@ -242,6 +256,159 @@ public class MPipeline {
             return;
         }
         setResult(pipeline, notDoneModules, outputs, executedModuleNames, errorHandler);
+    }
+
+    /**
+     * Expands wildcard inputs ({@code module.*}) into the tagged outputs the referenced module
+     * registered. Returns null while a referenced module has not been built yet, so the caller
+     * re-queues the module. Matching no output at all is a configuration error.
+     */
+    private static List<String> resolveInputNames(
+            final List<String> inputNames,
+            final Map<String, MCollection> outputs,
+            final Set<String> executedModuleNames) {
+
+        if(inputNames.stream().noneMatch(MPipeline::isWildcardInput)) {
+            return inputNames;
+        }
+        final List<String> resolved = new ArrayList<>();
+        for(final String inputName : inputNames) {
+            if(!isWildcardInput(inputName)) {
+                resolved.add(inputName);
+                continue;
+            }
+            final String moduleName = inputName.substring(0, inputName.length() - 2);
+            if(!executedModuleNames.contains(moduleName)) {
+                return null;
+            }
+            final List<String> matched = outputs.keySet().stream()
+                    .filter(name -> name.startsWith(moduleName + "."))
+                    // failure streams are routed via outputFailure/failureSinks, not wildcards
+                    .filter(name -> !name.equals(moduleName + ".failures"))
+                    .sorted()
+                    .toList();
+            if(matched.isEmpty()) {
+                throw new IllegalModuleException("", "pipeline",
+                        "wildcard input: " + inputName + " matched no output of module: " + moduleName);
+            }
+            resolved.addAll(matched);
+        }
+        return resolved;
+    }
+
+    private static boolean isWildcardInput(final String inputName) {
+        return inputName.endsWith(".*");
+    }
+
+    // The reserved ${input.*} namespace activates only when the module opted into wildcard
+    // inputs; otherwise the text is left untouched for runtime per-element templating.
+    private static boolean containsInputTemplate(
+            final ModuleConfig config,
+            final List<String> rawInputNames) {
+
+        return rawInputNames.stream().anyMatch(MPipeline::isWildcardInput)
+                && config.getParameters() != null
+                && TemplateUtil.containsInputTemplate(config.getParameters().toString());
+    }
+
+    /**
+     * Builds one sink instance per input collection, resolving ${input.*} expressions in the
+     * parameters against that collection's assembly-time context (name, tag and attributes such
+     * as the source table name). Instances are named {@code <sinkName>.<tag>}.
+     */
+    private static MCollectionTuple applyFanOutSinks(
+            final Pipeline pipeline,
+            final SinkConfig sinkConfig,
+            final List<String> rawInputNames,
+            final List<MCollection> inputs,
+            final List<MCollection> waits,
+            final MErrorHandler errorHandler) {
+
+        final Map<String, String> tags = new LinkedHashMap<>();
+        for(final MCollection input : inputs) {
+            tags.put(input.getName(), inputTag(input.getName(), rawInputNames));
+        }
+        // tag collisions across different wildcards fall back to the unambiguous full input name
+        final Set<String> duplicatedTags = tags.values().stream()
+                .filter(tag -> Collections.frequency(new ArrayList<>(tags.values()), tag) > 1)
+                .collect(Collectors.toSet());
+
+        for(final MCollection input : inputs) {
+            final String tag = tags.get(input.getName());
+            final String suffix = duplicatedTags.contains(tag) ? input.getName() : tag;
+            final String childName = sinkConfig.getName() + "." + suffix;
+
+            final Map<String, Object> context = new LinkedHashMap<>(input.getAttributes());
+            context.put("name", input.getName());
+            context.put("tag", tag);
+
+            final SinkConfig childConfig = copySinkConfigForInput(sinkConfig, input.getName(), childName, context);
+            final Sink sink = Sink.create(childConfig, pipeline.getOptions(), waits, errorHandler);
+            MCollectionTuple
+                    .mergeCollection(List.of(input))
+                    .apply(childName, sink);
+            LOG.info("sink module: {} fanned out to: {} for input: {}", sinkConfig.getName(), childName, input.getName());
+        }
+        return MCollectionTuple.empty(pipeline);
+    }
+
+    // The tag is the wildcard-matched part of the collection name ("Users" for "db.Users" via
+    // "db.*"); inputs listed explicitly keep their full name.
+    private static String inputTag(final String inputName, final List<String> rawInputNames) {
+        for(final String rawInputName : rawInputNames) {
+            if(!isWildcardInput(rawInputName)) {
+                continue;
+            }
+            final String moduleName = rawInputName.substring(0, rawInputName.length() - 2);
+            if(inputName.startsWith(moduleName + ".")) {
+                return inputName.substring(moduleName.length() + 1);
+            }
+        }
+        return inputName;
+    }
+
+    private static SinkConfig copySinkConfigForInput(
+            final SinkConfig config,
+            final String inputName,
+            final String childName,
+            final Map<String, Object> context) {
+
+        final Gson gson = new Gson();
+        final JsonObject json = gson.toJsonTree(config).getAsJsonObject();
+        json.addProperty("name", childName);
+        final JsonArray inputsArray = new JsonArray();
+        inputsArray.add(inputName);
+        json.add("inputs", inputsArray);
+        json.remove("input");
+        if(json.has("parameters") && json.get("parameters").isJsonObject()) {
+            json.add("parameters", resolveInputTemplates(json.get("parameters"), context));
+        }
+        return gson.fromJson(json, SinkConfig.class);
+    }
+
+    // Walks the parameters tree and resolves ${input.*} expressions in string leaves; every
+    // other ${...} survives for runtime templating.
+    private static JsonElement resolveInputTemplates(final JsonElement json, final Map<String, Object> context) {
+        if(json.isJsonPrimitive() && json.getAsJsonPrimitive().isString()) {
+            final String text = json.getAsString();
+            if(TemplateUtil.containsInputTemplate(text)) {
+                return new JsonPrimitive(TemplateUtil.executeInputTemplate(text, context));
+            }
+            return json;
+        } else if(json.isJsonArray()) {
+            final JsonArray array = new JsonArray();
+            for(final JsonElement element : json.getAsJsonArray()) {
+                array.add(resolveInputTemplates(element, context));
+            }
+            return array;
+        } else if(json.isJsonObject()) {
+            final JsonObject object = new JsonObject();
+            for(final Map.Entry<String, JsonElement> entry : json.getAsJsonObject().entrySet()) {
+                object.add(entry.getKey(), resolveInputTemplates(entry.getValue(), context));
+            }
+            return object;
+        }
+        return json;
     }
 
     private static Set<String> moduleNames(final Config config) {

@@ -19,16 +19,19 @@ public class MCollectionTuple implements PInput, POutput {
     private final Pipeline pipeline;
     private final Map<String, PCollection<MElement>> pcollectionMap;
     private final Map<String, Schema> schemaMap;
+    // pipeline-assembly-time metadata per tag (e.g. source table name); tags without metadata are absent
+    private final Map<String, Map<String, String>> attributesMap;
 
 
     private MCollectionTuple(Pipeline pipeline) {
-        this(pipeline, new LinkedHashMap<>(), new LinkedHashMap<>());
+        this(pipeline, new LinkedHashMap<>(), new LinkedHashMap<>(), new LinkedHashMap<>());
     }
 
-    private MCollectionTuple(Pipeline pipeline, Map<String, PCollection<MElement>> pcollectionMap, Map<String, Schema> schemaMap) {
+    private MCollectionTuple(Pipeline pipeline, Map<String, PCollection<MElement>> pcollectionMap, Map<String, Schema> schemaMap, Map<String, Map<String, String>> attributesMap) {
         this.pipeline = pipeline;
         this.pcollectionMap = Collections.unmodifiableMap(pcollectionMap);
         this.schemaMap = schemaMap;
+        this.attributesMap = attributesMap;
     }
 
 
@@ -51,10 +54,18 @@ public class MCollectionTuple implements PInput, POutput {
     }
 
     public MCollectionTuple and(String tag, PCollection<MElement> pc, Schema schema) {
+        return and(tag, pc, schema, null);
+    }
+
+    public MCollectionTuple and(String tag, PCollection<MElement> pc, Schema schema, Map<String, String> attributes) {
         if (pc.getPipeline() != pipeline) {
             throw new IllegalArgumentException("PCollections come from different Pipelines");
         }
 
+        final Map<String, Map<String, String>> newAttributesMap = new LinkedHashMap<>(attributesMap);
+        if(attributes != null && !attributes.isEmpty()) {
+            newAttributesMap.put(tag, Map.copyOf(attributes));
+        }
         return new MCollectionTuple(
                 pipeline,
                 new ImmutableMap.Builder<String, PCollection<MElement>>()
@@ -64,7 +75,12 @@ public class MCollectionTuple implements PInput, POutput {
                 new ImmutableMap.Builder<String, Schema>()
                         .putAll(schemaMap)
                         .put(tag, schema)
-                        .build());
+                        .build(),
+                newAttributesMap);
+    }
+
+    public Map<String, String> getAttributes(String tag) {
+        return attributesMap.getOrDefault(tag, Map.of());
     }
 
     /*
@@ -152,7 +168,8 @@ public class MCollectionTuple implements PInput, POutput {
         final Map<String, MCollectionTuple> flatten = new LinkedHashMap<>();
         for(final Map.Entry<String, PCollection<MElement>> entry : pcollectionMap.entrySet()) {
             final MCollectionTuple collection = MCollectionTuple
-                    .of(entry.getKey(), entry.getValue(), schemaMap.get(entry.getKey()));
+                    .empty(pipeline)
+                    .and(entry.getKey(), entry.getValue(), schemaMap.get(entry.getKey()), attributesMap.get(entry.getKey()));
             flatten.put(entry.getKey(), collection);
         }
         return flatten;
@@ -162,7 +179,7 @@ public class MCollectionTuple implements PInput, POutput {
         final Map<String, MCollection> flatten = new LinkedHashMap<>();
         for(final Map.Entry<String, PCollection<MElement>> entry : pcollectionMap.entrySet()) {
             final MCollection collection = MCollection
-                    .of(entry.getKey(), entry.getValue(), schemaMap.get(entry.getKey()));
+                    .of(entry.getKey(), entry.getValue(), schemaMap.get(entry.getKey()), attributesMap.get(entry.getKey()));
             flatten.put(entry.getKey(), collection);
         }
         return flatten;
@@ -260,7 +277,14 @@ public class MCollectionTuple implements PInput, POutput {
                                 .collect(Collectors.toMap(
                                         e -> e.getKey().isEmpty() ? name : name + "." + e.getKey(),
                                         Map.Entry::getValue)))
-                        .build());
+                        .build(),
+                attributesMap.entrySet()
+                        .stream()
+                        .collect(Collectors.toMap(
+                                e -> e.getKey().isEmpty() ? name : name + "." + e.getKey(),
+                                Map.Entry::getValue,
+                                (a, b) -> b,
+                                LinkedHashMap::new)));
     }
 
     static String defaultName(String transformName) {
@@ -273,9 +297,11 @@ public class MCollectionTuple implements PInput, POutput {
         }
         final Map<String, PCollection<MElement>> collectionMap = new LinkedHashMap<>();
         final Map<String, Schema> schemaMap = new LinkedHashMap<>();
+        final Map<String, Map<String, String>> attributesMap = new LinkedHashMap<>();
         for(final MCollectionTuple collection : collections) {
             collectionMap.putAll(collection.pcollectionMap);
             schemaMap.putAll(collection.schemaMap);
+            attributesMap.putAll(collection.attributesMap);
         }
         return new MCollectionTuple(
                 collections.get(0).getPipeline(),
@@ -284,7 +310,8 @@ public class MCollectionTuple implements PInput, POutput {
                         .build(),
                 new ImmutableMap.Builder<String, Schema>()
                         .putAll(schemaMap)
-                        .build());
+                        .build(),
+                attributesMap);
     }
 
     public static MCollectionTuple mergeCollection(final List<MCollection> collections) {
@@ -293,9 +320,13 @@ public class MCollectionTuple implements PInput, POutput {
         }
         final Map<String, PCollection<MElement>> collectionMap = new LinkedHashMap<>();
         final Map<String, Schema> schemaMap = new LinkedHashMap<>();
+        final Map<String, Map<String, String>> attributesMap = new LinkedHashMap<>();
         for(final MCollection collection : collections) {
             collectionMap.put(collection.getName(), collection.getCollection());
             schemaMap.put(collection.getName(), collection.getSchema());
+            if(!collection.getAttributes().isEmpty()) {
+                attributesMap.put(collection.getName(), collection.getAttributes());
+            }
         }
         return new MCollectionTuple(
                 collections.get(0).getPipeline(),
@@ -304,7 +335,8 @@ public class MCollectionTuple implements PInput, POutput {
                         .build(),
                 new ImmutableMap.Builder<String, Schema>()
                         .putAll(schemaMap)
-                        .build());
+                        .build(),
+                attributesMap);
     }
 
 }
