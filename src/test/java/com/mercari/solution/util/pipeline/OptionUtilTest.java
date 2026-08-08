@@ -1,9 +1,10 @@
 package com.mercari.solution.util.pipeline;
 
 import com.mercari.solution.MPipeline;
-import org.apache.beam.runners.dataflow.DataflowRunner;
 import org.apache.beam.runners.direct.DirectRunner;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.PipelineRunner;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -20,15 +21,42 @@ import java.util.Set;
 
 public class OptionUtilTest {
 
+    // OptionUtil.getRunner dispatches on the runner class's simple name only, so stubs with the
+    // same simple names let every branch be tested without depending on the runner artifacts,
+    // which are provided per-profile and absent from the test classpath.
+    private static abstract class StubRunner extends PipelineRunner<PipelineResult> {
+        @Override
+        public PipelineResult run(final Pipeline pipeline) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    private static class DataflowRunner extends StubRunner {}
+    private static class PrismRunner extends StubRunner {}
+    private static class PortableRunner extends StubRunner {}
+    private static class SparkRunner extends StubRunner {}
+    private static class SparkStructuredStreamingRunner extends StubRunner {}
+    private static class FlinkRunner extends StubRunner {}
+    private static class UnknownRunner extends StubRunner {}
+
+    private static PipelineOptions optionsWith(final Class<? extends PipelineRunner<?>> runner) {
+        final PipelineOptions options = PipelineOptionsFactory.create();
+        options.setRunner(runner);
+        return options;
+    }
+
     @Test
     public void testGetRunner() {
-        final PipelineOptions direct = PipelineOptionsFactory.create();
-        direct.setRunner(DirectRunner.class);
-        Assertions.assertEquals(MPipeline.Runner.direct, OptionUtil.getRunner(direct));
+        Assertions.assertEquals(MPipeline.Runner.direct, OptionUtil.getRunner(optionsWith(DirectRunner.class)));
+        Assertions.assertEquals(MPipeline.Runner.prism, OptionUtil.getRunner(optionsWith(PrismRunner.class)));
+        Assertions.assertEquals(MPipeline.Runner.portable, OptionUtil.getRunner(optionsWith(PortableRunner.class)));
+        Assertions.assertEquals(MPipeline.Runner.dataflow, OptionUtil.getRunner(optionsWith(DataflowRunner.class)));
+        Assertions.assertEquals(MPipeline.Runner.spark, OptionUtil.getRunner(optionsWith(SparkRunner.class)));
+        Assertions.assertEquals(MPipeline.Runner.spark, OptionUtil.getRunner(optionsWith(SparkStructuredStreamingRunner.class)));
+        Assertions.assertEquals(MPipeline.Runner.flink, OptionUtil.getRunner(optionsWith(FlinkRunner.class)));
 
-        final PipelineOptions dataflow = PipelineOptionsFactory.create();
-        dataflow.setRunner(DataflowRunner.class);
-        Assertions.assertEquals(MPipeline.Runner.dataflow, OptionUtil.getRunner(dataflow));
+        Assertions.assertThrows(IllegalArgumentException.class,
+                () -> OptionUtil.getRunner(optionsWith(UnknownRunner.class)));
     }
 
     @Test
