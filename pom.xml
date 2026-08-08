@@ -296,7 +296,10 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=DirectRunner</jib.entrypoint>
+        <!-- Local debugging image: skip DirectRunner's per-element encode/mutation checks by default.
+             Re-enable per run via config options.direct.enforceImmutability/enforceEncodability
+             (args cannot override: duplicating a flag fails PipelineOptionsFactory.fromArgs). -->
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=DirectRunner,--enforceImmutability=false,--enforceEncodability=false</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
