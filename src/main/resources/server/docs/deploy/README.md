@@ -60,6 +60,8 @@ docker pull {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct
 ```
 
 See [How to Execute Pipeline](../exec/README.md#run-pipeline-locally-directrunner) for how to run it.
+The same image can also be executed serverlessly as a Cloud Run Job —
+see [Run Pipeline on Cloud Run Jobs](cloud-run-jobs.md).
 
 ## Build bundled jar for Apache Flink / Apache Spark
 
