@@ -51,6 +51,7 @@ The destination table can be specified statically or dynamically using FreeMarke
 | method            | optional | Enum | Write method. Values: `FILE_LOADS`, `STREAMING_INSERTS`, `STORAGE_WRITE_API`, `STORAGE_API_AT_LEAST_ONCE`, `DEFAULT`. If not specified, automatically determined. See [Write methods](#write-methods). |
 | writeFormat       | optional | Enum | Internal data format for writing. Values: `json`, `avro`, `row`, `avrofile`. Auto-determined based on method and mode. Specify only when needed for performance or schema compatibility.             |
 | outputResult      | optional | Boolean | If `true`, output successful write results. Default: `true` for batch mode with FILE_LOADS/STREAMING_INSERTS/DEFAULT, `false` otherwise.                                                         |
+| cdc               | optional | Boolean | CDC apply mode: consume unified change records (the [`cdc` transform](../transform/cdc.md) output) and upsert/delete rows on the destination table. See [CDC apply mode](#cdc-apply-mode). Default: `false`. |
 
 ### Table creation parameters
 
@@ -124,6 +125,36 @@ myproject.mydataset.events_${region}
 All input field names can be used as template variables. The template is evaluated for each record to determine the destination table.
 
 When using dynamic destination, `partitioning`, `partitioningField`, and `clusteringFields` are also applied to each dynamically created table. The schema for all destination tables is derived from the input schema.
+
+## CDC apply mode
+
+With `cdc: true`, the sink consumes **unified change records** — the output of the
+[`cdc` transform](../transform/cdc.md) — and applies them to the destination table as
+upserts/deletes through the Storage Write API
+[`_CHANGE_TYPE` / `_CHANGE_SEQUENCE_NUMBER`](https://cloud.google.com/bigquery/docs/change-data-capture)
+pseudocolumns. Works in both streaming (live change stream) and batch (replay of archived change
+records) pipelines.
+
+- The row written is `keys ∪ after` for `INSERT`/`UPDATE`/`SNAPSHOT` (mapped to `UPSERT`), and the
+  key values only for `DELETE`.
+- The envelope `sequence` field becomes `_CHANGE_SEQUENCE_NUMBER`, so out-of-order delivery resolves
+  to the latest change per key.
+- `method` must be `STORAGE_API_AT_LEAST_ONCE` (default in this mode) or `STORAGE_WRITE_API`.
+- The destination table must already exist (`CREATE_NEVER`) with a
+  [primary key](https://cloud.google.com/bigquery/docs/information-schema-table-constraints) and
+  `max_staleness` configured as needed; its schema cannot be derived from change records.
+- A template `table` destination is not supported in this mode — configure one sink per table
+  (filter per table upstream, e.g. with the `select` transform on the envelope `table` field).
+
+```yaml
+sinks:
+  - name: bq
+    module: bigquery
+    inputs: [normalized_changes]
+    parameters:
+      table: myproject.mydataset.Users
+      cdc: true
+```
 
 ## Failure output
 

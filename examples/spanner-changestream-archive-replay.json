@@ -1,0 +1,43 @@
+{
+  "sources": [
+    {
+      "name": "archived",
+      "module": "storage",
+      "parameters": {
+        "input": "gs://mybucket/cdc/spanner/*.avro",
+        "format": "avro"
+      }
+    }
+  ],
+  "transforms": [
+    {
+      "name": "normalize",
+      "module": "cdc",
+      "inputs": ["archived"],
+      "parameters": {
+        "format": "spanner",
+        "accumulate": true
+      }
+    },
+    {
+      "name": "users",
+      "module": "select",
+      "inputs": ["normalize"],
+      "parameters": {
+        "filter": { "key": "table", "op": "=", "value": "Users" }
+      }
+    }
+  ],
+  "sinks": [
+    {
+      "name": "bigquery",
+      "module": "bigquery",
+      "inputs": ["users"],
+      "parameters": {
+        "table": "myproject.mydataset.Users",
+        "cdc": true,
+        "method": "STORAGE_WRITE_API"
+      }
+    }
+  ]
+}

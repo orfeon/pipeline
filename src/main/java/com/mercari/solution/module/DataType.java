@@ -22,13 +22,7 @@ public enum DataType implements Serializable {
     KINESIS(22), // AWS Kinesis record
     KAFKA(23), // Apache Kafka message
     // change capture record
-    DEBEZIUM(40),
-    SPANNER_DATACHANGERECORD(41),
     BIGTABLE_DATACHANGERECORD(42),
-    // mutation
-    UNIFIEDMUTATION(60),
-    MUTATION(61),
-    MUTATIONGROUP(62),
     // multi
     UNION(100),
     // unknown

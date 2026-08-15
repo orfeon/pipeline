@@ -14,6 +14,7 @@ import com.mercari.solution.util.cloud.google.SpannerUtil;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.MicroBatch;
 import com.mercari.solution.util.pipeline.OptionUtil;
+import com.mercari.solution.util.pipeline.cdc.SpannerChangeCapture;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.VarLongCoder;
@@ -25,6 +26,7 @@ import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.DataChangeRecord;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.*;
+import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.values.*;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -190,6 +192,9 @@ public class SpannerSource extends Source {
                     Parameters parentParameters) {
 
                 final List<String> errorMessages = new ArrayList<>();
+                if(this.changeStreamName == null) {
+                    errorMessages.add("spanner source module[" + name + "].changeStream requires 'changeStreamName' parameter");
+                }
                 return errorMessages;
             }
 
@@ -315,13 +320,6 @@ public class SpannerSource extends Source {
         }
     }
 
-    private enum Mode {
-        batch,
-        microBatch,
-        changeStream,
-        view
-    }
-
     @Override
     public MCollectionTuple expand(
             final PBegin begin,
@@ -359,12 +357,21 @@ public class SpannerSource extends Source {
                 yield null;
             }
             case changeDataCapture -> {
-                final ChangeStreamSource source = new ChangeStreamSource(parameters);
-                final PCollection<MMutation> mutation = begin.apply("ChangeStream", source);
+                final Schema outputSchema = SpannerChangeCapture.schema();
 
-                yield null;
-                //yield MCollectionTuple
-                //        .of(mutation, outputSchema);
+                final TupleTag<MElement> outputTag = new TupleTag<>() {};
+                final TupleTag<BadRecord> failuresTag = new TupleTag<>() {};
+
+                final PCollectionTuple outputs = begin
+                        .apply("ReadChangeStream", createDataChangeRecordSource(parameters))
+                        .apply("ConvertToElement", ParDo
+                                .of(new DataChangeRecordToElementDoFn(outputSchema, getFailFast(), failuresTag))
+                                .withOutputTags(outputTag, TupleTagList.of(failuresTag)));
+
+                errorHandler.addError(outputs.get(failuresTag));
+
+                yield MCollectionTuple
+                        .of(outputs.get(outputTag), outputSchema);
             }
             case view -> {
                 final TupleTag<MElement> outputTag = new TupleTag<>(){};
@@ -867,56 +874,83 @@ public class SpannerSource extends Source {
         }
     }
 
-    private static class ChangeStreamSource extends PTransform<PBegin, PCollection<MMutation>> {
+    private static SpannerIO.ReadChangeStream createDataChangeRecordSource(
+            final Parameters parameters) {
 
-        private final Parameters parameters;
-
-        ChangeStreamSource(final Parameters parameters) {
-            this.parameters = parameters;
+        SpannerConfig spannerConfig = SpannerConfig.create()
+                .withProjectId(parameters.projectId)
+                .withInstanceId(parameters.instanceId)
+                .withDatabaseId(parameters.databaseId)
+                .withDataBoostEnabled(ValueProvider.StaticValueProvider.of(parameters.enableDataBoost));
+        if(parameters.emulator) {
+            spannerConfig = spannerConfig
+                    .withEmulatorHost(ValueProvider.StaticValueProvider.of(SpannerUtil.getEmulatorHost()));
+        } else {
+            spannerConfig = spannerConfig
+                    .withHost(ValueProvider.StaticValueProvider.of(SpannerUtil.SPANNER_HOST_BATCH));
         }
 
-        @Override
-        public PCollection<MMutation> expand(PBegin begin) {
-            final SpannerIO.ReadChangeStream readChangeStream = createDataChangeRecordSource(parameters);
-            final PCollection<DataChangeRecord> dataChangeRecords = begin
-                    .apply("ReadChangeStream", readChangeStream);
+        SpannerIO.ReadChangeStream readChangeStream = SpannerIO.readChangeStream()
+                .withSpannerConfig(spannerConfig)
+                .withChangeStreamName(parameters.changeStream.changeStreamName)
+                .withMetadataInstance(parameters.changeStream.metadataInstance)
+                .withMetadataDatabase(parameters.changeStream.metadataDatabase)
+                .withRpcPriority(parameters.priority);
 
-            DataChangeRecord a;
-            return null;
+        if(parameters.changeStream.inclusiveStartAt != null) {
+            final Timestamp inclusiveStartAt = Timestamp.parseTimestamp(parameters.changeStream.inclusiveStartAt);
+            readChangeStream = readChangeStream.withInclusiveStartAt(inclusiveStartAt);
+        }
+        if(parameters.changeStream.inclusiveEndAt != null) {
+            final Timestamp inclusiveEndAt = Timestamp.parseTimestamp(parameters.changeStream.inclusiveEndAt);
+            readChangeStream = readChangeStream.withInclusiveEndAt(inclusiveEndAt);
+        }
+        if(parameters.changeStream.metadataTable != null) {
+            readChangeStream = readChangeStream.withMetadataTable(parameters.changeStream.metadataTable);
         }
 
-        private static SpannerIO.ReadChangeStream createDataChangeRecordSource(
-                final Parameters parameters) {
+        return readChangeStream;
+    }
 
-            final SpannerConfig spannerConfig = SpannerConfig.create()
-                    .withHost(ValueProvider.StaticValueProvider.of(SpannerUtil.SPANNER_HOST_BATCH))
-                    .withProjectId(parameters.projectId)
-                    .withInstanceId(parameters.instanceId)
-                    .withDatabaseId(parameters.databaseId)
-                    .withDataBoostEnabled(ValueProvider.StaticValueProvider.of(parameters.enableDataBoost));
+    private static class DataChangeRecordToElementDoFn extends DoFn<DataChangeRecord, MElement> {
 
-            SpannerIO.ReadChangeStream readChangeStream = SpannerIO.readChangeStream()
-                    .withSpannerConfig(spannerConfig)
-                    .withChangeStreamName(parameters.changeStream.changeStreamName)
-                    .withMetadataInstance(parameters.changeStream.metadataInstance)
-                    .withMetadataDatabase(parameters.changeStream.metadataDatabase)
-                    .withRpcPriority(parameters.priority);
+        private final Schema outputSchema;
+        private final Boolean failFast;
+        private final TupleTag<BadRecord> failureTag;
 
-            if(parameters.changeStream.inclusiveStartAt != null) {
-                final Timestamp inclusiveStartAt = Timestamp.parseTimestamp(parameters.changeStream.inclusiveStartAt);
-                readChangeStream = readChangeStream.withInclusiveStartAt(inclusiveStartAt);
-            }
-            if(parameters.changeStream.inclusiveEndAt != null) {
-                final Timestamp inclusiveEndAt = Timestamp.parseTimestamp(parameters.changeStream.inclusiveEndAt);
-                readChangeStream = readChangeStream.withInclusiveEndAt(inclusiveEndAt);
-            }
-            if(parameters.changeStream.metadataTable != null) {
-                readChangeStream = readChangeStream.withMetadataTable(parameters.changeStream.metadataTable);
-            }
+        DataChangeRecordToElementDoFn(
+                final Schema outputSchema,
+                final Boolean failFast,
+                final TupleTag<BadRecord> failureTag) {
 
-            return readChangeStream;
+            this.outputSchema = outputSchema;
+            this.failFast = failFast;
+            this.failureTag = failureTag;
         }
 
+        @Setup
+        public void setup() {
+            outputSchema.setup(DataType.AVRO);
+        }
+
+        @ProcessElement
+        public void processElement(ProcessContext c) {
+            final DataChangeRecord record = c.element();
+            if(record == null) {
+                return;
+            }
+            try {
+                final MElement output = SpannerChangeCapture.convert(record, c.timestamp());
+                c.output(output.convert(outputSchema, DataType.AVRO));
+            } catch (final Throwable e) {
+                final Map<String, Object> values = new HashMap<>();
+                values.put("serverTransactionId", record.getServerTransactionId());
+                values.put("tableName", record.getTableName());
+                values.put("recordSequence", record.getRecordSequence());
+                final BadRecord badRecord = processError("Failed to convert spanner data change record to element", values, e, failFast);
+                c.output(failureTag, badRecord);
+            }
+        }
     }
 
     private static class ViewSource extends PTransform<PBegin, PCollectionTuple> {

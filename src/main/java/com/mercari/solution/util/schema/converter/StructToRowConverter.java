@@ -12,8 +12,6 @@ import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.schema.RowSchemaUtil;
 import com.mercari.solution.util.schema.StructSchemaUtil;
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
-import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.ChangeStreamRecordMetadata;
-import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.ColumnType;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.DataChangeRecord;
 import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.Mod;
 import org.apache.beam.sdk.schemas.Schema;
@@ -270,85 +268,6 @@ public class StructToRowConverter {
             }
             default -> throw new IllegalStateException();
         }
-    }
-
-    public static Row convertToDataChangeRow(final Schema schema, final DataChangeRecord record) {
-        final Map<String, Object> values = new HashMap<>();
-        values.put("partitionToken", record.getPartitionToken());
-        values.put("commitTimestamp", DateTimeUtil.toJodaInstant(record.getCommitTimestamp()));
-        values.put("serverTransactionId", record.getServerTransactionId());
-        values.put("isLastRecordInTransactionInPartition", record.isLastRecordInTransactionInPartition());
-        values.put("recordSequence", record.getRecordSequence());
-        values.put("tableName", record.getTableName());
-
-        final Schema rowTypeSchema = schema.getField("rowType").getType().getCollectionElementType().getRowSchema();
-        final List<Row> rowTypes = new ArrayList<>();
-        for(final ColumnType columnType : record.getRowType()) {
-            final Map<String, Object> rowTypeValues = new HashMap<>();
-            rowTypeValues.put("name", columnType.getName());
-            final String code = StructSchemaUtil.convertChangeRecordTypeCode(columnType.getType().getCode());
-            rowTypeValues.put("Type", RowSchemaUtil.toEnumerationTypeValue(rowTypeSchema
-                    .getField("Type")
-                    .getType(), code));
-            rowTypeValues.put("isPrimaryKey", columnType.isPrimaryKey());
-            rowTypeValues.put("ordinalPosition", columnType.getOrdinalPosition());
-            final Row rowType = Row.withSchema(rowTypeSchema)
-                    .withFieldValues(rowTypeValues)
-                    .build();
-            rowTypes.add(rowType);
-        }
-        values.put("rowType", rowTypes);
-
-        final Schema modSchema = schema.getField("mods").getType().getCollectionElementType().getRowSchema();
-        final List<Row> mods = new ArrayList<>();
-        for(final Mod mod : record.getMods()) {
-            final Map<String, Object> modValues = new HashMap<>();
-            modValues.put("keysJson", mod.getKeysJson());
-            modValues.put("oldValuesJson", mod.getOldValuesJson());
-            modValues.put("newValuesJson", mod.getNewValuesJson());
-            mods.add(Row.withSchema(modSchema)
-                    .withFieldValues(modValues)
-                    .build());
-        }
-        values.put("mods", mods);
-
-        values.put("modType", RowSchemaUtil.toEnumerationTypeValue(
-                schema.getField("modType").getType(),
-                record.getModType().name()));
-        values.put("valueCaptureType", RowSchemaUtil.toEnumerationTypeValue(schema
-                .getField("valueCaptureType")
-                .getType(), record.getValueCaptureType().name()));
-        values.put("numberOfRecordsInTransaction", record.getNumberOfRecordsInTransaction());
-        values.put("numberOfPartitionsInTransaction", record.getNumberOfPartitionsInTransaction());
-
-        final ChangeStreamRecordMetadata metadata = record.getMetadata();
-        if(metadata == null) {
-            values.put("metadata", null);
-        } else {
-            final Schema metadataSchema = schema.getField("metadata").getType().getRowSchema();
-            final Map<String, Object> metadataValues = new HashMap<>();
-            metadataValues.put("partitionToken", metadata.getPartitionToken());
-            metadataValues.put("recordTimestamp", DateTimeUtil.toJodaInstant(metadata.getRecordTimestamp()));
-            metadataValues.put("partitionStartTimestamp", DateTimeUtil.toJodaInstant(metadata.getPartitionStartTimestamp()));
-            metadataValues.put("partitionEndTimestamp", DateTimeUtil.toJodaInstant(metadata.getPartitionEndTimestamp()));
-            metadataValues.put("partitionCreatedAt", DateTimeUtil.toJodaInstant(metadata.getPartitionCreatedAt()));
-            metadataValues.put("partitionScheduledAt", DateTimeUtil.toJodaInstant(metadata.getPartitionScheduledAt()));
-            metadataValues.put("partitionRunningAt", DateTimeUtil.toJodaInstant(metadata.getPartitionRunningAt()));
-            metadataValues.put("queryStartedAt", DateTimeUtil.toJodaInstant(metadata.getQueryStartedAt()));
-            metadataValues.put("recordStreamStartedAt", DateTimeUtil.toJodaInstant(metadata.getRecordStreamStartedAt()));
-            metadataValues.put("recordStreamEndedAt", DateTimeUtil.toJodaInstant(metadata.getRecordStreamEndedAt()));
-            metadataValues.put("recordReadAt", DateTimeUtil.toJodaInstant(metadata.getRecordReadAt()));
-            metadataValues.put("totalStreamTimeMillis", metadata.getTotalStreamTimeMillis());
-            metadataValues.put("numberOfRecordsRead", metadata.getNumberOfRecordsRead());
-            values.put("metadata", Row.withSchema(metadataSchema)
-                    .withFieldValues(metadataValues)
-                    .build());
-        }
-
-        return Row
-                .withSchema(schema)
-                .withFieldValues(values)
-                .build();
     }
 
 }

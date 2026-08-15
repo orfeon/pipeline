@@ -12,8 +12,8 @@ import com.mercari.solution.util.cloud.google.BigQueryUtil;
 import com.mercari.solution.util.schema.*;
 import com.mercari.solution.util.schema.converter.*;
 import com.mercari.solution.util.pipeline.Union;
-import com.mercari.solution.util.pipeline.mutation.UnifiedMutation;
 import com.mercari.solution.util.pipeline.OptionUtil;
+import com.mercari.solution.util.pipeline.cdc.ChangeRecord;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.coders.RowCoder;
 import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
@@ -48,7 +48,7 @@ public class BigQuerySink extends Sink {
         private BigQueryIO.Write.WriteDisposition writeDisposition;
         private BigQueryIO.Write.CreateDisposition createDisposition;
         private BigQueryIO.Write.Method method;
-        private RowMutationInformation.MutationType mutationType;
+        private Boolean cdc;
         private Boolean outputResult;
 
         // for table creation
@@ -117,6 +117,17 @@ public class BigQuerySink extends Sink {
             if(this.table == null) {
                 // datasetId and tableId form: build the table spec expected by BigQueryIO
                 this.table = String.format("%s.%s.%s", this.projectId, this.datasetId, this.tableId);
+            }
+            if(this.cdc == null) {
+                this.cdc = false;
+            }
+            if(this.cdc) {
+                if(this.method == null || BigQueryIO.Write.Method.DEFAULT.equals(this.method)) {
+                    this.method = BigQueryIO.Write.Method.STORAGE_API_AT_LEAST_ONCE;
+                }
+                if(this.writeDisposition == null) {
+                    this.writeDisposition = BigQueryIO.Write.WriteDisposition.WRITE_APPEND;
+                }
             }
             if(this.writeDisposition == null) {
                 this.writeDisposition = BigQueryIO.Write.WriteDisposition.WRITE_EMPTY;
@@ -243,6 +254,10 @@ public class BigQuerySink extends Sink {
 
         final List<String> templateVariables = TemplateUtil.extractTemplateArgs(parameters.table, inputSchema);
 
+        if(parameters.cdc) {
+            return writeChangeRecords(elements, inputSchema, parameters, templateVariables, isStreaming, errorHandler);
+        }
+
         final BigQueryUtil.WriteFormat writeDataType = Optional
                 .ofNullable(parameters.writeFormat)
                 .orElseGet(() -> BigQueryUtil.getPreferWriteFormat(parameters.method, isStreaming));
@@ -291,6 +306,50 @@ public class BigQuerySink extends Sink {
                         .apply("WriteTableRow", write);
             }
         };
+    }
+
+    /**
+     * CDC apply mode: consumes unified change records (the {@code cdc} transform output) and
+     * upserts/deletes rows on the destination table via the Storage Write API
+     * {@code _CHANGE_TYPE}/{@code _CHANGE_SEQUENCE_NUMBER} pseudocolumns.
+     */
+    private WriteResult writeChangeRecords(
+            final PCollection<MElement> elements,
+            final Schema inputSchema,
+            final Parameters parameters,
+            final List<String> templateVariables,
+            final boolean isStreaming,
+            final MErrorHandler errorHandler) {
+
+        for(final String field : List.of(
+                ChangeRecord.FIELD_TABLE, ChangeRecord.FIELD_OP, ChangeRecord.FIELD_KEYS, ChangeRecord.FIELD_SEQUENCE)) {
+            if(!inputSchema.hasField(field)) {
+                throw new IllegalModuleException(
+                        "bigquery sink module[" + getName() + "] with cdc mode requires unified change records (the cdc transform output) as input. missing field: " + field);
+            }
+        }
+        if(!BigQueryIO.Write.Method.STORAGE_WRITE_API.equals(parameters.method)
+                && !BigQueryIO.Write.Method.STORAGE_API_AT_LEAST_ONCE.equals(parameters.method)) {
+            throw new IllegalModuleException(
+                    "bigquery sink module[" + getName() + "] with cdc mode supports only STORAGE_WRITE_API or STORAGE_API_AT_LEAST_ONCE method. got: " + parameters.method);
+        }
+        if(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED.equals(parameters.createDisposition)) {
+            throw new IllegalModuleException(
+                    "bigquery sink module[" + getName() + "] with cdc mode requires an existing destination table (CREATE_NEVER): the destination schema cannot be derived from change records");
+        }
+        if(TemplateUtil.isTemplateText(parameters.table)) {
+            throw new IllegalModuleException(
+                    "bigquery sink module[" + getName() + "] with cdc mode does not support a template 'table' destination. configure one sink per table");
+        }
+
+        BigQueryIO.Write<MElement> write = BigQueryIO
+                .<MElement>write()
+                .withFormatFunction(ChangeRecord::toTableRow)
+                .withRowMutationInformationFn(element -> ChangeRecord.toRowMutationInformation(
+                        ChangeRecord.getOp(element), element.getAsString(ChangeRecord.FIELD_SEQUENCE)));
+        final SerializableFunction<MElement, String> destinationFunction = createDestinationFunction(inputSchema, parameters.table, templateVariables);
+        write = applyParameters(write, parameters, inputSchema, isStreaming, destinationFunction, errorHandler);
+        return elements.apply("WriteChangeRecords", write);
     }
 
     private MCollectionTuple createOutputs(
@@ -488,89 +547,6 @@ public class BigQuerySink extends Sink {
         }
 
     }
-
-        /*
-    private static final SerializableFunction<MElement, TableRow> convertTableRowFunction = (MElement element) -> switch (element.getType()) {
-        case ROW -> RowToTableRowConverter.convert((Row) element.getValue());
-        case AVRO -> RecordToTableRowConverter.convert((GenericRecord) element.getValue());
-        case STRUCT -> StructToTableRowConverter.convert((Struct) element.getValue());
-        case DOCUMENT -> DocumentToTableRowConverter.convert((Document) element.getValue());
-        case ENTITY -> EntityToTableRowConverter.convertWithoutKey((Entity) element.getValue());
-        default -> throw new IllegalArgumentException();
-    };
-     */
-
-    /*
-    public static class BigQueryMutationWrite extends PTransform<PCollection<UnifiedMutation>, PCollection<GenericRecord>> {
-
-        private final String name;
-        private final BigQuerySinkParameters parameters;
-        private final Map<String, String> tableSchemas;
-        private final List<FCollection<?>> waitCollections;
-
-        private FCollection<?> collection;
-
-        private BigQueryMutationWrite(
-                final String name,
-                final FCollection<?> collection,
-                final BigQuerySinkParameters parameters,
-                final Map<String, TableSchema> tableSchemas,
-                final List<FCollection<?>> waitCollections) {
-
-            this.name = name;
-            this.collection = collection;
-            this.parameters = parameters;
-            this.tableSchemas = tableSchemas.entrySet().stream()
-                    .collect(Collectors.toMap(
-                            Map.Entry::getKey,
-                            e -> TableRowToRecordConverter.convertSchema(e.getValue()).toString()));
-            this.waitCollections = waitCollections;
-
-            LOG.info("init: " + this.tableSchemas);
-        }
-
-        public PCollection<GenericRecord> expand(final PCollection<UnifiedMutation> input) {
-            this.parameters.validate();
-            this.parameters.setDefaults(input);
-
-            final PCollection<UnifiedMutation> waited;
-            if(waitCollections == null) {
-                waited = input;
-            } else {
-                final List<PCollection<?>> waits = waitCollections.stream()
-                        .map(FCollection::getCollection)
-                        .collect(Collectors.toList());
-                waited = input
-                        .apply("Wait", Wait.on(waits))
-                        .setCoder(input.getCoder());
-            }
-
-            final String projectId = parameters.getTable().split("\\.")[0];
-            final Map<String,List<String>> primaryKeyFields = BigQueryUtil
-                    .getPrimaryKeyFieldsFromDataset(parameters.getTable(), projectId);
-
-            final BigQueryIO.Write<UnifiedMutation> write = BigQueryIO
-                    .<UnifiedMutation>write()
-                    .to(new MutationDynamicDestinationFunc(parameters.getTable(), tableSchemas))
-                    .withFormatFunction((UnifiedMutation mutation) -> {
-                        return mutation.toTableRow(primaryKeyFields.get(mutation.getTable()));
-                    })
-                    .withRowMutationInformationFn(UnifiedMutation::toRowMutationInformation)
-                    .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)
-                    .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER)
-                    .withMethod(BigQueryIO.Write.Method.STORAGE_API_AT_LEAST_ONCE)
-                    .withExtendedErrorInfo();
-
-            final WriteResult writeResult = waited.apply("WriteTableRow", write);
-
-            return writeResult.getFailedStorageApiInserts()
-                    .apply("ConvertFailureSARecord", ParDo.of(new FailedStorageApiRecordDoFn(name, collection.getAvroSchema().toString())))
-                    .setCoder(AvroCoder.of(collection.getAvroSchema()));
-        }
-
-    }
-
-     */
 
     private static <InputT> BigQueryIO.Write<InputT> applyParameters(
             final BigQueryIO.Write<InputT> base,
@@ -871,61 +847,6 @@ public class BigQuerySink extends Sink {
         @Override
         public TableSchema getSchema(String destination) {
             return ElementToTableRowConverter.convertSchema(tableSchema);
-        }
-
-    }
-
-    private static class ConvertRowMutationDoFn extends DoFn<UnifiedMutation, RowMutation> {
-
-        private final Map<String, List<String>> primaryKeyFields;
-
-        public ConvertRowMutationDoFn(final Map<String, List<String>> primaryKeyFields) {
-            this.primaryKeyFields = primaryKeyFields;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final List<String> pk = primaryKeyFields.get(c.element().getTable());
-        }
-
-    }
-
-    private static class MutationDynamicDestinationFunc extends DynamicDestinations<UnifiedMutation, String> {
-
-        private final String dataset;
-        private final Map<String, String> tableSchemas;
-        public MutationDynamicDestinationFunc(final String dataset, final Map<String, String> tableSchemas) {
-            this.dataset = dataset;
-            this.tableSchemas = tableSchemas;
-        }
-
-        @Override
-        public String getDestination(ValueInSingleWindow<UnifiedMutation> element) {
-            return String.format("%s.%s", dataset, element.getValue().getTable());
-        }
-        @Override
-        public TableDestination getTable(String destination) {
-            return new TableDestination(destination, null);
-        }
-        @Override
-        public TableSchema getSchema(String destination) {
-            final String tableName = extractTableName(destination);
-            if(tableName == null) {
-                throw new IllegalArgumentException("illegal destination: " + destination);
-            }
-            if(!tableSchemas.containsKey(tableName)) {
-                throw new IllegalArgumentException("tableSchemas does not contains tableName: " + tableName + " in tableSchemas: " + tableSchemas);
-            }
-            final org.apache.avro.Schema schema = AvroSchemaUtil.convertSchema(tableSchemas.get(tableName));
-            return AvroToTableRowConverter.convertSchema(schema);
-        }
-
-        private String extractTableName(final String destination) {
-            final String[] strs = destination.split("\\.");
-            if(strs.length < 3) {
-                throw new IllegalArgumentException("Illegal destination: " + destination);
-            }
-            return strs[2];
         }
 
     }
