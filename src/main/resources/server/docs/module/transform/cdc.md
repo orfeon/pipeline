@@ -1,9 +1,9 @@
 ---
 type: Transform Module
 title: CDC Transform Module
-description: Normalizes provider-specific change data capture records (Spanner change streams, TiCDC canal-json) into a unified change record envelope consumed by apply-capable sinks such as the bigquery sink cdc mode. Supports per-key accumulation to collapse a batch of changes into the latest state.
-tags: [transform, cdc, changestream, changedatacapture, spanner, tidb, ticdc, canal, streaming, batch]
-timestamp: 2026-08-09T00:00:00Z
+description: Normalizes provider-specific change data capture records (Spanner change streams, PostgreSQL logical replication, TiCDC canal-json) into a unified change record envelope consumed by apply-capable sinks such as the bigquery sink cdc mode. Supports per-key accumulation to collapse a batch of changes into the latest state.
+tags: [transform, cdc, changestream, changedatacapture, spanner, postgres, tidb, ticdc, canal, streaming, batch]
+timestamp: 2026-08-17T00:00:00Z
 ---
 
 # CDC Transform Module
@@ -37,7 +37,7 @@ archive-then-batch-apply pipeline reuses the exact conversion logic of the strea
 
 | parameter  | optional | type    | description                                                                                                                                      |
 |------------|----------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| format     | required | Enum    | Input provider format. One of `spanner`, `ticdc`.                                                                                                |
+| format     | required | Enum    | Input provider format. One of `spanner`, `postgres`, `ticdc`.                                                                                    |
 | field      | optional | String  | (`ticdc` only) Name of the input field carrying canal-json event text (String or Bytes). Default: a field named `payload` (kafka/pubsub message) or `content` (files source). |
 | accumulate | optional | Boolean | Collapse changes per (table, keys) to the single latest change by `sequence` within each window. Intended for batch replay; in streaming it requires a windowing `strategy`. Default: `false`. |
 
@@ -48,6 +48,17 @@ Input must be the provider-native records emitted by the `spanner` source module
 sink (Avro/Parquet via the `storage` source). One input record yields one envelope record per entry
 of its `mods` array. `sequence` is composed of the commit timestamp micros, the record sequence and
 the mod index.
+
+### format: `postgres`
+
+Input must be the provider-native records emitted by the `postgres` source module in
+`mode: changeDataCapture` (logical replication via the pgoutput plugin) — either directly connected,
+or read back from archived files. One input record yields one envelope record; `TRUNCATE` records
+have no per-row representation in the envelope and are skipped. The envelope `table` is the bare
+table name for `public`-schema tables and `schema.table` otherwise (matching the postgres source
+batch `tables` mode tags). `sequence` is composed of the commit LSN and the change index within the
+transaction, so it is totally ordered across the stream. `before` is only populated when the source
+table has `REPLICA IDENTITY FULL` (otherwise deletes carry key values only).
 
 ### format: `ticdc`
 

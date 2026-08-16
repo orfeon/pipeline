@@ -5,6 +5,7 @@ import com.mercari.solution.module.Transform.Module;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.cdc.ChangeRecord;
+import com.mercari.solution.util.pipeline.cdc.PostgresChangeCapture;
 import com.mercari.solution.util.pipeline.cdc.SpannerChangeCapture;
 import com.mercari.solution.util.pipeline.cdc.TiCdcChangeCapture;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -57,6 +58,7 @@ public class CdcTransform extends Transform {
 
     private enum Format {
         spanner,
+        postgres,
         ticdc
     }
 
@@ -166,6 +168,7 @@ public class CdcTransform extends Transform {
                 Logging.log(LOG, logs, "input", input);
                 final List<Map<String, Object>> envelopes = switch (format) {
                     case spanner -> SpannerChangeCapture.normalize(input);
+                    case postgres -> PostgresChangeCapture.normalize(input);
                     case ticdc -> normalizeTiCdc(input);
                 };
                 for(final Map<String, Object> envelope : envelopes) {

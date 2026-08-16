@@ -248,6 +248,50 @@ public class PostgresUtil {
         }
     }
 
+    /** A schema-qualified table name as enumerated from {@code pg_class}. */
+    public record TableId(String schema, String name) implements Serializable {
+
+        /** Unquoted {@code schema.name} form, used for pattern matching and log/error messages. */
+        public String qualifiedName() {
+            return schema + "." + name;
+        }
+
+        /** Quoted {@code "schema"."name"} form, safe to embed in SQL (and {@code ::regclass} casts). */
+        public String quotedName() {
+            return quoteIdentifier(schema) + "." + quoteIdentifier(name);
+        }
+    }
+
+    public static String quoteIdentifier(final String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    /**
+     * Lists the base tables of the connected database: regular tables and partitioned-table
+     * parents in user schemas. Leaf partitions are excluded (they are read via their parent),
+     * as are the {@code information_schema} and {@code pg_*} system schemas.
+     */
+    public static List<TableId> getBaseTables(final Connection connection) throws SQLException {
+        final String sql = """
+                SELECT n.nspname, c.relname
+                FROM pg_class c
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE c.relkind IN ('r', 'p')
+                  AND NOT c.relispartition
+                  AND n.nspname <> 'information_schema'
+                  AND n.nspname NOT LIKE 'pg\\_%'
+                ORDER BY n.nspname, c.relname
+                """;
+        final List<TableId> tables = new ArrayList<>();
+        try(final PreparedStatement statement = connection.prepareStatement(sql);
+            final ResultSet resultSet = statement.executeQuery()) {
+            while(resultSet.next()) {
+                tables.add(new TableId(resultSet.getString(1), resultSet.getString(2)));
+            }
+        }
+        return tables;
+    }
+
     /**
      * Number of physical blocks (8KB pages) the table's main fork currently occupies.
      * Derived from {@code pg_relation_size}, so it reflects the real on-disk size
@@ -460,11 +504,20 @@ public class PostgresUtil {
         return record;
     }
 
-    private static Object decodeValue(final Column column, final byte[] bytes) {
+    /**
+     * Decodes one binary-format field value (the format shared by COPY BINARY fields and
+     * pgoutput binary-mode tuple data) into its avro-convention value.
+     */
+    public static Object decodeValue(final Column column, final byte[] bytes) {
         if(ColumnType.ARRAY.equals(column.type)) {
             return decodeArray(column, bytes);
         }
         return decodeScalar(column.type, bytes);
+    }
+
+    /** Converts a PostgreSQL-epoch (2000-01-01) microsecond timestamp to unix-epoch micros. */
+    public static long toUnixMicros(final long postgresMicros) {
+        return postgresMicros + POSTGRES_EPOCH_MICROS;
     }
 
     private static Object decodeScalar(final ColumnType type, final byte[] bytes) {
