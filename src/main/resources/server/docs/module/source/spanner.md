@@ -112,6 +112,32 @@ Read change data capture (CDC) events from a Spanner change stream. The pipeline
 | changeStream.inclusiveStartAt | optional | String | Timestamp to start reading change events from (inclusive). Default: current time.                                                          |
 | changeStream.inclusiveEndAt  | optional | String | Timestamp to stop reading change events at (inclusive). Default: `Timestamp.MAX_VALUE` (never stop).                                       |
 
+#### Change stream output schema
+
+The module outputs the change stream records with full fidelity — one element per
+[DataChangeRecord](https://cloud.google.com/spanner/docs/change-streams/details#data-change-records),
+without interpreting the changed values. To turn them into per-row change records (e.g. for BigQuery
+CDC upserts via the `bigquery` sink `cdc` mode), pass them through the [`cdc` transform](../transform/cdc.md)
+(`format: spanner`); to archive them, write them as-is with a file sink and replay later through the
+same `cdc` transform.
+
+| field                               | type            | description                                                             |
+|-------------------------------------|-----------------|-------------------------------------------------------------------------|
+| partitionToken                      | String          | Change stream partition token.                                          |
+| commitTimestamp                     | Timestamp       | Commit timestamp of the transaction.                                    |
+| serverTransactionId                 | String          | Transaction id.                                                         |
+| isLastRecordInTransactionInPartition | Boolean        | Whether this is the transaction's last record in the partition.         |
+| recordSequence                      | String          | Order of the record within its transaction.                             |
+| tableName                           | String          | Changed table.                                                          |
+| rowType                             | Array<Record\>  | Column catalog: `name`, `code`, `isPrimaryKey`, `ordinalPosition`.      |
+| mods                                | Array<Record\>  | Changed rows: `keysJson`, `oldValuesJson`, `newValuesJson` (JSON text). |
+| modType                             | String          | `INSERT`, `UPDATE` or `DELETE`.                                         |
+| valueCaptureType                    | String          | The change stream's [value capture type](https://cloud.google.com/spanner/docs/change-streams#value-capture-type). |
+| transactionTag                      | String          | Transaction tag (nullable).                                             |
+| isSystemTransaction                 | Boolean         | Whether the change was made by a system transaction.                    |
+| numberOfRecordsInTransaction        | Long            | Records in the transaction.                                             |
+| numberOfPartitionsInTransaction     | Long            | Partitions in the transaction.                                          |
+
 ### View mode parameters
 
 Periodically poll a Spanner query and output the entire result set as a single map element, keyed by a specified field. Useful for loading slowly-changing lookup data in streaming pipelines.

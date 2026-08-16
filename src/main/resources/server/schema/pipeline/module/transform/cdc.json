@@ -1,0 +1,42 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/cdc",
+  "title": "CDC",
+  "description": "Transform module for normalizing provider-specific change data capture records into a unified change record envelope",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "cdc" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "CDC Transform Parameters",
+      "description": "Parameters for normalizing change data capture records",
+      "type": "object",
+      "required": ["format"],
+      "properties": {
+        "format": {
+          "type": "string",
+          "title": "Format",
+          "description": "Input provider format",
+          "enum": ["spanner", "ticdc"]
+        },
+        "field": {
+          "type": "string",
+          "title": "Field",
+          "description": "(ticdc) Input field carrying canal-json event text. Default: payload or content"
+        },
+        "accumulate": {
+          "type": "boolean",
+          "title": "Accumulate",
+          "description": "Collapse changes per (table, keys) to the latest change by sequence within each window",
+          "default": false
+        }
+      }
+    }
+  }
+}

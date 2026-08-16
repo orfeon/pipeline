@@ -1,55 +1,41 @@
 {
   "sources": [
     {
-      "name": "spannerInput",
+      "name": "changeStream",
       "module": "spanner",
       "parameters": {
-        "mode": "changestream",
-        "changeStreamMode": "struct",
+        "mode": "changeDataCapture",
         "projectId": "myproject",
         "instanceId": "myinstance",
         "databaseId": "mydatabase",
-        "metadataDatabase": "mydatabase-cdc",
-        "metadataTable": "mytablecdc",
-        "changeStreamName": "TEST_STREAM",
-        "priority": "LOW",
-        "tables": ["MyTable1", "MyTable2"]
+        "changeStream": {
+          "changeStreamName": "TEST_STREAM",
+          "metadataDatabase": "mydatabase-cdc",
+          "metadataTable": "mytablecdc"
+        },
+        "priority": "LOW"
+      }
+    }
+  ],
+  "transforms": [
+    {
+      "name": "normalize",
+      "module": "cdc",
+      "inputs": ["changeStream"],
+      "parameters": {
+        "format": "spanner"
       }
     }
   ],
   "sinks": [
     {
-      "name": "bigqueryChangeRecord",
+      "name": "bigquery",
       "module": "bigquery",
-      "input": "spannerInput",
+      "inputs": ["normalize"],
       "parameters": {
-        "method": "STREAMING_INSERTS",
-        "table": "myproject:mydataset.changerecord",
-        "createDisposition": "CREATE_IF_NEEDED",
-        "writeDisposition": "WRITE_APPEND"
-      }
-    },
-    {
-      "name": "bigqueryMyTable1",
-      "module": "bigquery",
-      "input": "spannerInput.MyTable1",
-      "parameters": {
-        "method": "STORAGE_WRITE_API",
-        "table": "myproject:mydataset.mytable1",
-        "createDisposition": "CREATE_IF_NEEDED",
-        "writeDisposition": "WRITE_APPEND",
-        "optimizedWrites": true
-      }
-    },
-    {
-      "name": "bigqueryMyTable2",
-      "module": "bigquery",
-      "input": "spannerInput.MyTable2",
-      "parameters": {
-        "method": "STORAGE_WRITE_API",
-        "table": "myproject:mydataset.mytable2",
-        "createDisposition": "CREATE_IF_NEEDED",
-        "writeDisposition": "WRITE_APPEND"
+        "table": "myproject.mydataset.${table}",
+        "cdc": true,
+        "ignoreUnknownValues": true
       }
     }
   ]

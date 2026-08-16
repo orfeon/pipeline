@@ -51,6 +51,7 @@ The destination table can be specified statically or dynamically using FreeMarke
 | method            | optional | Enum | Write method. Values: `FILE_LOADS`, `STREAMING_INSERTS`, `STORAGE_WRITE_API`, `STORAGE_API_AT_LEAST_ONCE`, `DEFAULT`. If not specified, automatically determined. See [Write methods](#write-methods). |
 | writeFormat       | optional | Enum | Internal data format for writing. Values: `json`, `avro`, `row`, `avrofile`. Auto-determined based on method and mode. Specify only when needed for performance or schema compatibility.             |
 | outputResult      | optional | Boolean | If `true`, output successful write results. Default: `true` for batch mode with FILE_LOADS/STREAMING_INSERTS/DEFAULT, `false` otherwise.                                                         |
+| cdc               | optional | Boolean | CDC apply mode: consume unified change records (the [`cdc` transform](../transform/cdc.md) output) and upsert/delete rows on the destination table. See [CDC apply mode](#cdc-apply-mode). Default: `false`. |
 
 ### Table creation parameters
 
@@ -70,7 +71,6 @@ These parameters are applicable only in streaming mode.
 | parameter                | optional | type    | description                                                                                                                                                                                                          |
 |--------------------------|----------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | skipInvalidRows          | optional | Boolean | If `true`, inserts all valid rows even if some rows are invalid. Default: `false`.                                                                                                                                   |
-| ignoreUnknownValues      | optional | Boolean | If `true`, accepts rows with values that do not match the schema. Default: `false`.                                                                                                                                  |
 | ignoreInsertIds          | optional | Boolean | If `true`, disables [insertId-based deduplication](https://cloud.google.com/bigquery/streaming-data-into-bigquery#disabling_best_effort_de-duplication). Improves throughput but may allow duplicates. Default: `false`. |
 | withExtendedErrorInfo    | optional | Boolean | If `true`, enables extended error information for failed inserts (includes error message, reason, location). Only for `STREAMING_INSERTS`. Default: `false`.                                                         |
 | failedInsertRetryPolicy  | optional | Enum    | Retry policy for failed inserts. Values: `always`, `never`, `retryTransientErrors`. Only for `STREAMING_INSERTS`. Default: `always`.                                                                                 |
@@ -83,8 +83,9 @@ These parameters are applicable only in streaming mode.
 | parameter            | optional | type           | description                                                                                                                                                                                                   |
 |----------------------|----------|----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | kmsKey               | optional | String         | [Cloud KMS key](https://cloud.google.com/bigquery/docs/customer-managed-encryption) for encrypting data written to BigQuery.                                                                                  |
-| schemaUpdateOptions  | optional | Array<Enum\>   | Allows schema updates during writes. Values: `ALLOW_FIELD_ADDITION`, `ALLOW_FIELD_RELAXATION`. Only applicable with `FILE_LOADS` method.                                                                     |
-| autoSchemaUpdate     | optional | Boolean        | If `true`, enables [automatic schema update](https://cloud.google.com/bigquery/docs/write-api#update_the_schema). Only applicable with `STORAGE_WRITE_API` method.                                           |
+| ignoreUnknownValues  | optional | Boolean        | If `true`, values that do not match the destination table schema (e.g. columns not present on the table) are dropped instead of failing the row. Applies to all write methods, in both batch and streaming mode. Cannot be combined with `schemaUpdateOptions`. Default: `false`. |
+| schemaUpdateOptions  | optional | Array<Enum\>   | Allows schema updates during writes. Values: `ALLOW_FIELD_ADDITION`, `ALLOW_FIELD_RELAXATION`. Only applicable with `FILE_LOADS` method. Cannot be combined with `ignoreUnknownValues` or `autoSchemaUpdate`. |
+| autoSchemaUpdate     | optional | Boolean        | If `true`, enables [automatic schema update](https://cloud.google.com/bigquery/docs/write-api#update_the_schema): a streaming pipeline picks up destination table schema changes (e.g. `ALTER TABLE ... ADD COLUMN`) without a restart. Only applicable with `STORAGE_WRITE_API` method, and requires `ignoreUnknownValues: true`. |
 | optimizedWrites      | optional | Boolean        | If `true`, enables optimized write codepaths that use fewer resources. Default: `false`.                                                                                                                      |
 | withoutValidation    | optional | Boolean        | If `true`, skips validation of the destination table. Default: `false`.                                                                                                                                       |
 | customGcsTempLocation| optional | String         | Custom GCS path for temporary files during load jobs. If not specified, uses the pipeline's `tempLocation` setting.                                                                                           |
@@ -123,7 +124,101 @@ myproject.mydataset.events_${region}
 
 All input field names can be used as template variables. The template is evaluated for each record to determine the destination table.
 
-When using dynamic destination, `partitioning`, `partitioningField`, and `clusteringFields` are also applied to each dynamically created table. The schema for all destination tables is derived from the input schema.
+When using dynamic destination, `partitioning`, `partitioningField`, and `clusteringFields` are also applied to each dynamically created table. The schema for all destination tables is derived from the input schema — except in [CDC apply mode](#cdc-apply-mode), where each destination table must already exist and its schema is fetched from BigQuery.
+
+## CDC apply mode
+
+With `cdc: true`, the sink consumes **unified change records** — the output of the
+[`cdc` transform](../transform/cdc.md) — and applies them to the destination table as
+upserts/deletes through the Storage Write API
+[`_CHANGE_TYPE` / `_CHANGE_SEQUENCE_NUMBER`](https://cloud.google.com/bigquery/docs/change-data-capture)
+pseudocolumns. Works in both streaming (live change stream) and batch (replay of archived change
+records) pipelines.
+
+- The row written is `keys ∪ after` for `INSERT`/`UPDATE`/`SNAPSHOT` (mapped to `UPSERT`), and the
+  key values only for `DELETE`.
+- The envelope `sequence` field becomes `_CHANGE_SEQUENCE_NUMBER`, so out-of-order delivery resolves
+  to the latest change per key.
+- `method` must be `STORAGE_API_AT_LEAST_ONCE` (default in this mode) or `STORAGE_WRITE_API`.
+- The destination table must already exist (`CREATE_NEVER`) with a
+  [primary key](https://cloud.google.com/bigquery/docs/information-schema-table-constraints) and
+  `max_staleness` configured as needed; its schema cannot be derived from change records.
+- A template `table` (e.g. `myproject.mydataset.${table}`) routes each change record to its own
+  destination table — one sink applies a whole change stream to many tables. The schema of each
+  destination table is fetched from BigQuery at write time. **Every table the template resolves to
+  must already exist**: a change record referencing an unknown table is a request-level error that
+  fails the pipeline (not a row failure). If the stream contains tables you do not want to apply,
+  filter them out upstream on the envelope `table` field (e.g. with the `select` transform).
+
+```yaml
+sinks:
+  - name: bq
+    module: bigquery
+    inputs: [normalized_changes]
+    parameters:
+      table: myproject.mydataset.${table}   # or a fixed table name for a single-table sink
+      cdc: true
+```
+
+### Schema evolution
+
+The change record envelope carries row data as JSON, so a schema change on the source database
+(e.g. `ALTER TABLE ... ADD COLUMN` on Spanner or TiDB) never breaks the pipeline itself — new
+columns simply start appearing inside the envelope `after` values. What needs an operational
+procedure is the destination table, whose schema is not updated automatically:
+
+1. **Set `ignoreUnknownValues: true` on the sink.** Columns that are not (yet) present on the
+   destination table are dropped from each row instead of failing it, so the pipeline keeps
+   applying all other columns while the destination schema lags behind.
+2. **Add the column on the destination table** (`ALTER TABLE ... ADD COLUMN`) when ready.
+   - Streaming pipelines with `method: STORAGE_WRITE_API` can additionally set
+     `autoSchemaUpdate: true` (requires `ignoreUnknownValues: true`) to pick up the new destination
+     schema without a pipeline restart. With `STORAGE_API_AT_LEAST_ONCE`, restart (update) the
+     pipeline after the `ALTER` instead.
+3. **Backfill the gap.** Rows applied between the source schema change and the destination `ALTER`
+   were written without the new column. If the change records are archived (see the
+   [`cdc` transform](../transform/cdc.md) archive example), replay the archived records in a batch
+   pipeline with `accumulate: true` and `method: STORAGE_WRITE_API` — the envelope `sequence`
+   guarantees only rows still at their latest version are re-applied, now including the new column.
+
+Without `ignoreUnknownValues`, rows containing unknown columns fail row-by-row and are routed to
+the failure output (`failureSinks`), while the other rows keep flowing — choose this stricter mode
+when dropping a column silently is not acceptable. Request-level problems (destination table
+missing, no primary key on the table) are not row failures and fail the pipeline instead.
+
+### Performance and quotas
+
+**Destination schema fetch.** In cdc mode the destination table schema is fetched from BigQuery
+lazily on the workers — once per destination table per worker process, then cached process-wide.
+There is no per-record or per-bundle schema RPC, and no BigQuery access at pipeline construction.
+The cache is only refreshed periodically when `autoSchemaUpdate: true` (that refresh is what picks
+up an `ALTER TABLE` without a restart). This behavior is the same for a fixed and a template
+`table`.
+
+**Method characteristics with many destination tables.**
+
+- `STORAGE_API_AT_LEAST_ONCE` (the default): no shuffle; records append to each table's *default*
+  stream, which consumes no stream-creation quota. Each worker keeps an open append stream and
+  buffer per destination table it has seen, so per-worker memory and gRPC connections grow with the
+  number of tables — negligible for tens of tables. For hundreds of tables, consider the Storage
+  Write API connection-pool pipeline options (`useStorageApiConnectionPool`,
+  `minConnectionPoolConnections` / `maxConnectionPoolConnections`) to multiplex connections.
+- `STORAGE_WRITE_API` (exactly-once): records are shuffled keyed by destination × shard. In a
+  **streaming** pipeline with a template `table`, new write streams are created per destination
+  table every triggering period, so
+  [`CreateWriteStream` quota](https://cloud.google.com/bigquery/quotas#write-api-limits) usage
+  scales with *(number of tables × triggering frequency)*. Raise `triggeringFrequencySecond` when
+  applying many tables, or prefer `STORAGE_API_AT_LEAST_ONCE` — the envelope `sequence`
+  (`_CHANGE_SEQUENCE_NUMBER`) already resolves out-of-order and duplicate applies per key, which is
+  why at-least-once is the default for this mode. In batch (e.g. archive replay), stream creation
+  happens once per table and this concern does not apply.
+
+**Template evaluation.** With a template `table`, the destination is evaluated per record
+(the compiled template is cached); the overhead is a string build per record and is normally
+negligible next to write I/O.
+
+Sharding is tuned the same way as normal storage-API writes: `numStorageWriteApiStreams`, or
+`autoSharding` in streaming mode.
 
 ## Failure output
 

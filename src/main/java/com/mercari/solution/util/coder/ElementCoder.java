@@ -11,7 +11,6 @@ import org.apache.beam.sdk.coders.*;
 import org.apache.beam.sdk.extensions.avro.coders.AvroGenericCoder;
 import org.apache.beam.sdk.extensions.protobuf.DynamicProtoCoder;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessageWithAttributesAndMessageIdAndOrderingKeyCoder;
-import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.DataChangeRecord;
 import org.apache.beam.sdk.util.VarInt;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 
@@ -58,7 +57,6 @@ public class ElementCoder extends StructuredCoder<MElement> {
             case DOCUMENT -> SerializableCoder.of(Document.class);
             case ENTITY -> SerializableCoder.of(Entity.class);
             case MESSAGE -> PubsubMessageWithAttributesAndMessageIdAndOrderingKeyCoder.of();
-            case SPANNER_DATACHANGERECORD -> AvroGenericCoder.of(DataChangeRecord.class);
             case BIGTABLE_DATACHANGERECORD -> SerializableCoder.of(ChangeStreamMutation.class);
             default -> throw new IllegalStateException("Not supported schema: " + schema.getType());
         };
