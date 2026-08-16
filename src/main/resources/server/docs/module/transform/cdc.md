@@ -63,6 +63,15 @@ DDL events (`isDdl: true` / type `QUERY`) and watermark events are skipped. `seq
 TSO (`_tidb.commitTs`, when the canal-json extension is enabled) or the event time `es`, plus the row
 index within the event.
 
+## Schema evolution
+
+Row data travels through the envelope as JSON, so a schema change on the source database (e.g.
+`ADD COLUMN`) never breaks this transform or the pipeline — new columns simply appear inside the
+`after` values, and archived envelope records keep full fidelity across schema versions. Keeping
+the *destination* table in sync is an apply-sink concern: see
+[Schema evolution in the bigquery sink CDC apply mode](../sink/bigquery.md#schema-evolution) for the
+recommended operation (`ignoreUnknownValues` + `ALTER TABLE` + archive replay backfill).
+
 ## Examples
 
 ### Example 1: Spanner change stream to BigQuery CDC upsert (streaming)

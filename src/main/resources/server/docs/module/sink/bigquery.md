@@ -71,7 +71,6 @@ These parameters are applicable only in streaming mode.
 | parameter                | optional | type    | description                                                                                                                                                                                                          |
 |--------------------------|----------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | skipInvalidRows          | optional | Boolean | If `true`, inserts all valid rows even if some rows are invalid. Default: `false`.                                                                                                                                   |
-| ignoreUnknownValues      | optional | Boolean | If `true`, accepts rows with values that do not match the schema. Default: `false`.                                                                                                                                  |
 | ignoreInsertIds          | optional | Boolean | If `true`, disables [insertId-based deduplication](https://cloud.google.com/bigquery/streaming-data-into-bigquery#disabling_best_effort_de-duplication). Improves throughput but may allow duplicates. Default: `false`. |
 | withExtendedErrorInfo    | optional | Boolean | If `true`, enables extended error information for failed inserts (includes error message, reason, location). Only for `STREAMING_INSERTS`. Default: `false`.                                                         |
 | failedInsertRetryPolicy  | optional | Enum    | Retry policy for failed inserts. Values: `always`, `never`, `retryTransientErrors`. Only for `STREAMING_INSERTS`. Default: `always`.                                                                                 |
@@ -84,8 +83,9 @@ These parameters are applicable only in streaming mode.
 | parameter            | optional | type           | description                                                                                                                                                                                                   |
 |----------------------|----------|----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | kmsKey               | optional | String         | [Cloud KMS key](https://cloud.google.com/bigquery/docs/customer-managed-encryption) for encrypting data written to BigQuery.                                                                                  |
-| schemaUpdateOptions  | optional | Array<Enum\>   | Allows schema updates during writes. Values: `ALLOW_FIELD_ADDITION`, `ALLOW_FIELD_RELAXATION`. Only applicable with `FILE_LOADS` method.                                                                     |
-| autoSchemaUpdate     | optional | Boolean        | If `true`, enables [automatic schema update](https://cloud.google.com/bigquery/docs/write-api#update_the_schema). Only applicable with `STORAGE_WRITE_API` method.                                           |
+| ignoreUnknownValues  | optional | Boolean        | If `true`, values that do not match the destination table schema (e.g. columns not present on the table) are dropped instead of failing the row. Applies to all write methods, in both batch and streaming mode. Cannot be combined with `schemaUpdateOptions`. Default: `false`. |
+| schemaUpdateOptions  | optional | Array<Enum\>   | Allows schema updates during writes. Values: `ALLOW_FIELD_ADDITION`, `ALLOW_FIELD_RELAXATION`. Only applicable with `FILE_LOADS` method. Cannot be combined with `ignoreUnknownValues` or `autoSchemaUpdate`. |
+| autoSchemaUpdate     | optional | Boolean        | If `true`, enables [automatic schema update](https://cloud.google.com/bigquery/docs/write-api#update_the_schema): a streaming pipeline picks up destination table schema changes (e.g. `ALTER TABLE ... ADD COLUMN`) without a restart. Only applicable with `STORAGE_WRITE_API` method, and requires `ignoreUnknownValues: true`. |
 | optimizedWrites      | optional | Boolean        | If `true`, enables optimized write codepaths that use fewer resources. Default: `false`.                                                                                                                      |
 | withoutValidation    | optional | Boolean        | If `true`, skips validation of the destination table. Default: `false`.                                                                                                                                       |
 | customGcsTempLocation| optional | String         | Custom GCS path for temporary files during load jobs. If not specified, uses the pipeline's `tempLocation` setting.                                                                                           |
@@ -155,6 +155,32 @@ sinks:
       table: myproject.mydataset.Users
       cdc: true
 ```
+
+### Schema evolution
+
+The change record envelope carries row data as JSON, so a schema change on the source database
+(e.g. `ALTER TABLE ... ADD COLUMN` on Spanner or TiDB) never breaks the pipeline itself — new
+columns simply start appearing inside the envelope `after` values. What needs an operational
+procedure is the destination table, whose schema is not updated automatically:
+
+1. **Set `ignoreUnknownValues: true` on the sink.** Columns that are not (yet) present on the
+   destination table are dropped from each row instead of failing it, so the pipeline keeps
+   applying all other columns while the destination schema lags behind.
+2. **Add the column on the destination table** (`ALTER TABLE ... ADD COLUMN`) when ready.
+   - Streaming pipelines with `method: STORAGE_WRITE_API` can additionally set
+     `autoSchemaUpdate: true` (requires `ignoreUnknownValues: true`) to pick up the new destination
+     schema without a pipeline restart. With `STORAGE_API_AT_LEAST_ONCE`, restart (update) the
+     pipeline after the `ALTER` instead.
+3. **Backfill the gap.** Rows applied between the source schema change and the destination `ALTER`
+   were written without the new column. If the change records are archived (see the
+   [`cdc` transform](../transform/cdc.md) archive example), replay the archived records in a batch
+   pipeline with `accumulate: true` and `method: STORAGE_WRITE_API` — the envelope `sequence`
+   guarantees only rows still at their latest version are re-applied, now including the new column.
+
+Without `ignoreUnknownValues`, rows containing unknown columns fail row-by-row and are routed to
+the failure output (`failureSinks`), while the other rows keep flowing — choose this stricter mode
+when dropping a column silently is not acceptable. Request-level problems (destination table
+missing, no primary key on the table) are not row failures and fail the pipeline instead.
 
 ## Failure output
 

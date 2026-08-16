@@ -616,13 +616,17 @@ public class BigQuerySink extends Sink {
             write = write.withoutValidation();
         }
 
+        // Applies to all write methods (streaming inserts, Storage Write API and file loads),
+        // in both batch and streaming mode. For cdc mode this is the schema-evolution guard:
+        // columns not (yet) present on the destination table are dropped instead of failing rows.
+        if(parameters.ignoreUnknownValues) {
+            write = write.ignoreUnknownValues();
+        }
+
         if(isStreaming) {
             // For streaming mode options
             if(parameters.skipInvalidRows) {
                 write = write.skipInvalidRows();
-            }
-            if(parameters.ignoreUnknownValues) {
-                write = write.ignoreUnknownValues();
             }
             if(parameters.ignoreInsertIds) {
                 write = write.ignoreInsertIds();
