@@ -75,7 +75,7 @@ public class AvroToDocumentConverter {
             case LONG -> {
                 final Long l = (Long) v;
                 if(LogicalTypes.timestampMillis().equals(schema.getLogicalType())) {
-                    yield Value.newBuilder().setTimestampValue(DateTimeUtil.toProtoTimestamp(l/1000L)).build();
+                    yield Value.newBuilder().setTimestampValue(DateTimeUtil.toProtoTimestamp(l * 1000L)).build();
                 } else if(LogicalTypes.timestampMicros().equals(schema.getLogicalType())) {
                     yield Value.newBuilder().setTimestampValue(DateTimeUtil.toProtoTimestamp(l)).build();
                 } else if(LogicalTypes.timeMicros().equals(schema.getLogicalType())) {
