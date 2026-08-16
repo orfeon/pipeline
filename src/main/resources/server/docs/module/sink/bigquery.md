@@ -186,6 +186,40 @@ the failure output (`failureSinks`), while the other rows keep flowing — choos
 when dropping a column silently is not acceptable. Request-level problems (destination table
 missing, no primary key on the table) are not row failures and fail the pipeline instead.
 
+### Performance and quotas
+
+**Destination schema fetch.** In cdc mode the destination table schema is fetched from BigQuery
+lazily on the workers — once per destination table per worker process, then cached process-wide.
+There is no per-record or per-bundle schema RPC, and no BigQuery access at pipeline construction.
+The cache is only refreshed periodically when `autoSchemaUpdate: true` (that refresh is what picks
+up an `ALTER TABLE` without a restart). This behavior is the same for a fixed and a template
+`table`.
+
+**Method characteristics with many destination tables.**
+
+- `STORAGE_API_AT_LEAST_ONCE` (the default): no shuffle; records append to each table's *default*
+  stream, which consumes no stream-creation quota. Each worker keeps an open append stream and
+  buffer per destination table it has seen, so per-worker memory and gRPC connections grow with the
+  number of tables — negligible for tens of tables. For hundreds of tables, consider the Storage
+  Write API connection-pool pipeline options (`useStorageApiConnectionPool`,
+  `minConnectionPoolConnections` / `maxConnectionPoolConnections`) to multiplex connections.
+- `STORAGE_WRITE_API` (exactly-once): records are shuffled keyed by destination × shard. In a
+  **streaming** pipeline with a template `table`, new write streams are created per destination
+  table every triggering period, so
+  [`CreateWriteStream` quota](https://cloud.google.com/bigquery/quotas#write-api-limits) usage
+  scales with *(number of tables × triggering frequency)*. Raise `triggeringFrequencySecond` when
+  applying many tables, or prefer `STORAGE_API_AT_LEAST_ONCE` — the envelope `sequence`
+  (`_CHANGE_SEQUENCE_NUMBER`) already resolves out-of-order and duplicate applies per key, which is
+  why at-least-once is the default for this mode. In batch (e.g. archive replay), stream creation
+  happens once per table and this concern does not apply.
+
+**Template evaluation.** With a template `table`, the destination is evaluated per record
+(the compiled template is cached); the overhead is a string build per record and is normally
+negligible next to write I/O.
+
+Sharding is tuned the same way as normal storage-API writes: `numStorageWriteApiStreams`, or
+`autoSharding` in streaming mode.
+
 ## Failure output
 
 Failed insert records are captured and available as error output. The failure output follows the standard MFailure schema:
