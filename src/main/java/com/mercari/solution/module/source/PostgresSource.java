@@ -1,9 +1,11 @@
 package com.mercari.solution.module.source;
 
+import com.google.gson.JsonElement;
 import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.domain.db.JdbcUtil;
 import com.mercari.solution.util.domain.db.PostgresUtil;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
@@ -36,14 +38,19 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * Source module for reading records from PostgreSQL (or compatible) databases
  * using {@code COPY (SELECT ...) TO STDOUT (FORMAT BINARY)} for high throughput.
- * The table is split into physical block ({@code ctid}) ranges, and the ranges are
+ * Each table is split into physical block ({@code ctid}) ranges, and the ranges are
  * read in parallel with efficient TID range scans.
+ *
+ * Supports a single table ({@code table}) or every base table matching the
+ * {@code tables} include/exclude patterns, with one tagged output per table.
  */
 @Source.Module(name="postgres")
 public class PostgresSource extends Source {
@@ -63,6 +70,9 @@ public class PostgresSource extends Source {
         private String where;
         private Long splitSize;
 
+        // for all-tables parameters
+        private JsonElement tables;
+
         public void validate() {
             final List<String> errorMessages = new ArrayList<>();
             if(url == null) {
@@ -70,8 +80,21 @@ public class PostgresSource extends Source {
             } else if(!url.startsWith("jdbc:postgresql:")) {
                 errorMessages.add("parameters.url must be jdbc:postgresql: url");
             }
-            if(table == null) {
-                errorMessages.add("parameters.table must not be null");
+            if(table == null && tables == null) {
+                errorMessages.add("parameters.table or parameters.tables must not be null");
+            }
+            if(tables != null) {
+                if(table != null) {
+                    errorMessages.add("parameters.table must not be set together with parameters.tables");
+                }
+                if(select != null || where != null) {
+                    errorMessages.add("parameters.select and parameters.where must not be set together with parameters.tables (use tables.select / tables.where)");
+                }
+                try {
+                    TablesParameter.of(tables);
+                } catch (final IllegalArgumentException e) {
+                    errorMessages.add(e.getMessage());
+                }
             }
             if(user != null && password == null) {
                 errorMessages.add("parameters.password must not be null");
@@ -109,8 +132,115 @@ public class PostgresSource extends Source {
             }
         }
 
-        public static class TableParameter implements Serializable {
+    }
 
+    /**
+     * The {@code tables} parameter. Accepts either a pattern list shorthand
+     * {@code tables: ["users", "item_*"]} or the full form
+     * {@code tables: {includes: [...], excludes: [...], select: "...", where: "..."}}.
+     * Missing includes defaults to all public-schema tables; {@code *} matches any sequence.
+     */
+    static class TablesParameter implements Serializable {
+
+        final List<String> includes;
+        final List<String> excludes;
+        // common per-table SELECT clause template (default "*") and WHERE clause template;
+        // ${table} (output tag), ${schema} and ${name} are available as template variables
+        final String select;
+        final String where;
+
+        private TablesParameter(
+                final List<String> includes,
+                final List<String> excludes,
+                final String select,
+                final String where) {
+
+            this.includes = includes;
+            this.excludes = excludes;
+            this.select = select;
+            this.where = where;
+        }
+
+        static TablesParameter of(final JsonElement json) {
+            final List<String> includes;
+            final List<String> excludes;
+            final String select;
+            final String where;
+            if(json.isJsonArray()) {
+                includes = toStringList(json);
+                excludes = new ArrayList<>();
+                select = null;
+                where = null;
+            } else if(json.isJsonObject()) {
+                includes = json.getAsJsonObject().has("includes")
+                        ? toStringList(json.getAsJsonObject().get("includes"))
+                        : new ArrayList<>();
+                excludes = json.getAsJsonObject().has("excludes")
+                        ? toStringList(json.getAsJsonObject().get("excludes"))
+                        : new ArrayList<>();
+                select = getStringMember(json, "select");
+                where = getStringMember(json, "where");
+            } else {
+                throw new IllegalArgumentException(
+                        "'tables' must be a pattern array or an object with 'includes', 'excludes', 'select' and 'where': " + json);
+            }
+            if(includes.isEmpty()) {
+                includes.add("*");
+            }
+            return new TablesParameter(includes, excludes, select, where);
+        }
+
+        private static String getStringMember(final JsonElement json, final String member) {
+            if(!json.getAsJsonObject().has(member)) {
+                return null;
+            }
+            final JsonElement element = json.getAsJsonObject().get(member);
+            if(!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException("'tables." + member + "' must be a string: " + json);
+            }
+            return element.getAsString();
+        }
+
+        private static List<String> toStringList(final JsonElement json) {
+            if(!json.isJsonArray()) {
+                throw new IllegalArgumentException("'tables' patterns must be a string array: " + json);
+            }
+            final List<String> list = new ArrayList<>();
+            for(final JsonElement element : json.getAsJsonArray()) {
+                if(!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()) {
+                    throw new IllegalArgumentException("'tables' patterns must be a string array: " + json);
+                }
+                list.add(element.getAsString());
+            }
+            return list;
+        }
+
+        /**
+         * A pattern without a dot matches the table name only in the {@code public} schema;
+         * a pattern with a dot matches the schema-qualified {@code schema.name}.
+         */
+        boolean matches(final String schema, final String name) {
+            return includes.stream().anyMatch(p -> matchesPattern(p, schema, name))
+                    && excludes.stream().noneMatch(p -> matchesPattern(p, schema, name));
+        }
+
+        private static boolean matchesPattern(final String pattern, final String schema, final String name) {
+            if(pattern.contains(".")) {
+                return matchesGlob(pattern, schema + "." + name);
+            }
+            return "public".equals(schema) && matchesGlob(pattern, name);
+        }
+
+        private static boolean matchesGlob(final String pattern, final String value) {
+            final String[] literals = pattern.split("\\*", -1);
+            final StringBuilder regex = new StringBuilder();
+            for(int i = 0; i < literals.length; i++) {
+                if(i > 0) {
+                    regex.append(".*");
+                }
+                regex.append(java.util.regex.Pattern.quote(literals[i]));
+            }
+            return value.matches(regex.toString());
         }
 
     }
@@ -124,6 +254,10 @@ public class PostgresSource extends Source {
         parameters.validate();
         parameters.setDefaults();
         parameters.replaceParameters(begin.getPipeline());
+
+        if(parameters.tables != null) {
+            return expandAllTables(begin, parameters);
+        }
 
         final org.apache.avro.Schema outputAvroSchema;
         final List<PostgresUtil.Column> columns;
@@ -156,20 +290,152 @@ public class PostgresSource extends Source {
         }
         LOG.info("{} outputSchema: {}", getName(), outputAvroSchema);
 
-        final PCollection<PostgresUtil.Range> ranges = begin
-                .apply("CreateRanges", Create
-                        .of(blockRanges).withCoder(SerializableCoder.of(PostgresUtil.Range.class)))
-                .apply("Reshuffle", Reshuffle.viaRandomKey());
-
-        final PCollection<GenericRecord> records = ranges
-                .apply("ReadCopy", ParDo.of(new ReadDoFn(parameters, columns, outputAvroSchema.toString())))
-                .setCoder(AvroCoder.of(outputAvroSchema));
-
-        final PCollection<MElement> elements = records
-                .apply("Convert", ParDo.of(new ConvertDoFn(getTimestampAttribute(), getTimestampDefault())));
+        final PCollection<MElement> elements = applyRead(
+                begin, "", parameters,
+                parameters.table, parameters.select, parameters.where,
+                columns, outputAvroSchema, blockRanges);
 
         return MCollectionTuple
                 .of(elements, Schema.of(outputAvroSchema));
+    }
+
+    // Assembly-time resolved read of one matched table (only used while building the graph).
+    private record TableRead(
+            String tag,
+            String select,
+            String where,
+            PostgresUtil.TableId tableId,
+            List<PostgresUtil.Column> columns,
+            org.apache.avro.Schema avroSchema,
+            List<PostgresUtil.Range> ranges) { }
+
+    /**
+     * The all-tables ({@code tables}) mode: enumerates the matching base tables at assembly
+     * time, resolves each table's schema and ctid ranges, and appends one read branch per
+     * table as a tagged output with assembly-time attributes (table/schema/name).
+     *
+     * Unlike the spanner tables mode there is no shared snapshot: each ctid range is read
+     * on its own connection, so consistency across ranges and tables is not guaranteed.
+     */
+    private MCollectionTuple expandAllTables(final PBegin begin, final Parameters parameters) {
+
+        final TablesParameter tablesParameter = TablesParameter.of(parameters.tables);
+        // JsonElement is not java-serializable; drop the already-parsed raw JSON before
+        // building the graph
+        parameters.tables = null;
+
+        final List<TableRead> tableReads = new ArrayList<>();
+        try(final JdbcUtil.CloseableDataSource dataSource = JdbcUtil
+                .createDataSource(PostgresUtil.DRIVER, parameters.url, parameters.user, parameters.password, true)) {
+
+            try(final Connection connection = dataSource.getConnection()) {
+                final List<PostgresUtil.TableId> allTables = PostgresUtil.getBaseTables(connection);
+                final List<PostgresUtil.TableId> matched = allTables.stream()
+                        .filter(t -> tablesParameter.matches(t.schema(), t.name()))
+                        .toList();
+                if(matched.isEmpty()) {
+                    throw new IllegalModuleException(
+                            "postgres source module[" + getName() + "].tables matched no table. database tables: "
+                                    + allTables.stream().map(PostgresUtil.TableId::qualifiedName).toList());
+                }
+                LOG.info("postgres source module[{}] reads {} tables: {}", getName(), matched.size(),
+                        matched.stream().map(PostgresUtil.TableId::qualifiedName).toList());
+
+                for(final PostgresUtil.TableId tableId : matched) {
+                    final String tag = createTag(tableId);
+                    final String select = renderTableTemplate(tablesParameter.select, "*", tag, tableId);
+                    final String where = renderTableTemplate(tablesParameter.where, null, tag, tableId);
+
+                    final String query = PostgresUtil.createQuery(tableId.quotedName(), select, where, null);
+                    final org.apache.avro.Schema avroSchema;
+                    final List<PostgresUtil.Column> columns;
+                    try(final PreparedStatement statement = connection
+                            .prepareStatement(query, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
+                        final ResultSetMetaData meta = statement.getMetaData();
+                        if(meta == null) {
+                            throw new IllegalModuleException("Failed to get schema for query: " + query);
+                        }
+                        avroSchema = ResultSetToRecordConverter.convertSchema(meta);
+                        columns = PostgresUtil.getColumns(connection, meta);
+                    }
+
+                    // a partitioned-table parent has no storage (blockCount 0) and falls back
+                    // to a single unsplit COPY of all partitions
+                    final long blockCount = PostgresUtil.getBlockCount(connection, tableId.quotedName());
+                    final double estimatedRows = PostgresUtil.getEstimatedRowCount(connection, tableId.quotedName());
+                    final List<PostgresUtil.Range> ranges = PostgresUtil
+                            .createBlockRanges(blockCount, estimatedRows, parameters.splitSize);
+                    LOG.info("{} table: {} blockCount: {}, estimatedRows: {}, split into {} ctid ranges",
+                            getName(), tableId.qualifiedName(), blockCount, estimatedRows, ranges.size());
+
+                    tableReads.add(new TableRead(tag, select, where, tableId, columns, avroSchema, ranges));
+                }
+                connection.commit();
+            }
+        } catch (final IOException | SQLException e) {
+            throw new IllegalModuleException("Failed to connect database. url: " + parameters.url, e);
+        }
+
+        MCollectionTuple tuple = MCollectionTuple.empty(begin.getPipeline());
+        for(final TableRead tableRead : tableReads) {
+            final PCollection<MElement> elements = applyRead(
+                    begin, "." + tableRead.tag(), parameters,
+                    tableRead.tableId().quotedName(), tableRead.select(), tableRead.where(),
+                    tableRead.columns(), tableRead.avroSchema(), tableRead.ranges());
+            tuple = tuple.and(tableRead.tag(), elements, Schema.of(tableRead.avroSchema()), Map.of(
+                    "table", tableRead.tag(),
+                    "schema", tableRead.tableId().schema(),
+                    "name", tableRead.tableId().name()));
+        }
+        return tuple;
+    }
+
+    // public-schema tables keep their bare name as the output tag; others are schema-qualified
+    private static String createTag(final PostgresUtil.TableId tableId) {
+        return "public".equals(tableId.schema()) ? tableId.name() : tableId.qualifiedName();
+    }
+
+    private String renderTableTemplate(
+            final String template,
+            final String defaultValue,
+            final String tag,
+            final PostgresUtil.TableId tableId) {
+
+        if(template == null) {
+            return defaultValue;
+        }
+        final Map<String, Object> model = new HashMap<>();
+        if(getTemplateArgs() != null) {
+            model.putAll(getTemplateArgs());
+        }
+        model.put("table", tag);
+        model.put("schema", tableId.schema());
+        model.put("name", tableId.name());
+        return TemplateUtil.executeStrictTemplate(template, model);
+    }
+
+    // Shared by the single-table (table) and all-tables (tables) paths.
+    private PCollection<MElement> applyRead(
+            final PBegin begin,
+            final String nameSuffix,
+            final Parameters parameters,
+            final String table,
+            final String select,
+            final String where,
+            final List<PostgresUtil.Column> columns,
+            final org.apache.avro.Schema avroSchema,
+            final List<PostgresUtil.Range> blockRanges) {
+
+        return begin
+                .apply("CreateRanges" + nameSuffix, Create
+                        .of(blockRanges).withCoder(SerializableCoder.of(PostgresUtil.Range.class)))
+                .apply("Reshuffle" + nameSuffix, Reshuffle.viaRandomKey())
+                .apply("ReadCopy" + nameSuffix, ParDo.of(new ReadDoFn(
+                        parameters.url, parameters.user, parameters.password,
+                        table, select, where, columns, avroSchema.toString())))
+                .setCoder(AvroCoder.of(avroSchema))
+                .apply("Convert" + nameSuffix, ParDo.of(new ConvertDoFn(
+                        getTimestampAttribute(), getTimestampDefault())));
     }
 
     private static class ReadDoFn extends DoFn<PostgresUtil.Range, GenericRecord> {
@@ -184,58 +450,89 @@ public class PostgresSource extends Source {
         private final String schemaString;
 
         private transient org.apache.avro.Schema schema;
+        private transient HikariDataSource dataSource;
 
-        private static volatile HikariDataSource dataSource;
+        // Worker-shared connection pools, reference-counted per url+user so that the teardown
+        // of one read branch's DoFn does not close a pool other branches still use.
+        private static final Map<String, PoolEntry> POOLS = new HashMap<>();
+
+        private static final class PoolEntry {
+
+            private final HikariDataSource dataSource;
+            private int refCount;
+
+            private PoolEntry(final HikariDataSource dataSource) {
+                this.dataSource = dataSource;
+            }
+        }
 
         ReadDoFn(
-                final Parameters parameters,
+                final String url,
+                final String user,
+                final String password,
+                final String table,
+                final String select,
+                final String where,
                 final List<PostgresUtil.Column> columns,
                 final String schemaString) {
 
-            this.url = parameters.url;
-            this.user = parameters.user;
-            this.password = parameters.password;
-            this.table = parameters.table;
-            this.select = parameters.select;
-            this.where = parameters.where;
+            this.url = url;
+            this.user = user;
+            this.password = password;
+            this.table = table;
+            this.select = select;
+            this.where = where;
             this.columns = columns;
             this.schemaString = schemaString;
         }
 
-        private static HikariDataSource getDataSource(String url, String user, String password) {
-            if (dataSource == null) {
-                synchronized (ReadDoFn.class) {
-                    if (dataSource == null) {
-                        final HikariConfig config = new HikariConfig();
-                        config.setJdbcUrl(url);
-                        config.setUsername(user);
-                        config.setPassword(password);
-                        config.setDriverClassName(PostgresUtil.DRIVER);
-                        config.setMaximumPoolSize(10);
-                        config.setReadOnly(true);
-                        config.addDataSourceProperty("ApplicationName", "mercari-pipeline");
-                        dataSource = new HikariDataSource(config);
-                    }
+        private static HikariDataSource acquire(final String url, final String user, final String password) {
+            final String key = url + "|" + user;
+            synchronized (POOLS) {
+                PoolEntry entry = POOLS.get(key);
+                if (entry == null) {
+                    final HikariConfig config = new HikariConfig();
+                    config.setJdbcUrl(url);
+                    config.setUsername(user);
+                    config.setPassword(password);
+                    config.setDriverClassName(PostgresUtil.DRIVER);
+                    config.setMaximumPoolSize(10);
+                    config.setReadOnly(true);
+                    config.addDataSourceProperty("ApplicationName", "mercari-pipeline");
+                    entry = new PoolEntry(new HikariDataSource(config));
+                    POOLS.put(key, entry);
+                }
+                entry.refCount++;
+                return entry.dataSource;
+            }
+        }
+
+        private static void release(final String url, final String user) {
+            final String key = url + "|" + user;
+            synchronized (POOLS) {
+                final PoolEntry entry = POOLS.get(key);
+                if (entry == null) {
+                    return;
+                }
+                entry.refCount--;
+                if (entry.refCount <= 0) {
+                    POOLS.remove(key);
+                    entry.dataSource.close();
                 }
             }
-            return dataSource;
         }
 
         @Setup
         public void setup() {
             this.schema = AvroSchemaUtil.convertSchema(schemaString);
-            getDataSource(url, user, password);
+            this.dataSource = acquire(url, user, password);
         }
 
         @Teardown
-        public void teardown() throws SQLException, IOException {
-            if (dataSource != null && !dataSource.isClosed()) {
-                synchronized (ReadDoFn.class) {
-                    if (dataSource != null && !dataSource.isClosed()) {
-                        dataSource.close();
-                        dataSource = null;
-                    }
-                }
+        public void teardown() {
+            if (dataSource != null) {
+                dataSource = null;
+                release(url, user);
             }
         }
 
@@ -248,7 +545,7 @@ public class PostgresSource extends Source {
 
             long count = 0;
             final Instant start = Instant.now();
-            try (final Connection connection = getDataSource(url, user, password).getConnection()) {
+            try (final Connection connection = dataSource.getConnection()) {
                 final PGConnection pgConnection = connection.unwrap(PGConnection.class);
                 try (final PGCopyInputStream pgCopyInputStream = new PGCopyInputStream(pgConnection, copySql);
                      final BufferedInputStream bufferedInputStream = new BufferedInputStream(pgCopyInputStream, 524288);

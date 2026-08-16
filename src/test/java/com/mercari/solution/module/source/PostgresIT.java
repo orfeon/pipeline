@@ -323,6 +323,175 @@ public class PostgresIT {
         }
     }
 
+    /**
+     * The all-tables (tables parameter) mode: the source lists matching base tables at assembly
+     * time and outputs one tagged collection per table with per-table schema and assembly-time
+     * attributes. Bare patterns match public-schema tables only; dotted patterns match the
+     * schema-qualified name.
+     */
+    @Test
+    public void testSourceModuleAllTables() throws Exception {
+
+        try(final Connection connection = connect();
+            final Statement statement = connection.createStatement()) {
+
+            statement.execute("CREATE TABLE multi_a (id integer PRIMARY KEY, name text)");
+            statement.execute("INSERT INTO multi_a VALUES (1, 'a1'), (2, 'a2'), (3, 'a3')");
+            statement.execute("CREATE TABLE multi_b (id integer PRIMARY KEY)");
+            statement.execute("INSERT INTO multi_b VALUES (1), (2)");
+            statement.execute("CREATE TABLE multi_skip (id integer PRIMARY KEY)");
+            statement.execute("INSERT INTO multi_skip VALUES (1)");
+            statement.execute("CREATE SCHEMA mschema");
+            statement.execute("CREATE TABLE mschema.multi_c (id integer PRIMARY KEY, label text)");
+            statement.execute("INSERT INTO mschema.multi_c VALUES (1, 'c1')");
+        }
+
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "postgresMulti",
+                      "module": "postgres",
+                      "parameters": {
+                        "url": "%s",
+                        "user": "%s",
+                        "password": "%s",
+                        "tables": {
+                          "includes": ["multi_*", "mschema.*"],
+                          "excludes": ["multi_skip"]
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+        final TestPipeline pipeline = createPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
+
+        Assertions.assertNull(outputs.get("postgresMulti.multi_skip"), "excluded table must not be output: " + outputs.keySet());
+
+        final MCollection outputA = outputs.get("postgresMulti.multi_a");
+        Assertions.assertNotNull(outputA, "postgresMulti.multi_a not found in: " + outputs.keySet());
+        Assertions.assertEquals("multi_a", outputA.getAttributes().get("table"));
+        Assertions.assertEquals("public", outputA.getAttributes().get("schema"));
+        Assertions.assertEquals("multi_a", outputA.getAttributes().get("name"));
+        Assertions.assertNotNull(outputA.getSchema().getField("name"));
+
+        final MCollection outputB = outputs.get("postgresMulti.multi_b");
+        Assertions.assertNotNull(outputB, "postgresMulti.multi_b not found in: " + outputs.keySet());
+
+        // non-public schema tables keep the schema-qualified tag
+        final MCollection outputC = outputs.get("postgresMulti.mschema.multi_c");
+        Assertions.assertNotNull(outputC, "postgresMulti.mschema.multi_c not found in: " + outputs.keySet());
+        Assertions.assertEquals("mschema.multi_c", outputC.getAttributes().get("table"));
+        Assertions.assertEquals("mschema", outputC.getAttributes().get("schema"));
+        Assertions.assertEquals("multi_c", outputC.getAttributes().get("name"));
+        Assertions.assertNotNull(outputC.getSchema().getField("label"));
+
+        PAssert.that(outputA.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                Assertions.assertEquals("a" + element.getAsLong("id"), element.getAsString("name"));
+                count++;
+            }
+            Assertions.assertEquals(3, count);
+            return null;
+        });
+        PAssert.that(outputB.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement ignored : elements) {
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+        PAssert.that(outputC.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                Assertions.assertEquals("c1", element.getAsString("label"));
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run().waitUntilFinish();
+    }
+
+    /**
+     * The tables.select / tables.where templates: common per-table SELECT and WHERE clause
+     * fragments applied to every matched table, with ${table} resolved per table at assembly
+     * time. The output schema comes from the rendered per-table query.
+     */
+    @Test
+    public void testSourceModuleAllTablesSelectWhereTemplate() throws Exception {
+
+        try(final Connection connection = connect();
+            final Statement statement = connection.createStatement()) {
+
+            statement.execute("CREATE TABLE tmpl_x (id integer PRIMARY KEY, value text)");
+            statement.execute("INSERT INTO tmpl_x VALUES (1, 'x1'), (2, 'x2'), (3, 'x3')");
+            statement.execute("CREATE TABLE tmpl_y (id integer PRIMARY KEY, value text)");
+            statement.execute("INSERT INTO tmpl_y VALUES (1, 'y1'), (2, 'y2')");
+        }
+
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "postgresTmpl",
+                      "module": "postgres",
+                      "parameters": {
+                        "url": "%s",
+                        "user": "%s",
+                        "password": "%s",
+                        "tables": {
+                          "includes": ["tmpl_*"],
+                          "select": "id, '${table}'::text AS source_table",
+                          "where": "id >= 2"
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+        final TestPipeline pipeline = createPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
+
+        final MCollection outputX = outputs.get("postgresTmpl.tmpl_x");
+        Assertions.assertNotNull(outputX, "postgresTmpl.tmpl_x not found in: " + outputs.keySet());
+        // the schema comes from the rendered query, so the computed column must be present
+        Assertions.assertNotNull(outputX.getSchema().getField("source_table"));
+        Assertions.assertNull(outputX.getSchema().getField("value"));
+        final MCollection outputY = outputs.get("postgresTmpl.tmpl_y");
+        Assertions.assertNotNull(outputY, "postgresTmpl.tmpl_y not found in: " + outputs.keySet());
+
+        PAssert.that(outputX.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                Assertions.assertTrue(element.getAsLong("id") >= 2, "where must filter id 1");
+                Assertions.assertEquals("tmpl_x", element.getAsString("source_table"));
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+        PAssert.that(outputY.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                Assertions.assertEquals(2L, element.getAsLong("id"));
+                Assertions.assertEquals("tmpl_y", element.getAsString("source_table"));
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run().waitUntilFinish();
+    }
+
     private static ByteBuffer toDecimalBytes(final BigDecimal decimal) {
         return ByteBuffer.wrap(decimal.setScale(9).unscaledValue().toByteArray());
     }

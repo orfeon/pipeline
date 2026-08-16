@@ -33,7 +33,7 @@ sources:
     description: Reads messages from Apache Kafka topics in streaming mode. Connects to brokers via bootstrapServers and subscribes to a single topic, a list of topics, or a regex topic pattern. Message values can be deserialized as JSON, Avro, or Protocol Buffers according to the declared schema. Supports bounded reads via maxNumRecords/maxReadTime and Kafka read options such as read-committed isolation and log-append-time timestamps.
     tags: [source, kafka, streaming, messaging]
   - title: postgres
-    description: Reads records from PostgreSQL (or compatible) databases in parallel using COPY BINARY format. The table is split into physical block (ctid) ranges read concurrently by distributed workers via TID range scans, giving higher throughput than the generic jdbc source.
+    description: Reads records from PostgreSQL (or compatible) databases in parallel using COPY BINARY format. Each table is split into physical block (ctid) ranges read concurrently by distributed workers via TID range scans, giving higher throughput than the generic jdbc source. Reads a single table, or every table matching include/exclude patterns with one tagged output per table.
     tags: [source, postgres, batch, database, sql, copy]
   - title: pubsub
     description: Reads messages from Google Cloud Pub/Sub topics or subscriptions. Supports JSON, Avro, Protocol Buffers, and raw message formats. Includes attribute-based filtering, partition routing with inline filter/select/flatten, additional metadata field injection, seek-based replay, and multi-partition output.
