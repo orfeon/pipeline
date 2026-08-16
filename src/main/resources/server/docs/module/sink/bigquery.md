@@ -124,7 +124,7 @@ myproject.mydataset.events_${region}
 
 All input field names can be used as template variables. The template is evaluated for each record to determine the destination table.
 
-When using dynamic destination, `partitioning`, `partitioningField`, and `clusteringFields` are also applied to each dynamically created table. The schema for all destination tables is derived from the input schema.
+When using dynamic destination, `partitioning`, `partitioningField`, and `clusteringFields` are also applied to each dynamically created table. The schema for all destination tables is derived from the input schema — except in [CDC apply mode](#cdc-apply-mode), where each destination table must already exist and its schema is fetched from BigQuery.
 
 ## CDC apply mode
 
@@ -143,8 +143,12 @@ records) pipelines.
 - The destination table must already exist (`CREATE_NEVER`) with a
   [primary key](https://cloud.google.com/bigquery/docs/information-schema-table-constraints) and
   `max_staleness` configured as needed; its schema cannot be derived from change records.
-- A template `table` destination is not supported in this mode — configure one sink per table
-  (filter per table upstream, e.g. with the `select` transform on the envelope `table` field).
+- A template `table` (e.g. `myproject.mydataset.${table}`) routes each change record to its own
+  destination table — one sink applies a whole change stream to many tables. The schema of each
+  destination table is fetched from BigQuery at write time. **Every table the template resolves to
+  must already exist**: a change record referencing an unknown table is a request-level error that
+  fails the pipeline (not a row failure). If the stream contains tables you do not want to apply,
+  filter them out upstream on the envelope `table` field (e.g. with the `select` transform).
 
 ```yaml
 sinks:
@@ -152,7 +156,7 @@ sinks:
     module: bigquery
     inputs: [normalized_changes]
     parameters:
-      table: myproject.mydataset.Users
+      table: myproject.mydataset.${table}   # or a fixed table name for a single-table sink
       cdc: true
 ```
 

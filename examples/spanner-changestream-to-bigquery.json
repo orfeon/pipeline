@@ -25,43 +25,17 @@
       "parameters": {
         "format": "spanner"
       }
-    },
-    {
-      "name": "tables",
-      "module": "partition",
-      "inputs": ["normalize"],
-      "parameters": {
-        "exclusive": true,
-        "partitions": [
-          {
-            "name": "MyTable1",
-            "filter": { "key": "table", "op": "=", "value": "MyTable1" }
-          },
-          {
-            "name": "MyTable2",
-            "filter": { "key": "table", "op": "=", "value": "MyTable2" }
-          }
-        ]
-      }
     }
   ],
   "sinks": [
     {
-      "name": "bigqueryMyTable1",
+      "name": "bigquery",
       "module": "bigquery",
-      "inputs": ["tables.MyTable1"],
+      "inputs": ["normalize"],
       "parameters": {
-        "table": "myproject.mydataset.mytable1",
-        "cdc": true
-      }
-    },
-    {
-      "name": "bigqueryMyTable2",
-      "module": "bigquery",
-      "inputs": ["tables.MyTable2"],
-      "parameters": {
-        "table": "myproject.mydataset.mytable2",
-        "cdc": true
+        "table": "myproject.mydataset.${table}",
+        "cdc": true,
+        "ignoreUnknownValues": true
       }
     }
   ]

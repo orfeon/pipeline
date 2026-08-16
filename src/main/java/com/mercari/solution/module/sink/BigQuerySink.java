@@ -312,6 +312,10 @@ public class BigQuerySink extends Sink {
      * CDC apply mode: consumes unified change records (the {@code cdc} transform output) and
      * upserts/deletes rows on the destination table via the Storage Write API
      * {@code _CHANGE_TYPE}/{@code _CHANGE_SEQUENCE_NUMBER} pseudocolumns.
+     *
+     * <p>A template {@code table} (e.g. {@code myproject.mydataset.${table}}) routes each change
+     * record to its own destination table; every resolved table must already exist — its schema
+     * is fetched from the service, never derived from the change records.</p>
      */
     private WriteResult writeChangeRecords(
             final PCollection<MElement> elements,
@@ -337,11 +341,6 @@ public class BigQuerySink extends Sink {
             throw new IllegalModuleException(
                     "bigquery sink module[" + getName() + "] with cdc mode requires an existing destination table (CREATE_NEVER): the destination schema cannot be derived from change records");
         }
-        if(TemplateUtil.isTemplateText(parameters.table)) {
-            throw new IllegalModuleException(
-                    "bigquery sink module[" + getName() + "] with cdc mode does not support a template 'table' destination. configure one sink per table");
-        }
-
         BigQueryIO.Write<MElement> write = BigQueryIO
                 .<MElement>write()
                 .withFormatFunction(ChangeRecord::toTableRow)
@@ -809,6 +808,7 @@ public class BigQuerySink extends Sink {
         private final String partitioningType;
         private final String partitioningField;
         private final List<String> clusteringFields;
+        private final boolean cdc;
 
         public DynamicDestinationFunc(
                 final Schema tableSchema,
@@ -820,6 +820,7 @@ public class BigQuerySink extends Sink {
             this.partitioningType = parameters.partitioning;
             this.partitioningField = parameters.partitioningField;
             this.clusteringFields = parameters.clusteringFields;
+            this.cdc = parameters.cdc;
         }
 
         @Override
@@ -850,6 +851,12 @@ public class BigQuerySink extends Sink {
 
         @Override
         public TableSchema getSchema(String destination) {
+            if(cdc) {
+                // In cdc mode the input schema is the change record envelope, not the destination
+                // table schema. Returning null makes the Storage Write API fetch the actual schema
+                // of each (existing) destination table from the service.
+                return null;
+            }
             return ElementToTableRowConverter.convertSchema(tableSchema);
         }
 

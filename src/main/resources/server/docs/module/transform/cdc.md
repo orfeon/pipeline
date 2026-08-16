@@ -95,23 +95,18 @@ transforms:
     parameters:
       format: spanner
 
-  - name: users_only
-    module: select
-    inputs: [normalize]
-    parameters:
-      filter:
-        key: table
-        op: "="
-        value: Users
-
 sinks:
   - name: bq
     module: bigquery
-    inputs: [users_only]
+    inputs: [normalize]
     parameters:
-      table: myproject.mydataset.Users
+      table: myproject.mydataset.${table}   # routes each change to the table of the same name
       cdc: true
 ```
+
+Every table the template resolves to must already exist on BigQuery (with a primary key). To apply
+only some tables, filter on the envelope `table` field upstream (e.g. `select` transform with
+`filter`), or use a fixed `table` name for a single-table sink.
 
 ### Example 2: Archive a Spanner change stream to GCS, then batch-apply to BigQuery
 

@@ -136,6 +136,54 @@ public class BigQuerySinkTest {
     }
 
     @Test
+    public void testCdcDynamicDestinationTableTemplate() throws Exception {
+        // cdc mode + template table: each change record routes to its own destination table,
+        // whose schema is fetched from the service at write time (no schema at graph build)
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "changes",
+                      "module": "create",
+                      "outputType": "AVRO",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "table": "Users", "op": "INSERT", "keys": "{\\"id\\":\\"1\\"}", "after": "{\\"name\\":\\"alice\\"}", "sequence": "ff/0" }
+                        ]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "table", "type": "string" },
+                          { "name": "op", "type": "string" },
+                          { "name": "keys", "type": "string" },
+                          { "name": "after", "type": "string" },
+                          { "name": "sequence", "type": "string" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "bigquerySink",
+                      "module": "bigquery",
+                      "inputs": ["changes"],
+                      "parameters": {
+                        "table": "myproject.mydataset.${table}",
+                        "cdc": true,
+                        "outputResult": false
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
+        Assertions.assertFalse(outputs.containsKey("bigquerySink"));
+    }
+
+    @Test
     public void testBatchStreamingInsertsDefaultOutputResult() throws Exception {
         // batch pipeline + STREAMING_INSERTS without outputResult: the default outputResult=true
         // must not route to WriteResult.getSuccessfulInserts (unsupported for batch), but fall
