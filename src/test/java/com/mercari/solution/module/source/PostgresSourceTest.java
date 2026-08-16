@@ -98,6 +98,66 @@ public class PostgresSourceTest {
         Assertions.assertTrue(e.getMessage().contains("must be a string array"), "unexpected message: " + e.getMessage());
     }
 
+    private static String cdcConfigJson(final String parametersJson) {
+        return """
+                {
+                  "sources": [
+                    {
+                      "name": "postgres",
+                      "module": "postgres",
+                      "mode": "changeDataCapture",
+                      "parameters": {
+                        "url": "jdbc:postgresql://localhost:5432/fake",
+                        "user": "fake",
+                        "password": "fake"%s
+                      }
+                    }
+                  ]
+                }
+                """.formatted(parametersJson.isEmpty() ? "" : ",\n" + parametersJson);
+    }
+
+    @Test
+    public void testCdcModeWithoutCdcParameterThrows() throws Exception {
+        final Config config = Config.load(cdcConfigJson(""));
+        final IllegalModuleException e = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("parameters.cdc must not be null"), "unexpected message: " + e.getMessage());
+    }
+
+    @Test
+    public void testCdcModeWithoutSlotAndPublicationThrows() throws Exception {
+        final Config config = Config.load(cdcConfigJson("""
+                "cdc": {}
+                """));
+        final IllegalModuleException e = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("parameters.cdc.slot"), "unexpected message: " + e.getMessage());
+        Assertions.assertTrue(e.getMessage().contains("parameters.cdc.publication"), "unexpected message: " + e.getMessage());
+    }
+
+    @Test
+    public void testCdcModeWithTableParameterThrows() throws Exception {
+        final Config config = Config.load(cdcConfigJson("""
+                "table": "users",
+                "cdc": { "slot": "myslot", "publication": "mypub" }
+                """));
+        final IllegalModuleException e = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("not applicable"), "unexpected message: " + e.getMessage());
+    }
+
+    @Test
+    public void testCdcParameterInBatchModeThrows() throws Exception {
+        final Config config = Config.load(configJson("""
+                "table": "users",
+                "cdc": { "slot": "myslot", "publication": "mypub" }
+                """));
+        final IllegalModuleException e = Assertions.assertThrows(
+                IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("only applicable"), "unexpected message: " + e.getMessage());
+    }
+
     @Test
     public void testTablesParameterMatching() {
         // bare patterns match public-schema tables only

@@ -51,7 +51,9 @@ public class PostgresIT {
 
     @Container
     private static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16-alpine"));
+            DockerImageName.parse("postgres:16-alpine"))
+            // logical replication (changeDataCapture mode tests); a superset of the default level
+            .withCommand("postgres", "-c", "wal_level=logical");
 
     private static Connection connect() throws Exception {
         return DriverManager.getConnection(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
@@ -490,6 +492,154 @@ public class PostgresIT {
         });
 
         pipeline.run().waitUntilFinish();
+    }
+
+    /**
+     * The changeDataCapture mode: reads pending changes from a logical replication slot with
+     * the pgoutput plugin (binary tuple mode), outputs provider-native change records, and the
+     * cdc transform (format: postgres) normalizes them into the unified envelope.
+     */
+    @Test
+    public void testSourceModuleChangeDataCapture() throws Exception {
+
+        try(final Connection connection = connect();
+            final Statement statement = connection.createStatement()) {
+
+            statement.execute("CREATE TABLE cdc_items (id integer PRIMARY KEY, name text, price numeric(10,2), tags text[], updated timestamptz)");
+            // full before-images on update/delete
+            statement.execute("ALTER TABLE cdc_items REPLICA IDENTITY FULL");
+            statement.execute("CREATE PUBLICATION cdc_pub FOR TABLE cdc_items");
+            statement.execute("SELECT pg_create_logical_replication_slot('cdc_slot', 'pgoutput')");
+
+            // 4 change records retained in the slot before the pipeline starts
+            statement.execute("INSERT INTO cdc_items VALUES (1, 'one', 10.50, '{\"a\",\"b\"}', '2023-11-14 22:13:20+00')");
+            statement.execute("INSERT INTO cdc_items VALUES (2, 'two', NULL, NULL, NULL)");
+            statement.execute("UPDATE cdc_items SET name = 'ONE', price = 11.00 WHERE id = 1");
+            statement.execute("DELETE FROM cdc_items WHERE id = 2");
+        }
+
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "postgresCdc",
+                      "module": "postgres",
+                      "mode": "changeDataCapture",
+                      "parameters": {
+                        "url": "%s",
+                        "user": "%s",
+                        "password": "%s",
+                        "cdc": {
+                          "slot": "cdc_slot",
+                          "publication": "cdc_pub",
+                          "maxNumRecords": 4,
+                          "maxReadTimeSeconds": 120
+                        }
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "envelope",
+                      "module": "cdc",
+                      "inputs": ["postgresCdc"],
+                      "parameters": {
+                        "format": "postgres"
+                      }
+                    }
+                  ]
+                }
+                """.formatted(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+        final TestPipeline pipeline = createPipeline();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(configJson));
+
+        final MCollection rawOutput = outputs.get("postgresCdc");
+        Assertions.assertNotNull(rawOutput.getSchema().getField("lsn"));
+        Assertions.assertNotNull(rawOutput.getSchema().getField("keysJson"));
+
+        PAssert.that(rawOutput.getCollection()).satisfies(elements -> {
+            int inserts = 0, updates = 0, deletes = 0;
+            for(final MElement element : elements) {
+                Assertions.assertEquals("public", element.getAsString("schema"));
+                Assertions.assertEquals("cdc_items", element.getAsString("table"));
+                Assertions.assertTrue(element.getAsLong("commitLsn") > 0);
+                switch (element.getAsString("op")) {
+                    case "INSERT" -> {
+                        inserts++;
+                        final String newValues = element.getAsString("newValuesJson");
+                        if(newValues.contains("\"id\":1")) {
+                            Assertions.assertTrue(newValues.contains("\"name\":\"one\""), "unexpected: " + newValues);
+                            Assertions.assertTrue(newValues.contains("\"price\":\"10.5\""), "unexpected: " + newValues);
+                            Assertions.assertTrue(newValues.contains("\"tags\":[\"a\",\"b\"]"), "unexpected: " + newValues);
+                            Assertions.assertTrue(newValues.contains("\"updated\":\"2023-11-14T22:13:20Z\""), "unexpected: " + newValues);
+                        } else {
+                            Assertions.assertTrue(newValues.contains("\"name\":\"two\""), "unexpected: " + newValues);
+                            Assertions.assertTrue(newValues.contains("\"price\":null"), "unexpected: " + newValues);
+                        }
+                    }
+                    case "UPDATE" -> {
+                        updates++;
+                        Assertions.assertEquals("{\"id\":1}", element.getAsString("keysJson"));
+                        // REPLICA IDENTITY FULL: the whole before-image arrives
+                        final String oldValues = element.getAsString("oldValuesJson");
+                        Assertions.assertTrue(oldValues.contains("\"name\":\"one\""), "unexpected: " + oldValues);
+                        final String newValues = element.getAsString("newValuesJson");
+                        Assertions.assertTrue(newValues.contains("\"name\":\"ONE\""), "unexpected: " + newValues);
+                        Assertions.assertTrue(newValues.contains("\"price\":\"11\""), "unexpected: " + newValues);
+                    }
+                    case "DELETE" -> {
+                        deletes++;
+                        Assertions.assertEquals("{\"id\":2}", element.getAsString("keysJson"));
+                        Assertions.assertNull(element.getAsString("newValuesJson"));
+                        final String oldValues = element.getAsString("oldValuesJson");
+                        Assertions.assertTrue(oldValues.contains("\"name\":\"two\""), "unexpected: " + oldValues);
+                    }
+                    default -> Assertions.fail("unexpected op: " + element.getAsString("op"));
+                }
+            }
+            Assertions.assertEquals(2, inserts);
+            Assertions.assertEquals(1, updates);
+            Assertions.assertEquals(1, deletes);
+            return null;
+        });
+
+        final MCollection envelopeOutput = outputs.get("envelope");
+        PAssert.that(envelopeOutput.getCollection()).satisfies(elements -> {
+            int count = 0;
+            String insertSequence1 = null, updateSequence = null;
+            for(final MElement element : elements) {
+                Assertions.assertEquals("cdc_items", element.getAsString("table"));
+                final String sequence = element.getAsString("sequence");
+                Assertions.assertTrue(com.mercari.solution.util.pipeline.cdc.ChangeRecord.isValidSequence(sequence),
+                        "illegal sequence: " + sequence);
+                final String keys = element.getAsString("keys");
+                if("{\"id\":1}".equals(keys)) {
+                    final String after = element.getAsString("after");
+                    if(after != null && after.contains("\"name\":\"one\"")) {
+                        insertSequence1 = sequence;
+                    } else if(after != null && after.contains("\"name\":\"ONE\"")) {
+                        updateSequence = sequence;
+                    }
+                }
+                count++;
+            }
+            Assertions.assertEquals(4, count);
+            // the update commits after the insert: its (commitLsn, seq) sequence must sort higher
+            Assertions.assertNotNull(insertSequence1);
+            Assertions.assertNotNull(updateSequence);
+            Assertions.assertTrue(com.mercari.solution.util.pipeline.cdc.ChangeRecord
+                    .compareSequence(updateSequence, insertSequence1) > 0);
+            return null;
+        });
+
+        pipeline.run().waitUntilFinish();
+
+        try(final Connection connection = connect();
+            final Statement statement = connection.createStatement()) {
+            statement.execute("SELECT pg_drop_replication_slot('cdc_slot')");
+            statement.execute("DROP PUBLICATION cdc_pub");
+        }
     }
 
     private static ByteBuffer toDecimalBytes(final BigDecimal decimal) {

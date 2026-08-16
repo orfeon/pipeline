@@ -504,11 +504,20 @@ public class PostgresUtil {
         return record;
     }
 
-    private static Object decodeValue(final Column column, final byte[] bytes) {
+    /**
+     * Decodes one binary-format field value (the format shared by COPY BINARY fields and
+     * pgoutput binary-mode tuple data) into its avro-convention value.
+     */
+    public static Object decodeValue(final Column column, final byte[] bytes) {
         if(ColumnType.ARRAY.equals(column.type)) {
             return decodeArray(column, bytes);
         }
         return decodeScalar(column.type, bytes);
+    }
+
+    /** Converts a PostgreSQL-epoch (2000-01-01) microsecond timestamp to unix-epoch micros. */
+    public static long toUnixMicros(final long postgresMicros) {
+        return postgresMicros + POSTGRES_EPOCH_MICROS;
     }
 
     private static Object decodeScalar(final ColumnType type, final byte[] bytes) {

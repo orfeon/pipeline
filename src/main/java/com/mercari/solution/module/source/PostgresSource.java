@@ -6,8 +6,12 @@ import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
+import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.db.JdbcUtil;
+import com.mercari.solution.util.domain.db.PgOutput;
+import com.mercari.solution.util.domain.db.PostgresReplicationSource;
 import com.mercari.solution.util.domain.db.PostgresUtil;
+import com.mercari.solution.util.pipeline.cdc.PostgresChangeCapture;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
 import com.zaxxer.hikari.HikariConfig;
@@ -16,12 +20,14 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.extensions.avro.coders.AvroCoder;
+import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.postgresql.PGConnection;
 import org.postgresql.copy.PGCopyInputStream;
@@ -73,27 +79,78 @@ public class PostgresSource extends Source {
         // for all-tables parameters
         private JsonElement tables;
 
-        public void validate() {
+        // for changeDataCapture mode parameters
+        private CdcParameter cdc;
+
+        private static class CdcParameter implements Serializable {
+
+            private String slot;
+            private String publication;
+            private Boolean createSlot;
+            private Integer statusIntervalSeconds;
+            // bound the read (mainly for tests and one-shot drains); absent = endless stream
+            private Long maxNumRecords;
+            private Long maxReadTimeSeconds;
+
+            private List<String> validate() {
+                final List<String> errorMessages = new ArrayList<>();
+                if(slot == null) {
+                    errorMessages.add("parameters.cdc.slot must not be null");
+                }
+                if(publication == null) {
+                    errorMessages.add("parameters.cdc.publication must not be null");
+                }
+                if(statusIntervalSeconds != null && statusIntervalSeconds < 1) {
+                    errorMessages.add("parameters.cdc.statusIntervalSeconds must be positive");
+                }
+                return errorMessages;
+            }
+
+            private void setDefaults() {
+                if(createSlot == null) {
+                    createSlot = false;
+                }
+                if(statusIntervalSeconds == null) {
+                    statusIntervalSeconds = 10;
+                }
+            }
+        }
+
+        public void validate(final Mode mode) {
             final List<String> errorMessages = new ArrayList<>();
             if(url == null) {
                 errorMessages.add("parameters.url must not be null");
             } else if(!url.startsWith("jdbc:postgresql:")) {
                 errorMessages.add("parameters.url must be jdbc:postgresql: url");
             }
-            if(table == null && tables == null) {
-                errorMessages.add("parameters.table or parameters.tables must not be null");
-            }
-            if(tables != null) {
-                if(table != null) {
-                    errorMessages.add("parameters.table must not be set together with parameters.tables");
+            if(Mode.changeDataCapture.equals(mode)) {
+                if(cdc == null) {
+                    errorMessages.add("parameters.cdc must not be null if mode is changeDataCapture");
+                } else {
+                    errorMessages.addAll(cdc.validate());
                 }
-                if(select != null || where != null) {
-                    errorMessages.add("parameters.select and parameters.where must not be set together with parameters.tables (use tables.select / tables.where)");
+                if(table != null || tables != null || select != null || where != null) {
+                    errorMessages.add("parameters.table, tables, select and where are not applicable if mode is changeDataCapture");
                 }
-                try {
-                    TablesParameter.of(tables);
-                } catch (final IllegalArgumentException e) {
-                    errorMessages.add(e.getMessage());
+            } else {
+                if(table == null && tables == null) {
+                    errorMessages.add("parameters.table or parameters.tables must not be null");
+                }
+                if(tables != null) {
+                    if(table != null) {
+                        errorMessages.add("parameters.table must not be set together with parameters.tables");
+                    }
+                    if(select != null || where != null) {
+                        errorMessages.add("parameters.select and parameters.where must not be set together with parameters.tables (use tables.select / tables.where)");
+                    }
+                    try {
+                        TablesParameter.of(tables);
+                    } catch (final IllegalArgumentException e) {
+                        errorMessages.add(e.getMessage());
+                    }
+                }
+                if(cdc != null) {
+                    errorMessages.add("parameters.cdc is only applicable if mode is changeDataCapture");
                 }
             }
             if(user != null && password == null) {
@@ -113,6 +170,9 @@ public class PostgresSource extends Source {
             }
             if(splitSize == null) {
                 splitSize = 1_000_000L;
+            }
+            if(cdc != null) {
+                cdc.setDefaults();
             }
         }
 
@@ -251,10 +311,13 @@ public class PostgresSource extends Source {
             final MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
-        parameters.validate();
+        parameters.validate(getMode());
         parameters.setDefaults();
         parameters.replaceParameters(begin.getPipeline());
 
+        if(Mode.changeDataCapture.equals(getMode())) {
+            return expandChangeDataCapture(begin, parameters);
+        }
         if(parameters.tables != null) {
             return expandAllTables(begin, parameters);
         }
@@ -297,6 +360,151 @@ public class PostgresSource extends Source {
 
         return MCollectionTuple
                 .of(elements, Schema.of(outputAvroSchema));
+    }
+
+    /**
+     * The changeDataCapture mode: reads the logical replication slot with the pgoutput
+     * plugin (binary tuple mode) and outputs provider-native change records
+     * ({@code postgres_cdc.avsc}); the {@code cdc} transform (format: postgres) normalizes
+     * them into the unified envelope.
+     *
+     * Server requirements ({@code wal_level=logical}, PostgreSQL 14+, publication, slot)
+     * are verified at assembly time; the slot is created here when {@code cdc.createSlot}.
+     */
+    private MCollectionTuple expandChangeDataCapture(final PBegin begin, final Parameters parameters) {
+
+        final Parameters.CdcParameter cdc = parameters.cdc;
+        final String database;
+        final Map<String, List<String>> keyColumns = new HashMap<>();
+        try(final JdbcUtil.CloseableDataSource dataSource = JdbcUtil
+                .createDataSource(PostgresUtil.DRIVER, parameters.url, parameters.user, parameters.password)) {
+
+            try(final Connection connection = dataSource.getConnection()) {
+                final int serverVersion = Integer.parseInt(queryFirstString(connection, "SHOW server_version_num"));
+                if(serverVersion < 140000) {
+                    throw new IllegalModuleException("postgres source module[" + getName()
+                            + "] changeDataCapture mode requires PostgreSQL 14 or later (pgoutput binary mode). server_version_num: " + serverVersion);
+                }
+                final String walLevel = queryFirstString(connection, "SHOW wal_level");
+                if(!"logical".equals(walLevel)) {
+                    throw new IllegalModuleException("postgres source module[" + getName()
+                            + "] changeDataCapture mode requires wal_level=logical. current wal_level: " + walLevel);
+                }
+                if(!exists(connection, "SELECT pubname FROM pg_publication WHERE pubname = ?", cdc.publication)) {
+                    throw new IllegalModuleException("postgres source module[" + getName()
+                            + "].cdc.publication: " + cdc.publication + " does not exist. create it with: CREATE PUBLICATION " + cdc.publication + " FOR TABLE ...");
+                }
+                if(!exists(connection, "SELECT slot_name FROM pg_replication_slots WHERE slot_name = ?", cdc.slot)) {
+                    if(!cdc.createSlot) {
+                        throw new IllegalModuleException("postgres source module[" + getName()
+                                + "].cdc.slot: " + cdc.slot + " does not exist. create it with: SELECT pg_create_logical_replication_slot('" + cdc.slot + "', 'pgoutput') or set cdc.createSlot: true");
+                    }
+                    try(final PreparedStatement statement = connection
+                            .prepareStatement("SELECT pg_create_logical_replication_slot(?, 'pgoutput')")) {
+                        statement.setString(1, cdc.slot);
+                        statement.execute();
+                    }
+                    LOG.info("postgres source module[{}] created logical replication slot: {}", getName(), cdc.slot);
+                }
+                // primary key columns of the published tables: pins the change records'
+                // keysJson to the primary key even under REPLICA IDENTITY FULL (where the
+                // protocol's key flags cover every column)
+                final String keysSql = """
+                        SELECT pt.schemaname, pt.tablename, a.attname
+                        FROM pg_publication_tables pt
+                        JOIN pg_class c ON c.relname = pt.tablename
+                        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = pt.schemaname
+                        JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
+                        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+                        WHERE pt.pubname = ANY(string_to_array(?, ','))
+                        ORDER BY pt.schemaname, pt.tablename, array_position(i.indkey, a.attnum)
+                        """;
+                try(final PreparedStatement statement = connection.prepareStatement(keysSql)) {
+                    statement.setString(1, cdc.publication);
+                    try(final ResultSet resultSet = statement.executeQuery()) {
+                        while(resultSet.next()) {
+                            keyColumns
+                                    .computeIfAbsent(resultSet.getString(1) + "." + resultSet.getString(2), k -> new ArrayList<>())
+                                    .add(resultSet.getString(3));
+                        }
+                    }
+                }
+                LOG.info("postgres source module[{}] publication: {} key columns: {}", getName(), cdc.publication, keyColumns);
+
+                database = connection.getCatalog();
+                connection.commit();
+            }
+        } catch (final IOException | SQLException e) {
+            throw new IllegalModuleException("Failed to connect database. url: " + parameters.url, e);
+        }
+
+        final PostgresReplicationSource source = new PostgresReplicationSource(
+                parameters.url, parameters.user, parameters.password,
+                cdc.slot, cdc.publication, cdc.statusIntervalSeconds, keyColumns);
+
+        final PCollection<PgOutput.ChangeEvent> events;
+        final Read.Unbounded<PgOutput.ChangeEvent> read = Read.from(source);
+        if(cdc.maxNumRecords != null || cdc.maxReadTimeSeconds != null) {
+            var bounded = read.withMaxNumRecords(Optional.ofNullable(cdc.maxNumRecords).orElse(Long.MAX_VALUE));
+            if(cdc.maxReadTimeSeconds != null) {
+                bounded = bounded.withMaxReadTime(Duration.standardSeconds(cdc.maxReadTimeSeconds));
+            }
+            events = begin.apply("ReadReplicationStream", bounded);
+        } else {
+            events = begin.apply("ReadReplicationStream", read);
+        }
+
+        final Schema outputSchema = PostgresChangeCapture.schema();
+        final PCollection<MElement> elements = events
+                .apply("ConvertToElement", ParDo.of(new ChangeEventToElementDoFn(outputSchema, database)))
+                .setCoder(ElementCoder.of(outputSchema))
+                // the replication slot is read by a single reader: break fusion so that
+                // downstream stages distribute across workers
+                .apply("Redistribute", Reshuffle.viaRandomKey());
+
+        return MCollectionTuple
+                .of(elements, outputSchema);
+    }
+
+    private static String queryFirstString(final Connection connection, final String sql) throws SQLException {
+        try(final PreparedStatement statement = connection.prepareStatement(sql);
+            final ResultSet resultSet = statement.executeQuery()) {
+            if(!resultSet.next()) {
+                throw new SQLException("Empty result for query: " + sql);
+            }
+            return resultSet.getString(1);
+        }
+    }
+
+    private static boolean exists(final Connection connection, final String sql, final String value) throws SQLException {
+        try(final PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, value);
+            try(final ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+    private static class ChangeEventToElementDoFn extends DoFn<PgOutput.ChangeEvent, MElement> {
+
+        private final Schema outputSchema;
+        private final String database;
+
+        ChangeEventToElementDoFn(final Schema outputSchema, final String database) {
+            this.outputSchema = outputSchema;
+            this.database = database;
+        }
+
+        @Setup
+        public void setup() {
+            outputSchema.setup(DataType.AVRO);
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = PostgresChangeCapture.convert(c.element(), database, c.timestamp());
+            c.output(element.convert(outputSchema, DataType.AVRO));
+        }
     }
 
     // Assembly-time resolved read of one matched table (only used while building the graph).
