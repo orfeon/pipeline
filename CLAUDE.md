@@ -67,10 +67,22 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
-`pubsub` `storage` `files` `debug` `action` `auxia` `tasks` `localH2`.
+`pubsub` `storage` `files` `debug` `auxia` `tasks` `localH2`.
 
-> The registered `@…Module(name=…)` value is authoritative. If this list drifts, regenerate it by grepping
-> `@Source.Module` / `@Transform.Module` / `@Sink.Module` in `src/main/java`.
+**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage`.
+Registered as `action.<service>` in all three module registries (thin adapters `ActionSource` /
+`ActionTransform` / `ActionSink`; shared logic in `module/action/Actions.java`), so an action
+step is placeable in `sources` / `transforms` / `sinks` — placement never changes behavior. Triggers:
+`once` (fire after all inputs/waits complete; inputs are pure signals) / `perElement` / `collect`
+(gather all elements into one firing). Every firing emits a common envelope record
+(`service, op, jobId, state, startedAt, finishedAt, payload`). Two-plane rule: sink outputs and action
+envelopes are control records — consumable by action `inputs` and anyone's `waits`; a data
+transform/sink consuming them via `inputs` gets an assembly-time warning (see
+`docs → module/action/README.md`).
+
+> The registered `@…Module(name=…)` / `@Action.Service(name=…)` value is authoritative. If this list
+> drifts, regenerate it by grepping `@Source.Module` / `@Transform.Module` / `@Sink.Module` /
+> `@Action.Service` in `src/main/java`.
 
 ### Core Module Classes (`module/`)
 - `Module.java` — base for all modules; `Source`/`Transform`/`Sink` extend it and hold the discovery registries.
@@ -82,7 +94,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 
 ### Utilities (`util/`)
 - `schema/` — schema + `converter/` between Avro / Row / Entity / Struct / Document / Proto / JSON.
-- `pipeline/` — pipeline building blocks (`select/`, `aggregation/`, `mutation/`, `action/`, filters, queries).
+- `pipeline/` — pipeline building blocks (`select/`, `aggregation/`, `mutation/`, filters, queries).
   - `pipeline/Query2.java` + `pipeline/lookup/` + `pipeline/udf/` — the per-element SQL engine behind the
     `query` transform: Calcite SQL inside a DoFn (plan once per worker, no shuffle) with key-driven
     lookup-joins to external sources (jdbc / spanner incl. parameterized GoogleSQL/GQL query tables /

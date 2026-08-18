@@ -9,6 +9,7 @@ import com.mercari.solution.config.*;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
+import com.mercari.solution.module.action.Actions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -125,15 +126,16 @@ public class MPipeline {
         final Map<String, MCollection> outputs = new HashMap<>();
         final Set<String> executedModuleNames = new HashSet<>();
         final Set<String> moduleNames = moduleNames(config);
+        final Set<String> controlOutputModuleNames = controlOutputModuleNames(config);
 
         final int size = moduleNames.size();
 
         try(final MErrorHandler errorHandler = MErrorHandler.createPipelineErrorHandler(pipeline, config)) {
             int preOutputSize = 0;
             while(preOutputSize < size) {
-                setResult(pipeline, config.getSources(), outputs, executedModuleNames, errorHandler);
-                setResult(pipeline, config.getTransforms(), outputs, executedModuleNames, errorHandler);
-                setResult(pipeline, config.getSinks(), outputs, executedModuleNames, errorHandler);
+                setResult(pipeline, config.getSources(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
+                setResult(pipeline, config.getTransforms(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
+                setResult(pipeline, config.getSinks(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
                 if(preOutputSize == executedModuleNames.size()) {
                     moduleNames.removeAll(executedModuleNames);
                     final String message = String.format("No input for modules: %s", String.join(",", moduleNames));
@@ -151,6 +153,7 @@ public class MPipeline {
             final List<? extends ModuleConfig> moduleConfigs,
             final Map<String, MCollection> outputs,
             final Set<String> executedModuleNames,
+            final Set<String> controlOutputModuleNames,
             final MErrorHandler errorHandler) {
 
         final List<ModuleConfig> notDoneModules = new ArrayList<>();
@@ -206,6 +209,8 @@ public class MPipeline {
                     .map(outputs::get)
                     .collect(Collectors.toList());
 
+            lintControlPlaneInputs(moduleConfig, inputNames, controlOutputModuleNames);
+
             try {
                 final MCollectionTuple output = switch (moduleConfig) {
                     case SourceConfig sourceConfig -> {
@@ -222,9 +227,10 @@ public class MPipeline {
                         }
                         final Transform transform = Transform.create(
                                 transformConfig, pipeline.getOptions(), waits, sideInputs, errorHandler);
-                        yield MCollectionTuple
-                                .mergeCollection(inputs)
-                                .apply(moduleConfig.getName(), transform);
+                        final MCollectionTuple transformInput = inputs.isEmpty()
+                                ? MCollectionTuple.empty(pipeline)
+                                : MCollectionTuple.mergeCollection(inputs);
+                        yield transformInput.apply(moduleConfig.getName(), transform);
                     }
                     case SinkConfig sinkConfig -> {
                         if(containsInputTemplate(sinkConfig, rawInputNames)) {
@@ -255,7 +261,61 @@ public class MPipeline {
         if(notDoneModules.size() == moduleConfigs.size()) {
             return;
         }
-        setResult(pipeline, notDoneModules, outputs, executedModuleNames, errorHandler);
+        setResult(pipeline, notDoneModules, outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
+    }
+
+    /**
+     * Names of modules whose outputs are control records rather than data: every action module
+     * (in any section — their output is the execution result envelope) and every sink-section
+     * module (their output is the write result, e.g. written file paths).
+     */
+    private static Set<String> controlOutputModuleNames(final Config config) {
+        final Set<String> names = new HashSet<>();
+        names.addAll(config.getSources().stream()
+                .filter(Objects::nonNull)
+                .filter(c -> Actions.isActionModule(c.getModule()))
+                .map(SourceConfig::getName)
+                .collect(Collectors.toSet()));
+        names.addAll(config.getTransforms().stream()
+                .filter(Objects::nonNull)
+                .filter(c -> Actions.isActionModule(c.getModule()))
+                .map(TransformConfig::getName)
+                .collect(Collectors.toSet()));
+        names.addAll(config.getSinks().stream()
+                .filter(Objects::nonNull)
+                .map(SinkConfig::getName)
+                .collect(Collectors.toSet()));
+        return names;
+    }
+
+    /**
+     * Two-plane lint: data modules (non-action transforms/sinks) should consume data outputs
+     * (sources/transforms) via inputs; control records — action envelopes and sink results —
+     * are meant for action inputs or waits. Deliberate crossings (e.g. aggregating a file list
+     * before a summary notification) stay allowed, so this warns instead of failing.
+     */
+    private static void lintControlPlaneInputs(
+            final ModuleConfig moduleConfig,
+            final List<String> inputNames,
+            final Set<String> controlOutputModuleNames) {
+
+        if(!(moduleConfig instanceof TransformConfig) && !(moduleConfig instanceof SinkConfig)) {
+            return;
+        }
+        if(Actions.isActionModule(moduleConfig.getModule())) {
+            return;
+        }
+        for(final String inputName : inputNames) {
+            final String sourceModuleName = inputName.contains(".")
+                    ? inputName.substring(0, inputName.indexOf("."))
+                    : inputName;
+            if(controlOutputModuleNames.contains(sourceModuleName) || controlOutputModuleNames.contains(inputName)) {
+                LOG.warn("module: {} consumes control records (output of: {}) as data inputs."
+                                + " Control records (action envelopes, sink results) are meant for action inputs or waits;"
+                                + " if this is deliberate (e.g. aggregating results before an action), you can ignore this warning",
+                        moduleConfig.getName(), inputName);
+            }
+        }
     }
 
     /**

@@ -13,8 +13,8 @@ import java.util.Set;
     title="Describe Pipeline Module",
     description= """
         Get the full documentation (parameters, examples) of the module specified by parameter 'id'.
-        The id format is '{type}/{name}' where type is one of source, transform, sink
-        (e.g. 'source/bigquery', 'transform/select', 'sink/spanner').
+        The id format is '{type}/{name}' where type is one of source, transform, sink, action
+        (e.g. 'source/bigquery', 'transform/select', 'sink/spanner', 'action/bigquery').
         Use tool 'list-modules' to discover available module names.
         Shared documents referenced from module docs (e.g. module/common/filter.md) can be read
         with tool 'read-docs'.
@@ -38,7 +38,7 @@ public class DescribeModuleTool implements Tool {
 
     // Same docs tree as the agent's DocsReader (src/main/resources/server/docs)
     private static final String DOCS_MODULE_PATH = "/server/docs/module/";
-    private static final Set<String> MODULE_TYPES = Set.of("source", "transform", "sink");
+    private static final Set<String> MODULE_TYPES = Set.of("source", "transform", "sink", "action");
 
     @Override
     public void init(ServletContext servletContext) {
@@ -61,7 +61,7 @@ public class DescribeModuleTool implements Tool {
         final String[] parts = id.split("/");
         if(parts.length != 2 || !MODULE_TYPES.contains(parts[0]) || parts[1].isBlank()) {
             return McpSchema.CallToolResult.builder()
-                    .addTextContent("Invalid module id: '" + id + "'. Specify '{type}/{name}' where type is one of source, transform, sink (e.g. 'source/bigquery').")
+                    .addTextContent("Invalid module id: '" + id + "'. Specify '{type}/{name}' where type is one of source, transform, sink, action (e.g. 'source/bigquery', 'action/bigquery').")
                     .isError(true)
                     .build();
         }

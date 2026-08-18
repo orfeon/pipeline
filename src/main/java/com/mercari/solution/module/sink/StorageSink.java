@@ -128,8 +128,15 @@ public class StorageSink extends Sink {
         final PCollection<MElement> outputFiles = expand(
                 getName(), parameters, input, inputSchema, outputSchema, errorHandler);
 
+        // The written-files records are the sink's result (control records): downstream steps
+        // wait on them, and action modules may consume them as inputs (e.g. load each written
+        // file with a bigquery action, or keep a history file with a storage action).
         return MCollectionTuple
-                .done(PDone.in(inputs.getPipeline()));
+                .of(outputFiles, createFileSchema());
+    }
+
+    public static Schema createFileSchema() {
+        return OutputDoFn.schema;
     }
 
     public static PCollection<MElement> expand(

@@ -61,7 +61,10 @@ tuple.
 ## Reference implementations
 
 - `DebugSink.java` (~240 lines) — simplest full sink; also shows DirectRunner-only local output.
-- `ActionSink.java` / `TasksSink.java` — small, action-style sinks.
+- `TasksSink.java` — small skeleton sink (unimplemented execution, parameter shape only).
+  (`ActionSink.java` is not a reference — it is the thin position adapter for action modules;
+  operations against external services usually belong in an action service instead, see
+  [action.md](action.md).)
 - `FilesSink.java` — per-record file writing with templated paths.
 - `SpannerSink.java` — mutations, failure handling, emulator support.
 - `PubSubSink.java` — serialization formats + dynamic topics.

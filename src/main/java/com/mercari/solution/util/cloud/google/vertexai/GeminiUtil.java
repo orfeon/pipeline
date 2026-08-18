@@ -208,13 +208,6 @@ public class GeminiUtil {
 
     }
 
-    public static class BatchPredictionJobsResponse implements Serializable {
-        public List<Content> contents;
-        public Content systemInstruction;
-        public GenerationConfig generationConfig;
-        public SafetySetting safetySetting;
-    }
-
     public static class Content implements Serializable {
 
         public String role;
@@ -479,7 +472,11 @@ public class GeminiUtil {
         PROBABILITY
     }
 
-    public static BatchPredictionJobsResponse batchPredictionJobs(
+    /**
+     * Submits a batch prediction job and returns the created BatchPredictionJob resource
+     * (contains {@code name} — the job resource name — and {@code state}).
+     */
+    public static JsonObject batchPredictionJobs(
             final HttpClient client,
             final String token,
             final String project,
@@ -490,7 +487,7 @@ public class GeminiUtil {
         return batchPredictionJobs(client, token, project, region, body);
     }
 
-    public static BatchPredictionJobsResponse batchPredictionJobs(
+    public static JsonObject batchPredictionJobs(
             final HttpClient client,
             final String token,
             final String project,
@@ -509,10 +506,34 @@ public class GeminiUtil {
             if(res.statusCode() >= 400) {
                 throw new RuntimeException("Failed to batchPredictionJobs code: " + res.statusCode() + ", body: " + res.body());
             }
-            System.out.println("response: " + res.body());
-            final JsonObject responseJson = new Gson().fromJson(res.body(), JsonObject.class);
+            return new Gson().fromJson(res.body(), JsonObject.class);
+        } catch (final Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
 
-            return null;
+    /**
+     * Fetches a BatchPredictionJob resource by its full resource name
+     * ({@code projects/../locations/../batchPredictionJobs/..}), for polling job state.
+     */
+    public static JsonObject getBatchPredictionJob(
+            final HttpClient client,
+            final String token,
+            final String region,
+            final String jobResourceName) {
+
+        final String endpoint = String.format("https://%s-aiplatform.googleapis.com/v1/%s", region, jobResourceName);
+        try {
+            final HttpRequest req = HttpRequest.newBuilder()
+                    .uri(new URI(endpoint))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+            final HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
+            if(res.statusCode() >= 400) {
+                throw new RuntimeException("Failed to getBatchPredictionJob code: " + res.statusCode() + ", body: " + res.body());
+            }
+            return new Gson().fromJson(res.body(), JsonObject.class);
         } catch (final Exception e) {
             throw new RuntimeException(e);
         }

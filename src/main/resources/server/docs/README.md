@@ -49,6 +49,12 @@ You can define and run a pipeline by combining these types of various build-in m
 
 The list of build-in modules can be found on [Modules Page](module/README.md).
 
+Besides the data modules, [action modules](module/action/README.md) (`action.<service>`) execute
+operations against external services (run a BigQuery job, write a result-history file) as
+lightweight workflow steps. They are placeable in any of the `sources` / `transforms` / `sinks`
+sections — put one where it sits in the flow: no upstream → `sources`, consumed downstream →
+`transforms`, terminal → `sinks`.
+
 Examples of configuration files are listed in the [Examples Page](../../../../../examples/README.md), so try to find and arrange a configuration file that is close to the data processing you want to perform.
 
 Below is an overview of these built-in modules.
