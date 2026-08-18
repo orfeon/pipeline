@@ -61,10 +61,19 @@ This page lists the modules registered in the current codebase.
 | [storage](sink/storage.md)       | Write input data as files (Avro/Parquet/JSON/CSV) to GCS, S3, or local file systems              |
 | [files](sink/files.md)           | Write each input record as an individual file with template-driven path and content              |
 | [debug](sink/debug.md)           | Output input data to logs for debugging and inspection                                           |
-| [action](sink/action.md)                                                         | Execute actions on external services (BigQuery, Vertex AI Gemini, Dataflow)                      |
 | [auxia](sink/auxia.md)           | Send input data as events to the Auxia platform via its ingestion API                            |
 | [tasks](sink/tasks.md)                                                           | Send input records as tasks to a Cloud Tasks queue (not yet implemented)                         |
 | [localH2](sink/localh2.md)                                                       | Load input records into a local H2 database and write the database file out                      |
+
+## Action Modules
+
+Action modules (`action.<service>`) execute an operation against an external service at a point in the pipeline (run a job, write a result history) — lightweight workflow steps. They are placeable in any of the `sources` / `transforms` / `sinks` sections; see the [action modules overview](action/README.md) for placement, trigger semantics (`once` / `perElement` / `collect`) and the common output envelope.
+
+| module                                                | description                                                                                       |
+|-------------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| [action.bigquery](action/bigquery.md)                 | Run a BigQuery job (query or load) and wait for it, with idempotent deterministic job ids           |
+| [action.vertexai_gemini](action/vertexai_gemini.md)   | Launch a Vertex AI Gemini batch prediction job and wait for it                                      |
+| [action.storage](action/storage.md)                   | Write a small file from the triggering records (result histories, summary reports, marker files)    |
 
 ## Failure Modules
 

@@ -85,9 +85,6 @@ transforms:
     description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
     tags: [transform, select, filter, batch, streaming, field, projection]
 sinks:
-  - title: action
-    description: Executes an operation against an external Google Cloud service at a point in the pipeline. Supported services are BigQuery (run a query job or load job), Vertex AI Gemini (launch a batch prediction job), and Dataflow (template launch, currently a placeholder). The sink can run with no inputs, using waits to trigger the action after other steps complete.
-    tags: [sink, action, bigquery, dataflow, vertexai, gemini, job, trigger, batch]
   - title: auxia
     description: Sends input data as events to the Auxia platform via its ingestion API.
     tags: [sink, auxia, batch, streaming, event, api]
@@ -130,3 +127,15 @@ sinks:
   - title: tasks
     description: Planned sink for enqueueing input records as Google Cloud Tasks HTTP tasks. NOT YET IMPLEMENTED - the module is registered but its execution unconditionally fails, so it cannot be used in pipelines yet. Parameter definitions (queue, format, attributes, batching) exist as a design placeholder.
     tags: [sink, tasks, cloudtasks, gcp, unimplemented]
+# Action modules are placeable in any of the sources/transforms/sinks sections
+# (the server appends these entries to each section's module list for the Builder UI).
+actions:
+  - title: action.bigquery
+    description: Runs a BigQuery job (query or load) via the Jobs API and waits for its completion, with idempotent deterministic job ids (a retried bundle adopts the running job). trigger once fires after upstream steps complete; perElement runs one job per record with ${field} templates; collect runs one job over all records (e.g. sourceUrisField gathers every written file into a single load job). Emits the common action envelope (service, op, jobId, state, startedAt, finishedAt, payload).
+    tags: [action, bigquery, job, query, load, trigger, batch, workflow]
+  - title: action.vertexai_gemini
+    description: Launches a Vertex AI batch prediction job (batchPredictionJobs REST API) for a Gemini model and waits for its completion by polling the job state. Submission is not idempotent (no client-supplied job id), so prefer trigger once. Emits the common action envelope.
+    tags: [action, vertexai, gemini, batch, prediction, job, trigger, workflow]
+  - title: action.storage
+    description: Writes a small file from the triggering records — the control-plane counterpart of the storage sink. Keeps execution result histories (e.g. the file list a storage sink emitted) as JSONL, writes templated summary reports, or creates marker files (empty _SUCCESS object with trigger once). Supports GCS/S3/local paths. Emits the common action envelope.
+    tags: [action, storage, gcs, file, history, marker, report, trigger, workflow]

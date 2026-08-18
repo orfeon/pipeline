@@ -20,7 +20,10 @@ public class DocsReader {
     public enum ModuleType {
         source,
         transform,
-        sink
+        sink,
+        // action modules (action.<service>) are placeable in sources/transforms/sinks;
+        // their docs live under module/action/<service>.md
+        action
     }
 
     @Tool("""

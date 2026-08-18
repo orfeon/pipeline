@@ -41,7 +41,10 @@ public abstract class Source extends Module<PBegin> {
         view
     }
 
-    private static final Map<String, Class<Source>> sources = findSourcesInPackage("com.mercari.solution.module.source");
+    private static final Map<String, Class<Source>> sources = com.mercari.solution.module.action.Actions
+            .registerActionModules(
+                    findSourcesInPackage("com.mercari.solution.module.source"),
+                    com.mercari.solution.module.source.ActionSource.class);
 
     private Schema schema;
 
