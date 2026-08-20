@@ -40,7 +40,11 @@ For deep internals (assembly loop, data model, schema conversions, error handlin
 **[docs/developer/architecture.md](docs/developer/architecture.md)**. Summary:
 
 ### Entry Point — `MPipeline.java`
-Loads the `Config`, sets pipeline `Options`, then `apply()` assembles the Beam pipeline. Assembly is a
+Loads the `Config`, sets pipeline `Options`, then `apply()` assembles the Beam pipeline.
+When the `PORT` env var is set (Cloud Run Service) or `--serve=true` is passed, `main` instead
+starts `MPipelineHttpServer` (JDK built-in HTTP server, no Jetty): `POST /run` assembles and runs
+one pipeline per request (fixed config via `--config`/`MPIPELINE_CONFIG`; body = data for the
+`request` source, or the config itself; `?args.*` = template args). Assembly is a
 **dependency-resolution loop**: modules whose `inputs`/`waits`/`sideInputs` are all satisfied get built and
 their outputs registered; the loop repeats until every module is built (or it detects an unsatisfiable module).
 Order in the config file does not matter. If assembly throws, `system.failure.alterConfig` can supply a
@@ -61,7 +65,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `@Source.Module(name="…")`, `@Transform.Module(name="…")`, `@Sink.Module(name="…")`.
 
 **Sources** (`module/source/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg`
-`jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create`.
+`jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
 
 **Transforms** (`module/transform/`): `select` `aggregation` `beamsql` `query` `partition`
 `compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.

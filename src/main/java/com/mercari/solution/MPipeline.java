@@ -42,6 +42,14 @@ public class MPipeline {
         Config.Format getFormat();
         void setFormat(Config.Format format);
 
+        @Description("Request body content for the request source module (set per run in HTTP serve mode).")
+        String getRequestBody();
+        void setRequestBody(String requestBody);
+
+        @Description("Force HTTP serve mode on/off. When unset, serve mode activates if the PORT environment variable is set (Cloud Run Service).")
+        Boolean getServe();
+        void setServe(Boolean serve);
+
     }
 
     public interface MPipelineServerOptions extends MPipelineOptions {
@@ -66,6 +74,11 @@ public class MPipeline {
         final MPipelineOptions pipelineOptions = PipelineOptionsFactory
                 .fromArgs(OptionUtil.filterPipelineArgs(args))
                 .as(MPipelineOptions.class);
+
+        if(MPipelineHttpServer.isServeMode(pipelineOptions)) {
+            MPipelineHttpServer.serve(pipelineOptions, args);
+            return;
+        }
 
         final Runner runner = OptionUtil.getRunner(pipelineOptions);
         LOG.info("Runner: {}", runner);

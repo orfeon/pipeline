@@ -317,6 +317,21 @@ public class Config implements Serializable {
     }
 
     public static Config load(final String configParam, final String context, final Format format, final Map<String, String> args) throws IOException {
+        final String content = readContent(configParam);
+        if(content == null) {
+            // a subscription config resource with no message available yields an empty pipeline
+            return empty();
+        }
+        return parse(content, context, format, args);
+    }
+
+    /**
+     * Resolves the config parameter to its raw text content without parsing, accepting the same
+     * forms as {@link #load} (GCS, Parameter Manager, Artifact Registry, base64, Pub/Sub
+     * subscription, local file path, or the config body itself). Returns null only for a
+     * subscription resource with no message available.
+     */
+    public static String readContent(final String configParam) throws IOException {
         if(configParam == null) {
             throw new IllegalModuleException("", "pipeline", List.of("pipeline parameter config must not be null"));
         }
@@ -340,7 +355,7 @@ public class Config implements Serializable {
             LOG.info("config parameter is PubSub Subscription: {}", configParam);
             content = PubSubUtil.getTextMessage(configParam);
             if(content == null) {
-                return empty();
+                return null;
             }
             LOG.info("config content: {}", content);
         } else  {
@@ -363,7 +378,7 @@ public class Config implements Serializable {
             throw new IllegalModuleException("", "pipeline", List.of("pipeline parameter config must not be empty"));
         }
 
-        return parse(content, context, format, args);
+        return content;
     }
 
     public static Config parse(final String configText, final String context, final Format format, final String[] args) {

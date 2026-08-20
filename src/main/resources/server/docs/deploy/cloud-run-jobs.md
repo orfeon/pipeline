@@ -5,6 +5,9 @@ The container image built with the `direct` profile
 can be executed as a [Cloud Run Job](https://cloud.google.com/run/docs/create-jobs).
 This is a lightweight way to run small to medium batch pipelines on a schedule or on demand,
 without launching a Dataflow job.
+(The same image also runs as a [Cloud Run Worker Pool](cloud-run-worker-pools.md) for
+streaming/queue workloads, as an HTTP-triggered
+[Cloud Run Service](cloud-run-service.md), and on [Kubernetes](kubernetes.md).)
 
 The image's entrypoint already launches `com.mercari.solution.MPipeline` with
 `--runner=DirectRunner`, so the job only needs to supply the pipeline arguments

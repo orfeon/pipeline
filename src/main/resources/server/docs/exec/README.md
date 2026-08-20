@@ -65,6 +65,11 @@ gcloud dataflow flex-template run {job_name} \
 You can run a pipeline locally using the container image built with the `direct` profile
 (see [How to Deploy Pipeline](../deploy/README.md#deploy-direct-runner-for-local-execution)).
 This is useful when you want to process small data quickly.
+The same image also runs serverlessly on
+[Cloud Run Jobs](../deploy/cloud-run-jobs.md) /
+[Worker Pools](../deploy/cloud-run-worker-pools.md) /
+[Services](../deploy/cloud-run-service.md) and on
+[Kubernetes](../deploy/kubernetes.md).
 
 For local execution, execute the following command to grant the necessary permissions.
 
