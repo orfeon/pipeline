@@ -769,6 +769,12 @@
       <artifactId>google-cloud-iamcredentials</artifactId>
     </dependency>
 
+    <!-- https://mvnrepository.com/artifact/com.google.cloud/google-cloud-tasks -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-tasks</artifactId>
+    </dependency>
+
     <!-- https://mvnrepository.com/artifact/com.google.cloud/google-cloud-kms -->
     <dependency>
       <groupId>com.google.cloud</groupId>

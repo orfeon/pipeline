@@ -61,7 +61,8 @@ tuple.
 ## Reference implementations
 
 - `DebugSink.java` (~240 lines) — simplest full sink; also shows DirectRunner-only local output.
-- `TasksSink.java` — small skeleton sink (unimplemented execution, parameter shape only).
+- `TasksSink.java` — custom client boundary (`TasksClient` interface, in-memory client for unit tests via
+  `endpoint: memory://…`, emulator IT), per-record templates, control-record output.
   (`ActionSink.java` is not a reference — it is the thin position adapter for action modules;
   operations against external services usually belong in an action service instead, see
   [action.md](action.md).)

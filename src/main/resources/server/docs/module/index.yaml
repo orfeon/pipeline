@@ -128,8 +128,8 @@ sinks:
     description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
     tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
   - title: tasks
-    description: Planned sink for enqueueing input records as Google Cloud Tasks HTTP tasks. NOT YET IMPLEMENTED - the module is registered but its execution unconditionally fails, so it cannot be used in pipelines yet. Parameter definitions (queue, format, attributes, batching) exist as a design placeholder.
-    tags: [sink, tasks, cloudtasks, gcp, unimplemented]
+    description: Enqueues each input record as a Google Cloud Tasks HTTP task so the queue governs rate limiting, retries, delayed/scheduled execution and name-based deduplication. Supports per-record templates for URL, headers, task id (hashed, idempotent), scheduleTime/delay, JSON/Avro/Protobuf/FreeMarker bodies with a size guard, keyed micro-batching of records into one task, OIDC/OAuth target auth, queue-level HTTP routing (tasks:buffer), and emits CREATED/ALREADY_EXISTS/FAILED control records.
+    tags: [sink, tasks, cloudtasks, gcp, http, webhook, scheduling, batch, streaming]
 # Action modules are placeable in any of the sources/transforms/sinks sections
 # (the server appends these entries to each section's module list for the Builder UI).
 actions:
@@ -142,3 +142,6 @@ actions:
   - title: action.storage
     description: Writes a small file from the triggering records — the control-plane counterpart of the storage sink. Keeps execution result histories (e.g. the file list a storage sink emitted) as JSONL, writes templated summary reports, or creates marker files (empty _SUCCESS object with trigger once). Supports GCS/S3/local paths. Emits the common action envelope.
     tags: [action, storage, gcs, file, history, marker, report, trigger, workflow]
+  - title: action.tasks
+    description: Cloud Tasks queue operations as workflow steps, the control-plane counterpart of the tasks sink. create (idempotent, adopts an existing queue) / update rate limits and retry config / pause / resume / purge / delete / get, waitForEmpty (poll until the queue has drained so a later step can rely on every task having run), runTask and deleteTask (perElement templates). Emits the common action envelope.
+    tags: [action, tasks, cloudtasks, queue, pause, resume, purge, wait, trigger, workflow, gcp]

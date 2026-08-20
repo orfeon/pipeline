@@ -32,6 +32,7 @@ public class TemplateUtil {
         templateConfig.setTemplateExceptionHandler(new ImputeSameVariablesTemplateExceptionHandler());
         templateConfig.setLogTemplateExceptions(false);
         templateConfig.setSharedVariable("statics", BeansWrapper.getDefaultInstance().getStaticModels());
+        templateConfig.setURLEscapingCharset("UTF-8"); // enables the ?url built-in
         try {
             templateConfig.setSharedVariable("utils", UTILS);
             return new Template(name, new StringReader(template), templateConfig);
@@ -44,6 +45,7 @@ public class TemplateUtil {
         final Configuration templateConfig = new Configuration(Configuration.VERSION_2_3_34);
         templateConfig.setNumberFormat("computer");
         templateConfig.setSharedVariable("statics", BeansWrapper.getDefaultInstance().getStaticModels());
+        templateConfig.setURLEscapingCharset("UTF-8"); // enables the ?url built-in
         //templateConfig.setObjectWrapper(new CSVWrapper(Configuration.VERSION_2_3_30));
         try {
             templateConfig.setSharedVariable("utils", UTILS);
