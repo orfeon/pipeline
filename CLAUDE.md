@@ -73,7 +73,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
 `pubsub` `storage` `files` `debug` `auxia` `tasks` `localH2`.
 
-**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage`.
+**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks`.
 Registered as `action.<service>` in all three module registries (thin adapters `ActionSource` /
 `ActionTransform` / `ActionSink`; shared logic in `module/action/Actions.java`), so an action
 step is placeable in `sources` / `transforms` / `sinks` — placement never changes behavior. Triggers:

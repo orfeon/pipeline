@@ -1,187 +1,1505 @@
 package com.mercari.solution.module.sink;
 
-import com.google.gson.Gson;
+import com.google.api.core.ApiFuture;
+import com.google.api.core.ApiFutures;
+import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
+import com.google.api.gax.retrying.RetrySettings;
+import com.google.api.gax.rpc.AlreadyExistsException;
+import com.google.api.gax.rpc.StatusCode;
+import com.google.cloud.tasks.v2.*;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Timestamp;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.TemplateUtil;
+import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
+import com.mercari.solution.util.cloud.google.IAMUtil;
+import com.mercari.solution.util.pipeline.Serialize;
 import com.mercari.solution.util.pipeline.Union;
-import org.apache.beam.io.requestresponse.Caller;
-import org.apache.beam.io.requestresponse.RequestResponseIO;
-import org.apache.beam.io.requestresponse.SetupTeardown;
-import org.apache.beam.io.requestresponse.UserCodeExecutionException;
+import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
+import com.mercari.solution.util.schema.converter.ElementToProtoConverter;
+import com.mercari.solution.util.schema.converter.ElementToJsonConverter;
+import freemarker.template.Template;
+import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupIntoBatches;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.commons.lang.NotImplementedException;
+import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.TupleTag;
+import org.apache.beam.sdk.values.TupleTagList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+/**
+ * Sink that enqueues each input element as a Google Cloud Tasks HTTP task.
+ *
+ * <p>Design (see docs/module/sink/tasks.md): one element = one task. Rate limiting and
+ * target-side retries belong to the queue; the sink only retries the createTask RPC itself.
+ * Idempotency is achieved with named tasks ({@code task.id} template). The sink emits one
+ * control record per element (CREATED / ALREADY_EXISTS / FAILED) so downstream steps can
+ * {@code waits} on it; failures are also routed to {@code failureSinks}.
+ */
 @Sink.Module(name="tasks")
 public class TasksSink extends Sink {
 
     private static final Logger LOG = LoggerFactory.getLogger(TasksSink.class);
 
-    private static class Parameters implements Serializable {
+    private static final String VAR_TIMESTAMP = "__timestamp";
+    private static final String VAR_SOURCE = "__source";
+    private static final Pattern PATTERN_QUEUE = Pattern
+            .compile("^projects/[^/]+/locations/[^/]+/queues/[^/]+$");
+    private static final Pattern PATTERN_TASK_ID = Pattern.compile("^[A-Za-z0-9_-]{1,500}$");
+    private static final Pattern PATTERN_SIMPLE_FIELD = Pattern.compile("^\\$\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*}$");
+    private static final Pattern PATTERN_SHORT_DURATION = Pattern.compile("^(\\d+)\\s*(ms|s|m|h|d)$");
+    private static final String SCOPE_CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform";
+
+    public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
+
+    public static class Parameters implements Serializable {
 
         private String queue;
-        private Format format;
-        private List<String> attributes;
+        private TargetParameters target;
+        private BodyParameters body;
+        private TaskParameters task;
+        private BatchParameters batch;
+        private RetryParameters retry;
+        private OnAlreadyExists onAlreadyExists;
+        private Integer concurrency;
+        private String endpoint;
 
-        private Integer maxBatchSize;
-        private Integer maxBatchBytesSize;
-
-
-        private void validate() {
+        private void validate(final Schema inputSchema) {
             final List<String> errorMessages = new ArrayList<>();
-            if (this.queue == null) {
+            if(concurrency != null && concurrency < 1) {
+                errorMessages.add("parameters.concurrency must be >= 1 but: " + concurrency);
+            }
+            if(queue == null) {
                 errorMessages.add("parameters.queue must not be null");
+            } else if(!TemplateUtil.isTemplateText(queue) && !PATTERN_QUEUE.matcher(queue).matches()) {
+                errorMessages.add("parameters.queue must be in format projects/{project}/locations/{location}/queues/{queue} but: " + queue);
             }
-            if (this.format == null) {
-                errorMessages.add("parameters.format must not be null");
+            if(target != null) {
+                errorMessages.addAll(target.validate());
             }
-            if (!errorMessages.isEmpty()) {
+            if(body != null) {
+                errorMessages.addAll(body.validate());
+            }
+            if(task != null) {
+                errorMessages.addAll(task.validate());
+            }
+            if(retry != null) {
+                errorMessages.addAll(retry.validate());
+            }
+            if(batch != null) {
+                errorMessages.addAll(batch.validate());
+                errorMessages.addAll(validateBatchTemplateArgs(inputSchema));
+            }
+            if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
         }
 
+        /**
+         * In batch mode every element of a task shares one rendered queue / url / headers / id /
+         * schedule, so those templates may only reference fields that also appear in batch.key
+         * (elements in a batch are equal on those fields by construction).
+         */
+        private List<String> validateBatchTemplateArgs(final Schema inputSchema) {
+            final List<String> errorMessages = new ArrayList<>();
+            final Set<String> keyArgs = new HashSet<>();
+            if(batch.key != null) {
+                keyArgs.addAll(TemplateUtil.extractTemplateArgs(batch.key, inputSchema));
+            }
+            final Map<String, String> perTaskTemplates = new LinkedHashMap<>();
+            perTaskTemplates.put("queue", queue);
+            if(target != null) {
+                perTaskTemplates.put("target.url", target.url);
+                if(target.headers != null) {
+                    target.headers.forEach((k, v) -> perTaskTemplates.put("target.headers." + k, v));
+                }
+            }
+            if(task != null) {
+                perTaskTemplates.put("task.id", task.id);
+                perTaskTemplates.put("task.scheduleTime", task.scheduleTime);
+                perTaskTemplates.put("task.delay", task.delay);
+            }
+            for(final Map.Entry<String, String> entry : perTaskTemplates.entrySet()) {
+                if(entry.getValue() == null) {
+                    continue;
+                }
+                for(final String arg : TemplateUtil.extractTemplateArgs(entry.getValue(), inputSchema)) {
+                    if(!keyArgs.contains(arg)) {
+                        errorMessages.add("parameters." + entry.getKey() + " references field '" + arg
+                                + "' which is not part of parameters.batch.key (in batch mode per-task templates may only use batch.key fields)");
+                    }
+                }
+            }
+            return errorMessages;
+        }
+
         private void setDefaults() {
-            if (this.attributes == null) {
-                this.attributes = new ArrayList<>();
+            if(body == null) {
+                body = new BodyParameters();
+            }
+            body.setDefaults();
+            if(task == null) {
+                task = new TaskParameters();
+            }
+            task.setDefaults();
+            if(retry == null) {
+                retry = new RetryParameters();
+            }
+            retry.setDefaults();
+            if(onAlreadyExists == null) {
+                onAlreadyExists = OnAlreadyExists.success;
+            }
+            if(concurrency == null) {
+                concurrency = 1;
+            }
+            if(target != null) {
+                target.setDefaults();
+            }
+            if(batch != null) {
+                batch.setDefaults();
             }
         }
     }
 
-    private enum Format {
-        avro,
+    public static class BatchParameters implements Serializable {
+
+        private Integer maxSize;
+        private Long maxBytes;
+        private String maxBufferingDuration;
+        private String key;
+        private Integer shards;
+
+        private List<String> validate() {
+            final List<String> errorMessages = new ArrayList<>();
+            if(maxSize != null && maxSize < 1) {
+                errorMessages.add("parameters.batch.maxSize must be >= 1 but: " + maxSize);
+            }
+            if(maxBytes != null && maxBytes < 1) {
+                errorMessages.add("parameters.batch.maxBytes must be >= 1 but: " + maxBytes);
+            }
+            if(maxSize == null && maxBytes == null) {
+                errorMessages.add("parameters.batch requires maxSize and/or maxBytes");
+            }
+            if(maxBufferingDuration != null) {
+                try {
+                    parseDuration(maxBufferingDuration);
+                } catch (final IllegalArgumentException e) {
+                    errorMessages.add("parameters.batch.maxBufferingDuration is illegal: " + e.getMessage());
+                }
+            }
+            if(shards != null && shards < 1) {
+                errorMessages.add("parameters.batch.shards must be >= 1 but: " + shards);
+            }
+            if(key != null && !TemplateUtil.isTemplateText(key)) {
+                errorMessages.add("parameters.batch.key must be a template on element fields but: " + key);
+            }
+            return errorMessages;
+        }
+
+        private void setDefaults() {
+            if(shards == null) {
+                shards = 8;
+            }
+        }
+    }
+
+    public static class TargetParameters implements Serializable {
+
+        private String url;
+        private HttpMethod method;
+        private Map<String, String> headers;
+        private AuthParameters auth;
+
+        private List<String> validate() {
+            final List<String> errorMessages = new ArrayList<>();
+            if(url == null) {
+                errorMessages.add("parameters.target.url must not be null");
+            } else if(!url.startsWith("https://") && !url.startsWith("http://") && !TemplateUtil.isTemplateText(url)) {
+                errorMessages.add("parameters.target.url must start with https:// or http:// but: " + url);
+            }
+            if(auth != null) {
+                errorMessages.addAll(auth.validate());
+            }
+            return errorMessages;
+        }
+
+        private void setDefaults() {
+            if(method == null) {
+                method = HttpMethod.POST;
+            }
+            if(headers == null) {
+                headers = new HashMap<>();
+            }
+            if(auth == null) {
+                auth = new AuthParameters();
+            }
+            auth.setDefaults();
+        }
+    }
+
+    public static class AuthParameters implements Serializable {
+
+        private AuthType type;
+        private String serviceAccount;
+        private String audience;
+        private String scope;
+
+        private List<String> validate() {
+            final List<String> errorMessages = new ArrayList<>();
+            if(type != null && !AuthType.none.equals(type) && serviceAccount == null && !IAMUtil.isOnGcp()) {
+                errorMessages.add("parameters.target.auth.serviceAccount must not be null when not running on GCP (metadata server unavailable)");
+            }
+            return errorMessages;
+        }
+
+        private void setDefaults() {
+            if(type == null) {
+                type = AuthType.none;
+            }
+            if(!AuthType.none.equals(type) && serviceAccount == null) {
+                serviceAccount = IAMUtil.getMetadataServiceAccount();
+            }
+            if(AuthType.oauth.equals(type) && scope == null) {
+                scope = SCOPE_CLOUD_PLATFORM;
+            }
+        }
+    }
+
+    public static class BodyParameters implements Serializable {
+
+        private Format format;
+        private String template;
+        private Long maxBytes;
+        private Boolean omitNulls;
+
+        private List<String> validate() {
+            final List<String> errorMessages = new ArrayList<>();
+            if(Format.template.equals(format) && template == null) {
+                errorMessages.add("parameters.body.template must not be null when body.format is template");
+            }
+            if(maxBytes != null && maxBytes <= 0) {
+                errorMessages.add("parameters.body.maxBytes must be positive but: " + maxBytes);
+            }
+            return errorMessages;
+        }
+
+        private void setDefaults() {
+            if(format == null) {
+                format = template != null ? Format.template : Format.json;
+            }
+            if(omitNulls == null) {
+                omitNulls = false;
+            }
+        }
+    }
+
+    public static class TaskParameters implements Serializable {
+
+        private String id;
+        private Boolean hashId;
+        private String scheduleTime;
+        private String delay;
+        private String dispatchDeadline;
+
+        private List<String> validate() {
+            final List<String> errorMessages = new ArrayList<>();
+            if(scheduleTime != null && delay != null) {
+                errorMessages.add("parameters.task.scheduleTime and parameters.task.delay are exclusive");
+            }
+            if(delay != null && !TemplateUtil.isTemplateText(delay)) {
+                try {
+                    parseDuration(delay);
+                } catch (final IllegalArgumentException e) {
+                    errorMessages.add("parameters.task.delay is illegal: " + e.getMessage());
+                }
+            }
+            if(dispatchDeadline != null) {
+                try {
+                    final java.time.Duration d = parseDuration(dispatchDeadline);
+                    if(d.getSeconds() < 15 || d.getSeconds() > 30 * 60) {
+                        errorMessages.add("parameters.task.dispatchDeadline must be between 15s and 30m but: " + dispatchDeadline);
+                    }
+                } catch (final IllegalArgumentException e) {
+                    errorMessages.add("parameters.task.dispatchDeadline is illegal: " + e.getMessage());
+                }
+            }
+            if(id != null && !TemplateUtil.isTemplateText(id)) {
+                errorMessages.add("parameters.task.id must be a template containing element fields (a constant id would collide for every element): " + id);
+            }
+            return errorMessages;
+        }
+
+        private void setDefaults() {
+            if(hashId == null) {
+                hashId = true;
+            }
+        }
+    }
+
+    public static class RetryParameters implements Serializable {
+
+        private Integer maxAttempts;
+        private Double initialRetryDelaySeconds;
+        private Double maxRetryDelaySeconds;
+        private Double totalTimeoutSeconds;
+
+        private List<String> validate() {
+            final List<String> errorMessages = new ArrayList<>();
+            if(maxAttempts != null && maxAttempts < 1) {
+                errorMessages.add("parameters.retry.maxAttempts must be >= 1 but: " + maxAttempts);
+            }
+            return errorMessages;
+        }
+
+        private void setDefaults() {
+            if(maxAttempts == null) {
+                maxAttempts = 5;
+            }
+            if(initialRetryDelaySeconds == null) {
+                initialRetryDelaySeconds = 0.5D;
+            }
+            if(maxRetryDelaySeconds == null) {
+                maxRetryDelaySeconds = 10D;
+            }
+            if(totalTimeoutSeconds == null) {
+                totalTimeoutSeconds = 60D;
+            }
+        }
+
+        RetrySettings toRetrySettings() {
+            return RetrySettings.newBuilder()
+                    .setMaxAttempts(maxAttempts)
+                    .setInitialRetryDelayDuration(java.time.Duration.ofMillis((long) (initialRetryDelaySeconds * 1000)))
+                    .setRetryDelayMultiplier(2.0D)
+                    .setMaxRetryDelayDuration(java.time.Duration.ofMillis((long) (maxRetryDelaySeconds * 1000)))
+                    .setInitialRpcTimeoutDuration(java.time.Duration.ofSeconds(20))
+                    .setRpcTimeoutMultiplier(1.0D)
+                    .setMaxRpcTimeoutDuration(java.time.Duration.ofSeconds(20))
+                    .setTotalTimeoutDuration(java.time.Duration.ofMillis((long) (totalTimeoutSeconds * 1000)))
+                    .build();
+        }
+    }
+
+    public enum Format {
         json,
-        protobuf
+        avro,
+        protobuf,
+        template,
+        none
+    }
+
+    public enum AuthType {
+        none,
+        oidc,
+        oauth
+    }
+
+    public enum OnAlreadyExists {
+        success,
+        fail
+    }
+
+    public enum State {
+        CREATED,
+        ALREADY_EXISTS,
+        FAILED
     }
 
     @Override
     public MCollectionTuple expand(
-            MCollectionTuple inputs,
-            MErrorHandler errorHandler) {
-
-        if(true) {
-            throw new NotImplementedException("Not Implemented tasks sink module");
-        }
+            final MCollectionTuple inputs,
+            final MErrorHandler errorHandler) {
 
         final Parameters parameters = getParameters(Parameters.class);
         if (parameters == null) {
-            throw new IllegalArgumentException("tasks sink module parameters must not be empty!");
+            throw new IllegalModuleException("tasks sink module parameters must not be empty!");
         }
-        parameters.validate();
+        final Schema inputSchema = Union.createUnionSchema(inputs);
+        parameters.validate(inputSchema);
         parameters.setDefaults();
 
         final PCollection<MElement> input = inputs
-                .apply("Union", com.mercari.solution.util.pipeline.Union.flatten()
+                .apply("Union", Union.flatten()
                         .withWaits(getWaits())
                         .withStrategy(getStrategy()));
-        final Schema inputSchema = Union.createUnionSchema(inputs);
 
-        final Caller<MElement, MElement> caller = new TasksCaller();
-        RequestResponseIO.of(caller, ElementCoder.of(inputSchema));
+        final Schema outputSchema = Optional.ofNullable(getSchema()).orElse(inputSchema);
+        if(Format.protobuf.equals(parameters.body.format) && outputSchema.getProtobuf() == null) {
+            throw new IllegalModuleException("body.format protobuf requires schema.protobuf (descriptorFile / messageName)");
+        }
 
-        return null;
+        final TupleTag<MElement> outputTag = new TupleTag<>() {};
+        final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
+
+        final PCollectionTuple outputs;
+        if(parameters.batch == null) {
+            outputs = input
+                    .apply("CreateTasks", ParDo
+                            .of(new CreateTaskDoFn(getName(), parameters, inputSchema, outputSchema, inputs.getAllInputs(), failureTag, getFailFast(), getLoggings()))
+                            .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+        } else {
+            @SuppressWarnings("unchecked")
+            final Coder<MElement> elementCoder = (Coder<MElement>) input.getCoder();
+            GroupIntoBatches<String, MElement> groupIntoBatches = parameters.batch.maxSize != null
+                    ? GroupIntoBatches.ofSize(parameters.batch.maxSize.longValue())
+                    : GroupIntoBatches.ofByteSize(parameters.batch.maxBytes);
+            if(parameters.batch.maxSize != null && parameters.batch.maxBytes != null) {
+                groupIntoBatches = groupIntoBatches.withByteSize(parameters.batch.maxBytes);
+            }
+            if(parameters.batch.maxBufferingDuration != null) {
+                groupIntoBatches = groupIntoBatches.withMaxBufferingDuration(
+                        org.joda.time.Duration.millis(parseDuration(parameters.batch.maxBufferingDuration).toMillis()));
+            }
+            outputs = input
+                    .apply("WithBatchKey", ParDo.of(new BatchKeyDoFn(getName(), parameters, inputSchema, inputs.getAllInputs())))
+                    .setCoder(KvCoder.of(StringUtf8Coder.of(), elementCoder))
+                    .apply("GroupIntoBatches", groupIntoBatches)
+                    .apply("CreateBatchTasks", ParDo
+                            .of(new CreateBatchTaskDoFn(getName(), parameters, inputSchema, outputSchema, inputs.getAllInputs(), failureTag, getFailFast(), getLoggings()))
+                            .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+        }
+
+        errorHandler.addError(outputs.get(failureTag));
+
+        return MCollectionTuple.of(outputs.get(outputTag), createOutputSchema());
     }
 
-    private static class TasksCaller implements Caller<MElement, MElement>, SetupTeardown {
+    public static Schema createOutputSchema() {
+        return Schema.builder()
+                .withField(Schema.Field.of("queue", Schema.FieldType.STRING.withNullable(false)))
+                .withField(Schema.Field.of("taskName", Schema.FieldType.STRING.withNullable(true)))
+                .withField(Schema.Field.of("url", Schema.FieldType.STRING.withNullable(true)))
+                .withField(Schema.Field.of("state", Schema.FieldType.STRING.withNullable(false)))
+                .withField(Schema.Field.of("scheduleTime", Schema.FieldType.TIMESTAMP.withNullable(true)))
+                .withField(Schema.Field.of("createTime", Schema.FieldType.TIMESTAMP.withNullable(true)))
+                .withField(Schema.Field.of("elementCount", Schema.FieldType.INT64.withNullable(false)))
+                .withField(Schema.Field.of("bytes", Schema.FieldType.INT64.withNullable(false)))
+                .withField(Schema.Field.of("error", Schema.FieldType.STRING.withNullable(true)))
+                .withField(Schema.Field.of("timestamp", Schema.FieldType.TIMESTAMP.withNullable(false)))
+                .build();
+    }
 
-        private static final String METADATA_ENDPOINT = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
-        private static final String TASKS_TASK_ENDPOINT = "https://cloudtasks.googleapis.com/v2/parent=projects/%s/locations/%s/queues/%s/tasks/%s";
+    // ---------------------------------------------------------------------------------------
+    // Client abstraction (gRPC client in production, in-memory client in unit tests)
+    // ---------------------------------------------------------------------------------------
 
-        private transient HttpClient client;
-        private transient String accessToken;
-
-        @Override
-        public void setup() throws UserCodeExecutionException {
-
-            this.client = HttpClient.newBuilder().build();
-            this.accessToken = getAccessToken();
-        }
-
-        @Override
-        public void teardown() throws UserCodeExecutionException {
-
-        }
-
-        @Override
-        public MElement call(MElement request) throws UserCodeExecutionException {
+    /** Thin boundary around the Cloud Tasks API so the DoFn can be tested without network. */
+    public interface TasksClient extends AutoCloseable {
+        /** Creates a task with an explicit HTTP target. Throws {@link AlreadyExistsException} on duplicate names. */
+        Task createTask(String queue, Task task);
+        /** Asynchronous variant used when {@code concurrency > 1}; defaults to the synchronous call. */
+        default ApiFuture<Task> createTaskAsync(String queue, Task task) {
             try {
-                final String endpoint = String.format(TASKS_TASK_ENDPOINT, "");
-                final HttpRequest httpRequest = HttpRequest.newBuilder()
-                        .uri(new URI(endpoint))
-                        .header("Authorization", "Bearer " + accessToken)
-                        .POST(HttpRequest.BodyPublishers.ofString(""))
-                        .build();
-                final HttpResponse<String> httpResponse = this.client
-                        .send(httpRequest, HttpResponse.BodyHandlers.ofString());
-                final JsonElement responseJson = new Gson().fromJson(httpResponse.body(), JsonElement.class);
-                if(!responseJson.isJsonObject()) {
-                    throw new IllegalStateException("Illegal token response: " + responseJson);
-                }
-                final JsonObject jsonObject = responseJson.getAsJsonObject();
+                return ApiFutures.immediateFuture(createTask(queue, task));
+            } catch (final RuntimeException e) {
+                return ApiFutures.immediateFailedFuture(e);
+            }
+        }
+        /** Buffers a task into a queue that has a queue-level HTTP target (tasks:buffer). */
+        Task bufferTask(String queue, String taskId, ByteString body);
+        @Override
+        void close();
+    }
 
-            } catch (URISyntaxException | IOException | InterruptedException e) {
-                throw new RuntimeException(e);
+    public interface TasksClientFactory extends Serializable {
+        TasksClient create(Parameters parameters) throws IOException;
+    }
+
+    private static final Map<String, TasksClient> MEMORY_CLIENTS = new HashMap<>();
+
+    /** Registers an in-memory client reachable via {@code endpoint: memory://<name>} (tests). */
+    public static void registerMemoryClient(final String name, final TasksClient client) {
+        synchronized (MEMORY_CLIENTS) {
+            MEMORY_CLIENTS.put(name, client);
+        }
+    }
+
+    public static void unregisterMemoryClient(final String name) {
+        synchronized (MEMORY_CLIENTS) {
+            MEMORY_CLIENTS.remove(name);
+        }
+    }
+
+    static TasksClient createClient(final Parameters parameters) throws IOException {
+        if(parameters.endpoint != null && parameters.endpoint.startsWith(ENDPOINT_MEMORY_PREFIX)) {
+            final String name = parameters.endpoint.substring(ENDPOINT_MEMORY_PREFIX.length());
+            synchronized (MEMORY_CLIENTS) {
+                final TasksClient client = MEMORY_CLIENTS.get(name);
+                if(client == null) {
+                    throw new IllegalStateException("in-memory tasks client is not registered: " + name);
+                }
+                return client;
+            }
+        }
+        return new GrpcTasksClient(parameters);
+    }
+
+    static class GrpcTasksClient implements TasksClient {
+
+        private final Parameters parameters;
+        private final CloudTasksClient client;
+
+        private static final Set<StatusCode.Code> RETRYABLE_CODES = Set.of(
+                StatusCode.Code.UNAVAILABLE,
+                StatusCode.Code.DEADLINE_EXCEEDED,
+                StatusCode.Code.RESOURCE_EXHAUSTED,
+                StatusCode.Code.INTERNAL);
+
+        GrpcTasksClient(final Parameters parameters) throws IOException {
+            this.parameters = parameters;
+            final CloudTasksSettings.Builder builder = CloudTasksSettings.newBuilder();
+            configure(builder, parameters);
+            builder.createTaskSettings()
+                    .setRetryableCodes(RETRYABLE_CODES)
+                    .setRetrySettings(parameters.retry.toRetrySettings());
+            this.client = CloudTasksClient.create(builder.build());
+        }
+
+        private static void configure(final com.google.api.gax.rpc.ClientSettings.Builder<?, ?> builder, final Parameters parameters) {
+            if(parameters.endpoint != null) {
+                // Emulator: plaintext channel, no credentials
+                builder.setEndpoint(parameters.endpoint)
+                        .setCredentialsProvider(NoCredentialsProvider.create())
+                        .setTransportChannelProvider(InstantiatingGrpcChannelProvider.newBuilder()
+                                .setEndpoint(parameters.endpoint)
+                                .setChannelConfigurator(b -> b.usePlaintext())
+                                .build());
+            } else {
+                builder.setCredentialsProvider(GcpCredentialsCache::credentials);
+            }
+        }
+
+        @Override
+        public Task createTask(final String queue, final Task task) {
+            return client.createTask(CreateTaskRequest.newBuilder()
+                    .setParent(queue)
+                    .setTask(task)
+                    .build());
+        }
+
+        @Override
+        public ApiFuture<Task> createTaskAsync(final String queue, final Task task) {
+            return client.createTaskCallable().futureCall(CreateTaskRequest.newBuilder()
+                    .setParent(queue)
+                    .setTask(task)
+                    .build());
+        }
+
+        @Override
+        public Task bufferTask(final String queue, final String taskId, final ByteString body) {
+            // The Java client does not expose tasks:buffer yet; call the REST surface directly.
+            if(parameters.endpoint != null) {
+                throw new UnsupportedOperationException("tasks:buffer (target omitted) is not supported against a custom endpoint / emulator");
+            }
+            try {
+                final String path = taskId == null ? "/tasks:buffer" : "/tasks/" + taskId + ":buffer";
+                final java.net.http.HttpRequest.Builder request = java.net.http.HttpRequest.newBuilder()
+                        .uri(java.net.URI.create("https://cloudtasks.googleapis.com/v2/" + queue + path))
+                        .header("Authorization", "Bearer " + GcpCredentialsCache.accessToken().getTokenValue())
+                        .header("Content-Type", "application/octet-stream")
+                        .timeout(java.time.Duration.ofSeconds(30));
+                request.POST(body == null
+                        ? java.net.http.HttpRequest.BodyPublishers.noBody()
+                        : java.net.http.HttpRequest.BodyPublishers.ofByteArray(body.toByteArray()));
+                final java.net.http.HttpResponse<String> response = httpClient()
+                        .send(request.build(), java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if(response.statusCode() == 409) {
+                    throw new AlreadyExistsException(
+                            "task already exists: " + queue + "/tasks/" + taskId,
+                            null,
+                            com.google.api.gax.grpc.GrpcStatusCode.of(io.grpc.Status.Code.ALREADY_EXISTS),
+                            false);
+                }
+                if(response.statusCode() / 100 != 2) {
+                    throw new IllegalStateException("tasks:buffer failed with status " + response.statusCode() + ": " + response.body());
+                }
+                final JsonObject json = new com.google.gson.Gson().fromJson(response.body(), JsonObject.class);
+                final JsonObject task = json.has("task") ? json.getAsJsonObject("task") : json;
+                final Task.Builder out = Task.newBuilder();
+                if(task.has("name")) {
+                    out.setName(task.get("name").getAsString());
+                }
+                if(task.has("scheduleTime")) {
+                    out.setScheduleTime(toProtoTimestamp(task.get("scheduleTime").getAsString()));
+                }
+                if(task.has("createTime")) {
+                    out.setCreateTime(toProtoTimestamp(task.get("createTime").getAsString()));
+                }
+                return out.build();
+            } catch (final IOException e) {
+                throw new IllegalStateException("tasks:buffer request failed", e);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("tasks:buffer request interrupted", e);
+            }
+        }
+
+        private java.net.http.HttpClient http;
+
+        private synchronized java.net.http.HttpClient httpClient() {
+            if(http == null) {
+                http = java.net.http.HttpClient.newBuilder()
+                        .connectTimeout(java.time.Duration.ofSeconds(10))
+                        .build();
+            }
+            return http;
+        }
+
+        private static Timestamp toProtoTimestamp(final String rfc3339) {
+            final Instant instant = Instant.parse(rfc3339);
+            return Timestamp.newBuilder().setSeconds(instant.getEpochSecond()).setNanos(instant.getNano()).build();
+        }
+
+        @Override
+        public void close() {
+            client.close();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Request building (pure, unit-testable) and the DoFn
+    // ---------------------------------------------------------------------------------------
+
+    /** Result of building a request for one element (or one batch of elements). */
+    static class BuiltTask {
+        final String queue;
+        final String taskId;
+        final Task task;       // null when buffering (target omitted)
+        final ByteString body;
+        final String url;
+        final int elementCount;
+
+        BuiltTask(String queue, String taskId, Task task, ByteString body, String url, int elementCount) {
+            this.queue = queue;
+            this.taskId = taskId;
+            this.task = task;
+            this.body = body;
+            this.url = url;
+            this.elementCount = elementCount;
+        }
+    }
+
+    /** Thrown when a rendered body exceeds body.maxBytes (callers may split a batch and retry). */
+    static class BodyTooLargeException extends IllegalArgumentException {
+        BodyTooLargeException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Turns one element (or one batch) into a Cloud Tasks request. Templates are compiled once
+     * per instance; templates that reference no element field are rendered once (e.g.
+     * secret-bearing headers must not hit Secret Manager per element).
+     *
+     * <p>Batch mode: per-task templates (queue / url / headers / id / schedule) are rendered with
+     * the first element's fields — assembly-time validation guarantees they only reference
+     * {@code batch.key} fields, on which every element of the batch is equal — plus
+     * {@code elements} (list of maps), {@code size} and {@code key}.
+     */
+    static class RequestBuilder implements Serializable {
+
+        private final String name;
+        private final Parameters parameters;
+        private final Schema inputSchema;
+        private final Schema outputSchema;
+        private final List<String> inputNames;
+        private final List<String> templateArgs;
+        private final Serialize serialize;
+
+        private transient Template queueTemplate;
+        private transient String staticQueue;
+        private transient Template urlTemplate;
+        private transient String staticUrl;
+        private transient Map<String, Template> headerTemplates;
+        private transient Map<String, String> staticHeaders;
+        private transient Template idTemplate;
+        private transient Template scheduleTimeTemplate;
+        private transient String scheduleTimeField;
+        private transient Template delayTemplate;
+        private transient java.time.Duration staticDelay;
+        private transient com.google.protobuf.Duration dispatchDeadline;
+        private transient Template bodyTemplate;
+        private transient Template keyTemplate;
+        private transient org.apache.avro.Schema avroSchema;
+
+        RequestBuilder(
+                final String name,
+                final Parameters parameters,
+                final Schema inputSchema,
+                final Schema outputSchema,
+                final List<String> inputNames) {
+
+            this.name = name;
+            this.parameters = parameters;
+            this.inputSchema = inputSchema;
+            this.outputSchema = outputSchema;
+            this.inputNames = inputNames;
+
+            final Set<String> args = new HashSet<>();
+            final List<String> texts = new ArrayList<>();
+            texts.add(parameters.queue);
+            if(parameters.target != null) {
+                texts.add(parameters.target.url);
+                texts.addAll(parameters.target.headers.values());
+            }
+            texts.add(parameters.task.id);
+            texts.add(parameters.task.scheduleTime);
+            texts.add(parameters.task.delay);
+            texts.add(parameters.body.template);
+            if(parameters.batch != null) {
+                texts.add(parameters.batch.key);
+            }
+            for(final String text : texts) {
+                if(text != null) {
+                    args.addAll(TemplateUtil.extractTemplateArgs(text, inputSchema));
+                }
+            }
+            this.templateArgs = new ArrayList<>(args);
+            this.serialize = switch (parameters.body.format) {
+                case avro -> Serialize.of(Serialize.Format.avro, outputSchema);
+                case protobuf -> Serialize.of(Serialize.Format.protobuf, outputSchema);
+                default -> null;
+            };
+        }
+
+        boolean isBatch() {
+            return parameters.batch != null;
+        }
+
+        void setup() {
+            final Map<String, Object> staticValues = new HashMap<>();
+            TemplateUtil.setFunctions(staticValues);
+
+            if(TemplateUtil.isTemplateText(parameters.queue) && !isStatic(parameters.queue)) {
+                this.queueTemplate = TemplateUtil.createStrictTemplate(name + ".queue", parameters.queue);
+            } else {
+                this.staticQueue = render(name + ".queue", parameters.queue, staticValues);
+            }
+
+            if(parameters.target != null) {
+                if(TemplateUtil.isTemplateText(parameters.target.url) && !isStatic(parameters.target.url)) {
+                    this.urlTemplate = TemplateUtil.createStrictTemplate(name + ".url", parameters.target.url);
+                } else {
+                    this.staticUrl = render(name + ".url", parameters.target.url, staticValues);
+                }
+                this.headerTemplates = new HashMap<>();
+                this.staticHeaders = new HashMap<>();
+                for(final Map.Entry<String, String> entry : parameters.target.headers.entrySet()) {
+                    if(TemplateUtil.isTemplateText(entry.getValue()) && !isStatic(entry.getValue())) {
+                        headerTemplates.put(entry.getKey(), TemplateUtil.createStrictTemplate(name + ".header." + entry.getKey(), entry.getValue()));
+                    } else {
+                        staticHeaders.put(entry.getKey(), render(name + ".header." + entry.getKey(), entry.getValue(), staticValues));
+                    }
+                }
+            }
+
+            if(parameters.task.id != null) {
+                this.idTemplate = TemplateUtil.createStrictTemplate(name + ".id", parameters.task.id);
+            }
+            if(parameters.task.scheduleTime != null) {
+                final Matcher matcher = PATTERN_SIMPLE_FIELD.matcher(parameters.task.scheduleTime.trim());
+                if(matcher.matches() && inputSchema.hasField(matcher.group(1))) {
+                    this.scheduleTimeField = matcher.group(1);
+                } else {
+                    this.scheduleTimeTemplate = TemplateUtil.createStrictTemplate(name + ".scheduleTime", parameters.task.scheduleTime);
+                }
+            }
+            if(parameters.task.delay != null) {
+                if(TemplateUtil.isTemplateText(parameters.task.delay)) {
+                    this.delayTemplate = TemplateUtil.createStrictTemplate(name + ".delay", parameters.task.delay);
+                } else {
+                    this.staticDelay = parseDuration(parameters.task.delay);
+                }
+            }
+            if(parameters.task.dispatchDeadline != null) {
+                final java.time.Duration d = parseDuration(parameters.task.dispatchDeadline);
+                this.dispatchDeadline = com.google.protobuf.Duration.newBuilder()
+                        .setSeconds(d.getSeconds()).setNanos(d.getNano()).build();
+            }
+            if(Format.template.equals(parameters.body.format)) {
+                this.bodyTemplate = TemplateUtil.createStrictTemplate(name + ".body", parameters.body.template);
+            }
+            if(parameters.batch != null && parameters.batch.key != null) {
+                this.keyTemplate = TemplateUtil.createStrictTemplate(name + ".batchKey", parameters.batch.key);
+            }
+            if(serialize != null) {
+                serialize.setupSerialize();
+            }
+            if(Format.avro.equals(parameters.body.format)) {
+                this.avroSchema = outputSchema.getAvroSchema();
+            }
+        }
+
+        private static final Pattern PATTERN_DYNAMIC_VAR = Pattern
+                .compile("\\$\\{[^}]*\\b(__timestamp|__source|elements|size|key)\\b[^}]*}");
+
+        /** True when the template references neither element fields nor per-element/batch variables. */
+        private boolean isStatic(final String text) {
+            return TemplateUtil.extractTemplateArgs(text, inputSchema).isEmpty()
+                    && !PATTERN_DYNAMIC_VAR.matcher(text).find();
+        }
+
+        private static String render(final String name, final String text, final Map<String, Object> values) {
+            if(text == null) {
+                return null;
+            }
+            if(!TemplateUtil.isTemplateText(text)) {
+                return text;
+            }
+            return TemplateUtil.executeStrictTemplate(TemplateUtil.createStrictTemplate(name, text), values);
+        }
+
+        Map<String, Object> createTemplateValues(final MElement element) {
+            final Map<String, Object> values = element.asStandardMap(inputSchema, templateArgs);
+            values.put(VAR_TIMESTAMP, Instant.ofEpochMilli(element.getEpochMillis()));
+            values.put(VAR_SOURCE, element.getIndex() < inputNames.size() ? inputNames.get(element.getIndex()) : "");
+            TemplateUtil.setFunctions(values);
+            return values;
+        }
+
+        Map<String, Object> createTemplateValues(final List<MElement> elements, final String key) {
+            final Map<String, Object> values = createTemplateValues(elements.get(0));
+            final List<Map<String, Object>> maps = elements.stream()
+                    .map(e -> e.asStandardMap(inputSchema))
+                    .toList();
+            values.put("elements", maps);
+            values.put("size", maps.size());
+            values.put("key", key);
+            return values;
+        }
+
+        /** Renders the batch grouping key for one element (null when batch.key is omitted). */
+        String renderBatchKey(final MElement element) {
+            if(keyTemplate == null) {
+                return null;
+            }
+            return TemplateUtil.executeStrictTemplate(keyTemplate, createTemplateValues(element));
+        }
+
+        BuiltTask build(final MElement element) {
+            return build(List.of(element), createTemplateValues(element));
+        }
+
+        BuiltTask build(final List<MElement> elements, final String key) {
+            return build(elements, createTemplateValues(elements, key));
+        }
+
+        private BuiltTask build(final List<MElement> elements, final Map<String, Object> values) {
+            final String queue = queueTemplate != null ? TemplateUtil.executeStrictTemplate(queueTemplate, values) : staticQueue;
+            if(!PATTERN_QUEUE.matcher(queue).matches()) {
+                throw new IllegalArgumentException("rendered queue is illegal: " + queue);
+            }
+
+            final ByteString body = createBody(elements, values);
+            if(parameters.body.maxBytes != null && body != null && body.size() > parameters.body.maxBytes) {
+                throw new BodyTooLargeException("task body size " + body.size() + " exceeds body.maxBytes " + parameters.body.maxBytes);
+            }
+
+            String taskId = null;
+            if(idTemplate != null) {
+                final String rendered = TemplateUtil.executeStrictTemplate(idTemplate, values);
+                taskId = parameters.task.hashId ? sha256Hex(rendered) : rendered;
+                if(!PATTERN_TASK_ID.matcher(taskId).matches()) {
+                    throw new IllegalArgumentException("task id must match [A-Za-z0-9_-]{1,500} but: " + taskId + " (set task.hashId: true)");
+                }
+            }
+
+            if(parameters.target == null) {
+                return new BuiltTask(queue, taskId, null, body, null, elements.size());
+            }
+
+            final String url = urlTemplate != null ? TemplateUtil.executeStrictTemplate(urlTemplate, values) : staticUrl;
+            final HttpRequest.Builder httpRequest = HttpRequest.newBuilder()
+                    .setUrl(url)
+                    .setHttpMethod(parameters.target.method);
+            httpRequest.putAllHeaders(staticHeaders);
+            for(final Map.Entry<String, Template> entry : headerTemplates.entrySet()) {
+                final String value = TemplateUtil.executeStrictTemplate(entry.getValue(), values);
+                if(value != null) {
+                    httpRequest.putHeaders(entry.getKey(), value);
+                }
+            }
+            if(body != null && !HttpMethod.GET.equals(parameters.target.method) && !HttpMethod.HEAD.equals(parameters.target.method)) {
+                httpRequest.setBody(body);
+            }
+            switch (parameters.target.auth.type) {
+                case oidc -> httpRequest.setOidcToken(OidcToken.newBuilder()
+                        .setServiceAccountEmail(parameters.target.auth.serviceAccount)
+                        .setAudience(Optional.ofNullable(parameters.target.auth.audience).orElseGet(() -> stripQuery(url)))
+                        .build());
+                case oauth -> httpRequest.setOauthToken(OAuthToken.newBuilder()
+                        .setServiceAccountEmail(parameters.target.auth.serviceAccount)
+                        .setScope(parameters.target.auth.scope)
+                        .build());
+                default -> {}
+            }
+
+            final Task.Builder task = Task.newBuilder().setHttpRequest(httpRequest);
+            if(taskId != null) {
+                task.setName(queue + "/tasks/" + taskId);
+            }
+            final Instant scheduleTime = resolveScheduleTime(values);
+            if(scheduleTime != null) {
+                task.setScheduleTime(Timestamp.newBuilder()
+                        .setSeconds(scheduleTime.getEpochSecond()).setNanos(scheduleTime.getNano()).build());
+            }
+            if(dispatchDeadline != null) {
+                task.setDispatchDeadline(dispatchDeadline);
+            }
+            return new BuiltTask(queue, taskId, task.build(), body, url, elements.size());
+        }
+
+        private ByteString createBody(final List<MElement> elements, final Map<String, Object> values) {
+            final boolean batch = isBatch();
+            return switch (parameters.body.format) {
+                case none -> null;
+                case json -> {
+                    if(!batch) {
+                        yield ByteString.copyFrom(toJson(elements.get(0)).toString(), StandardCharsets.UTF_8);
+                    }
+                    final JsonArray array = new JsonArray();
+                    for(final MElement element : elements) {
+                        array.add(toJson(element));
+                    }
+                    yield ByteString.copyFrom(array.toString(), StandardCharsets.UTF_8);
+                }
+                case template -> {
+                    final String text = TemplateUtil.executeStrictTemplate(bodyTemplate, values);
+                    yield ByteString.copyFrom(text, StandardCharsets.UTF_8);
+                }
+                case avro -> {
+                    if(!batch) {
+                        yield ByteString.copyFrom(serialize.serialize(elements.get(0)));
+                    }
+                    // batch: Avro Object Container File holding all records
+                    try(final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                        final org.apache.avro.file.DataFileWriter<org.apache.avro.generic.GenericRecord> writer =
+                                new org.apache.avro.file.DataFileWriter<>(new org.apache.avro.generic.GenericDatumWriter<>(avroSchema))) {
+                        writer.create(avroSchema, out);
+                        for(final MElement element : elements) {
+                            writer.append(ElementToAvroConverter.convert(avroSchema, element));
+                        }
+                        writer.flush();
+                        yield ByteString.copyFrom(out.toByteArray());
+                    } catch (final IOException e) {
+                        throw new IllegalStateException("Failed to write avro container", e);
+                    }
+                }
+                case protobuf -> {
+                    if(!batch) {
+                        yield ByteString.copyFrom(serialize.serialize(elements.get(0)));
+                    }
+                    // batch: length-delimited protobuf messages (parseDelimitedFrom on the receiver)
+                    try(final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                        final com.google.protobuf.CodedOutputStream coded = com.google.protobuf.CodedOutputStream.newInstance(out);
+                        for(final MElement element : elements) {
+                            final byte[] bytes = serialize.serialize(element);
+                            coded.writeUInt32NoTag(bytes.length);
+                            coded.writeRawBytes(bytes);
+                        }
+                        coded.flush();
+                        yield ByteString.copyFrom(out.toByteArray());
+                    } catch (final IOException e) {
+                        throw new IllegalStateException("Failed to write delimited protobuf", e);
+                    }
+                }
+            };
+        }
+
+        private JsonElement toJson(final MElement element) {
+            final JsonObject json = ElementToJsonConverter.convert(inputSchema, element.asPrimitiveMap());
+            return parameters.body.omitNulls ? omitNulls(json) : json;
+        }
+
+        Instant resolveScheduleTime(final Map<String, Object> values) {
+            if(scheduleTimeField != null) {
+                final Object value = values.get(scheduleTimeField);
+                return value == null ? null : toInstant(value);
+            }
+            if(scheduleTimeTemplate != null) {
+                final String text = TemplateUtil.executeStrictTemplate(scheduleTimeTemplate, values);
+                if(text == null || text.isBlank()) {
+                    return null;
+                }
+                return toInstant(text.trim());
+            }
+            java.time.Duration delay = staticDelay;
+            if(delayTemplate != null) {
+                final String text = TemplateUtil.executeStrictTemplate(delayTemplate, values);
+                if(text == null || text.isBlank()) {
+                    return null;
+                }
+                delay = parseDuration(text.trim());
+            }
+            if(delay != null) {
+                return Instant.now().plus(delay);
             }
             return null;
         }
+    }
 
-        private JsonObject createRequest() {
-            final JsonObject request = new JsonObject();
-            {
-                final JsonObject task = new JsonObject();
-                task.addProperty("name", "");
-                task.addProperty("scheduleTime", "");
-                task.addProperty("dispatchDeadline", "");
-                {
-                    final JsonObject httpRequest = new JsonObject();
-                    httpRequest.addProperty("url", "");
-                    httpRequest.addProperty("httpMethod", "");
-                    httpRequest.addProperty("headers", "");
-                    httpRequest.addProperty("body", "");
-                    //httpRequest.addProperty("oauthToken", "");
-                    //httpRequest.addProperty("oidcToken", "");
-                    task.add("httpRequest", httpRequest);
+    static Instant toInstant(final Object value) {
+        return switch (value) {
+            case Instant i -> i;
+            case org.joda.time.Instant j -> Instant.ofEpochMilli(j.getMillis());
+            case Long l -> {
+                // epoch seconds / millis / micros by magnitude
+                if(l < 100_000_000_000L) {
+                    yield Instant.ofEpochSecond(l);
+                } else if(l < 100_000_000_000_000L) {
+                    yield Instant.ofEpochMilli(l);
+                } else {
+                    yield DateTimeUtil.toInstant(l);
                 }
-                request.add("task", task);
             }
-            return request;
+            case Integer i -> Instant.ofEpochSecond(i);
+            case String s -> {
+                final String t = s.trim();
+                if(t.matches("^\\d+$")) {
+                    yield toInstant(Long.parseLong(t));
+                }
+                final Instant parsed = DateTimeUtil.toInstant(t, true);
+                if(parsed == null) {
+                    throw new IllegalArgumentException("illegal scheduleTime: " + s);
+                }
+                yield parsed;
+            }
+            default -> {
+                final Instant parsed = DateTimeUtil.toInstant(value);
+                if(parsed == null) {
+                    throw new IllegalArgumentException("illegal scheduleTime: " + value);
+                }
+                yield parsed;
+            }
+        };
+    }
+
+    /** Accepts ISO-8601 ({@code PT10M}) or short form ({@code 10m}, {@code 2h}, {@code 30s}, {@code 1d}, {@code 500ms}). */
+    static java.time.Duration parseDuration(final String text) {
+        if(text == null || text.isBlank()) {
+            throw new IllegalArgumentException("duration must not be empty");
+        }
+        final String t = text.trim();
+        final Matcher matcher = PATTERN_SHORT_DURATION.matcher(t);
+        if(matcher.matches()) {
+            final long n = Long.parseLong(matcher.group(1));
+            return switch (matcher.group(2)) {
+                case "ms" -> java.time.Duration.ofMillis(n);
+                case "s" -> java.time.Duration.ofSeconds(n);
+                case "m" -> java.time.Duration.ofMinutes(n);
+                case "h" -> java.time.Duration.ofHours(n);
+                default -> java.time.Duration.ofDays(n);
+            };
+        }
+        try {
+            return java.time.Duration.parse(t);
+        } catch (final Exception e) {
+            throw new IllegalArgumentException("illegal duration: " + text + " (expected ISO-8601 like PT10M or short form like 10m)");
+        }
+    }
+
+    static String sha256Hex(final String text) {
+        try {
+            final MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            final byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
+            final StringBuilder sb = new StringBuilder(hash.length * 2);
+            for(final byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (final NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    static String stripQuery(final String url) {
+        final int i = url.indexOf('?');
+        return i < 0 ? url : url.substring(0, i);
+    }
+
+    static JsonElement omitNulls(final JsonElement element) {
+        if(element == null || element.isJsonNull()) {
+            return null;
+        }
+        if(element.isJsonObject()) {
+            final JsonObject out = new JsonObject();
+            for(final Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet()) {
+                final JsonElement child = omitNulls(entry.getValue());
+                if(child != null) {
+                    out.add(entry.getKey(), child);
+                }
+            }
+            return out;
+        }
+        if(element.isJsonArray()) {
+            final JsonArray out = new JsonArray();
+            for(final JsonElement child : element.getAsJsonArray()) {
+                final JsonElement c = omitNulls(child);
+                out.add(c == null ? com.google.gson.JsonNull.INSTANCE : c);
+            }
+            return out;
+        }
+        return element;
+    }
+
+    /** Output sink abstraction so results can be emitted from both @ProcessElement and @FinishBundle. */
+    private interface Emitter {
+        void output(MElement element, org.joda.time.Instant timestamp, BoundedWindow window);
+        void failure(BadRecord badRecord, org.joda.time.Instant timestamp, BoundedWindow window);
+    }
+
+    /** One in-flight createTask call (concurrency > 1). */
+    private record Pending(
+            List<MElement> elements,
+            BuiltTask built,
+            ApiFuture<Task> future,
+            org.joda.time.Instant timestamp,
+            BoundedWindow window) {}
+
+    /**
+     * Shared client lifecycle + output/failure plumbing of the per-element and batch DoFns.
+     *
+     * <p>With {@code concurrency > 1} createTask calls are issued asynchronously: up to
+     * {@code concurrency} calls are in flight per bundle; the oldest is awaited when the limit is
+     * reached and all are drained at bundle end, so the bundle only commits once every task is
+     * created (or routed to failures).
+     */
+    private abstract static class BaseTaskDoFn<InputT> extends DoFn<InputT, MElement> {
+
+        protected final String name;
+        protected final Parameters parameters;
+        protected final RequestBuilder builder;
+        protected final TupleTag<BadRecord> failureTag;
+        protected final boolean failFast;
+        protected final Map<String, Logging> logging;
+
+        protected transient TasksClient client;
+        private transient boolean ownsClient;
+        private transient Deque<Pending> pending;
+
+        BaseTaskDoFn(
+                final String name,
+                final Parameters parameters,
+                final Schema inputSchema,
+                final Schema outputSchema,
+                final List<String> inputNames,
+                final TupleTag<BadRecord> failureTag,
+                final boolean failFast,
+                final List<Logging> loggings) {
+
+            this.name = name;
+            this.parameters = parameters;
+            this.builder = new RequestBuilder(name, parameters, inputSchema, outputSchema, inputNames);
+            this.failureTag = failureTag;
+            this.failFast = failFast;
+            this.logging = Logging.map(loggings);
         }
 
-        private String getAccessToken() {
-            try {
-                final HttpRequest httpRequest = HttpRequest.newBuilder()
-                        .uri(new URI(METADATA_ENDPOINT))
-                        .header("Metadata-Flavor", "Google")
-                        .GET()
-                        .build();
-                final HttpResponse<String> httpResponse = this.client
-                        .send(httpRequest, HttpResponse.BodyHandlers.ofString());
-                final JsonElement responseJson = new Gson().fromJson(httpResponse.body(), JsonElement.class);
-                if(!responseJson.isJsonObject()) {
-                    throw new IllegalStateException("Illegal token response: " + responseJson);
-                }
-                final JsonObject jsonObject = responseJson.getAsJsonObject();
-                if(!jsonObject.has("")) {
-                    throw new IllegalStateException("Illegal token response: " + responseJson);
-                }
+        @Setup
+        public void setup() throws IOException {
+            this.builder.setup();
+            this.client = createClient(parameters);
+            this.ownsClient = parameters.endpoint == null || !parameters.endpoint.startsWith(ENDPOINT_MEMORY_PREFIX);
+            this.pending = new ArrayDeque<>();
+        }
 
-                return jsonObject.get("").getAsString();
-            } catch (URISyntaxException | IOException | InterruptedException e) {
-                throw new RuntimeException(e);
+        @Teardown
+        public void teardown() {
+            if(client != null && ownsClient) {
+                client.close();
+            }
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            drain(0, new Emitter() {
+                @Override
+                public void output(final MElement element, final org.joda.time.Instant timestamp, final BoundedWindow window) {
+                    c.output(element, timestamp, window);
+                }
+                @Override
+                public void failure(final BadRecord badRecord, final org.joda.time.Instant timestamp, final BoundedWindow window) {
+                    c.output(failureTag, badRecord, timestamp, window);
+                }
+            });
+        }
+
+        protected Emitter emitter(final ProcessContext c) {
+            return new Emitter() {
+                @Override
+                public void output(final MElement element, final org.joda.time.Instant timestamp, final BoundedWindow window) {
+                    c.outputWithTimestamp(element, timestamp);
+                }
+                @Override
+                public void failure(final BadRecord badRecord, final org.joda.time.Instant timestamp, final BoundedWindow window) {
+                    c.outputWithTimestamp(failureTag, badRecord, timestamp);
+                }
+            };
+        }
+
+        /** Sends one built task: synchronously (concurrency 1) or as an in-flight future. */
+        protected void send(
+                final Emitter emitter,
+                final List<MElement> elements,
+                final BuiltTask built,
+                final org.joda.time.Instant timestamp,
+                final BoundedWindow window) {
+
+            if(parameters.concurrency <= 1 || built.task == null) {
+                Task created;
+                State state;
+                try {
+                    created = built.task != null
+                            ? client.createTask(built.queue, built.task)
+                            : client.bufferTask(built.queue, built.taskId, built.body);
+                    state = State.CREATED;
+                } catch (final AlreadyExistsException e) {
+                    if(OnAlreadyExists.fail.equals(parameters.onAlreadyExists)) {
+                        throw e;
+                    }
+                    created = built.task;
+                    state = State.ALREADY_EXISTS;
+                }
+                emit(emitter, built, created, state, timestamp, window);
+                return;
+            }
+            pending.addLast(new Pending(elements, built, client.createTaskAsync(built.queue, built.task), timestamp, window));
+            drain(parameters.concurrency - 1, emitter);
+        }
+
+        /** Awaits in-flight calls until at most {@code keep} remain. */
+        private void drain(final int keep, final Emitter emitter) {
+            while(pending != null && pending.size() > keep) {
+                final Pending p = pending.pollFirst();
+                try {
+                    Task created;
+                    State state;
+                    try {
+                        created = p.future().get();
+                        state = State.CREATED;
+                    } catch (final java.util.concurrent.ExecutionException e) {
+                        if(e.getCause() instanceof AlreadyExistsException) {
+                            if(OnAlreadyExists.fail.equals(parameters.onAlreadyExists)) {
+                                throw e.getCause();
+                            }
+                            created = p.built().task;
+                            state = State.ALREADY_EXISTS;
+                        } else {
+                            throw e.getCause() != null ? e.getCause() : e;
+                        }
+                    }
+                    emit(emitter, p.built(), created, state, p.timestamp(), p.window());
+                } catch (final Throwable e) {
+                    fail(emitter, p.elements(), p.built(), e, p.timestamp(), p.window());
+                }
+            }
+        }
+
+        private void emit(
+                final Emitter emitter,
+                final BuiltTask built,
+                final Task created,
+                final State state,
+                final org.joda.time.Instant timestamp,
+                final BoundedWindow window) {
+
+            final MElement output = createOutput(built, created, state, null, timestamp);
+            Logging.log(LOG, logging, "output", output);
+            emitter.output(output, timestamp, window);
+        }
+
+        /** Routes failed elements to the failure tag and (with failFast=false) emits a FAILED record. */
+        protected void fail(
+                final Emitter emitter,
+                final List<MElement> elements,
+                final BuiltTask built,
+                final Throwable e,
+                final org.joda.time.Instant timestamp,
+                final BoundedWindow window) {
+
+            for(final MElement element : elements) {
+                final BadRecord badRecord = processError("Failed to create task: " + name, element, e, failFast);
+                emitter.failure(badRecord, timestamp, window);
+            }
+            emitter.output(createOutput(
+                    built != null ? built : new BuiltTask(parameters.queue, null, null, null, null, elements.size()),
+                    null, State.FAILED, e.getMessage(), timestamp), timestamp, window);
+        }
+
+        private MElement createOutput(
+                final BuiltTask built,
+                final Task task,
+                final State state,
+                final String error,
+                final org.joda.time.Instant timestamp) {
+
+            final MElement.Builder b = MElement.builder()
+                    .withString("queue", built.queue)
+                    .withString("taskName", task != null && !task.getName().isEmpty() ? task.getName()
+                            : (built.taskId != null ? built.queue + "/tasks/" + built.taskId : null))
+                    .withString("url", built.url)
+                    .withString("state", state.name())
+                    .withInt64("elementCount", (long) built.elementCount)
+                    .withInt64("bytes", built.body == null ? 0L : (long) built.body.size())
+                    .withString("error", error)
+                    .withTimestamp("timestamp", timestamp)
+                    .withEventTime(timestamp);
+            if(task != null && task.hasScheduleTime()) {
+                b.withTimestamp("scheduleTime", Instant.ofEpochSecond(task.getScheduleTime().getSeconds(), task.getScheduleTime().getNanos()));
+            } else {
+                b.withTimestamp("scheduleTime", (Instant) null);
+            }
+            if(task != null && task.hasCreateTime()) {
+                b.withTimestamp("createTime", Instant.ofEpochSecond(task.getCreateTime().getSeconds(), task.getCreateTime().getNanos()));
+            } else {
+                b.withTimestamp("createTime", (Instant) null);
+            }
+            return b.build();
+        }
+    }
+
+    private static class CreateTaskDoFn extends BaseTaskDoFn<MElement> {
+
+        CreateTaskDoFn(
+                final String name,
+                final Parameters parameters,
+                final Schema inputSchema,
+                final Schema outputSchema,
+                final List<String> inputNames,
+                final TupleTag<BadRecord> failureTag,
+                final boolean failFast,
+                final List<Logging> loggings) {
+            super(name, parameters, inputSchema, outputSchema, inputNames, failureTag, failFast, loggings);
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
+            final MElement input = c.element();
+            if(input == null) {
+                return;
+            }
+            Logging.log(LOG, logging, "input", input);
+            final Emitter emitter = emitter(c);
+            BuiltTask built = null;
+            try {
+                built = builder.build(input);
+                send(emitter, List.of(input), built, c.timestamp(), window);
+            } catch (final Throwable e) {
+                fail(emitter, List.of(input), built, e, c.timestamp(), window);
             }
         }
     }
 
+    /** Assigns the batch grouping key: rendered batch.key, or a random shard when omitted. */
+    private static class BatchKeyDoFn extends DoFn<MElement, KV<String, MElement>> {
+
+        private final RequestBuilder builder;
+        private final int shards;
+
+        BatchKeyDoFn(final String name, final Parameters parameters, final Schema inputSchema, final List<String> inputNames) {
+            this.builder = new RequestBuilder(name, parameters, inputSchema, inputSchema, inputNames);
+            this.shards = parameters.batch.shards;
+        }
+
+        @Setup
+        public void setup() {
+            builder.setup();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement input = c.element();
+            if(input == null) {
+                return;
+            }
+            final String key = builder.renderBatchKey(input);
+            if(key != null) {
+                c.output(KV.of(key, input));
+            } else {
+                c.output(KV.of("shard-" + java.util.concurrent.ThreadLocalRandom.current().nextInt(shards), input));
+            }
+        }
+    }
+
+    private static class CreateBatchTaskDoFn extends BaseTaskDoFn<KV<String, Iterable<MElement>>> {
+
+        CreateBatchTaskDoFn(
+                final String name,
+                final Parameters parameters,
+                final Schema inputSchema,
+                final Schema outputSchema,
+                final List<String> inputNames,
+                final TupleTag<BadRecord> failureTag,
+                final boolean failFast,
+                final List<Logging> loggings) {
+            super(name, parameters, inputSchema, outputSchema, inputNames, failureTag, failFast, loggings);
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
+            final KV<String, Iterable<MElement>> kv = c.element();
+            if(kv == null || kv.getValue() == null) {
+                return;
+            }
+            final List<MElement> elements = new ArrayList<>();
+            for(final MElement element : kv.getValue()) {
+                Logging.log(LOG, logging, "input", element);
+                elements.add(element);
+            }
+            if(elements.isEmpty()) {
+                return;
+            }
+            final String key = parameters.batch.key == null ? null : kv.getKey();
+            process(emitter(c), elements, key, c.timestamp(), window);
+        }
+
+        /** Builds and sends one task for the batch; on body.maxBytes overflow splits it in halves. */
+        private void process(
+                final Emitter emitter,
+                final List<MElement> elements,
+                final String key,
+                final org.joda.time.Instant timestamp,
+                final BoundedWindow window) {
+
+            BuiltTask built = null;
+            try {
+                built = builder.build(elements, key);
+                send(emitter, elements, built, timestamp, window);
+            } catch (final BodyTooLargeException e) {
+                if(elements.size() > 1) {
+                    final int mid = elements.size() / 2;
+                    process(emitter, elements.subList(0, mid), key, timestamp, window);
+                    process(emitter, elements.subList(mid, elements.size()), key, timestamp, window);
+                } else {
+                    fail(emitter, elements, null, e, timestamp, window);
+                }
+            } catch (final Throwable e) {
+                fail(emitter, elements, built, e, timestamp, window);
+            }
+        }
+    }
 
 }
