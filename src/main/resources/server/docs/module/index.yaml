@@ -38,6 +38,9 @@ sources:
   - title: pubsub
     description: Reads messages from Google Cloud Pub/Sub topics or subscriptions. Supports JSON, Avro, Protocol Buffers, and raw message formats. Includes attribute-based filtering, partition routing with inline filter/select/flatten, additional metadata field injection, seek-based replay, and multi-partition output.
     tags: [source, pubsub, streaming, gcp, messaging]
+  - title: request
+    description: Turns the HTTP request body into source data when the pipeline runs in HTTP serve mode (direct-profile container deployed as a Cloud Run Service). Parses the body as JSON against the declared schema - an array becomes one element per entry, an object becomes one element. Supports subtree selection via a dot-notation path and a sample fallback body for validation and local testing outside serve mode.
+    tags: [source, request, batch, http, serve, cloudrun, api]
   - title: spanner
     description: Reads data from Google Cloud Spanner via SQL query or table scan. Supports batch partitioned queries, table key range filtering, change streams for CDC, view mode for periodic polling, microbatch mode for near real-time streaming, Data Boost, and timestamp-bound reads.
     tags: [source, spanner, batch, streaming, gcp, sql, cdc]

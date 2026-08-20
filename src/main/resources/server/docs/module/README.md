@@ -30,6 +30,7 @@ This page lists the modules registered in the current codebase.
 | [pubsub](source/pubsub.md)       | Import messages from Cloud Pub/Sub topics or subscriptions                                             |
 | [kafka](source/kafka.md)                                                         | Import data from Apache Kafka topics                                                                   |
 | [create](source/create.md)       | Generate data with specified conditions (explicit elements or sequences)                               |
+| [request](source/request.md)     | Turn the HTTP request body into source data in serve mode (Cloud Run Service)                          |
 
 ## Transform Modules
 

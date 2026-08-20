@@ -89,7 +89,7 @@ See [How to Execute Pipeline](src/main/resources/server/docs/exec/README.md) for
 | Maven profile        | Runner         | Build artifact                                                 |
 |----------------------|----------------|----------------------------------------------------------------|
 | `dataflow` (default) | DataflowRunner | FlexTemplate container image                                   |
-| `direct`             | DirectRunner   | Container image for local execution                            |
+| `direct`             | DirectRunner   | Container image for local execution, Cloud Run (Jobs / Worker Pools / Services) and Kubernetes |
 | `flink`              | FlinkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `spark`              | SparkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `server`             | —              | Pipeline API server container image (WAR on Jetty)             |

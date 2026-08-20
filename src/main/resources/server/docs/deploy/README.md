@@ -60,8 +60,16 @@ docker pull {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct
 ```
 
 See [How to Execute Pipeline](../exec/README.md#run-pipeline-locally-directrunner) for how to run it.
-The same image can also be executed serverlessly as a Cloud Run Job —
-see [Run Pipeline on Cloud Run Jobs](cloud-run-jobs.md).
+
+The same image also runs serverlessly — it supports all three Cloud Run forms, and any
+Kubernetes cluster:
+
+| deployment | use case |
+| --- | --- |
+| [Cloud Run Jobs](cloud-run-jobs.md) | one-shot or scheduled batch pipelines |
+| [Cloud Run Worker Pools](cloud-run-worker-pools.md) | streaming pipelines; config-queue worker (configs via Pub/Sub subscription) |
+| [Cloud Run Services](cloud-run-service.md) | HTTP-triggered runs (serve mode): Cloud Scheduler, Pub/Sub push, request-carried data via the `request` source |
+| [Kubernetes](kubernetes.md) | the same patterns as Job/CronJob/Deployment on GKE or any cluster |
 
 ## Build bundled jar for Apache Flink / Apache Spark
 
