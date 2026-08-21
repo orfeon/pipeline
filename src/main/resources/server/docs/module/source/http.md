@@ -50,7 +50,7 @@ Typical uses:
 | headers   | optional | Map<String,String\> | Request headers (values are templates). |
 | body      | optional | String \| JSON | Request body template: a string, or a JSON object/array whose text is rendered as a template (`Content-Type: application/json` unless a header says otherwise). |
 | auth      | optional | [Auth](../sink/http.md#auth-parameters) | Per-request authentication (overrides the module-level `auth`). |
-| response  | optional | [Response](#response-parameters) | How the response becomes records, and success / retry classification. |
+| response  | optional | [Response](#response-parameters) | How the response becomes records, and success / retry classification. (`format` directly under the request is accepted as an alias of `response.format`.) |
 | loop      | optional | [Loop](#loop-parameters) | Pagination. |
 | input     | optional | String | Name of the parent request. This request runs once **per record** of the parent's output (in parallel across workers), with the parent record's fields as template variables. |
 
@@ -72,7 +72,7 @@ The request is repeated while `condition` holds. Before each repetition the `fee
 |---------------|----------|------|-------------|
 | vars          | optional | Map<String,Object\> | Initial variables (`{ page: 1 }`, `{ cursor: "" }`). |
 | feeds         | optional | Map<String,String\> | Templates producing the next values (`page: "${page + 1}"`, `cursor: "${payload.next_cursor!''}"`, `cursor: "${headers['x-next-cursor']!''}"`). Numeric results become numbers. |
-| condition     | required (with feeds) | [Filter](../common/filter.md) | Continue condition evaluated on the response: `statusCode`, `headers.<name>` (first value, lower-case keys available), `body`, `payload.<path>` (parsed JSON), plus the current loop variables. |
+| condition     | required (with feeds) | [Filter](../common/filter.md) | Continue condition evaluated on the response: `statusCode`, `headers.<name>` (first value, lower-case keys available), `body`, `payload.<path>` (parsed JSON; `response` is an alias), plus the current loop variables. A list of conditions is AND-ed. |
 | maxIterations | optional | Integer | Safety cap (default `10000`). |
 
 ### Polling parameters

@@ -89,6 +89,38 @@ public class HttpSourceTest {
             }
             respond(exchange, 200, "[{\"v\":" + n + "}]");
         });
+        // FireHydrant-style: {"data":[...],"pagination":{"page":n,"next":n+1|null}} with Bearer auth
+        server.createContext("/v1/incidents", exchange -> {
+            final Received r = record("incidents", exchange);
+            if(!"Bearer fh-key".equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
+                respond(exchange, 401, "{\"error\":\"unauthorized\"}");
+                return;
+            }
+            int page = 1;
+            for(final String kv : r.query().split("&")) {
+                if(kv.startsWith("page=")) {
+                    page = Integer.parseInt(kv.substring(5));
+                }
+            }
+            final JsonArray data = new JsonArray();
+            for(int i = 0; i < 2; i++) {
+                final JsonObject inc = new JsonObject();
+                inc.addProperty("id", "inc-" + ((page - 1) * 2 + i + 1));
+                inc.addProperty("severity", "SEV" + (i + 1));
+                data.add(inc);
+            }
+            final JsonObject pagination = new JsonObject();
+            pagination.addProperty("page", page);
+            if(page < 3) {
+                pagination.addProperty("next", page + 1);
+            } else {
+                pagination.add("next", com.google.gson.JsonNull.INSTANCE);
+            }
+            final JsonObject body = new JsonObject();
+            body.add("data", data);
+            body.add("pagination", pagination);
+            respond(exchange, 200, body.toString());
+        });
         // flaky: first call 503, then 200
         server.createContext("/flaky", exchange -> {
             record("flaky", exchange);
@@ -286,6 +318,100 @@ public class HttpSourceTest {
 
         Assertions.assertEquals(3, received("cursor").size());
         Assertions.assertEquals(2, received("flaky").size());
+    }
+
+    /** The previous config style (endpoint / request-level format / `response.*` loop variables / list condition / numeric param) + storage avro sink. */
+    @Test
+    public void testPreviousStyleConfigWithStorageSink() throws Exception {
+        final String dir = "target/http-source-test/firehydrant";
+        final java.nio.file.Path path = java.nio.file.Path.of(dir);
+        if(java.nio.file.Files.exists(path)) {
+            try(final java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(path)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            }
+        }
+        final String configYaml = """
+                system:
+                  args:
+                    fh_api_key: fh-key
+                sources:
+                  - name: firehydrant_source
+                    module: http
+                    parameters:
+                      requests:
+                        - name: incidents
+                          endpoint: %s
+                          method: GET
+                          format: json
+                          headers:
+                            accept: application/json
+                            Authorization: "Bearer ${args.fh_api_key}"
+                          params:
+                            page: ${page}
+                            per_page: 200
+                          loop:
+                            condition:
+                              - key: response.pagination.next
+                                op: '!='
+                                value: null
+                            vars:
+                              page: 1
+                            feeds:
+                              page: "${response.pagination.next}"
+                sinks:
+                  - name: firehydrant_sink
+                    module: storage
+                    inputs:
+                      - firehydrant_source
+                    parameters:
+                      output: "%s/service=firehydrant/resource=${name}/date=1970-01-01/${statusCode}"
+                      format: avro
+                      numShards: 1
+                      suffix: ".avro"
+                """.formatted(url("/v1/incidents"), dir);
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        PAssert.that(outputs.get("firehydrant_source").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement e : elements) {
+                count++;
+                Assertions.assertEquals("incidents", e.getPrimitiveValue("name"));
+                Assertions.assertEquals(200, e.getPrimitiveValue("statusCode"));
+                Assertions.assertTrue(((String) e.getPrimitiveValue("payload")).contains("\"pagination\""));
+                Assertions.assertTrue(((String) e.getPrimitiveValue("body")).contains("\"data\""));
+            }
+            Assertions.assertEquals(3, count);   // one record per page
+            return null;
+        });
+        pipeline.run();
+
+        final List<Received> calls = received("incidents");
+        Assertions.assertEquals(3, calls.size());
+        Assertions.assertTrue(calls.stream().allMatch(r -> r.query().contains("per_page=200")));
+        Assertions.assertTrue(calls.stream().allMatch(r -> "application/json".equals(r.headers().get("Accept").get(0))));
+        Assertions.assertEquals(Set.of(1, 2, 3), new HashSet<>(calls.stream()
+                .map(r -> Integer.parseInt(Arrays.stream(r.query().split("&")).filter(q -> q.startsWith("page=")).findFirst().orElseThrow().substring(5))).toList()));
+
+        final List<java.nio.file.Path> files;
+        try(final java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(path)) {
+            files = walk.filter(java.nio.file.Files::isRegularFile).toList();
+        }
+        Assertions.assertEquals(1, files.size(), files.toString());
+        final String file = files.get(0).toString().replace('\\', '/');
+        Assertions.assertTrue(file.contains("service=firehydrant/resource=incidents/date=1970-01-01/200"), file);
+        Assertions.assertTrue(file.endsWith(".avro"), file);
+        try(final org.apache.avro.file.DataFileReader<org.apache.avro.generic.GenericRecord> reader = new org.apache.avro.file.DataFileReader<>(
+                files.get(0).toFile(), new org.apache.avro.generic.GenericDatumReader<>())) {
+            int rows = 0;
+            while(reader.hasNext()) {
+                final org.apache.avro.generic.GenericRecord record = reader.next();
+                rows++;
+                Assertions.assertEquals("incidents", record.get("name").toString());
+                Assertions.assertEquals(200, record.get("statusCode"));
+                Assertions.assertTrue(record.get("payload").toString().contains("inc-"));
+            }
+            Assertions.assertEquals(3, rows);
+        }
     }
 
     @Test

@@ -159,6 +159,7 @@ public class HttpSource extends Source {
         private Map<String, String> params;
         private Map<String, String> headers;
         private JsonElement body;     // string template, or JSON object/array rendered as a template
+        private ResponsePolicy.Format format;   // alias of response.format (previous parameter location)
         private AuthProvider.Parameters auth;
         private Response response;
         private Loop loop;
@@ -222,6 +223,9 @@ public class HttpSource extends Source {
             }
             if(response == null) {
                 response = new Response();
+            }
+            if(response.format == null && format != null) {
+                response.format = format;
             }
             response.setDefaults();
             if(loop == null) {
@@ -633,6 +637,7 @@ public class HttpSource extends Source {
             values.put("headers", headers);
             values.put("body", result.parsed().text());
             values.put("payload", result.parsed().payload());
+            values.put("response", result.parsed().payload());   // previous variable name
             return values;
         }
 
