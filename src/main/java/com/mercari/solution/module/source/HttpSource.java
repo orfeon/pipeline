@@ -1,14 +1,17 @@
 package com.mercari.solution.module.source;
 
+import com.google.common.util.concurrent.RateLimiter;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.outbound.*;
 import com.mercari.solution.util.schema.converter.JsonToElementConverter;
+import com.mercari.solution.util.schema.converter.JsonToMapConverter;
 import freemarker.template.Template;
 import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.io.GenerateSequence;
@@ -27,13 +30,13 @@ import java.util.*;
 /**
  * Source that fetches records from HTTP APIs.
  *
- * <p>Each entry of {@code requests} is one request definition: url / params / headers / body
- * templates, auth, response handling (typed records via {@code response.schema}, array fan-out via
- * {@code response.rowsFrom}), pagination ({@code loop}) and chaining ({@code input}: one request per
- * record of a parent request, executed in parallel). Built on the shared outbound core
- * ({@link RequestRenderer}, {@link AuthProvider}, {@link ResponsePolicy}, {@link SyncCaller}) used by
- * the http sink and action.http. In streaming mode {@code polling.interval} repeats the root
- * requests periodically.
+ * <p>A request definition mirrors the http sink: {@code target} (url / method / params / headers /
+ * auth), {@code body} and {@code response} (format / schema / success / retry) are the shared
+ * {@link RequestSpec} / {@link ResponsePolicy} blocks. A source adds {@code response.itemsPath}
+ * (array fan-out into records), {@code loop} (pagination), {@code input} (+ {@code foreach}) for
+ * chaining one request per parent record (or per item of the parent's response), {@code rate}
+ * and, in streaming mode, {@code polling}. A single request may be written directly under
+ * {@code parameters}; several requests go under {@code requests}.
  *
  * <p>Outputs: the first request is the module's main output; every request is also available as
  * the tagged output {@code <module>.<request name>}.
@@ -46,41 +49,35 @@ public class HttpSource extends Source {
     public static class Parameters implements Serializable {
 
         private List<Request> requests;
+        // single-request shorthand (same blocks as one requests[] entry)
+        private RequestSpec.Target target;
+        private RequestSpec.Body body;
+        private Response response;
+        private Loop loop;
+        private Rate rate;
+
         private AuthProvider.Parameters auth;
         private HttpTransport.TimeoutParameters timeout;
         private HttpTransport.Parameters http;
         private Polling polling;
 
-        private void validate(final String name) {
+        private void validate(final String moduleName) {
             final List<String> errorMessages = new ArrayList<>();
             if(requests == null || requests.isEmpty()) {
-                errorMessages.add("parameters.requests must not be empty");
-            } else {
-                final Set<String> names = new HashSet<>();
-                for(int i = 0; i < requests.size(); i++) {
-                    final Request request = requests.get(i);
-                    if(request == null) {
-                        errorMessages.add("parameters.requests[" + i + "] must not be null");
-                        continue;
-                    }
-                    if(request.name == null) {
-                        if(requests.size() > 1) {
-                            errorMessages.add("parameters.requests[" + i + "].name is required when several requests are defined");
-                        }
-                    } else if(!names.add(request.name)) {
-                        errorMessages.add("parameters.requests[" + i + "].name is duplicated: " + request.name);
-                    }
-                    errorMessages.addAll(request.validate("parameters.requests[" + i + "]", http != null && http.allowedHosts != null, auth));
+                if(target == null) {
+                    errorMessages.add("parameters.requests (or parameters.target for a single request) must not be empty");
+                } else {
+                    final Request single = new Request();
+                    single.name = moduleName;
+                    single.target = target;
+                    single.body = body;
+                    single.response = response;
+                    single.loop = loop;
+                    single.rate = rate;
+                    requests = new ArrayList<>(List.of(single));
                 }
-                for(int i = 0; i < requests.size(); i++) {
-                    final Request request = requests.get(i);
-                    if(request != null && request.input != null && !names.contains(request.input)) {
-                        errorMessages.add("parameters.requests[" + i + "].input refers to an unknown request: " + request.input);
-                    }
-                }
-                if(names.size() == requests.size() && hasCycle(requests)) {
-                    errorMessages.add("parameters.requests input chain must not be cyclic");
-                }
+            } else if(target != null || body != null || response != null || loop != null) {
+                errorMessages.add("parameters.target/body/response/loop are the single-request form and cannot be combined with parameters.requests");
             }
             if(auth != null) {
                 errorMessages.addAll(auth.validate("parameters.auth"));
@@ -93,6 +90,40 @@ public class HttpSource extends Source {
             }
             if(polling != null) {
                 errorMessages.addAll(polling.validate());
+            }
+            if(requests != null && !requests.isEmpty()) {
+                final Map<String, Request> byName = new LinkedHashMap<>();
+                for(int i = 0; i < requests.size(); i++) {
+                    final Request request = requests.get(i);
+                    final String prefix = "parameters.requests[" + i + "]";
+                    if(request == null) {
+                        errorMessages.add(prefix + " must not be null");
+                        continue;
+                    }
+                    if(request.name == null) {
+                        if(requests.size() > 1) {
+                            errorMessages.add(prefix + ".name is required when several requests are defined");
+                        }
+                    } else if(byName.put(request.name, request) != null) {
+                        errorMessages.add(prefix + ".name is duplicated: " + request.name);
+                    }
+                    errorMessages.addAll(request.validate(prefix, http != null && http.allowedHosts != null, auth));
+                }
+                for(int i = 0; i < requests.size(); i++) {
+                    final Request request = requests.get(i);
+                    if(request == null || request.input == null) {
+                        continue;
+                    }
+                    final Request parent = byName.get(request.input);
+                    if(parent == null) {
+                        errorMessages.add("parameters.requests[" + i + "].input refers to an unknown request: " + request.input);
+                    } else if(request.foreach != null && parent.response != null && parent.response.schema != null) {
+                        errorMessages.add("parameters.requests[" + i + "].foreach requires an untyped parent (" + request.input + " has response.schema); use the parent's fields directly instead");
+                    }
+                }
+                if(byName.size() == requests.size() && hasCycle(requests)) {
+                    errorMessages.add("parameters.requests input chain must not be cyclic");
+                }
             }
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -153,29 +184,30 @@ public class HttpSource extends Source {
     public static class Request implements Serializable {
 
         private String name;
-        private String url;
-        private String endpoint;      // alias of url (previous parameter name)
-        private String method;
-        private Map<String, String> params;
-        private Map<String, String> headers;
-        private JsonElement body;     // string template, or JSON object/array rendered as a template
-        private ResponsePolicy.Format format;   // alias of response.format (previous parameter location)
-        private AuthProvider.Parameters auth;
+        private RequestSpec.Target target;
+        private RequestSpec.Body body;
         private Response response;
         private Loop loop;
         private String input;
-
-        private RequestSpec.Target target;   // built in setDefaults
-        private RequestSpec.Body bodySpec;
-        private String bodyJson;
+        private String foreach;
+        private Rate rate;
 
         private List<String> validate(final String prefix, final boolean allowedHostsGiven, final AuthProvider.Parameters defaultAuth) {
             final List<String> errorMessages = new ArrayList<>();
-            if(url == null && endpoint == null) {
-                errorMessages.add(prefix + ".url must not be null");
+            if(target == null) {
+                errorMessages.add(prefix + ".target must not be null");
+            } else {
+                errorMessages.addAll(target.validate(prefix + ".target", null, allowedHostsGiven));
+                if(target.auth == null && defaultAuth != null && !defaultAuth.isNone()
+                        && target.url != null && RequestSpec.staticOrigin(target.url) == null && !allowedHostsGiven) {
+                    errorMessages.add("parameters.http.allowedHosts is required when parameters.auth is set and the host part of " + prefix + ".target.url is a template");
+                }
             }
-            if(auth != null) {
-                errorMessages.addAll(auth.validate(prefix + ".auth"));
+            if(body != null) {
+                errorMessages.addAll(body.validate(prefix + ".body", null));
+                if(RequestSpec.Format.bytes.equals(body.format) || RequestSpec.Format.avro.equals(body.format) || RequestSpec.Format.protobuf.equals(body.format)) {
+                    errorMessages.add(prefix + ".body.format " + body.format + " is not supported in the http source (json, ndjson, form, multipart, template, none)");
+                }
             }
             if(response != null) {
                 errorMessages.addAll(response.validate(prefix + ".response"));
@@ -183,10 +215,16 @@ public class HttpSource extends Source {
             if(loop != null) {
                 errorMessages.addAll(loop.validate(prefix + ".loop"));
             }
-            final String u = url != null ? url : endpoint;
-            final AuthProvider.Parameters effectiveAuth = auth != null ? auth : defaultAuth;
-            if(effectiveAuth != null && !effectiveAuth.isNone() && u != null && RequestSpec.staticOrigin(u) == null && !allowedHostsGiven) {
-                errorMessages.add("parameters.http.allowedHosts is required when " + prefix + ".auth is set and the host part of the url is a template");
+            if(foreach != null) {
+                if(input == null) {
+                    errorMessages.add(prefix + ".foreach requires input");
+                }
+                if(!foreach.startsWith("/")) {
+                    errorMessages.add(prefix + ".foreach must be a JSON pointer starting with / but: " + foreach);
+                }
+            }
+            if(rate != null) {
+                errorMessages.addAll(rate.validate(prefix + ".rate"));
             }
             return errorMessages;
         }
@@ -195,37 +233,23 @@ public class HttpSource extends Source {
             if(name == null) {
                 name = moduleName;
             }
-            if(url == null) {
-                url = endpoint;
+            if(target.method == null) {
+                target.method = "GET";
             }
-            target = new RequestSpec.Target();
-            target.url = url;
-            target.method = method == null ? "GET" : method;
-            target.params = params;
-            target.headers = headers;
-            target.auth = auth != null ? auth : defaultAuth;
+            if(target.auth == null) {
+                target.auth = defaultAuth;
+            }
             target.setDefaults();
-            bodySpec = new RequestSpec.Body();
-            if(body != null && !body.isJsonNull()) {
-                bodySpec.format = RequestSpec.Format.template;
-                bodySpec.template = body.isJsonPrimitive() ? body.getAsString() : body.toString();
-                bodyJson = body.toString();
-                body = null;
-            } else {
-                bodySpec.format = RequestSpec.Format.none;
+            if(body == null) {
+                body = new RequestSpec.Body();
+                body.format = RequestSpec.Format.none;
             }
-            bodySpec.setDefaults();
-            if(bodySpec.template != null && target.headers.keySet().stream().noneMatch(k -> k.equalsIgnoreCase("Content-Type"))) {
-                bodySpec.contentType = bodyJson != null && bodyJson.startsWith("{") || bodyJson != null && bodyJson.startsWith("[")
-                        ? "application/json" : "text/plain; charset=utf-8";
-            } else {
-                bodySpec.contentType = null; // header given explicitly
+            body.setDefaults();
+            if(target.headers.keySet().stream().anyMatch(k -> k.equalsIgnoreCase("Content-Type"))) {
+                body.contentType = null; // header given explicitly
             }
             if(response == null) {
                 response = new Response();
-            }
-            if(response.format == null && format != null) {
-                response.format = format;
             }
             response.setDefaults();
             if(loop == null) {
@@ -250,7 +274,7 @@ public class HttpSource extends Source {
     public static class Response implements Serializable {
         private ResponsePolicy.Format format;
         private JsonElement schema;
-        private String rowsFrom;
+        private String itemsPath;
         private ResponsePolicy.Success success;
         private ResponsePolicy.Retry retry;
 
@@ -262,14 +286,11 @@ public class HttpSource extends Source {
             if(schema != null && !schema.isJsonObject()) {
                 errorMessages.add(prefix + ".schema must be an object");
             }
-            if(rowsFrom != null && !rowsFrom.startsWith("/")) {
-                errorMessages.add(prefix + ".rowsFrom must be a JSON pointer starting with / but: " + rowsFrom);
+            if(itemsPath != null && !itemsPath.startsWith("/")) {
+                errorMessages.add(prefix + ".itemsPath must be a JSON pointer starting with / but: " + itemsPath);
             }
-            if(rowsFrom != null && format != null && !ResponsePolicy.Format.json.equals(format)) {
-                errorMessages.add(prefix + ".rowsFrom requires format json");
-            }
-            if(schema != null && format != null && !ResponsePolicy.Format.json.equals(format)) {
-                errorMessages.add(prefix + ".schema requires format json");
+            if((itemsPath != null || schema != null) && format != null && !ResponsePolicy.Format.json.equals(format)) {
+                errorMessages.add(prefix + ".itemsPath / schema require format json");
             }
             final ResponsePolicy.Parameters p = new ResponsePolicy.Parameters();
             p.success = success;
@@ -291,14 +312,14 @@ public class HttpSource extends Source {
         }
     }
 
-    /** Pagination: repeat the request while {@code condition} holds, feeding variables from each response. */
+    /** Pagination: repeat the request until {@code until} holds, computing the next variables from each response. */
     public static class Loop implements Serializable {
-        private JsonElement condition;
         private Map<String, JsonElement> vars;
-        private LinkedHashMap<String, String> feeds;
+        private LinkedHashMap<String, String> next;
+        private JsonElement until;
         private Integer maxIterations;
 
-        private String conditionJson;
+        private String untilJson;
         private Map<String, String> varsJson;
 
         private List<String> validate(final String prefix) {
@@ -306,16 +327,16 @@ public class HttpSource extends Source {
             if(maxIterations != null && maxIterations < 1) {
                 errorMessages.add(prefix + ".maxIterations must be >= 1");
             }
-            if(condition == null && feeds != null && !feeds.isEmpty()) {
-                errorMessages.add(prefix + ".condition is required when feeds are set");
+            if(until == null) {
+                errorMessages.add(prefix + ".until must not be null");
             }
             return errorMessages;
         }
 
         private void setDefaults() {
-            if(condition != null) {
-                conditionJson = condition.toString();
-                condition = null;
+            if(until != null) {
+                untilJson = until.toString();
+                until = null;
             }
             varsJson = new LinkedHashMap<>();
             if(vars != null) {
@@ -324,16 +345,32 @@ public class HttpSource extends Source {
                 }
                 vars = null;
             }
-            if(feeds == null) {
-                feeds = new LinkedHashMap<>();
+            if(next == null) {
+                next = new LinkedHashMap<>();
             }
             if(maxIterations == null) {
                 maxIterations = 10000;
             }
         }
+    }
 
-        boolean isEnabled() {
-            return conditionJson != null;
+    public static class Rate implements Serializable {
+        private Double count;
+        private String unit;
+
+        private List<String> validate(final String prefix) {
+            final List<String> errorMessages = new ArrayList<>();
+            if(count == null || count <= 0) {
+                errorMessages.add(prefix + ".count must be positive");
+            }
+            if(unit != null && !unit.equals("second") && !unit.equals("minute")) {
+                errorMessages.add(prefix + ".unit must be second or minute but: " + unit);
+            }
+            return errorMessages;
+        }
+
+        double permitsPerSecond() {
+            return "minute".equals(unit) ? count / 60D : count;
         }
     }
 
@@ -431,7 +468,6 @@ public class HttpSource extends Source {
         }
 
         errorHandler.addError(PCollectionList.of(failures).apply("FlattenFailures", Flatten.pCollections()));
-
         return result;
     }
 
@@ -459,14 +495,13 @@ public class HttpSource extends Source {
                 .build();
     }
 
-    /** Executes one request definition for each input element (seed or parent record), with pagination. */
+    /** Executes one request definition for each input element (seed, parent record, or parent item), with pagination. */
     private static class RequestDoFn extends DoFn<MElement, MElement> {
 
         private final String moduleName;
         private final Request request;
         private final HttpTransport.TimeoutParameters timeout;
         private final HttpTransport.Parameters http;
-        private final Schema inputSchema;
         private final Schema outputSchema;
         private final TupleTag<BadRecord> failureTag;
         private final boolean failFast;
@@ -475,9 +510,10 @@ public class HttpSource extends Source {
         private final ResponsePolicy policy;
 
         private transient HttpTransport transport;
-        private transient Filter.ConditionNode loopCondition;
-        private transient Map<String, Template> feedTemplates;
+        private transient Filter.ConditionNode untilCondition;
+        private transient Map<String, Template> nextTemplates;
         private transient Map<String, Object> initialVars;
+        private transient RateLimiter rateLimiter;
 
         RequestDoFn(
                 final String moduleName,
@@ -493,15 +529,18 @@ public class HttpSource extends Source {
             this.request = request;
             this.timeout = parameters.timeout;
             this.http = parameters.http;
-            this.inputSchema = inputSchema;
             this.outputSchema = outputSchema;
             this.failureTag = failureTag;
             this.failFast = failFast;
             this.logging = Logging.map(loggings);
-            final List<String> extraTexts = new ArrayList<>(request.loop.feeds.values());
+            final List<String> extraTexts = new ArrayList<>(request.loop.next.values());
             final Set<String> dynamicVars = new HashSet<>(request.loop.varsJson.keySet());
-            dynamicVars.addAll(request.loop.feeds.keySet());
-            this.renderer = new RequestRenderer(moduleName + "." + request.name, request.target, request.bodySpec,
+            dynamicVars.addAll(request.loop.next.keySet());
+            if(request.foreach != null) {
+                // item fields are unknown at assembly time: render every template per request
+                dynamicVars.add(RequestRenderer.DYNAMIC_ALL);
+            }
+            this.renderer = new RequestRenderer(moduleName + "." + request.name, request.target, request.body,
                     null, false, inputSchema, inputSchema, List.of(request.input == null ? "" : request.input), extraTexts, dynamicVars);
             this.policy = new ResponsePolicy(request.response.policy);
         }
@@ -515,15 +554,16 @@ public class HttpSource extends Source {
             }
             final AuthProvider auth = AuthProvider.create(request.target.auth, RequestSpec.staticOrigin(request.target.url));
             this.transport = new HttpTransport(http, timeout, auth);
-            this.loopCondition = request.loop.conditionJson == null ? null : Filter.parse(request.loop.conditionJson);
-            this.feedTemplates = new LinkedHashMap<>();
-            for(final Map.Entry<String, String> entry : request.loop.feeds.entrySet()) {
-                feedTemplates.put(entry.getKey(), TemplateUtil.createStrictTemplate(moduleName + "." + request.name + ".feed." + entry.getKey(), entry.getValue()));
+            this.untilCondition = request.loop.untilJson == null ? null : Filter.parse(request.loop.untilJson);
+            this.nextTemplates = new LinkedHashMap<>();
+            for(final Map.Entry<String, String> entry : request.loop.next.entrySet()) {
+                nextTemplates.put(entry.getKey(), TemplateUtil.createStrictTemplate(moduleName + "." + request.name + ".next." + entry.getKey(), entry.getValue()));
             }
             this.initialVars = new LinkedHashMap<>();
             for(final Map.Entry<String, String> entry : request.loop.varsJson.entrySet()) {
-                initialVars.put(entry.getKey(), toVar(com.mercari.solution.util.domain.file.JsonUtil.fromJson(entry.getValue())));
+                initialVars.put(entry.getKey(), toVar(JsonUtil.fromJson(entry.getValue())));
             }
+            this.rateLimiter = request.rate == null ? null : RateLimiter.create(request.rate.permitsPerSecond());
         }
 
         @Teardown
@@ -543,30 +583,33 @@ public class HttpSource extends Source {
                 Logging.log(LOG, logging, "input", input);
             }
             try {
-                final Map<String, Object> values = renderer.createTemplateValues(input);
-                final Map<String, Object> vars = new LinkedHashMap<>(initialVars);
-                int iteration = 0;
-                while(true) {
-                    iteration++;
-                    values.putAll(vars);
-                    final OutboundRequest outbound = renderer.build(List.of(input), values);
-                    final SyncCaller.Result result = SyncCaller.call(moduleName + "." + request.name, transport, policy, outbound);
-                    if(!result.succeeded()) {
-                        throw new IllegalStateException("request " + request.name + " " + outbound.method() + " " + outbound.url() + " failed: " + result.error());
+                if(request.foreach == null) {
+                    execute(c, input, renderer.createTemplateValues(input));
+                    return;
+                }
+                // fan out over the parent's response items
+                final Object payload = input.getPrimitiveValue("payload");
+                final JsonElement json = payload == null ? null : JsonUtil.fromJson(payload.toString());
+                final JsonElement items = json == null ? null : ResponsePolicy.pointer(json, request.foreach);
+                if(items == null || items.isJsonNull()) {
+                    return;
+                }
+                final List<JsonElement> list = new ArrayList<>();
+                if(items.isJsonArray()) {
+                    items.getAsJsonArray().forEach(list::add);
+                } else {
+                    list.add(items);
+                }
+                for(final JsonElement item : list) {
+                    final Map<String, Object> values = renderer.createTemplateValues(input);
+                    if(item.isJsonObject()) {
+                        final Map<String, Object> itemValues = JsonToMapConverter.convert(item);
+                        values.putAll(itemValues);
+                        values.put("__item", itemValues);
+                    } else {
+                        values.put("__item", toVar(item));
                     }
-                    emit(c, outbound, result);
-                    if(loopCondition == null || iteration >= request.loop.maxIterations) {
-                        break;
-                    }
-                    final Map<String, Object> loopValues = new HashMap<>(values);
-                    loopValues.putAll(responseValues(result));
-                    if(!Filter.filter(loopCondition, loopValues)) {
-                        break;
-                    }
-                    for(final Map.Entry<String, Template> entry : feedTemplates.entrySet()) {
-                        final String text = TemplateUtil.executeStrictTemplate(entry.getValue(), loopValues);
-                        vars.put(entry.getKey(), toVar(text));
-                    }
+                    execute(c, input, values);
                 }
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed http request: " + request.name, input, e, failFast);
@@ -574,12 +617,42 @@ public class HttpSource extends Source {
             }
         }
 
+        private void execute(final ProcessContext c, final MElement input, final Map<String, Object> values) throws InterruptedException {
+            final Map<String, Object> vars = new LinkedHashMap<>(initialVars);
+            int iteration = 0;
+            while(true) {
+                iteration++;
+                values.putAll(vars);
+                if(rateLimiter != null) {
+                    rateLimiter.acquire();
+                }
+                final OutboundRequest outbound = renderer.build(List.of(input), values);
+                final SyncCaller.Result result = SyncCaller.call(moduleName + "." + request.name, transport, policy, outbound);
+                if(!result.succeeded()) {
+                    throw new IllegalStateException("request " + request.name + " " + outbound.method() + " " + outbound.url() + " failed: " + result.error());
+                }
+                emit(c, outbound, result);
+                if(untilCondition == null || iteration >= request.loop.maxIterations) {
+                    break;
+                }
+                final Map<String, Object> loopValues = new HashMap<>(values);
+                loopValues.putAll(responseValues(result));
+                if(Filter.filter(untilCondition, loopValues)) {
+                    break;
+                }
+                for(final Map.Entry<String, Template> entry : nextTemplates.entrySet()) {
+                    final String text = TemplateUtil.executeStrictTemplate(entry.getValue(), loopValues);
+                    vars.put(entry.getKey(), toVar(text));
+                }
+            }
+        }
+
         private void emit(final ProcessContext c, final OutboundRequest outbound, final SyncCaller.Result result) {
             final ResponsePolicy.Parsed parsed = result.parsed();
             final JsonElement json = parsed.values().get("json") instanceof JsonElement e ? e : null;
             final List<JsonElement> rows = new ArrayList<>();
-            if(request.response.rowsFrom != null) {
-                final JsonElement target = json == null ? null : ResponsePolicy.pointer(json, request.response.rowsFrom);
+            if(request.response.itemsPath != null) {
+                final JsonElement target = json == null ? null : ResponsePolicy.pointer(json, request.response.itemsPath);
                 if(target != null && target.isJsonArray()) {
                     for(final JsonElement row : target.getAsJsonArray()) {
                         rows.add(row);
@@ -623,7 +696,7 @@ public class HttpSource extends Source {
             }
         }
 
-        /** Response variables for loop conditions / feeds: statusCode, headers (first values), body, payload. */
+        /** Response variables for loop until / next: statusCode, headers (first values), body, payload. */
         private static Map<String, Object> responseValues(final SyncCaller.Result result) {
             final Map<String, Object> values = new HashMap<>();
             values.put("statusCode", result.response().statusCode());
@@ -637,7 +710,6 @@ public class HttpSource extends Source {
             values.put("headers", headers);
             values.put("body", result.parsed().text());
             values.put("payload", result.parsed().payload());
-            values.put("response", result.parsed().payload());   // previous variable name
             return values;
         }
 

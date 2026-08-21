@@ -40,6 +40,8 @@ public class RequestRenderer implements Serializable {
     public static final String VAR_ELEMENT = "__element";
     public static final String VAR_DOC = "__doc";
     public static final String VAR_BODY = "__body";
+    /** Marker in {@code dynamicVariables}: every template is rendered per request (variables unknown at assembly). */
+    public static final String DYNAMIC_ALL = "*";
 
     private static final Pattern PATTERN_DYNAMIC_VAR = Pattern
             .compile("\\$\\{[^}]*\\b(__timestamp|__source|__element|__doc|__body|elements|size|key)\\b[^}]*}");
@@ -134,6 +136,7 @@ public class RequestRenderer implements Serializable {
 
         this.name = name;
         this.dynamicVariablePattern = dynamicVariables == null || dynamicVariables.isEmpty() ? null
+                : dynamicVariables.contains(DYNAMIC_ALL) ? Pattern.compile("\\$\\{")
                 : Pattern.compile("\\$\\{[^}]*\\b(" + String.join("|", dynamicVariables.stream().map(Pattern::quote).toList()) + ")\\b[^}]*}");
         this.target = target;
         this.body = body;

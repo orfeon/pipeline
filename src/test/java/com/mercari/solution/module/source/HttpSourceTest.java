@@ -1,6 +1,7 @@
 package com.mercari.solution.module.source;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
@@ -20,11 +21,14 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 public class HttpSourceTest {
 
@@ -43,7 +47,7 @@ public class HttpSourceTest {
         port = server.getAddress().getPort();
         server.setExecutor(Executors.newFixedThreadPool(8));
 
-        // paginated list: ?page=N -> 2 items per page, 3 pages; requires Authorization: Bearer secret
+        // paginated list: ?page=N -> 2 items per page, 3 pages, has_more flag; requires Bearer secret
         server.createContext("/items", exchange -> {
             final Received r = record("items", exchange);
             if(!"Bearer secret".equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
@@ -56,14 +60,7 @@ public class HttpSourceTest {
                 respond(exchange, 200, "{\"id\":" + id + ",\"detail\":\"detail-" + id + "\",\"tags\":[\"a\",\"b\"]}");
                 return;
             }
-            int page = 1;
-            if(r.query() != null) {
-                for(final String kv : r.query().split("&")) {
-                    if(kv.startsWith("page=")) {
-                        page = Integer.parseInt(kv.substring(5));
-                    }
-                }
-            }
+            final int page = pageOf(r.query());
             final JsonArray items = new JsonArray();
             for(int i = 0; i < 2; i++) {
                 final JsonObject item = new JsonObject();
@@ -79,7 +76,31 @@ public class HttpSourceTest {
             body.addProperty("has_more", page < 3);
             respond(exchange, 200, body.toString());
         });
-        // cursor pagination via header: X-Next-Cursor until empty
+        // nested pagination block {"data":{"items":[...],"has_more_data":bool}} and a per-item sub-resource
+        server.createContext("/v1/courses", exchange -> {
+            final Received r = record("courses", exchange);
+            final String path = exchange.getRequestURI().getPath();
+            if(path.matches("/v1/courses/[^/]+/enrollments")) {
+                final String id = path.split("/")[3];
+                final int page = pageOf(r.query());
+                respond(exchange, 200, "{\"data\":{\"items\":[{\"course\":\"" + id + "\",\"user\":\"u" + page + "\"}],\"has_more_data\":" + (page < 2) + "}}");
+                return;
+            }
+            final int page = pageOf(r.query());
+            final JsonArray items = new JsonArray();
+            for(int i = 0; i < 2; i++) {
+                final JsonObject item = new JsonObject();
+                item.addProperty("id", "c" + ((page - 1) * 2 + i + 1));
+                items.add(item);
+            }
+            final JsonObject data = new JsonObject();
+            data.add("items", items);
+            data.addProperty("has_more_data", page < 2);
+            final JsonObject body = new JsonObject();
+            body.add("data", data);
+            respond(exchange, 200, body.toString());
+        });
+        // cursor pagination via header: X-Next-Cursor until absent
         server.createContext("/cursor", exchange -> {
             final Received r = record("cursor", exchange);
             final String cursor = r.query() == null ? "" : r.query().replace("cursor=", "");
@@ -88,38 +109,6 @@ public class HttpSourceTest {
                 exchange.getResponseHeaders().add("X-Next-Cursor", String.valueOf(n + 1));
             }
             respond(exchange, 200, "[{\"v\":" + n + "}]");
-        });
-        // FireHydrant-style: {"data":[...],"pagination":{"page":n,"next":n+1|null}} with Bearer auth
-        server.createContext("/v1/incidents", exchange -> {
-            final Received r = record("incidents", exchange);
-            if(!"Bearer fh-key".equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
-                respond(exchange, 401, "{\"error\":\"unauthorized\"}");
-                return;
-            }
-            int page = 1;
-            for(final String kv : r.query().split("&")) {
-                if(kv.startsWith("page=")) {
-                    page = Integer.parseInt(kv.substring(5));
-                }
-            }
-            final JsonArray data = new JsonArray();
-            for(int i = 0; i < 2; i++) {
-                final JsonObject inc = new JsonObject();
-                inc.addProperty("id", "inc-" + ((page - 1) * 2 + i + 1));
-                inc.addProperty("severity", "SEV" + (i + 1));
-                data.add(inc);
-            }
-            final JsonObject pagination = new JsonObject();
-            pagination.addProperty("page", page);
-            if(page < 3) {
-                pagination.addProperty("next", page + 1);
-            } else {
-                pagination.add("next", com.google.gson.JsonNull.INSTANCE);
-            }
-            final JsonObject body = new JsonObject();
-            body.add("data", data);
-            body.add("pagination", pagination);
-            respond(exchange, 200, body.toString());
         });
         // flaky: first call 503, then 200
         server.createContext("/flaky", exchange -> {
@@ -143,12 +132,29 @@ public class HttpSourceTest {
                 out.write(bytes);
             }
         });
+        // POST search: echoes the JSON body it received
+        server.createContext("/search", exchange -> {
+            final Received r = record("search", exchange);
+            respond(exchange, 200, "{\"echo\":" + r.body() + "}");
+        });
         server.start();
     }
 
     @AfterAll
     public static void stopServer() {
         server.stop(0);
+    }
+
+    private static int pageOf(final String query) {
+        int page = 1;
+        if(query != null) {
+            for(final String kv : query.split("&")) {
+                if(kv.startsWith("page=")) {
+                    page = Integer.parseInt(kv.substring(5));
+                }
+            }
+        }
+        return page;
     }
 
     private static Received record(final String name, final HttpExchange exchange) throws IOException {
@@ -176,8 +182,23 @@ public class HttpSourceTest {
         return new ArrayList<>(RECEIVED.getOrDefault(name, new ConcurrentLinkedQueue<>()));
     }
 
+    private static void cleanDir(final String dir) throws IOException {
+        final Path path = Path.of(dir);
+        if(Files.exists(path)) {
+            try(final Stream<Path> walk = Files.walk(path)) {
+                walk.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            }
+        }
+    }
+
+    private static List<Path> listFiles(final String dir) throws IOException {
+        try(final Stream<Path> walk = Files.walk(Path.of(dir))) {
+            return walk.filter(Files::isRegularFile).toList();
+        }
+    }
+
     @Test
-    public void testPaginationTypedRowsAndChaining() throws Exception {
+    public void testPaginationTypedItemsAndChaining() throws Exception {
         final String configYaml = """
                 sources:
                   - name: api
@@ -188,16 +209,17 @@ public class HttpSourceTest {
                         token: secret
                       requests:
                         - name: items
-                          url: %s
-                          params:
-                            page: ${page}
-                            size: "2"
+                          target:
+                            url: %s
+                            params:
+                              page: ${page}
+                              size: "2"
                           loop:
                             vars: { page: 1 }
-                            feeds: { page: "${page + 1}" }
-                            condition: { key: payload.has_more, op: "=", value: true }
+                            next: { page: "${page + 1}" }
+                            until: { key: payload.has_more, op: "=", value: false }
                           response:
-                            rowsFrom: /items
+                            itemsPath: /items
                             schema:
                               fields:
                                 - { name: id, type: int64 }
@@ -205,7 +227,9 @@ public class HttpSourceTest {
                                 - { name: price, type: float64 }
                         - name: detail
                           input: items
-                          url: %s/${id}
+                          target:
+                            url: %s/${id}
+                          rate: { count: 100 }
                           response:
                             schema:
                               fields:
@@ -245,43 +269,159 @@ public class HttpSourceTest {
         final List<Received> list = received("items").stream().filter(r -> r.path().equals("/items")).toList();
         Assertions.assertEquals(3, list.size());
         Assertions.assertTrue(list.stream().allMatch(r -> r.query().contains("size=2")));
-        Assertions.assertEquals(Set.of("page=1", "page=2", "page=3"),
-                new HashSet<>(list.stream().map(r -> Arrays.stream(r.query().split("&")).filter(q -> q.startsWith("page=")).findFirst().orElseThrow()).toList()));
+        Assertions.assertEquals(Set.of(1, 2, 3), new HashSet<>(list.stream().map(r -> pageOf(r.query())).toList()));
         Assertions.assertEquals(6, received("items").stream().filter(r -> r.path().matches("/items/\\d+")).count());
     }
 
+    /** Raw parent pages archived to storage while a child fans out over the parent's response items (foreach). */
     @Test
-    public void testRawOutputHeaderCursorRetryAndText() throws Exception {
+    public void testForeachOverRawParentAndStorageSink() throws Exception {
+        final String dir = "target/http-source-test/foreach";
+        cleanDir(dir);
+        final String configYaml = """
+                system:
+                  args:
+                    start_date: "2026-01-01 00:00:00"
+                sources:
+                  - name: lms
+                    module: http
+                    parameters:
+                      requests:
+                        - name: courses
+                          target:
+                            url: %s
+                            params:
+                              page: ${page}
+                              page_size: 200
+                              status: published
+                              last_update_from: '${args.start_date}'
+                          loop:
+                            vars: { page: 1 }
+                            next: { page: "${page + 1}" }
+                            until: { key: payload.data.has_more_data, op: "=", value: false }
+                        - name: enrollments
+                          input: courses
+                          foreach: /data/items
+                          target:
+                            url: %s/${id}/enrollments
+                            params:
+                              page: ${page}
+                          loop:
+                            vars: { page: 1 }
+                            next: { page: "${page + 1}" }
+                            until: { key: payload.data.has_more_data, op: "=", value: false }
+                sinks:
+                  - name: archive
+                    module: storage
+                    inputs: [lms.courses, lms.enrollments]
+                    parameters:
+                      output: "%s/resource=${name}/${statusCode}"
+                      format: avro
+                      numShards: 1
+                      suffix: ".avro"
+                """.formatted(url("/v1/courses"), url("/v1/courses"), dir);
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        PAssert.that(outputs.get("lms.courses").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement e : elements) {
+                count++;
+                Assertions.assertEquals("courses", e.getPrimitiveValue("name"));
+                Assertions.assertEquals(200, e.getPrimitiveValue("statusCode"));
+                Assertions.assertTrue(((String) e.getPrimitiveValue("payload")).contains("\"has_more_data\""));
+            }
+            Assertions.assertEquals(2, count);   // 2 pages, one raw record each
+            return null;
+        });
+        PAssert.that(outputs.get("lms.enrollments").getCollection()).satisfies(elements -> {
+            final Set<String> urls = new TreeSet<>();
+            for(final MElement e : elements) {
+                Assertions.assertEquals("enrollments", e.getPrimitiveValue("name"));
+                urls.add((String) e.getPrimitiveValue("url"));
+            }
+            Assertions.assertEquals(8, urls.size());   // 4 courses x 2 pages
+            return null;
+        });
+        pipeline.run();
+
+        final List<Received> calls = received("courses");
+        final List<Received> pages = calls.stream().filter(r -> r.path().equals("/v1/courses")).toList();
+        Assertions.assertEquals(2, pages.size());
+        for(final Received r : pages) {   // getQuery() decodes %xx (the space is form-encoded as +)
+            Assertions.assertTrue(r.query().contains("page_size=200") && r.query().contains("status=published")
+                    && r.query().contains("last_update_from=2026-01-01+00:00:00"), r.query());
+        }
+        final Set<String> enrollmentPaths = new TreeSet<>();
+        calls.stream().filter(r -> r.path().endsWith("/enrollments")).forEach(r -> enrollmentPaths.add(r.path()));
+        Assertions.assertEquals(Set.of("/v1/courses/c1/enrollments", "/v1/courses/c2/enrollments", "/v1/courses/c3/enrollments", "/v1/courses/c4/enrollments"), enrollmentPaths);
+
+        final List<Path> files = listFiles(dir);
+        final Set<String> dirs = new TreeSet<>();
+        int rows = 0;
+        for(final Path file : files) {
+            final String f = file.toString().replace('\\', '/');
+            // output "<dir>/resource=<name>/<statusCode>" -> the last segment is the file prefix
+            dirs.add(f.substring(f.indexOf("resource="), f.lastIndexOf('/')));
+            Assertions.assertTrue(f.substring(f.lastIndexOf('/') + 1).startsWith("200"), f);
+            try(final org.apache.avro.file.DataFileReader<org.apache.avro.generic.GenericRecord> reader = new org.apache.avro.file.DataFileReader<>(
+                    file.toFile(), new org.apache.avro.generic.GenericDatumReader<>())) {
+                while(reader.hasNext()) {
+                    final org.apache.avro.generic.GenericRecord record = reader.next();
+                    rows++;
+                    Assertions.assertEquals(200, record.get("statusCode"));
+                    Assertions.assertNotNull(record.get("payload"));
+                }
+            }
+        }
+        Assertions.assertEquals(Set.of("resource=courses", "resource=enrollments"), dirs);
+        Assertions.assertEquals(10, rows);
+    }
+
+    @Test
+    public void testSingleRequestShorthandCursorRetryTextAndPostBody() throws Exception {
         COUNTERS.remove("flaky");
         final String configYaml = """
                 sources:
                   - name: cursor
                     module: http
                     parameters:
-                      requests:
-                        - url: %s
-                          params:
-                            cursor: ${cursor}
-                          loop:
-                            vars: { cursor: "" }
-                            feeds: { cursor: "${headers['x-next-cursor']!''}" }
-                            condition: { key: headers.x-next-cursor, op: "!=", value: null }
-                          response:
-                            rowsFrom: /
+                      target:
+                        url: %s
+                        params:
+                          cursor: ${cursor}
+                      loop:
+                        vars: { cursor: "" }
+                        next: { cursor: "${headers['x-next-cursor']!''}" }
+                        until: { key: headers.x-next-cursor, op: "=", value: null }
+                      response:
+                        itemsPath: /
                   - name: flaky
                     module: http
                     parameters:
-                      requests:
-                        - url: %s
-                          response:
-                            retry: { initialBackoff: 10ms, maxBackoff: 20ms, maxAttempts: 3 }
+                      target: { url: %s }
+                      response:
+                        retry: { initialBackoff: 10ms, maxBackoff: 20ms, maxAttempts: 3 }
                   - name: text
                     module: http
                     parameters:
-                      requests:
-                        - url: %s
-                          response: { format: text }
-                """.formatted(url("/cursor"), url("/flaky"), url("/text"));
+                      target: { url: %s }
+                      response: { format: text }
+                  - name: search
+                    module: http
+                    parameters:
+                      target: { url: %s, method: POST }
+                      body:
+                        format: template
+                        template: '{"q": "${utils.string.format("%%s", "shoes")}", "limit": 10}'
+                      response:
+                        schema:
+                          fields:
+                            - name: echo
+                              type: element
+                              fields:
+                                - { name: q, type: string }
+                                - { name: limit, type: int64 }
+                """.formatted(url("/cursor"), url("/flaky"), url("/text"), url("/search"));
         final Config config = Config.load(configYaml);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
 
@@ -314,104 +454,24 @@ public class HttpSourceTest {
             }
             return null;
         });
-        pipeline.run();
-
-        Assertions.assertEquals(3, received("cursor").size());
-        Assertions.assertEquals(2, received("flaky").size());
-    }
-
-    /** The previous config style (endpoint / request-level format / `response.*` loop variables / list condition / numeric param) + storage avro sink. */
-    @Test
-    public void testPreviousStyleConfigWithStorageSink() throws Exception {
-        final String dir = "target/http-source-test/firehydrant";
-        final java.nio.file.Path path = java.nio.file.Path.of(dir);
-        if(java.nio.file.Files.exists(path)) {
-            try(final java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(path)) {
-                walk.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
-            }
-        }
-        final String configYaml = """
-                system:
-                  args:
-                    fh_api_key: fh-key
-                sources:
-                  - name: firehydrant_source
-                    module: http
-                    parameters:
-                      requests:
-                        - name: incidents
-                          endpoint: %s
-                          method: GET
-                          format: json
-                          headers:
-                            accept: application/json
-                            Authorization: "Bearer ${args.fh_api_key}"
-                          params:
-                            page: ${page}
-                            per_page: 200
-                          loop:
-                            condition:
-                              - key: response.pagination.next
-                                op: '!='
-                                value: null
-                            vars:
-                              page: 1
-                            feeds:
-                              page: "${response.pagination.next}"
-                sinks:
-                  - name: firehydrant_sink
-                    module: storage
-                    inputs:
-                      - firehydrant_source
-                    parameters:
-                      output: "%s/service=firehydrant/resource=${name}/date=1970-01-01/${statusCode}"
-                      format: avro
-                      numShards: 1
-                      suffix: ".avro"
-                """.formatted(url("/v1/incidents"), dir);
-        final Config config = Config.load(configYaml);
-        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
-        PAssert.that(outputs.get("firehydrant_source").getCollection()).satisfies(elements -> {
+        PAssert.that(outputs.get("search").getCollection()).satisfies(elements -> {
             int count = 0;
             for(final MElement e : elements) {
                 count++;
-                Assertions.assertEquals("incidents", e.getPrimitiveValue("name"));
-                Assertions.assertEquals(200, e.getPrimitiveValue("statusCode"));
-                Assertions.assertTrue(((String) e.getPrimitiveValue("payload")).contains("\"pagination\""));
-                Assertions.assertTrue(((String) e.getPrimitiveValue("body")).contains("\"data\""));
+                final Map<?, ?> echo = (Map<?, ?>) e.getPrimitiveValue("echo");
+                Assertions.assertEquals("shoes", echo.get("q"));
+                Assertions.assertEquals(10L, echo.get("limit"));
             }
-            Assertions.assertEquals(3, count);   // one record per page
+            Assertions.assertEquals(1, count);
             return null;
         });
         pipeline.run();
 
-        final List<Received> calls = received("incidents");
-        Assertions.assertEquals(3, calls.size());
-        Assertions.assertTrue(calls.stream().allMatch(r -> r.query().contains("per_page=200")));
-        Assertions.assertTrue(calls.stream().allMatch(r -> "application/json".equals(r.headers().get("Accept").get(0))));
-        Assertions.assertEquals(Set.of(1, 2, 3), new HashSet<>(calls.stream()
-                .map(r -> Integer.parseInt(Arrays.stream(r.query().split("&")).filter(q -> q.startsWith("page=")).findFirst().orElseThrow().substring(5))).toList()));
-
-        final List<java.nio.file.Path> files;
-        try(final java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(path)) {
-            files = walk.filter(java.nio.file.Files::isRegularFile).toList();
-        }
-        Assertions.assertEquals(1, files.size(), files.toString());
-        final String file = files.get(0).toString().replace('\\', '/');
-        Assertions.assertTrue(file.contains("service=firehydrant/resource=incidents/date=1970-01-01/200"), file);
-        Assertions.assertTrue(file.endsWith(".avro"), file);
-        try(final org.apache.avro.file.DataFileReader<org.apache.avro.generic.GenericRecord> reader = new org.apache.avro.file.DataFileReader<>(
-                files.get(0).toFile(), new org.apache.avro.generic.GenericDatumReader<>())) {
-            int rows = 0;
-            while(reader.hasNext()) {
-                final org.apache.avro.generic.GenericRecord record = reader.next();
-                rows++;
-                Assertions.assertEquals("incidents", record.get("name").toString());
-                Assertions.assertEquals(200, record.get("statusCode"));
-                Assertions.assertTrue(record.get("payload").toString().contains("inc-"));
-            }
-            Assertions.assertEquals(3, rows);
-        }
+        Assertions.assertEquals(3, received("cursor").size());
+        Assertions.assertEquals(2, received("flaky").size());
+        final Received search = received("search").get(0);
+        Assertions.assertEquals("POST", search.method());
+        Assertions.assertEquals("application/json", search.headers().get("Content-type").get(0));
     }
 
     @Test
@@ -422,8 +482,7 @@ public class HttpSourceTest {
                     module: http
                     failFast: false
                     parameters:
-                      requests:
-                        - url: %s
+                      target: { url: %s }
                 """.formatted(url("/bad"));
         final Config config = Config.load(configYaml);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
@@ -432,49 +491,86 @@ public class HttpSourceTest {
         Assertions.assertEquals(1, received("bad").size());
 
         // several requests need names
-        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load("""
+        assertInvalid("""
                 sources:
                   - name: a
                     module: http
                     parameters:
                       requests:
-                        - url: https://example.com/a
-                        - url: https://example.com/b
-                """)));
+                        - target: { url: https://example.com/a }
+                        - target: { url: https://example.com/b }
+                """);
         // unknown input
-        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load("""
+        assertInvalid("""
                 sources:
                   - name: a
                     module: http
                     parameters:
                       requests:
                         - name: x
-                          url: https://example.com/a
+                          target: { url: https://example.com/a }
                           input: y
-                """)));
+                """);
         // cyclic input
-        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load("""
+        assertInvalid("""
                 sources:
                   - name: a
                     module: http
                     parameters:
                       requests:
                         - name: x
-                          url: https://example.com/a
+                          target: { url: https://example.com/a }
                           input: y
                         - name: y
-                          url: https://example.com/b
+                          target: { url: https://example.com/b }
                           input: x
-                """)));
+                """);
         // auth with templated host requires allowedHosts
-        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load("""
+        assertInvalid("""
                 sources:
                   - name: a
                     module: http
                     parameters:
                       auth: { type: bearer, token: t }
+                      target: { url: https://${host}/a }
+                """);
+        // foreach needs an untyped parent
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
                       requests:
-                        - url: https://${host}/a
-                """)));
+                        - name: x
+                          target: { url: https://example.com/a }
+                          response: { schema: { fields: [ { name: id, type: string } ] } }
+                        - name: y
+                          input: x
+                          foreach: /items
+                          target: { url: https://example.com/b/${id} }
+                """);
+        // single-request form cannot be mixed with requests
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
+                      target: { url: https://example.com/a }
+                      requests:
+                        - target: { url: https://example.com/b }
+                """);
+        // loop needs until
+        assertInvalid("""
+                sources:
+                  - name: a
+                    module: http
+                    parameters:
+                      target: { url: https://example.com/a }
+                      loop: { vars: { page: 1 }, next: { page: "${page + 1}" } }
+                """);
+    }
+
+    private void assertInvalid(final String configYaml) {
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(configYaml)));
     }
 }
