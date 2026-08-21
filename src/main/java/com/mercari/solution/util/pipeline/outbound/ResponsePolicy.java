@@ -411,7 +411,7 @@ public class ResponsePolicy implements Serializable {
     }
 
     /** Minimal JSON pointer (RFC 6901) over Gson trees. */
-    static JsonElement pointer(final JsonElement root, final String pointer) {
+    public static JsonElement pointer(final JsonElement root, final String pointer) {
         if(pointer == null || pointer.isEmpty() || pointer.equals("/")) {
             return root;
         }

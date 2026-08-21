@@ -64,7 +64,7 @@ tuple.
 - `HttpSink.java` — built on the shared `util/pipeline/outbound/` core (`RequestSpec`/`RequestRenderer` for
   target+body templates, `AuthProvider`, `HttpTransport`, `ResponsePolicy`); async in-flight sends with retry,
   partial-failure handling, control-record output; tests against an in-process JDK `HttpServer`.
-  Modules that call HTTP endpoints should reuse this core rather than `HttpUtil`.
+  Modules that call HTTP endpoints reuse this core (the http source is built on it too).
 - `TasksSink.java` — custom client boundary (`TasksClient` interface, in-memory client for unit tests via
   `endpoint: memory://…`, emulator IT), per-record templates, control-record output.
   (`ActionSink.java` is not a reference — it is the thin position adapter for action modules;
