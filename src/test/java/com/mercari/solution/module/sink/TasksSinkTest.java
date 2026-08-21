@@ -126,7 +126,7 @@ public class TasksSinkTest {
                           X-User: ${user_id}
                           X-Static: fixed
                         auth:
-                          type: oidc
+                          type: gcpOidc
                           serviceAccount: invoker@myproject.iam.gserviceaccount.com
                       body:
                         format: json
@@ -204,7 +204,7 @@ public class TasksSinkTest {
                       target:
                         url: https://api.example.com/bulk
                         auth:
-                          type: oauth
+                          type: gcpOauth
                           serviceAccount: invoker@myproject.iam.gserviceaccount.com
                       body:
                         template: '{"user":"${user_id}","at":"${utils.datetime.formatTimestamp(remind_at, "yyyy-MM-dd HH:mm:ss.SSS", "UTC")}"}'
@@ -684,7 +684,7 @@ public class TasksSinkTest {
         Assertions.assertEquals("https://a/b", TasksSink.stripQuery("https://a/b?x=1"));
 
         final JsonObject json = JsonParser.parseString("{\"a\":null,\"b\":{\"c\":null,\"d\":1},\"e\":[1,null]}").getAsJsonObject();
-        Assertions.assertEquals("{\"b\":{\"d\":1},\"e\":[1,null]}", TasksSink.omitNulls(json).toString());
+        Assertions.assertEquals("{\"b\":{\"d\":1},\"e\":[1,null]}", com.mercari.solution.util.pipeline.outbound.RequestRenderer.omitNulls(json).toString());
     }
 
 }

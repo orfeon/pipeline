@@ -85,7 +85,7 @@ sinks:
       queue: projects/myproject/locations/asia-northeast1/queues/subruns
       target:
         url: https://pipeline-xxxx.a.run.app/run?args.table=${table_name}
-        auth: { type: oidc, serviceAccount: pipeline@myproject.iam.gserviceaccount.com }
+        auth: { type: gcpOidc, serviceAccount: pipeline@myproject.iam.gserviceaccount.com }
       body: { format: none }
       task: { id: "${table_name}-${args.run_id}", dispatchDeadline: 30m }
   - name: drained

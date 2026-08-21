@@ -22,7 +22,8 @@ public class TemplateUtil {
             "bigtable", new BigtableFunctions(),
             "gcp", new GcpFunctions(),
             "oauth", new OAuthFunctions(),
-            "secrets", new SecretFunctions()
+            "secrets", new SecretFunctions(),
+            "json", new JsonFunctions()
     );
 
     public static Template createSafeTemplate(final String name, final String template) {

@@ -75,7 +75,8 @@ public class Actions {
                     "action module[" + module.getName() + "] with trigger: " + trigger + " requires inputs");
         }
 
-        final Action action = Action.create(module.getName(), service, parametersJson, pipeline.getOptions());
+        final Schema inputSchema = inputs.size() == 0 ? null : Union.createUnionSchema(inputs);
+        final Action action = Action.create(module.getName(), service, parametersJson, pipeline.getOptions(), inputSchema);
 
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
         final TupleTag<BadRecord> failureTag = new TupleTag<>() {};

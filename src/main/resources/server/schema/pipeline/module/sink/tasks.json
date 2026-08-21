@@ -30,11 +30,12 @@
           "properties": {
             "url": { "type": "string", "description": "Target URL (template on record fields)" },
             "method": { "type": "string", "enum": ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "default": "POST" },
+            "params": { "type": "object", "description": "Query parameters (values are templates)", "additionalProperties": { "type": "string" } },
             "headers": { "type": "object", "description": "Request headers (values are templates)", "additionalProperties": { "type": "string" } },
             "auth": {
               "type": "object",
               "properties": {
-                "type": { "type": "string", "enum": ["none", "oidc", "oauth"], "default": "none" },
+                "type": { "type": "string", "enum": ["none", "gcpOidc", "gcpOauth"], "default": "none" },
                 "serviceAccount": { "type": "string", "description": "Service account email whose token is attached by Cloud Tasks" },
                 "audience": { "type": "string", "description": "OIDC audience (default: url without query)" },
                 "scope": { "type": "string", "description": "OAuth scope (default: cloud-platform)" }
@@ -46,10 +47,13 @@
         "body": {
           "type": "object",
           "properties": {
-            "format": { "type": "string", "enum": ["json", "avro", "protobuf", "template", "none"], "default": "json" },
+            "format": { "type": "string", "enum": ["json", "ndjson", "template", "form", "bytes", "avro", "protobuf", "none"], "default": "json" },
+            "fields": { "type": "array", "items": { "type": "string" }, "description": "Restrict json/ndjson/form to these fields" },
+            "wrapper": { "type": "string", "description": "json batch: wrap the array, e.g. {\"records\": ${body}}" },
+            "compression": { "type": "string", "enum": ["none", "gzip"], "default": "none" },
             "template": { "type": "string", "description": "FreeMarker template for format=template" },
             "omitNulls": { "type": "boolean", "default": false, "description": "Drop null fields from the JSON body" },
-            "maxBytes": { "type": "integer", "description": "Reject records whose body exceeds this size (routed to failureSinks)" }
+            "maxBytes": { "type": "string", "description": "Body size guard (100KB, 1MB); batches are split, single records routed to failureSinks" }
           }
         },
         "task": {
@@ -67,7 +71,7 @@
           "description": "Pack several records into one task (GroupIntoBatches)",
           "properties": {
             "maxSize": { "type": "integer", "description": "Maximum records per task" },
-            "maxBytes": { "type": "integer", "description": "Approximate maximum bytes per task" },
+            "maxBytes": { "type": "string", "description": "Approximate maximum bytes per task (1MB)" },
             "maxBufferingDuration": { "type": "string", "description": "Streaming: flush incomplete batches after this duration (10s, PT1M)" },
             "key": { "type": "string", "description": "Template; records sharing the rendered key share a task" },
             "shards": { "type": "integer", "default": 8, "description": "Random groups when key is omitted" }
