@@ -387,26 +387,30 @@ Extracts values from a JSON string field using [JSONPath](https://goessner.net/a
 
 ### http
 
-Sends an HTTP request per record and returns the response. Supports FreeMarker templates for dynamic endpoints and bodies.
+Calls an HTTP endpoint once per record and returns the response as the field value. Uses the same `target` / `body` / `response` blocks as the [http sink](../sink/http.md) and [http source](../source/http.md): authentication providers with token caching, declarative success / retry classification, request templates over the record's fields.
 
-| parameter | optional | type                | description                                                        |
-|-----------|----------|---------------------|--------------------------------------------------------------------|
-| endpoint  | required | String              | URL endpoint. Supports FreeMarker template expressions.            |
-| method    | optional | String              | HTTP method. Values: `get`, `post`, `put`, `delete`. Default: `get`. |
-| body      | optional | String              | Request body. Supports FreeMarker template expressions.            |
-| headers   | optional | Map<String,String\> | HTTP request headers.                                              |
-| type      | optional | String              | Response type. Values: `string`, `bytes`. Default: `string`.       |
+| parameter | optional | type | description |
+|-----------|----------|------|-------------|
+| target    | required | [Target](../sink/http.md#target-parameters) | `url` (template on record fields), `method` (default `GET`), `params`, `headers`, `auth`. |
+| body      | optional | [Body](../sink/http.md#body-parameters) | `json` / `form` (of the record fields, optionally restricted with `fields`), `template`, `multipart`, … Default: no body. |
+| response  | optional | [Response](../sink/http.md#response-parameters) | `format` (`text` default, `json`, `bytes`), `schema` (typed struct output), `success`, `retry`. |
+| timeout   | optional | [Timeout](../sink/http.md#timeout-parameters) | Connect / request timeouts. |
+| http      | optional | [Http](../sink/http.md#http-parameters) | Client options; `allowedHosts` is required when `auth` is set and the url host is a template. |
+
+Output type: STRING (`text` / `json` body text), BYTES (`format: bytes`), or a STRUCT of `response.schema`. A `404` response yields `null`; other failures (after retries) fail the record. For keyed enrichment of many records prefer the [query](query.md) transform's `rest` lookup source (batching per distinct key, LEFT JOIN semantics, caching).
 
 ```yaml
-- name: api_response
+- name: profile
   func: http
-  endpoint: "https://api.example.com/users/${user_id}"
-  method: get
-  headers:
-    Authorization: "Bearer ${token}"
+  target:
+    url: "https://api.example.com/users/${user_id}"
+    auth: { type: gcpOidc }
+  response:
+    schema:
+      fields:
+        - { name: name, type: string }
+        - { name: plan, type: string }
 ```
-
-Output type: STRING or BYTES.
 
 ### scrape
 
