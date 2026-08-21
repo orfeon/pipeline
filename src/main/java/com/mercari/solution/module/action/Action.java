@@ -4,6 +4,7 @@ import com.google.common.reflect.ClassPath;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MElement;
+import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.options.PipelineOptions;
 
 import java.io.IOException;
@@ -83,6 +84,15 @@ public interface Action extends Serializable {
 
     void configure(String name, JsonObject parameters, PipelineOptions options);
 
+    /**
+     * Variant that also receives the union schema of the step's inputs (null when the step has no
+     * inputs, e.g. trigger once without inputs). Services that compile element templates at
+     * assembly time override this; the default ignores the schema.
+     */
+    default void configure(String name, JsonObject parameters, PipelineOptions options, Schema inputSchema) {
+        configure(name, parameters, options);
+    }
+
     void setup();
 
     ActionResult execute(List<MElement> elements) throws Exception;
@@ -92,6 +102,15 @@ public interface Action extends Serializable {
             final String service,
             final JsonObject parameters,
             final PipelineOptions options) {
+        return create(name, service, parameters, options, null);
+    }
+
+    static Action create(
+            final String name,
+            final String service,
+            final JsonObject parameters,
+            final PipelineOptions options,
+            final Schema inputSchema) {
 
         final Class<? extends Action> clazz = Registry.SERVICES.get(service);
         if(clazz == null) {
@@ -104,7 +123,7 @@ public interface Action extends Serializable {
         } catch (InstantiationException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
             throw new RuntimeException("Failed to instantiate action service: " + service + ", class: " + clazz, e);
         }
-        action.configure(name, parameters, options);
+        action.configure(name, parameters, options, inputSchema);
         return action;
     }
 

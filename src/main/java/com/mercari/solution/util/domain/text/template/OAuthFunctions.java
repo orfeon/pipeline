@@ -83,7 +83,7 @@ public class OAuthFunctions {
         }
     }
 
-    private static RSAPrivateKey loadPrivateKey(String pemKey) {
+    public static RSAPrivateKey loadPrivateKey(String pemKey) {
         final String privateKeyPEM = pemKey
                 .replace("-----BEGIN PRIVATE KEY-----", "")
                 .replaceAll(System.lineSeparator(), "")
@@ -105,16 +105,30 @@ public class OAuthFunctions {
             final String aud,
             final long durationMin,
             final RSAPrivateKey privateKey) {
+        return createJwtAssertion(iss, sub, aud, null, null, durationMin, privateKey);
+    }
+
+    /** RS256 JWT assertion; {@code scope} and {@code kid} are optional. */
+    public static String createJwtAssertion(
+            final String iss,
+            final String sub,
+            final String aud,
+            final String scope,
+            final String kid,
+            final long durationMin,
+            final RSAPrivateKey privateKey) {
         Base64.Encoder urlEncoder = Base64.getUrlEncoder().withoutPadding();
 
-        String headerJson = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
+        String headerJson = kid == null
+                ? "{\"alg\":\"RS256\",\"typ\":\"JWT\"}"
+                : "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"" + kid + "\"}";
         String encodedHeader = urlEncoder.encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
 
         long iat = Instant.now().getEpochSecond();
         long exp = iat + durationMin * 60;
         final String payloadJson = String.format(
-                "{\"iss\":\"%s\",\"sub\":\"%s\",\"aud\":\"%s\",\"iat\":%d,\"exp\":%d}",
-                iss, sub, aud, iat, exp);
+                "{\"iss\":\"%s\",\"sub\":\"%s\",\"aud\":\"%s\"%s,\"iat\":%d,\"exp\":%d}",
+                iss, sub, aud, scope == null ? "" : ",\"scope\":\"" + scope + "\"", iat, exp);
         final String encodedPayload = urlEncoder.encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
 
         String dataToSign = encodedHeader + "." + encodedPayload;

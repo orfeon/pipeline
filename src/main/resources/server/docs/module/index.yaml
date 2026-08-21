@@ -127,6 +127,9 @@ sinks:
   - title: storage
     description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
     tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
+  - title: http
+    description: Sends each input record (or a keyed micro-batch) as an HTTP request to an endpoint and emits one SUCCEEDED/PARTIAL/FAILED control record per request with status, headers, body and typed payload. Supports per-record templates for URL/params/headers (incl. __body signature headers), JSON/NDJSON/form/bytes/Avro/Protobuf/template bodies with gzip and size guard, auth providers (basic, bearer, apiKey, OAuth2 client credentials with token cache, GCP OIDC/OAuth) with refresh on 401, declarative success/retry classification with Retry-After aware backoff, per-item partial failure and selective item retry for bulk APIs (Elasticsearch _bulk, Solr), per-worker rate limiting and bounded in-flight concurrency, batch and streaming.
+    tags: [sink, http, rest, api, webhook, bulk, elasticsearch, solr, oauth2, oidc, batch, streaming]
   - title: tasks
     description: Enqueues each input record as a Google Cloud Tasks HTTP task so the queue governs rate limiting, retries, delayed/scheduled execution and name-based deduplication. Supports per-record templates for URL, headers, task id (hashed, idempotent), scheduleTime/delay, JSON/Avro/Protobuf/FreeMarker bodies with a size guard, keyed micro-batching of records into one task, OIDC/OAuth target auth, queue-level HTTP routing (tasks:buffer), and emits CREATED/ALREADY_EXISTS/FAILED control records.
     tags: [sink, tasks, cloudtasks, gcp, http, webhook, scheduling, batch, streaming]
@@ -142,6 +145,9 @@ actions:
   - title: action.storage
     description: Writes a small file from the triggering records — the control-plane counterpart of the storage sink. Keeps execution result histories (e.g. the file list a storage sink emitted) as JSONL, writes templated summary reports, or creates marker files (empty _SUCCESS object with trigger once). Supports GCS/S3/local paths. Emits the common action envelope.
     tags: [action, storage, gcs, file, history, marker, report, trigger, workflow]
+  - title: action.http
+    description: One HTTP request per trigger firing as a workflow step, the control-plane counterpart of the http sink. Notify (Slack/webhook) after upstream steps complete (once), trigger downstream jobs (Cloud Run Jobs, Airflow, Workflows), run maintenance calls around a bulk load (create index, disable refresh, commit, alias swap), or start an asynchronous API job and poll its status endpoint until done (poll with until/failWhen/interval/timeout). Shares target/body/response/auth (basic, bearer, apiKey, OAuth2, GCP OIDC/OAuth) with the http sink and emits the common action envelope with the final response as payload.
+    tags: [action, http, rest, api, webhook, notify, trigger, poll, workflow]
   - title: action.tasks
     description: Cloud Tasks queue operations as workflow steps, the control-plane counterpart of the tasks sink. create (idempotent, adopts an existing queue) / update rate limits and retry config / pause / resume / purge / delete / get, waitForEmpty (poll until the queue has drained so a later step can rely on every task having run), runTask and deleteTask (perElement templates). Emits the common action envelope.
     tags: [action, tasks, cloudtasks, queue, pause, resume, purge, wait, trigger, workflow, gcp]

@@ -8,8 +8,6 @@ import com.google.api.gax.retrying.RetrySettings;
 import com.google.api.gax.rpc.AlreadyExistsException;
 import com.google.api.gax.rpc.StatusCode;
 import com.google.cloud.tasks.v2.*;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
@@ -18,11 +16,11 @@ import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import com.mercari.solution.util.cloud.google.IAMUtil;
-import com.mercari.solution.util.pipeline.Serialize;
 import com.mercari.solution.util.pipeline.Union;
-import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
-import com.mercari.solution.util.schema.converter.ElementToProtoConverter;
-import com.mercari.solution.util.schema.converter.ElementToJsonConverter;
+import com.mercari.solution.util.pipeline.outbound.AuthProvider;
+import com.mercari.solution.util.pipeline.outbound.OutboundRequest;
+import com.mercari.solution.util.pipeline.outbound.RequestRenderer;
+import com.mercari.solution.util.pipeline.outbound.RequestSpec;
 import freemarker.template.Template;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -64,8 +62,8 @@ public class TasksSink extends Sink {
 
     private static final Logger LOG = LoggerFactory.getLogger(TasksSink.class);
 
-    private static final String VAR_TIMESTAMP = "__timestamp";
-    private static final String VAR_SOURCE = "__source";
+
+
     private static final Pattern PATTERN_QUEUE = Pattern
             .compile("^projects/[^/]+/locations/[^/]+/queues/[^/]+$");
     private static final Pattern PATTERN_TASK_ID = Pattern.compile("^[A-Za-z0-9_-]{1,500}$");
@@ -78,8 +76,8 @@ public class TasksSink extends Sink {
     public static class Parameters implements Serializable {
 
         private String queue;
-        private TargetParameters target;
-        private BodyParameters body;
+        private RequestSpec.Target target;
+        private RequestSpec.Body body;
         private TaskParameters task;
         private BatchParameters batch;
         private RetryParameters retry;
@@ -98,10 +96,18 @@ public class TasksSink extends Sink {
                 errorMessages.add("parameters.queue must be in format projects/{project}/locations/{location}/queues/{queue} but: " + queue);
             }
             if(target != null) {
-                errorMessages.addAll(target.validate());
+                errorMessages.addAll(target.validate("parameters.target", inputSchema, true));
+                if(target.auth != null && !target.auth.isNone()) {
+                    if(!AuthProvider.Type.gcpOidc.equals(target.auth.type) && !AuthProvider.Type.gcpOauth.equals(target.auth.type)) {
+                        errorMessages.add("parameters.target.auth.type must be none, gcpOidc or gcpOauth for Cloud Tasks (the queue attaches the token) but: " + target.auth.type);
+                    }
+                    if(target.auth.serviceAccount == null && !IAMUtil.isOnGcp()) {
+                        errorMessages.add("parameters.target.auth.serviceAccount must not be null when not running on GCP (metadata server unavailable)");
+                    }
+                }
             }
             if(body != null) {
-                errorMessages.addAll(body.validate());
+                errorMessages.addAll(body.validate("parameters.body", inputSchema));
             }
             if(task != null) {
                 errorMessages.addAll(task.validate());
@@ -136,6 +142,9 @@ public class TasksSink extends Sink {
                 if(target.headers != null) {
                     target.headers.forEach((k, v) -> perTaskTemplates.put("target.headers." + k, v));
                 }
+                if(target.params != null) {
+                    target.params.forEach((k, v) -> perTaskTemplates.put("target.params." + k, v));
+                }
             }
             if(task != null) {
                 perTaskTemplates.put("task.id", task.id);
@@ -158,7 +167,7 @@ public class TasksSink extends Sink {
 
         private void setDefaults() {
             if(body == null) {
-                body = new BodyParameters();
+                body = new RequestSpec.Body();
             }
             body.setDefaults();
             if(task == null) {
@@ -177,6 +186,12 @@ public class TasksSink extends Sink {
             }
             if(target != null) {
                 target.setDefaults();
+                if(!target.auth.isNone() && target.auth.serviceAccount == null) {
+                    target.auth.serviceAccount = IAMUtil.getMetadataServiceAccount();
+                }
+                if(AuthProvider.Type.gcpOauth.equals(target.auth.type) && target.auth.scope == null) {
+                    target.auth.scope = SCOPE_CLOUD_PLATFORM;
+                }
             }
             if(batch != null) {
                 batch.setDefaults();
@@ -222,96 +237,6 @@ public class TasksSink extends Sink {
         private void setDefaults() {
             if(shards == null) {
                 shards = 8;
-            }
-        }
-    }
-
-    public static class TargetParameters implements Serializable {
-
-        private String url;
-        private HttpMethod method;
-        private Map<String, String> headers;
-        private AuthParameters auth;
-
-        private List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(url == null) {
-                errorMessages.add("parameters.target.url must not be null");
-            } else if(!url.startsWith("https://") && !url.startsWith("http://") && !TemplateUtil.isTemplateText(url)) {
-                errorMessages.add("parameters.target.url must start with https:// or http:// but: " + url);
-            }
-            if(auth != null) {
-                errorMessages.addAll(auth.validate());
-            }
-            return errorMessages;
-        }
-
-        private void setDefaults() {
-            if(method == null) {
-                method = HttpMethod.POST;
-            }
-            if(headers == null) {
-                headers = new HashMap<>();
-            }
-            if(auth == null) {
-                auth = new AuthParameters();
-            }
-            auth.setDefaults();
-        }
-    }
-
-    public static class AuthParameters implements Serializable {
-
-        private AuthType type;
-        private String serviceAccount;
-        private String audience;
-        private String scope;
-
-        private List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(type != null && !AuthType.none.equals(type) && serviceAccount == null && !IAMUtil.isOnGcp()) {
-                errorMessages.add("parameters.target.auth.serviceAccount must not be null when not running on GCP (metadata server unavailable)");
-            }
-            return errorMessages;
-        }
-
-        private void setDefaults() {
-            if(type == null) {
-                type = AuthType.none;
-            }
-            if(!AuthType.none.equals(type) && serviceAccount == null) {
-                serviceAccount = IAMUtil.getMetadataServiceAccount();
-            }
-            if(AuthType.oauth.equals(type) && scope == null) {
-                scope = SCOPE_CLOUD_PLATFORM;
-            }
-        }
-    }
-
-    public static class BodyParameters implements Serializable {
-
-        private Format format;
-        private String template;
-        private Long maxBytes;
-        private Boolean omitNulls;
-
-        private List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(Format.template.equals(format) && template == null) {
-                errorMessages.add("parameters.body.template must not be null when body.format is template");
-            }
-            if(maxBytes != null && maxBytes <= 0) {
-                errorMessages.add("parameters.body.maxBytes must be positive but: " + maxBytes);
-            }
-            return errorMessages;
-        }
-
-        private void setDefaults() {
-            if(format == null) {
-                format = template != null ? Format.template : Format.json;
-            }
-            if(omitNulls == null) {
-                omitNulls = false;
             }
         }
     }
@@ -403,20 +328,6 @@ public class TasksSink extends Sink {
         }
     }
 
-    public enum Format {
-        json,
-        avro,
-        protobuf,
-        template,
-        none
-    }
-
-    public enum AuthType {
-        none,
-        oidc,
-        oauth
-    }
-
     public enum OnAlreadyExists {
         success,
         fail
@@ -447,7 +358,7 @@ public class TasksSink extends Sink {
                         .withStrategy(getStrategy()));
 
         final Schema outputSchema = Optional.ofNullable(getSchema()).orElse(inputSchema);
-        if(Format.protobuf.equals(parameters.body.format) && outputSchema.getProtobuf() == null) {
+        if(RequestSpec.Format.protobuf.equals(parameters.body.format) && outputSchema.getProtobuf() == null) {
             throw new IllegalModuleException("body.format protobuf requires schema.protobuf (descriptorFile / messageName)");
         }
 
@@ -702,48 +613,26 @@ public class TasksSink extends Sink {
         }
     }
 
-    /** Thrown when a rendered body exceeds body.maxBytes (callers may split a batch and retry). */
-    static class BodyTooLargeException extends IllegalArgumentException {
-        BodyTooLargeException(final String message) {
-            super(message);
-        }
-    }
-
     /**
-     * Turns one element (or one batch) into a Cloud Tasks request. Templates are compiled once
-     * per instance; templates that reference no element field are rendered once (e.g.
-     * secret-bearing headers must not hit Secret Manager per element).
-     *
-     * <p>Batch mode: per-task templates (queue / url / headers / id / schedule) are rendered with
-     * the first element's fields — assembly-time validation guarantees they only reference
-     * {@code batch.key} fields, on which every element of the batch is equal — plus
-     * {@code elements} (list of maps), {@code size} and {@code key}.
+     * Turns one element (or one batch) into a Cloud Tasks request: the shared
+     * {@link RequestRenderer} renders url / params / headers / body, this class adds the
+     * task-specific parts (queue, name, schedule, token).
      */
     static class RequestBuilder implements Serializable {
 
         private final String name;
         private final Parameters parameters;
         private final Schema inputSchema;
-        private final Schema outputSchema;
-        private final List<String> inputNames;
-        private final List<String> templateArgs;
-        private final Serialize serialize;
+        private final RequestRenderer renderer;
 
         private transient Template queueTemplate;
         private transient String staticQueue;
-        private transient Template urlTemplate;
-        private transient String staticUrl;
-        private transient Map<String, Template> headerTemplates;
-        private transient Map<String, String> staticHeaders;
         private transient Template idTemplate;
         private transient Template scheduleTimeTemplate;
         private transient String scheduleTimeField;
         private transient Template delayTemplate;
         private transient java.time.Duration staticDelay;
         private transient com.google.protobuf.Duration dispatchDeadline;
-        private transient Template bodyTemplate;
-        private transient Template keyTemplate;
-        private transient org.apache.avro.Schema avroSchema;
 
         RequestBuilder(
                 final String name,
@@ -755,34 +644,24 @@ public class TasksSink extends Sink {
             this.name = name;
             this.parameters = parameters;
             this.inputSchema = inputSchema;
-            this.outputSchema = outputSchema;
-            this.inputNames = inputNames;
-
-            final Set<String> args = new HashSet<>();
-            final List<String> texts = new ArrayList<>();
-            texts.add(parameters.queue);
+            // target omitted (tasks:buffer): render the body only, against a placeholder target
+            final RequestSpec.Target target;
             if(parameters.target != null) {
-                texts.add(parameters.target.url);
-                texts.addAll(parameters.target.headers.values());
+                target = parameters.target;
+            } else {
+                target = new RequestSpec.Target();
+                target.url = "https://buffer.invalid/";
+                target.setDefaults();
             }
-            texts.add(parameters.task.id);
-            texts.add(parameters.task.scheduleTime);
-            texts.add(parameters.task.delay);
-            texts.add(parameters.body.template);
-            if(parameters.batch != null) {
-                texts.add(parameters.batch.key);
-            }
-            for(final String text : texts) {
-                if(text != null) {
-                    args.addAll(TemplateUtil.extractTemplateArgs(text, inputSchema));
-                }
-            }
-            this.templateArgs = new ArrayList<>(args);
-            this.serialize = switch (parameters.body.format) {
-                case avro -> Serialize.of(Serialize.Format.avro, outputSchema);
-                case protobuf -> Serialize.of(Serialize.Format.protobuf, outputSchema);
-                default -> null;
-            };
+            final List<String> extraTexts = new ArrayList<>();
+            extraTexts.add(parameters.queue);
+            extraTexts.add(parameters.task.id);
+            extraTexts.add(parameters.task.scheduleTime);
+            extraTexts.add(parameters.task.delay);
+            extraTexts.removeIf(Objects::isNull);
+            this.renderer = new RequestRenderer(name, target, parameters.body,
+                    parameters.batch == null ? null : parameters.batch.key, parameters.batch != null,
+                    inputSchema, outputSchema, inputNames, extraTexts);
         }
 
         boolean isBatch() {
@@ -790,6 +669,7 @@ public class TasksSink extends Sink {
         }
 
         void setup() {
+            renderer.setup();
             final Map<String, Object> staticValues = new HashMap<>();
             TemplateUtil.setFunctions(staticValues);
 
@@ -798,24 +678,6 @@ public class TasksSink extends Sink {
             } else {
                 this.staticQueue = render(name + ".queue", parameters.queue, staticValues);
             }
-
-            if(parameters.target != null) {
-                if(TemplateUtil.isTemplateText(parameters.target.url) && !isStatic(parameters.target.url)) {
-                    this.urlTemplate = TemplateUtil.createStrictTemplate(name + ".url", parameters.target.url);
-                } else {
-                    this.staticUrl = render(name + ".url", parameters.target.url, staticValues);
-                }
-                this.headerTemplates = new HashMap<>();
-                this.staticHeaders = new HashMap<>();
-                for(final Map.Entry<String, String> entry : parameters.target.headers.entrySet()) {
-                    if(TemplateUtil.isTemplateText(entry.getValue()) && !isStatic(entry.getValue())) {
-                        headerTemplates.put(entry.getKey(), TemplateUtil.createStrictTemplate(name + ".header." + entry.getKey(), entry.getValue()));
-                    } else {
-                        staticHeaders.put(entry.getKey(), render(name + ".header." + entry.getKey(), entry.getValue(), staticValues));
-                    }
-                }
-            }
-
             if(parameters.task.id != null) {
                 this.idTemplate = TemplateUtil.createStrictTemplate(name + ".id", parameters.task.id);
             }
@@ -839,24 +701,11 @@ public class TasksSink extends Sink {
                 this.dispatchDeadline = com.google.protobuf.Duration.newBuilder()
                         .setSeconds(d.getSeconds()).setNanos(d.getNano()).build();
             }
-            if(Format.template.equals(parameters.body.format)) {
-                this.bodyTemplate = TemplateUtil.createStrictTemplate(name + ".body", parameters.body.template);
-            }
-            if(parameters.batch != null && parameters.batch.key != null) {
-                this.keyTemplate = TemplateUtil.createStrictTemplate(name + ".batchKey", parameters.batch.key);
-            }
-            if(serialize != null) {
-                serialize.setupSerialize();
-            }
-            if(Format.avro.equals(parameters.body.format)) {
-                this.avroSchema = outputSchema.getAvroSchema();
-            }
         }
 
         private static final Pattern PATTERN_DYNAMIC_VAR = Pattern
-                .compile("\\$\\{[^}]*\\b(__timestamp|__source|elements|size|key)\\b[^}]*}");
+                .compile("\\$\\{[^}]*\\b(__timestamp|__source|__element|__doc|elements|size|key)\\b[^}]*}");
 
-        /** True when the template references neither element fields nor per-element/batch variables. */
         private boolean isStatic(final String text) {
             return TemplateUtil.extractTemplateArgs(text, inputSchema).isEmpty()
                     && !PATTERN_DYNAMIC_VAR.matcher(text).find();
@@ -873,30 +722,15 @@ public class TasksSink extends Sink {
         }
 
         Map<String, Object> createTemplateValues(final MElement element) {
-            final Map<String, Object> values = element.asStandardMap(inputSchema, templateArgs);
-            values.put(VAR_TIMESTAMP, Instant.ofEpochMilli(element.getEpochMillis()));
-            values.put(VAR_SOURCE, element.getIndex() < inputNames.size() ? inputNames.get(element.getIndex()) : "");
-            TemplateUtil.setFunctions(values);
-            return values;
+            return renderer.createTemplateValues(element);
         }
 
         Map<String, Object> createTemplateValues(final List<MElement> elements, final String key) {
-            final Map<String, Object> values = createTemplateValues(elements.get(0));
-            final List<Map<String, Object>> maps = elements.stream()
-                    .map(e -> e.asStandardMap(inputSchema))
-                    .toList();
-            values.put("elements", maps);
-            values.put("size", maps.size());
-            values.put("key", key);
-            return values;
+            return renderer.createTemplateValues(elements, key);
         }
 
-        /** Renders the batch grouping key for one element (null when batch.key is omitted). */
         String renderBatchKey(final MElement element) {
-            if(keyTemplate == null) {
-                return null;
-            }
-            return TemplateUtil.executeStrictTemplate(keyTemplate, createTemplateValues(element));
+            return renderer.renderBatchKey(element);
         }
 
         BuiltTask build(final MElement element) {
@@ -913,10 +747,8 @@ public class TasksSink extends Sink {
                 throw new IllegalArgumentException("rendered queue is illegal: " + queue);
             }
 
-            final ByteString body = createBody(elements, values);
-            if(parameters.body.maxBytes != null && body != null && body.size() > parameters.body.maxBytes) {
-                throw new BodyTooLargeException("task body size " + body.size() + " exceeds body.maxBytes " + parameters.body.maxBytes);
-            }
+            final OutboundRequest request = renderer.build(elements, values);
+            final ByteString body = request.body() == null ? null : ByteString.copyFrom(request.body());
 
             String taskId = null;
             if(idTemplate != null) {
@@ -931,26 +763,20 @@ public class TasksSink extends Sink {
                 return new BuiltTask(queue, taskId, null, body, null, elements.size());
             }
 
-            final String url = urlTemplate != null ? TemplateUtil.executeStrictTemplate(urlTemplate, values) : staticUrl;
+            final String url = request.url();
             final HttpRequest.Builder httpRequest = HttpRequest.newBuilder()
                     .setUrl(url)
-                    .setHttpMethod(parameters.target.method);
-            httpRequest.putAllHeaders(staticHeaders);
-            for(final Map.Entry<String, Template> entry : headerTemplates.entrySet()) {
-                final String value = TemplateUtil.executeStrictTemplate(entry.getValue(), values);
-                if(value != null) {
-                    httpRequest.putHeaders(entry.getKey(), value);
-                }
-            }
-            if(body != null && !HttpMethod.GET.equals(parameters.target.method) && !HttpMethod.HEAD.equals(parameters.target.method)) {
+                    .setHttpMethod(HttpMethod.valueOf(request.method()));
+            httpRequest.putAllHeaders(request.headers());
+            if(body != null) {
                 httpRequest.setBody(body);
             }
             switch (parameters.target.auth.type) {
-                case oidc -> httpRequest.setOidcToken(OidcToken.newBuilder()
+                case gcpOidc -> httpRequest.setOidcToken(OidcToken.newBuilder()
                         .setServiceAccountEmail(parameters.target.auth.serviceAccount)
                         .setAudience(Optional.ofNullable(parameters.target.auth.audience).orElseGet(() -> stripQuery(url)))
                         .build());
-                case oauth -> httpRequest.setOauthToken(OAuthToken.newBuilder()
+                case gcpOauth -> httpRequest.setOauthToken(OAuthToken.newBuilder()
                         .setServiceAccountEmail(parameters.target.auth.serviceAccount)
                         .setScope(parameters.target.auth.scope)
                         .build());
@@ -970,68 +796,6 @@ public class TasksSink extends Sink {
                 task.setDispatchDeadline(dispatchDeadline);
             }
             return new BuiltTask(queue, taskId, task.build(), body, url, elements.size());
-        }
-
-        private ByteString createBody(final List<MElement> elements, final Map<String, Object> values) {
-            final boolean batch = isBatch();
-            return switch (parameters.body.format) {
-                case none -> null;
-                case json -> {
-                    if(!batch) {
-                        yield ByteString.copyFrom(toJson(elements.get(0)).toString(), StandardCharsets.UTF_8);
-                    }
-                    final JsonArray array = new JsonArray();
-                    for(final MElement element : elements) {
-                        array.add(toJson(element));
-                    }
-                    yield ByteString.copyFrom(array.toString(), StandardCharsets.UTF_8);
-                }
-                case template -> {
-                    final String text = TemplateUtil.executeStrictTemplate(bodyTemplate, values);
-                    yield ByteString.copyFrom(text, StandardCharsets.UTF_8);
-                }
-                case avro -> {
-                    if(!batch) {
-                        yield ByteString.copyFrom(serialize.serialize(elements.get(0)));
-                    }
-                    // batch: Avro Object Container File holding all records
-                    try(final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-                        final org.apache.avro.file.DataFileWriter<org.apache.avro.generic.GenericRecord> writer =
-                                new org.apache.avro.file.DataFileWriter<>(new org.apache.avro.generic.GenericDatumWriter<>(avroSchema))) {
-                        writer.create(avroSchema, out);
-                        for(final MElement element : elements) {
-                            writer.append(ElementToAvroConverter.convert(avroSchema, element));
-                        }
-                        writer.flush();
-                        yield ByteString.copyFrom(out.toByteArray());
-                    } catch (final IOException e) {
-                        throw new IllegalStateException("Failed to write avro container", e);
-                    }
-                }
-                case protobuf -> {
-                    if(!batch) {
-                        yield ByteString.copyFrom(serialize.serialize(elements.get(0)));
-                    }
-                    // batch: length-delimited protobuf messages (parseDelimitedFrom on the receiver)
-                    try(final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
-                        final com.google.protobuf.CodedOutputStream coded = com.google.protobuf.CodedOutputStream.newInstance(out);
-                        for(final MElement element : elements) {
-                            final byte[] bytes = serialize.serialize(element);
-                            coded.writeUInt32NoTag(bytes.length);
-                            coded.writeRawBytes(bytes);
-                        }
-                        coded.flush();
-                        yield ByteString.copyFrom(out.toByteArray());
-                    } catch (final IOException e) {
-                        throw new IllegalStateException("Failed to write delimited protobuf", e);
-                    }
-                }
-            };
-        }
-
-        private JsonElement toJson(final MElement element) {
-            final JsonObject json = ElementToJsonConverter.convert(inputSchema, element.asPrimitiveMap());
-            return parameters.body.omitNulls ? omitNulls(json) : json;
         }
 
         Instant resolveScheduleTime(final Map<String, Object> values) {
@@ -1138,31 +902,6 @@ public class TasksSink extends Sink {
     static String stripQuery(final String url) {
         final int i = url.indexOf('?');
         return i < 0 ? url : url.substring(0, i);
-    }
-
-    static JsonElement omitNulls(final JsonElement element) {
-        if(element == null || element.isJsonNull()) {
-            return null;
-        }
-        if(element.isJsonObject()) {
-            final JsonObject out = new JsonObject();
-            for(final Map.Entry<String, JsonElement> entry : element.getAsJsonObject().entrySet()) {
-                final JsonElement child = omitNulls(entry.getValue());
-                if(child != null) {
-                    out.add(entry.getKey(), child);
-                }
-            }
-            return out;
-        }
-        if(element.isJsonArray()) {
-            final JsonArray out = new JsonArray();
-            for(final JsonElement child : element.getAsJsonArray()) {
-                final JsonElement c = omitNulls(child);
-                out.add(c == null ? com.google.gson.JsonNull.INSTANCE : c);
-            }
-            return out;
-        }
-        return element;
     }
 
     /** Output sink abstraction so results can be emitted from both @ProcessElement and @FinishBundle. */
@@ -1488,7 +1227,7 @@ public class TasksSink extends Sink {
             try {
                 built = builder.build(elements, key);
                 send(emitter, elements, built, timestamp, window);
-            } catch (final BodyTooLargeException e) {
+            } catch (final RequestRenderer.BodyTooLargeException e) {
                 if(elements.size() > 1) {
                     final int mid = elements.size() / 2;
                     process(emitter, elements.subList(0, mid), key, timestamp, window);

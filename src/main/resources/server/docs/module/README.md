@@ -63,6 +63,7 @@ This page lists the modules registered in the current codebase.
 | [files](sink/files.md)           | Write each input record as an individual file with template-driven path and content              |
 | [debug](sink/debug.md)           | Output input data to logs for debugging and inspection                                           |
 | [auxia](sink/auxia.md)           | Send input data as events to the Auxia platform via its ingestion API                            |
+| [http](sink/http.md)                                                             | Send each record (or micro-batch) as an HTTP request with auth, retry, partial-failure handling  |
 | [tasks](sink/tasks.md)                                                           | Enqueue each record as a Cloud Tasks HTTP task (rate limit, retry, schedule, dedup by the queue)  |
 | [localH2](sink/localh2.md)                                                       | Load input records into a local H2 database and write the database file out                      |
 
@@ -75,6 +76,7 @@ Action modules (`action.<service>`) execute an operation against an external ser
 | [action.bigquery](action/bigquery.md)                 | Run a BigQuery job (query or load) and wait for it, with idempotent deterministic job ids           |
 | [action.vertexai_gemini](action/vertexai_gemini.md)   | Launch a Vertex AI Gemini batch prediction job and wait for it                                      |
 | [action.storage](action/storage.md)                   | Write a small file from the triggering records (result histories, summary reports, marker files)    |
+| [action.http](action/http.md)                         | One HTTP request per firing: notify, trigger jobs, maintenance calls, start + poll async jobs |
 | [action.tasks](action/tasks.md)                       | Cloud Tasks queue operations (create/update/pause/resume/purge/delete, waitForEmpty, run/delete task) |
 
 ## Failure Modules

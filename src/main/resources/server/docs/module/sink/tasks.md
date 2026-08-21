@@ -1,7 +1,7 @@
 ---
 type: Sink Module
 title: Tasks Sink Module
-description: Enqueues input records as Google Cloud Tasks HTTP tasks (one task per record, or micro-batches of records per task). The queue provides rate limiting, retries, delayed/scheduled execution (scheduleTime/delay), name-based deduplication (idempotent task.id) and OIDC/OAuth authentication to the target. Supports per-record FreeMarker templates for URL, headers, task id and schedule, JSON / Avro / Protobuf / template bodies, a body size guard with automatic batch splitting, keyed micro-batching (GroupIntoBatches), queue-level HTTP routing (tasks:buffer) and emits one control record per task (CREATED / ALREADY_EXISTS / FAILED).
+description: Enqueues input records as Google Cloud Tasks HTTP tasks (one task per record, or micro-batches of records per task). The queue provides rate limiting, retries, delayed/scheduled execution (scheduleTime/delay), name-based deduplication (idempotent task.id) and OIDC/OAuth authentication to the target (gcpOidc / gcpOauth). Supports per-record FreeMarker templates for URL, headers, task id and schedule, JSON / Avro / Protobuf / template bodies, a body size guard with automatic batch splitting, keyed micro-batching (GroupIntoBatches), queue-level HTTP routing (tasks:buffer) and emits one control record per task (CREATED / ALREADY_EXISTS / FAILED).
 tags: [sink, tasks, cloudtasks, gcp, http, webhook, scheduling, batch, streaming]
 timestamp: 2026-08-20T00:00:00Z
 ---
@@ -22,7 +22,7 @@ Use it when a pipeline must call an HTTP endpoint for every record **and** you w
 
 Typical use cases: per-record webhooks or third-party API calls (e.g. measurement / CRM S2S events), delayed notifications, fanning out a batch job into many sub-runs of this pipeline's own [Cloud Run serve mode](../../deploy/cloud-run-service.md) (`POST /run?args.*`), triggering Cloud Workflows / Cloud Run Jobs, and streaming event → task conversion with deduplication.
 
-If you only need fire-and-forget fan-out without scheduling, rate limiting or named-task dedup, prefer the [pubsub](pubsub.md) sink (higher throughput, cheaper).
+If you only need fire-and-forget fan-out without scheduling, rate limiting or named-task dedup, prefer the [pubsub](pubsub.md) sink (higher throughput, cheaper). If you need the response of the call (ids, per-item results), a synchronous call, or no GCP dependency, use the [http](http.md) sink; its `target` / `body` / `batch` parameters are the same.
 
 ## Sink module common parameters
 
@@ -57,26 +57,27 @@ If you only need fire-and-forget fan-out without scheduling, rate limiting or na
 |-----------|----------|--------------------|-------------|
 | url       | required | String             | Target URL. Template on record fields, e.g. `https://api.example.com/users/${user_id}` (use `${field?url}` to percent-encode). |
 | method    | optional | Enum               | `POST` (default), `GET`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`. The body is not sent for `GET`/`HEAD`. |
-| headers   | optional | Map<String,String\> | Request headers. Values are templates. Headers that reference no record field (e.g. an API key via `${utils.secrets.get("projects/p/secrets/s/versions/latest")}`) are rendered once per worker. |
+| params    | optional | Map<String,String\> | Query parameters appended to the URL (values are templates, URL-encoded). |
+| headers   | optional | Map<String,String\> | Request headers. Values are templates. Headers that reference no record field (e.g. an API key via `${utils.secrets.get("projects/p/secrets/s/versions/latest")}`) are rendered once per worker. A header referencing `__body` is rendered after the body (signature headers). |
 | auth      | optional | Auth               | Token attached by Cloud Tasks when dispatching. |
 
 ### target.auth
 
 | parameter      | optional | type   | description |
 |----------------|----------|--------|-------------|
-| type           | optional | Enum   | `none` (default), `oidc` (ID token — Cloud Run, Cloud Functions, your own services), `oauth` (access token — Google APIs). |
+| type           | optional | Enum   | `none` (default), `gcpOidc` (ID token — Cloud Run, Cloud Functions, your own services), `gcpOauth` (access token — Google APIs). Same names as the [http sink](http.md#auth-parameters); the other http-sink auth types are not available because Cloud Tasks attaches the token itself. |
 | serviceAccount | optional | String | Service account email whose token is attached. Defaults to the default service account of the launching environment (metadata server); required when not launching from GCP. The account creating the tasks needs `roles/cloudtasks.enqueuer` and `iam.serviceAccounts.actAs` on this account. |
-| audience       | optional | String | `oidc` only. Defaults to `url` without its query string. |
-| scope          | optional | String | `oauth` only. Default `https://www.googleapis.com/auth/cloud-platform`. |
+| audience       | optional | String | `gcpOidc` only. Defaults to `url` without its query string. |
+| scope          | optional | String | `gcpOauth` only. Default `https://www.googleapis.com/auth/cloud-platform`. |
 
 ### body
 
 | parameter | optional | type    | description |
 |-----------|----------|---------|-------------|
-| format    | optional | Enum    | `json` (default; the record as a JSON object — a JSON array in batch mode), `avro` (Avro binary of the record — an Avro Object Container File in batch mode; the Avro schema is derived from the input schema or taken from the module `schema`), `protobuf` (serialized message — length-delimited messages in batch mode; requires `schema.protobuf.descriptorFile` / `messageName`), `template` (FreeMarker text), `none` (no body). `template` is implied when `template` is set. |
+| format    | optional | Enum    | Same as the [http sink](http.md#body-parameters): `json` (default; the record as a JSON object — a JSON array in batch mode, `wrapper` / `fields` apply), `ndjson`, `form`, `bytes`, `avro` (Avro binary of the record — an Avro Object Container File in batch mode; the Avro schema is derived from the input schema or taken from the module `schema`), `protobuf` (serialized message — length-delimited messages in batch mode; requires `schema.protobuf.descriptorFile` / `messageName`), `template` (FreeMarker text), `none` (no body). `template` is implied when `template` is set. |
 | template  | optional | String  | FreeMarker template for `format: template`. Variables: record fields, `__timestamp` (event time), `__source` (input step name), `utils.*`; in batch mode additionally `elements` (list of records), `size` and `key`. Use `?json_string` for escaping. |
 | omitNulls | optional | Boolean | `json` only. Drop `null` fields (recursively). Default `false`. Useful for APIs with many optional fields. |
-| maxBytes  | optional | Integer | Reject records whose serialized body exceeds this size: no task is created, the record goes to `failureSinks` and a `FAILED` output record is emitted. In batch mode an oversized batch is first split in halves until each task fits (a single record that still exceeds the limit is rejected). Set it below the target's limit so Cloud Tasks never retries a request that can never succeed. |
+| maxBytes  | optional | String  | Size such as `100KB` / `1MB` / `1024`. Reject records whose serialized body exceeds this size: no task is created, the record goes to `failureSinks` and a `FAILED` output record is emitted. In batch mode an oversized batch is first split in halves until each task fits (a single record that still exceeds the limit is rejected). Set it below the target's limit so Cloud Tasks never retries a request that can never succeed. |
 
 ### task
 
@@ -93,7 +94,7 @@ If you only need fire-and-forget fan-out without scheduling, rate limiting or na
 | parameter           | optional | type    | description |
 |---------------------|----------|---------|-------------|
 | maxSize             | optional | Integer | Maximum records per task. At least one of `maxSize` / `maxBytes` is required. |
-| maxBytes            | optional | Integer | Maximum (approximate, pre-serialization) bytes per task as seen by Beam's `GroupIntoBatches`. Use `body.maxBytes` for the exact limit on the serialized body. |
+| maxBytes            | optional | String  | Maximum (approximate, pre-serialization) bytes per task (`1MB`) as seen by Beam's `GroupIntoBatches`. Use `body.maxBytes` for the exact limit on the serialized body. |
 | maxBufferingDuration | optional | String | Streaming only: flush an incomplete batch after this duration (`10s`, `PT1M`). |
 | key                 | optional | String  | Template on record fields; only records with the same rendered key share a task (e.g. `${tenant}`). When omitted, records are spread over `shards` random groups. |
 | shards              | optional | Integer | Number of random groups when `key` is omitted (parallelism of batch formation). Default 8. |
@@ -158,7 +159,7 @@ sinks:
         headers:
           Content-Type: application/json
           X-Batch-Size: ${size}
-        auth: { type: oidc }
+        auth: { type: gcpOidc }
       body:
         template: '{"events": [<#list elements as e>{"id": "${e.id}", "ts": "${e.event_time}"}<#sep>,</#list>]}'
         maxBytes: 65536
@@ -191,7 +192,7 @@ sinks:
         headers:
           Content-Type: application/json
         auth:
-          type: oidc
+          type: gcpOidc
           serviceAccount: notifier-invoker@myproject.iam.gserviceaccount.com
       body:
         format: json
@@ -244,7 +245,7 @@ sinks:
       target:
         url: https://pipeline-xxxx.a.run.app/run?args.table=${table_name}
         auth:
-          type: oidc
+          type: gcpOidc
           serviceAccount: pipeline@myproject.iam.gserviceaccount.com
       body:
         format: none
@@ -277,7 +278,7 @@ sinks:
       queue: projects/myproject/locations/asia-northeast1/queues/recheck
       target:
         url: https://orders-xxxx.a.run.app/recheck
-        auth: { type: oidc }
+        auth: { type: gcpOidc }
       task:
         id: "${order_id}"
         delay: 10m

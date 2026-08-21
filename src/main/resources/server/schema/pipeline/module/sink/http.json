@@ -1,0 +1,152 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/http",
+  "title": "HTTP",
+  "description": "Sink module that sends each input record (or micro-batch) as an HTTP request and tracks the outcome",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "http" },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "filter": {
+      "description": "Filter condition (JSON object or SQL-like text)",
+      "oneOf": [ { "type": "object" }, { "type": "string" } ]
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string", "description": "Endpoint URL (template on record fields)" },
+            "method": { "type": "string", "enum": ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "default": "POST" },
+            "params": { "type": "object", "description": "Query parameters (values are templates)", "additionalProperties": { "type": "string" } },
+            "headers": { "type": "object", "description": "Request headers (values are templates; __body is available for signature headers)", "additionalProperties": { "type": "string" } },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "enum": ["none", "basic", "bearer", "apiKey", "oauth2", "gcpOidc", "gcpOauth"], "default": "none" },
+                "username": { "type": "string" },
+                "password": { "type": "string" },
+                "token": { "type": "string", "description": "Static bearer token" },
+                "name": { "type": "string", "description": "apiKey: header / query parameter name" },
+                "value": { "type": "string", "description": "apiKey: value (prefix included, e.g. ApiKey xxx)" },
+                "in": { "type": "string", "enum": ["header", "query"], "default": "header" },
+                "grant": { "type": "string", "enum": ["clientCredentials", "jwtBearer"], "default": "clientCredentials" },
+                "tokenUrl": { "type": "string", "description": "oauth2: token endpoint" },
+                "clientId": { "type": "string" },
+                "clientSecret": { "type": "string" },
+                "scope": { "type": "string", "description": "oauth2 / gcpOauth scope" },
+                "audience": { "type": "string", "description": "oauth2 audience / gcpOidc audience (default: origin of url)" },
+                "refreshBeforeSeconds": { "type": "integer", "default": 60 },
+                "issuer": { "type": "string", "description": "jwtBearer: iss claim" },
+                "subject": { "type": "string", "description": "jwtBearer: sub claim (default issuer)" },
+                "privateKey": { "type": "string", "description": "jwtBearer: PKCS#8 PEM private key (RS256)" },
+                "keyId": { "type": "string", "description": "jwtBearer: kid header" },
+                "jwtLifetimeMinutes": { "type": "integer", "default": 60 },
+                "serviceAccount": { "type": "string", "description": "gcpOidc / gcpOauth: service account to impersonate" }
+              }
+            }
+          },
+          "required": ["url"]
+        },
+        "body": {
+          "type": "object",
+          "properties": {
+            "format": { "type": "string", "enum": ["json", "ndjson", "template", "form", "multipart", "bytes", "avro", "protobuf", "none"], "default": "json" },
+            "template": { "type": "string", "description": "FreeMarker template (whole body for format=template, one line per record for ndjson)" },
+            "parts": { "type": "array", "description": "multipart parts", "items": { "type": "object", "properties": { "name": { "type": "string" }, "field": { "type": "string" }, "template": { "type": "string" }, "filename": { "type": "string" }, "contentType": { "type": "string" } }, "required": ["name"] } },
+            "fields": { "type": "array", "items": { "type": "string" }, "description": "Restrict json/ndjson/form/__doc to these fields" },
+            "wrapper": { "type": "string", "description": "json batch: wrap the array, e.g. {\"records\": ${body}}" },
+            "omitNulls": { "type": "boolean", "default": false },
+            "maxBytes": { "type": "string", "description": "Body size guard (1MB, 100KB); batches are split, single records routed to failureSinks" },
+            "compression": { "type": "string", "enum": ["none", "gzip"], "default": "none" },
+            "field": { "type": "string", "description": "format=bytes: field holding the body" },
+            "contentType": { "type": "string", "description": "Override the Content-Type derived from format" }
+          }
+        },
+        "response": {
+          "type": "object",
+          "properties": {
+            "format": { "type": "string", "enum": ["json", "text", "bytes", "none"], "default": "json" },
+            "schema": { "type": "object", "description": "Schema of the JSON response (typed payload)" },
+            "success": {
+              "type": "object",
+              "properties": {
+                "statusCodes": { "type": "array", "items": { "type": "integer" }, "description": "Default: all 2xx" },
+                "condition": { "$ref": "#/$defs/filter" }
+              }
+            },
+            "retry": {
+              "type": "object",
+              "properties": {
+                "statusCodes": { "type": "array", "items": { "type": "integer" }, "default": [408, 425, 429, 500, 502, 503, 504] },
+                "condition": { "$ref": "#/$defs/filter" },
+                "respectRetryAfter": { "type": "boolean", "default": true },
+                "maxAttempts": { "type": "integer", "default": 5 },
+                "initialBackoff": { "type": "string", "default": "1s" },
+                "maxBackoff": { "type": "string", "default": "30s" },
+                "totalTimeout": { "type": "string", "default": "5m" }
+              }
+            },
+            "partialFailure": {
+              "type": "object",
+              "description": "Per-item outcome for bulk responses (batch only)",
+              "properties": {
+                "itemsPath": { "type": "string", "description": "JSON pointer to the items array, e.g. /items" },
+                "errorCondition": { "$ref": "#/$defs/filter" },
+                "retryCondition": { "$ref": "#/$defs/filter" }
+              },
+              "required": ["itemsPath", "errorCondition"]
+            }
+          }
+        },
+        "batch": {
+          "type": "object",
+          "description": "Send one request per micro-batch of records (GroupIntoBatches)",
+          "properties": {
+            "maxSize": { "type": "integer", "description": "Maximum records per request" },
+            "maxBytes": { "type": "string", "description": "Approximate maximum input bytes per batch (5MB)" },
+            "maxBufferingDuration": { "type": "string", "description": "Streaming: flush incomplete batches after this duration (2s, PT1M)" },
+            "key": { "type": "string", "description": "Template; records sharing the rendered key share a request" },
+            "shards": { "type": "integer", "default": 8, "description": "Random groups when key is omitted" }
+          }
+        },
+        "concurrency": { "type": "integer", "default": 1, "description": "Requests in flight per worker bundle" },
+        "rate": {
+          "type": "object",
+          "properties": {
+            "count": { "type": "number", "description": "Permits per unit per worker" },
+            "unit": { "type": "string", "enum": ["second", "minute"], "default": "second" }
+          },
+          "required": ["count"]
+        },
+        "timeout": {
+          "type": "object",
+          "properties": {
+            "connect": { "type": "string", "default": "10s" },
+            "request": { "type": "string", "default": "60s" }
+          }
+        },
+        "http": {
+          "type": "object",
+          "properties": {
+            "version": { "type": "string", "enum": ["HTTP_2", "HTTP_1_1"], "default": "HTTP_2" },
+            "followRedirects": { "type": "string", "enum": ["normal", "never", "always"], "default": "normal" },
+            "proxy": { "type": "string", "description": "host:port" },
+            "allowedHosts": { "type": "array", "items": { "type": "string" }, "description": "Hosts requests may be sent to (required when auth is set and the url host is a template)" }
+          }
+        }
+      },
+      "required": ["target"]
+    }
+  }
+}

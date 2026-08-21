@@ -71,9 +71,9 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
-`pubsub` `storage` `files` `debug` `auxia` `tasks` `localH2`.
+`pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `localH2`.
 
-**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks`.
+**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks` `http`.
 Registered as `action.<service>` in all three module registries (thin adapters `ActionSource` /
 `ActionTransform` / `ActionSink`; shared logic in `module/action/Actions.java`), so an action
 step is placeable in `sources` / `transforms` / `sinks` — placement never changes behavior. Triggers:
@@ -111,6 +111,12 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 - `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`, `web/`.
   - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
     still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
+- `pipeline/outbound/` — shared core for modules that call external HTTP endpoints (`http` sink and `action.http`;
+  planned: `grpc` sink, `tasks` sink rebase, `http` source auth): `AuthProvider` (basic/bearer/apiKey/oauth2/
+  gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
+  (declarative success/retry/partial-failure classification, Retry-After backoff), `RequestSpec`/`RequestRenderer`
+  (target/body config + template rendering), `SyncCaller` (blocking send-with-retry). Design notes in
+  repo-root `work_http.md` (uncommitted).
 - `coder/` — Beam coders.
 
 ### Server (`server/`)

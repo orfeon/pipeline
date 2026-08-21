@@ -98,6 +98,8 @@ and control records (chaining on results). See `docs/module/action/README.md` fo
   polling with backoff/timeout, collect aggregation parameter.
 - `StorageAction.java` (~130 lines) — simplest complete service (file writing, template content).
 - `GeminiAction.java` — REST submission + state polling, non-idempotent (documented).
+- `HttpAction.java` — generic HTTP request per firing on the shared `outbound` core (`RequestRenderer`,
+  `SyncCaller`, `ResponsePolicy`), schema-aware `configure(name, params, options, inputSchema)`, `poll` loop.
 - `src/test/java/com/mercari/solution/module/action/MockAction.java` — minimal test service.
 
 ## Test

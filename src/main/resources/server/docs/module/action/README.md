@@ -2,7 +2,7 @@
 
 Action modules (`action.<service>`) execute an operation against an external service from inside the pipeline — run a BigQuery job, launch a Vertex AI batch prediction job, write a result-history file. They give a pipeline lightweight workflow steps (run a job after files are written, scale an instance before reading, notify results) without an external orchestrator.
 
-Available services: [bigquery](bigquery.md) · [vertexai_gemini](vertexai_gemini.md) · [storage](storage.md)
+Available services: [bigquery](bigquery.md) · [vertexai_gemini](vertexai_gemini.md) · [storage](storage.md) · [tasks](tasks.md) · [http](http.md)
 
 ## The two planes
 
@@ -49,7 +49,7 @@ Every execution emits exactly one record with the same schema regardless of serv
 
 | field      | type      | description                                                        |
 |------------|-----------|--------------------------------------------------------------------|
-| service    | STRING    | The action service (`bigquery`, `vertexai_gemini`, `storage`).     |
+| service    | STRING    | The action service (`bigquery`, `vertexai_gemini`, `storage`, `tasks`, `http`). |
 | op         | STRING    | The operation executed (e.g. `query`, `load`, `write`).            |
 | jobId      | STRING (nullable) | Id / resource name of the launched job or written object.  |
 | state      | STRING (nullable) | Final (or last observed) state, e.g. `DONE`.               |
