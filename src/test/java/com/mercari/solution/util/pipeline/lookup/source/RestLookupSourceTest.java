@@ -29,6 +29,9 @@ public class RestLookupSourceTest {
     private static HttpServer server;
     private static String baseUrl;
     private static final AtomicInteger userRequests = new AtomicInteger();
+    private static final AtomicInteger tokenRequests = new AtomicInteger();
+    private static final AtomicInteger secureRequests = new AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicBoolean flaky = new java.util.concurrent.atomic.AtomicBoolean(true);
 
     @BeforeAll
     public static void startServer() throws Exception {
@@ -56,6 +59,28 @@ public class RestLookupSourceTest {
                 default -> "{\"items\":[]}";
             };
             respond(exchange, 200, body);
+        });
+        // oauth2 client-credentials token endpoint (issues token-N) and a protected resource:
+        // token-1 is rejected once (401) so the source must refresh; first /secure call answers 503
+        server.createContext("/oauth/token", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            final int n = tokenRequests.incrementAndGet();
+            respond(exchange, 200, "{\"access_token\":\"token-" + n + "\",\"expires_in\":3600}");
+        });
+        server.createContext("/secure/", exchange -> {
+            secureRequests.incrementAndGet();
+            final String auth = exchange.getRequestHeaders().getFirst("Authorization");
+            if (auth == null || auth.equals("Bearer token-1")) {
+                respond(exchange, 401, "{\"error\":\"unauthorized\"}");
+                return;
+            }
+            if (flaky.compareAndSet(true, false)) {
+                respond(exchange, 503, "{\"error\":\"busy\"}");
+                return;
+            }
+            final String path = exchange.getRequestURI().getPath();
+            final String id = path.substring(path.lastIndexOf('/') + 1);
+            respond(exchange, 200, "{\"name\":\"secret-" + id + "\"}");
         });
         server.start();
         baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
@@ -170,6 +195,56 @@ public class RestLookupSourceTest {
             }
             Assertions.assertEquals(200L, weightedByOrder.get("o1"));
             Assertions.assertEquals(400L, weightedByOrder.get("o2"));
+        } finally {
+            query.teardown();
+        }
+    }
+
+    @Test
+    public void testAuthProviderRefreshOn401AndRetry() {
+        tokenRequests.set(0);
+        secureRequests.set(0);
+        flaky.set(true);
+        final com.mercari.solution.util.pipeline.outbound.AuthProvider.Parameters auth =
+                new com.mercari.solution.util.pipeline.outbound.AuthProvider.Parameters();
+        auth.type = com.mercari.solution.util.pipeline.outbound.AuthProvider.Type.oauth2;
+        auth.tokenUrl = baseUrl + "/oauth/token";
+        auth.clientId = "id";
+        auth.clientSecret = "secret";
+        final com.mercari.solution.util.pipeline.outbound.ResponsePolicy.Retry retry =
+                new com.mercari.solution.util.pipeline.outbound.ResponsePolicy.Retry();
+        retry.initialBackoff = "10ms";
+        retry.maxBackoff = "20ms";
+        retry.maxAttempts = 3;
+        final RestLookupSource source = RestLookupSource.builder()
+                .withName("api")
+                .withAuth(auth)          // no allowedHosts: pinned to the endpoint host automatically
+                .withRetry(retry)
+                .withTable(RestLookupSource.TableConfig.builder()
+                        .withName("secure")
+                        .withEndpoint(baseUrl + "/secure/{id}")
+                        .withField("name", Schema.FieldType.STRING)
+                        .build())
+                .build();
+
+        final Query2 query = Query2.builder()
+                .withInput("INPUT", inputSchema())
+                .withSource(source)
+                .withSql("SELECT i.uid AS uid, s.name AS name FROM INPUT AS i JOIN api.secure AS s ON s.id = i.uid")
+                .build();
+        query.setup();
+        try {
+            final List<MElement> outputs = query.execute(List.of(input("u1", 1L), input("u2", 2L)), TIMESTAMP);
+            Assertions.assertEquals(2, outputs.size());
+            final Map<String, String> names = new HashMap<>();
+            for (final MElement output : outputs) {
+                names.put(output.getAsString("uid"), output.getAsString("name"));
+            }
+            Assertions.assertEquals(Map.of("u1", "secret-u1", "u2", "secret-u2"), names);
+            // token-1 rejected once → refreshed to token-2 (2 token requests), cached for the second key
+            Assertions.assertEquals(2, tokenRequests.get());
+            // u1: 401 + 503 + 200, u2: 200 → 4 resource requests
+            Assertions.assertEquals(4, secureRequests.get());
         } finally {
             query.teardown();
         }

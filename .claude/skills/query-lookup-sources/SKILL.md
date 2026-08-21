@@ -194,12 +194,18 @@ over-restriction was found; test:
    RestLookupSource.decodeRow). A superset is fine; the operator filters
    exactly. Backend can't array-bind a key set? Drive it with
    `PerKeyLookup.run` (rejects ranges, dedups tuples, skips null components).
-4. Lookups must be **read-only and idempotent** — they run many times, in
+4. HTTP/gRPC-backed sources take credentials through the shared
+   `util/pipeline/outbound/AuthProvider` (`auth` config block — same as the
+   http source/sink): rest sends via `HttpTransport` + `SyncCaller` (retry
+   from `ResponsePolicy`, 404 → no row, 401 → one token refresh), grpc adds
+   the provider's headers as call metadata in its interceptor and retries once
+   on `UNAUTHENTICATED`. Don't hand-roll token handling in a new source.
+5. Lookups must be **read-only and idempotent** — they run many times, in
    arbitrary order, and bundle retries repeat them. If an endpoint is
    input-derived, add an allow-list guard (see `allowedHosts`).
-5. Wire it into `QueryTransform.createSource` + document it in
+6. Wire it into `QueryTransform.createSource` + document it in
    `src/main/resources/server/docs/module/transform/query.md` (+ index.yaml).
-6. Tests: hermetic first — H2 for JDBC-shaped sources, JDK
+7. Tests: hermetic first — H2 for JDBC-shaped sources, JDK
    `com.sun.net.httpserver.HttpServer` for HTTP (see `RestLookupSourceTest`),
    Testcontainers emulator `*IT` for cloud backends (see
    `SpannerQueryLookupIT`; run with `mvn verify -DskipITs=false

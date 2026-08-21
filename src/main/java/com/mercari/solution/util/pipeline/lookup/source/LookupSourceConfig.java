@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.IllegalModuleException;
+import com.mercari.solution.util.pipeline.outbound.AuthProvider;
+import com.mercari.solution.util.pipeline.outbound.ResponsePolicy;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
 
@@ -45,11 +47,13 @@ public final class LookupSourceConfig {
         private String namespace;
         private String emulatorHost;
 
-        // rest
+        // rest / grpc
         private String baseUrl;
         private Map<String, String> headers;
         private List<String> allowedHosts;
         private Long timeoutMillis;
+        private AuthProvider.Parameters auth;
+        private ResponsePolicy.Retry retry;
 
         // grpc
         private String target;
@@ -107,6 +111,7 @@ public final class LookupSourceConfig {
                     }
                 }
                 case "rest" -> {
+                    validateAuthAndRetry(index);
                 }
                 case "datastore" -> {
                     if(projectId == null) {
@@ -161,6 +166,7 @@ public final class LookupSourceConfig {
                         throw new IllegalModuleException(
                                 "parameters.sources[" + index + "] (grpc) requires target and descriptorSetPath");
                     }
+                    validateAuthAndRetry(index);
                     for(int t = 0; t < tables.size(); t++) {
                         final TableParameters table = tables.get(t);
                         if(table.method == null || table.keyField == null) {
@@ -220,6 +226,21 @@ public final class LookupSourceConfig {
                 }
                 default -> throw new IllegalModuleException(
                         "parameters.sources[" + index + "].type must be one of jdbc, spanner, bigtable, datastore, firestore, rest, grpc, sideinput, buffer but was: " + type);
+            }
+        }
+
+        private void validateAuthAndRetry(final int index) {
+            final List<String> errorMessages = new ArrayList<>();
+            if(auth != null) {
+                errorMessages.addAll(auth.validate("parameters.sources[" + index + "].auth"));
+            }
+            if(retry != null) {
+                final ResponsePolicy.Parameters p = new ResponsePolicy.Parameters();
+                p.retry = retry;
+                errorMessages.addAll(p.validate("parameters.sources[" + index + "]"));
+            }
+            if(!errorMessages.isEmpty()) {
+                throw new IllegalModuleException(errorMessages);
             }
         }
     }
@@ -614,6 +635,12 @@ public final class LookupSourceConfig {
                 if(source.timeoutMillis != null) {
                     builder.withTimeoutMillis(source.timeoutMillis);
                 }
+                if(source.auth != null) {
+                    builder.withAuth(source.auth);
+                }
+                if(source.retry != null) {
+                    builder.withRetry(source.retry);
+                }
                 for(final TableParameters table : source.tables) {
                     final RestLookupSource.TableBuilder tableBuilder = RestLookupSource.TableConfig.builder()
                             .withName(table.name)
@@ -660,6 +687,9 @@ public final class LookupSourceConfig {
                 }
                 if(source.timeoutMillis != null) {
                     builder.withDeadlineMillis(source.timeoutMillis);
+                }
+                if(source.auth != null) {
+                    builder.withAuth(source.auth);
                 }
                 if(source.maxInboundMessageBytes != null) {
                     builder.withMaxInboundMessageBytes(source.maxInboundMessageBytes);

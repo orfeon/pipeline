@@ -61,6 +61,10 @@ final class DynamicGrpcTestServer {
 
     private final Server server;
 
+    /** When set, calls must carry {@code authorization: Bearer <token>} with this token; others fail UNAUTHENTICATED. */
+    final java.util.concurrent.atomic.AtomicReference<String> requiredToken = new java.util.concurrent.atomic.AtomicReference<>();
+    final java.util.List<String> seenAuthorizations = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
     DynamicGrpcTestServer() throws Exception {
         this.file = buildFile();
         this.getUserRequest = file.findMessageTypeByName("GetUserRequest");
@@ -69,7 +73,24 @@ final class DynamicGrpcTestServer {
         this.classifyRequest = file.findMessageTypeByName("ClassifyRequest");
         this.classifyResponse = file.findMessageTypeByName("ClassifyResponse");
         this.label = file.findMessageTypeByName("Label");
+        final io.grpc.ServerInterceptor authCheck = new io.grpc.ServerInterceptor() {
+            @Override
+            public <Q, S> io.grpc.ServerCall.Listener<Q> interceptCall(io.grpc.ServerCall<Q, S> call,
+                    io.grpc.Metadata headers, io.grpc.ServerCallHandler<Q, S> next) {
+                final String required = requiredToken.get();
+                final String auth = headers.get(io.grpc.Metadata.Key.of("authorization", io.grpc.Metadata.ASCII_STRING_MARSHALLER));
+                if (required != null) {
+                    seenAuthorizations.add(auth);
+                    if (auth == null || !auth.equals("Bearer " + required)) {
+                        call.close(io.grpc.Status.UNAUTHENTICATED.withDescription("bad token"), new io.grpc.Metadata());
+                        return new io.grpc.ServerCall.Listener<>() {};
+                    }
+                }
+                return next.startCall(call, headers);
+            }
+        };
         this.server = ServerBuilder.forPort(0)
+                .intercept(authCheck)
                 .addService(userService())
                 .addService(classifierService())
                 .addService(streamerService())

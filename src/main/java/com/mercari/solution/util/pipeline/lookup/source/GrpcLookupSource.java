@@ -12,6 +12,7 @@ import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupKey;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
+import com.mercari.solution.util.pipeline.outbound.AuthProvider;
 import com.mercari.solution.util.pipeline.lookup.PerKeyLookup;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
@@ -38,6 +39,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -193,6 +195,8 @@ public class GrpcLookupSource extends LookupSource {
     private final boolean plaintext;
     private final Map<String, String> headers;
     private final long deadlineMillis;
+    private final AuthProvider.Parameters auth;
+    private transient AuthProvider authProvider;
     private final int maxInboundMessageBytes;
     private final String descriptorSetPath;
     private final Map<String, TableConfig> tables;
@@ -212,6 +216,12 @@ public class GrpcLookupSource extends LookupSource {
         this.plaintext = builder.plaintext;
         this.headers = Map.copyOf(builder.headers);
         this.deadlineMillis = builder.deadlineMillis;
+        this.auth = builder.auth == null ? new AuthProvider.Parameters() : builder.auth;
+        this.auth.setDefaults();
+        final List<String> authErrors = this.auth.validate("auth");
+        if (!authErrors.isEmpty()) {
+            throw new IllegalArgumentException(String.join(", ", authErrors));
+        }
         this.maxInboundMessageBytes = builder.maxInboundMessageBytes;
         this.descriptorSetPath = builder.descriptorSetPath;
         this.descriptorSetBytes = builder.descriptorSetBytes;
@@ -243,6 +253,13 @@ public class GrpcLookupSource extends LookupSource {
         private boolean plaintext;
         private final Map<String, String> headers = new LinkedHashMap<>();
         private long deadlineMillis = 60_000L;
+        private AuthProvider.Parameters auth;
+
+        /** Authentication provider shared with the http modules; its headers are sent as call metadata. */
+        public Builder withAuth(AuthProvider.Parameters auth) {
+            this.auth = auth;
+            return this;
+        }
         private int maxInboundMessageBytes;
         private String descriptorSetPath;
         private byte[] descriptorSetBytes;
@@ -333,7 +350,8 @@ public class GrpcLookupSource extends LookupSource {
                 channelBuilder.maxInboundMessageSize(maxInboundMessageBytes);
             }
             managedChannel = channelBuilder.build();
-            channel = withHeaders(managedChannel, headers);
+            authProvider = AuthProvider.create(auth, (plaintext ? "http://" : "https://") + target);
+            channel = withHeaders(managedChannel, headers, authProvider);
             grpcMethods = new ConcurrentHashMap<>();
         }
     }
@@ -402,20 +420,29 @@ public class GrpcLookupSource extends LookupSource {
         final CallOptions options = deadlineMillis > 0
                 ? CallOptions.DEFAULT.withDeadlineAfter(deadlineMillis, TimeUnit.MILLISECONDS)
                 : CallOptions.DEFAULT;
-        try {
-            if (config.serverStreaming) {
-                final Iterator<DynamicMessage> it = ClientCalls.blockingServerStreamingCall(
-                        channel, grpcMethod, options, request);
-                final List<DynamicMessage> out = new ArrayList<>();
-                while (it.hasNext()) {
-                    out.add(it.next());
+        boolean authRetried = false;
+        while (true) {
+            try {
+                if (config.serverStreaming) {
+                    final Iterator<DynamicMessage> it = ClientCalls.blockingServerStreamingCall(
+                            channel, grpcMethod, options, request);
+                    final List<DynamicMessage> out = new ArrayList<>();
+                    while (it.hasNext()) {
+                        out.add(it.next());
+                    }
+                    return out;
                 }
-                return out;
+                return List.of(ClientCalls.blockingUnaryCall(channel, grpcMethod, options, request));
+            } catch (StatusRuntimeException e) {
+                if (e.getStatus().getCode() == io.grpc.Status.Code.UNAUTHENTICATED
+                        && !authRetried && authProvider != null && !authProvider.isNone()) {
+                    authProvider.invalidate(); // refresh the token once, like the http modules on 401
+                    authRetried = true;
+                    continue;
+                }
+                throw new IllegalStateException(
+                        "gRPC call '" + config.method + "' failed: " + e.getStatus(), e);
             }
-            return List.of(ClientCalls.blockingUnaryCall(channel, grpcMethod, options, request));
-        } catch (StatusRuntimeException e) {
-            throw new IllegalStateException(
-                    "gRPC call '" + config.method + "' failed: " + e.getStatus(), e);
         }
     }
 
@@ -864,9 +891,9 @@ public class GrpcLookupSource extends LookupSource {
                 + methodName + "')");
     }
 
-    /** Wraps the channel so every call carries the configured static headers. */
-    private static Channel withHeaders(ManagedChannel channel, Map<String, String> headers) {
-        if (headers.isEmpty()) {
+    /** Wraps the channel so every call carries the configured static headers and the auth provider's headers. */
+    private static Channel withHeaders(ManagedChannel channel, Map<String, String> headers, AuthProvider auth) {
+        if (headers.isEmpty() && (auth == null || auth.isNone())) {
             return channel;
         }
         final Metadata extra = new Metadata();
@@ -881,6 +908,16 @@ public class GrpcLookupSource extends LookupSource {
                     @Override
                     public void start(Listener<S> responseListener, Metadata requestHeaders) {
                         requestHeaders.merge(extra);
+                        if (auth != null && !auth.isNone()) {
+                            try {
+                                for (final Map.Entry<String, String> e : auth.headers().entrySet()) {
+                                    requestHeaders.put(Metadata.Key.of(e.getKey().toLowerCase(Locale.ROOT),
+                                            Metadata.ASCII_STRING_MARSHALLER), e.getValue());
+                                }
+                            } catch (IOException e) {
+                                throw new IllegalStateException("failed to obtain auth credentials for gRPC call", e);
+                            }
+                        }
                         super.start(responseListener, requestHeaders);
                     }
                 };

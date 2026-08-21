@@ -350,7 +350,9 @@ timestamps at millisecond precision.
 | parameter    | optional | type                | description                                                     |
 |--------------|----------|---------------------|------------------------------------------------------------------|
 | baseUrl      | optional | String              | Prefix for relative `endpoint`s.                                |
-| headers      | optional | Map<String,String\> | Default headers merged into every request (e.g. auth).          |
+| headers      | optional | Map<String,String\> | Default headers merged into every request.                      |
+| auth         | optional | [Auth](../sink/http.md#auth-parameters) | Authentication provider shared with the http modules (`basic`, `bearer`, `apiKey`, `oauth2` client credentials / JWT bearer, `gcpOidc`, `gcpOauth`). Tokens are cached per worker, refreshed before expiry and once after a 401 — prefer it over a token in `headers`, which never refreshes. With `auth`, requests are pinned to the hosts of `baseUrl` / the endpoints (or `allowedHosts`). |
+| retry        | optional | [Retry](../sink/http.md#success--retry-conditions) | Retry policy for transient failures (default: 408/425/429/5xx and connection errors, 5 attempts, `Retry-After` honored). 404 still means "no row". |
 | allowedHosts | optional | Array<String\>      | If set, requests to any other host fail (SSRF guard).           |
 | timeoutMillis| optional | Integer             | Per-request timeout (default 60000).                            |
 
@@ -384,7 +386,8 @@ shipped to the workers with the pipeline).
 | target                 | required | String              | gRPC target: `host:port` or any name-resolver URI.                |
 | descriptorSetPath      | required | String              | Path to the protoc descriptor set (`--include_imports` required). |
 | plaintext              | optional | Boolean             | Use plaintext instead of TLS (default `false`).                    |
-| headers                | optional | Map<String,String\> | Static request headers sent on every call (e.g. an auth token).    |
+| headers                | optional | Map<String,String\> | Static request headers sent on every call.                         |
+| auth                   | optional | [Auth](../sink/http.md#auth-parameters) | Authentication provider shared with the http modules; its headers are sent as call metadata (`authorization`). Cached per worker, refreshed before expiry and once after `UNAUTHENTICATED`. |
 | timeoutMillis          | optional | Integer             | Per-call deadline (default 60000; `0` = none).                     |
 | maxInboundMessageBytes | optional | Integer             | Max inbound message size.                                          |
 
