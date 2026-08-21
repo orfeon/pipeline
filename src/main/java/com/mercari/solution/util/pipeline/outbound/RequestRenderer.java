@@ -62,6 +62,7 @@ public class RequestRenderer implements Serializable {
     private final List<String> inputNames;
     private final List<String> templateArgs;
     private final Serialize serialize;
+    private final Pattern dynamicVariablePattern;
 
     private transient Template urlTemplate;
     private transient String staticUrl;
@@ -111,8 +112,29 @@ public class RequestRenderer implements Serializable {
             final Schema outputSchema,
             final List<String> inputNames,
             final List<String> extraTemplateTexts) {
+        this(name, target, body, batchKey, batch, inputSchema, outputSchema, inputNames, extraTemplateTexts, Set.of());
+    }
+
+    /**
+     * @param dynamicVariables names of caller-supplied per-request template variables (e.g. the
+     *                         http source's loop vars); templates referencing them are rendered per
+     *                         request instead of once at setup
+     */
+    public RequestRenderer(
+            final String name,
+            final RequestSpec.Target target,
+            final RequestSpec.Body body,
+            final String batchKey,
+            final boolean batch,
+            final Schema inputSchema,
+            final Schema outputSchema,
+            final List<String> inputNames,
+            final List<String> extraTemplateTexts,
+            final Set<String> dynamicVariables) {
 
         this.name = name;
+        this.dynamicVariablePattern = dynamicVariables == null || dynamicVariables.isEmpty() ? null
+                : Pattern.compile("\\$\\{[^}]*\\b(" + String.join("|", dynamicVariables.stream().map(Pattern::quote).toList()) + ")\\b[^}]*}");
         this.target = target;
         this.body = body;
         this.batchKey = batchKey;
@@ -216,7 +238,8 @@ public class RequestRenderer implements Serializable {
     /** True when the template references neither element fields nor per-element/batch variables. */
     private boolean isStatic(final String text) {
         return TemplateUtil.extractTemplateArgs(text, inputSchema).isEmpty()
-                && !PATTERN_DYNAMIC_VAR.matcher(text).find();
+                && !PATTERN_DYNAMIC_VAR.matcher(text).find()
+                && (dynamicVariablePattern == null || !dynamicVariablePattern.matcher(text).find());
     }
 
     private static String render(final String name, final String text, final Map<String, Object> values) {

@@ -26,7 +26,7 @@ This page lists the modules registered in the current codebase.
 | [storage](source/storage.md)     | Import and parse file contents (Avro/Parquet/CSV/JSON) from GCS, S3, or local file systems             |
 | [files](source/files.md)         | Import file metadata (and optionally content) matched by glob patterns from GCS, S3, or local files    |
 | [drive](source/drive.md)         | Import file metadata and content from Google Drive                                                     |
-| [http](source/http.md)           | Send HTTP requests and output the responses (pagination, chaining, retry)                              |
+| [http](source/http.md)           | Fetch typed records from HTTP APIs (auth, pagination, chaining, polling, retry)                       |
 | [pubsub](source/pubsub.md)       | Import messages from Cloud Pub/Sub topics or subscriptions                                             |
 | [kafka](source/kafka.md)                                                         | Import data from Apache Kafka topics                                                                   |
 | [create](source/create.md)       | Generate data with specified conditions (explicit elements or sequences)                               |

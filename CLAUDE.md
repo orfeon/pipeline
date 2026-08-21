@@ -108,11 +108,11 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
     Built on the Beam-vendored Calcite 1.40 — never add a regular `org.apache.calcite` dependency.
     Maintain via the **`query-lookup-sources` skill** (`.claude/skills/query-lookup-sources/`).
 - `cloud/` — cloud service clients (`google/`, `amazon/`, `hashicorp/`, `crm/`).
-- `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`, `web/`.
+- `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`.
   - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
     still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
-- `pipeline/outbound/` — shared core for modules that call external HTTP endpoints (`http` sink and `action.http`;
-  planned: `grpc` sink, `tasks` sink rebase, `http` source auth): `AuthProvider` (basic/bearer/apiKey/oauth2/
+- `pipeline/outbound/` — shared core for modules that call external HTTP endpoints (`http` source/sink,
+  `action.http`, `tasks` sink; planned: `grpc` sink): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
   (declarative success/retry/partial-failure classification, Retry-After backoff), `RequestSpec`/`RequestRenderer`
   (target/body config + template rendering), `SyncCaller` (blocking send-with-retry). Design notes in
