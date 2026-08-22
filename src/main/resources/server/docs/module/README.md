@@ -63,6 +63,7 @@ This page lists the modules registered in the current codebase.
 | [files](sink/files.md)           | Write each input record as an individual file with template-driven path and content              |
 | [debug](sink/debug.md)           | Output input data to logs for debugging and inspection                                           |
 | [auxia](sink/auxia.md)           | Send input data as events to the Auxia platform via its ingestion API                            |
+| [grpc](sink/grpc.md)                                                             | Send each record (or micro-batch) as a gRPC request (descriptor-set driven, auth, retry)        |
 | [http](sink/http.md)                                                             | Send each record (or micro-batch) as an HTTP request with auth, retry, partial-failure handling  |
 | [tasks](sink/tasks.md)                                                           | Enqueue each record as a Cloud Tasks HTTP task (rate limit, retry, schedule, dedup by the queue)  |
 | [localH2](sink/localh2.md)                                                       | Load input records into a local H2 database and write the database file out                      |

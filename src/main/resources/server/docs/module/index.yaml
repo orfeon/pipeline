@@ -127,6 +127,9 @@ sinks:
   - title: storage
     description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
     tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
+  - title: grpc
+    description: Sends each input record (or a keyed micro-batch) as a gRPC request to any service described by a protoc descriptor set (no generated stubs). Records map to the request message by field name or through a FreeMarker protobuf-JSON template; unary and client-streaming methods, batches via a repeated field or the client stream. Shares the http sink's auth providers (as call metadata), status-code based retry with backoff, concurrency, rate limiting, and emits SUCCEEDED/FAILED control records with the response as JSON payload.
+    tags: [sink, grpc, protobuf, api, batch, streaming]
   - title: http
     description: Sends each input record (or a keyed micro-batch) as an HTTP request to an endpoint and emits one SUCCEEDED/PARTIAL/FAILED control record per request with status, headers, body and typed payload. Supports per-record templates for URL/params/headers (incl. __body signature headers), JSON/NDJSON/form/bytes/Avro/Protobuf/template bodies with gzip and size guard, auth providers (basic, bearer, apiKey, OAuth2 client credentials with token cache, GCP OIDC/OAuth) with refresh on 401, declarative success/retry classification with Retry-After aware backoff, per-item partial failure and selective item retry for bulk APIs (Elasticsearch _bulk, Solr), per-worker rate limiting and bounded in-flight concurrency, batch and streaming.
     tags: [sink, http, rest, api, webhook, bulk, elasticsearch, solr, oauth2, oidc, batch, streaming]
