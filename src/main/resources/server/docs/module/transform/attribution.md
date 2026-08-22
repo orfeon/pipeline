@@ -1,9 +1,9 @@
 ---
 type: Transform Module
 title: Attribution Transform Module
-description: Explains the difference between two multi-dimensional aggregates (baseline vs target) by automatically localizing it to a concise set of dimension-value slices (root causes). Implements the RiskLoc, Squeeze and Adtributor localization algorithms with derived (ratio) measure allocation, distribution measures (quantile shift localization via mergeable KLL sketches), distinct-count measures (cardinality change localization via mergeable Theta sketches), pre-serialized sketch input (aggregate at the source, ship only sketch bytes), four baseline strategies (two-input external, label column, time shift, synthetic marginal), numeric binning, and cardinality/support guards. Batch only.
-tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches]
-timestamp: 2026-07-12T00:00:00Z
+description: Explains why a metric changed between a baseline and a target period along two orthogonal axes. Slice attribution (vocabulary.unit slice, the default) localizes the change to a concise set of dimension-value slices (where) with the RiskLoc, Squeeze and Adtributor algorithms, derived (ratio) measure allocation, distribution measures (KLL sketches), distinct-count measures (Theta sketches), pre-serialized sketch input, four baseline strategies and cardinality/support guards. Metric-tree attribution (vocabulary.unit metric) decomposes the change along a declared driver/KPI tree (why) — sum, product (volume x rate), sum-of-products and weighted-average nodes with per-dimension breakdowns — with exact additivity at every level and an optional causal adjustment for declared rate-to-volume dependencies (ordered allocation with a baseline-fitted regression). Batch only.
+tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches, metrictree, kpi, decomposition, causal]
+timestamp: 2026-08-22T00:00:00Z
 ---
 
 # Attribution Transform Module
@@ -15,7 +15,14 @@ it automatically localizes the difference to a concise set of dimension-value co
 single declarative step.
 
 Where aggregation modules answer "what happened", this module answers "**where and why it
-changed**". Input rows can be **raw events or pre-aggregated leaves** (dimension columns +
+changed**" along two orthogonal axes, selected by `vocabulary.unit`:
+
+- **`slice`** (default) — *where*: which dimension-value slices (`country=JP AND channel=app`)
+  explain the change. Everything in this document applies to it unless noted.
+- **`metric`** — *why*: which driver metrics in a declared **metric tree** (`revenue = units ×
+  AUP`, `AUP` by deal status, …) explain the change. See [Metric-tree attribution](#metric-tree-attribution-vocabularyunit-metric);
+  the `measures`, `comparison` (all baseline strategies) and `output` blocks are shared.
+ Input rows can be **raw events or pre-aggregated leaves** (dimension columns +
 numeric measure columns): leaf aggregation by dimension tuple runs inside the module,
 distributed across workers, and rows with identical dimension values are always merged — so
 multiple time buckets, partial aggregates or event-level rows per tuple are all fine. For very
@@ -58,6 +65,12 @@ Supports:
 - **Guards** — `maxCardinality` / `minSupport` bucketing of tail values into `other`, and
   `maxLayer` bounding the search depth, to control cost and spurious findings.
 - **Binned dimensions** — numeric columns bucketed by quantile or equal width before search.
+- **Metric-tree attribution** (`vocabulary.unit: metric`) — metric-tree change decomposition
+  (MTCD: Zhou, Janzing, Tsang, Blöbaum, Visentini Scarzanella, "A Unified Approach to
+  Interpretable Causal Root Cause Attribution", KDD '26 TSMO workshop): a declared KPI/driver tree
+  with sum / product / sum-of-products / weighted-average nodes and per-dimension breakdowns,
+  exact additivity at every level, and an optional **causal adjustment** of product nodes along
+  declared rate → volume edges. See [Metric-tree attribution](#metric-tree-attribution-vocabularyunit-metric).
 
 Batch only. Streaming mode and the parameter values marked **reserved** below are planned for
 future versions; reserved values are accepted by the schema but rejected at validation time
@@ -251,8 +264,9 @@ Strategy semantics:
 
 | parameter      | optional | type              | description                                                       |
 |----------------|----------|-------------------|-------------------------------------------------------------------|
-| unit           | optional | Enum              | `slice` (default). (`metric` is **reserved**.)                    |
-| dimensions     | required | Array<Dimension\> | Dimensions (input columns) forming the slice vocabulary. Max 31.  |
+| unit           | optional | Enum              | `slice` (default) or `metric` (metric tree, see [below](#metric-tree-attribution-vocabularyunit-metric)). |
+| dimensions     | required for slice | Array<Dimension\> | Dimensions (input columns) forming the slice vocabulary. Max 31. For `unit: metric` they are the columns available to `breakdowns` (optional). |
+| tree           | required for metric | Tree | The metric tree declaration (`unit: metric` only). See [tree parameters](#tree-parameters). |
 | expressiveness | optional | Enum              | `slice` (default). (`predicate`, `ruleList` are **reserved**.)    |
 
 ### dimension parameters
@@ -267,9 +281,10 @@ Strategy semantics:
 
 | parameter         | optional | type | description                                                                                      |
 |-------------------|----------|------|----------------------------------------------------------------------------------------------------|
-| basis             | optional | Enum | `contribution` (default). (`mixRate`, `causalAdjusted` are **reserved**.)                          |
-| derivedAllocation | optional | Enum | Allocation of derived measures to components: `gre` (default), `partialDerivative`, or `shapley` (exact, up to 10 variables). |
-| epBasis           | optional | Enum | Basis of explanatory power: `auto` (default), `netDelta`, or `absoluteDelta`. See below.          |
+| basis             | optional | Enum | `contribution` (default) or `causalAdjusted` (`unit: metric` only — apply the causal edges declared in `causal`). |
+| derivedAllocation | optional | Enum | Allocation of derived measures to components: `gre` (default), `partialDerivative`, or `shapley` (exact, up to 10 variables). Slice mode only. |
+| epBasis           | optional | Enum | Basis of explanatory power: `auto` (default), `netDelta`, or `absoluteDelta`. See below. Slice mode only. |
+| causal            | required for causalAdjusted | Causal | Causal edges and estimation settings for the metric tree. See [causal parameters](#causal-parameters). |
 
 ### epBasis
 
@@ -296,6 +311,7 @@ The two bases answer **different questions** and every output row records which 
 | adtributor | optional | Adtributor | `{ teep: 0.1, tep: 0.67 }` — per-value and cumulative explanatory power thresholds (NSDI 2014). |
 | squeeze    | optional | Squeeze    | `{ psUpperBound: 0.9, maxNumElementsSingleCluster: 12, maxNormalDeviation: 0.2, enableFilter: true }` — reference-implementation defaults (ISSRE 2019): potential-score early-exit bound, per-cuboid element cap, minimum mean deviation for a cluster to count as anomalous, and the knee-point amplitude filter. |
 | guards     | optional | Guards     | See below.                                                                     |
+| metricTree | optional | MetricTree | `{ minParentDeltaRatio: 0.01 }` — `unit: metric` degeneracy guard, see [Metric-tree attribution](#degenerate-parents). |
 
 ### guards parameters
 
@@ -313,10 +329,11 @@ Algorithm-independent sanity constraints against spurious findings and cost expl
 | parameter     | optional | type    | description                                                                     |
 |---------------|----------|---------|-----------------------------------------------------------------------------------|
 | mode          | optional | Enum    | `report` (default). (`featureSpec`, `interventionSpec` are **reserved**.)         |
-| topK          | optional | Integer | Maximum findings per measure. Default `3`.                                        |
+| topK          | optional | Integer | Maximum findings per measure. Default `3` (`10` for `unit: metric`, where it bounds the ranked non-root nodes). |
 | emitNoFinding | optional | Boolean | If `true` (default), emits an explicit `noFinding: true` row for a measure with no significant attribution — useful for downstream agents to branch on. Note that an entirely empty input produces no output at all. |
+| drilldown     | optional | Drilldown | `unit: metric` only: slice-localize the top tree nodes onto a second output `<name>.drilldown`. `{ topK: 3, dimensions: [...], minExplanatoryPower: 0 }`, see [Drilldown](#drilldown-why--where). |
 
-## Output schema (report mode)
+## Output schema (report mode, unit: slice)
 
 One row per finding per measure (plus one `noFinding` row per measure when applicable):
 
@@ -362,6 +379,268 @@ to have actually moved (relative net change ≥ 5%), and then flags it when:
 `unexplainedShare` itself stays available as the raw quantity behind the judgment (with no
 findings it is 1 by definition — read it together with the delta). Measures whose totals
 cancel by construction (`synthetic` marginal) never qualify as "moved" and are never flagged.
+
+## Metric-tree attribution (vocabulary.unit: metric)
+
+Slice attribution asks *where* a metric changed. Metric-tree attribution asks *why*: given a
+declared tree of driver metrics — the KPI tree every analytics team keeps in a spreadsheet —
+it decomposes the root's change into the exact contribution of every node, at every level, so
+"revenue fell" becomes "AUP held, units fell; of that, repeat-customer units in the no-deal
+segment". It is the metric-tree change decomposition (MTCD) framework of Zhou et al. (KDD '26
+TSMO workshop), optionally with their causal correction for dependent siblings.
+
+Both axes compose: `output.drilldown` runs a slice attribution on the top tree nodes and emits
+the culprit slices on a second output, `<name>.drilldown` (see [Drilldown](#drilldown-why--where)).
+
+### Input and node values
+
+Input rows are the same as in slice mode — raw or pre-aggregated rows carrying a period label
+(or two inputs, a time column, …; every `comparison.reference` strategy works) plus the numeric
+columns the tree refers to and the dimension columns used by breakdowns. Every node's baseline
+and target values are computed from **period-level sums** of input columns:
+
+| node value   | meaning                                                                                  |
+|--------------|------------------------------------------------------------------------------------------|
+| `field`      | Sum of an additive input column (units, revenue, sessions, …).                           |
+| `expression` | A [Lucene expression](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) over period-level sums of input columns — the way to declare a **rate**: `revenue / units`, `orders / sessions`. Never feed a pre-averaged rate column. |
+| (none)       | Implied by the static children: `sum` → Σ components, `product` → volume × rate.         |
+
+### tree parameters
+
+`vocabulary.tree.nodes` is a flat list of named nodes; structure comes from references.
+
+| parameter     | optional | type   | description |
+|---------------|----------|--------|-------------|
+| name          | required | String | Node name. `measures[].name` must name a node (the root of that analysis; several measures = several roots). |
+| field         | optional | String | Additive input column summed per period. |
+| expression    | optional | String | Rate expression over input columns (mutually exclusive with `field`). |
+| decomposition | optional | Enum   | Static children: `sum` (Type 1, `components`) or `product` (Type 2, `volume` + `rate`). |
+| components    | required for sum | Array<String\> | Child node names whose values sum to this node. |
+| volume        | required for product | String | The additive (count) child node `n` in `y = n · X̄`. |
+| rate          | required for product | String | The rate child node `X̄` in `y = n · X̄`. |
+| breakdowns    | optional | Array<Breakdown\> | Dynamic children per value of a dimension column (below). Each breakdown is an independent, complete partition of this node's change. |
+
+A node may be referenced by several parents (the static children must only be acyclic).
+
+#### breakdown parameters
+
+| parameter     | optional | type   | description |
+|---------------|----------|--------|-------------|
+| by            | required | String | Dimension column (must be declared in `vocabulary.dimensions`). One child per value. |
+| decomposition | optional | Enum   | `sum` (default, Type 1 — node is additive), `sumOfProducts` (Type 3 — node is an additive `field`; `volume` required), or `weightedAverage` (Type 4 — node is a rate `expression`; `weight` required). |
+| volume        | required for sumOfProducts | String | Additive input column `n_k`; the per-group rate is `field / volume`. |
+| weight        | required for weightedAverage | String | Additive input column giving the share `p_k = weight_k / Σ weight`. For an exact decomposition use the rate's **denominator** (e.g. `sessions` for `orders / sessions`). |
+| breakdowns    | optional | Array<Breakdown\> | Nested breakdowns applied to each group's **rate** child (`sum`: the group itself), on the rows of that group only. |
+
+The local change decompositions (Table 1 of the paper) are:
+
+| decomposition     | metric                     | contributions (sum exactly to Δy)                                   | child rows per value |
+|-------------------|----------------------------|----------------------------------------------------------------------|----------------------|
+| `sum`             | `y = Σ y_k`                | `Δy_k`                                                               | one (`effect: delta`) |
+| `product`         | `y = n · X̄`               | volume `Δn · X̄₁`, rate `ΔX̄ · n₀` (ordered: the rate moves first)  | `volume`, `rate` (static) |
+| `sumOfProducts`   | `y = Σ n_k · X̄_k`         | volume `Δn_k · X̄_k,1`, rate `ΔX̄_k · n_k,0`                         | `volume`, `rate`     |
+| `weightedAverage` | `ȳ = Σ p_k · ȳ_k`         | share `Δp_k · (ȳ_k,0 − ȳ₀)`, rate `Δȳ_k · p_k,1`                   | `share`, `rate`      |
+
+Contributions propagate down the tree (Algorithm 1): the root's contribution is its own change
+`Δy_r`; a child's contribution is its local contribution rescaled by the parent's importance,
+`C_c = contrib_c · C_v / Δy_v`. Hence every group of siblings sums exactly to their parent's
+contribution, and every node's `explanatoryPower = C / Δy_root`.
+
+#### Degenerate parents
+
+When a parent's own change is (nearly) zero because its children cancel, the rescaling
+`C_v / Δy_v` is undefined or explosive. A parent whose `|Δy_v| < minParentDeltaRatio · Σ|contrib_c|`
+(`engine.metricTree.minParentDeltaRatio`, default `0.01`; `0` only guards the exact zero) is
+flagged `degenerate: true`; its descendants get `contribution = 0` but keep their
+`localContribution`, so the cancelling movement remains visible in the report.
+
+A `residual` value on a node means its local decomposition did not add up to its change (beyond
+rounding) — typically a `weightedAverage` whose `weight` is not the rate's denominator, or a
+`product` node that also carries its own `field`. The contributions are still reported as
+computed; fix the declaration for an exact decomposition.
+
+### causal parameters (`semantics.basis: causalAdjusted`)
+
+MTCD treats siblings as independent. When a rate causally drives its volume sibling (AUP →
+units sold: a price change moves volume), the plain split misattributes the induced volume
+change to the volume node. Declaring the edge applies the paper's unified estimator: a function
+`f̂₀` from the rate to the volume is fitted on **baseline-period granules** (e.g. days), the
+volume node is credited only with its own mechanism change conditional on the new-period rate,
+and the rate node receives the rest (direct + indirect effect) — ordered allocation along the
+causal path, which is the aligned estimand when the causal order is unique (Shapley averaging
+over impossible orders is *not* used).
+
+| parameter           | optional | type   | description |
+|---------------------|----------|--------|-------------|
+| granularity.field   | required unless every edge has `elasticity` | String | Column identifying the regression granule (day, week, store, …). Any type; not a declared dimension. |
+| edges               | required | Array<Edge\> | Declared dependencies (below). |
+| slopeStabilityAlpha | optional | Double | Significance level of the slope-stability test used by `estimator: auto`. Default `0.05`. |
+| minGranules         | optional | Integer | Minimum baseline granules to fit `f̂₀`; below it the edge is not applied (`estimator: fallback` + `warning`). Default `14`. |
+
+| edge parameter | optional | type    | description |
+|----------------|----------|---------|-------------|
+| from           | required | String  | The cause: the **rate** child of a `product` node. |
+| to             | required | String  | The effect: the **volume** child of the same `product` node (v1 supports sibling edges only; one edge per target). |
+| model          | optional | Enum    | `linear` (default) or `quadratic` polynomial `f̂₀`. |
+| robust         | optional | Boolean | Huber-weighted fit (outlier resistant). Default `false`. |
+| estimator      | optional | Enum    | `auto` (default), `simplified` (Eq. 6: `(n₁ − Σⱼ f̂₀(X̄₁ⱼ)) · X̄₁`, needs only period aggregates of `n`), or `full` (Eq. 5: `Σⱼ (n₁ⱼ − f̂₀(X̄₁ⱼ)) · X̄₁ⱼ`). `auto` tests the simplified estimator's assumption (only the intercept of the relation changed, F-test on the pooled interaction model) and switches to `full` when it is rejected. |
+| elasticity     | optional | Double  | Known slope `dn/dX̄` instead of fitting: `n₀* = n₀ + elasticity · ΔX̄`. Lets the edge work without granular data. |
+
+> **The edges are your assumption.** Only the declared edges need to be causally right (the
+> rest of the tree stays model-free), but a wrong direction makes both the plain and the
+> adjusted attribution wrong. Use domain knowledge, temporal ordering and falsification tests
+> before declaring one; the output's `diagnostics` (fit coefficients, `r2`, granule counts,
+> `interactionPValue`) help judge the fit.
+
+### Output schema (unit: metric)
+
+One row per tree node (the root plus the `topK` highest-|contribution| non-root nodes).
+
+| field             | type              | description |
+|-------------------|-------------------|-------------|
+| measure           | String            | Root node name |
+| algorithm         | String            | `mtcd` |
+| node              | String            | Node name (breakdown children: the node, `<node>_rate`, `<node>_share`, or the volume column) |
+| parent            | String (nullable) | Parent path |
+| path              | String            | `revenue/aup/deal=deal/rate` — static children by name, breakdown children as `<by>=<value>[/<effect>]` |
+| depth             | Long              | 0 for the root |
+| dimension / value | String (nullable) | Set on breakdown children |
+| decomposition     | String (nullable) | The rule that produced this child from its parent |
+| effect            | String            | `root`, `delta`, `volume`, `rate`, `share` |
+| rank              | Long              | 1-based rank of non-root nodes by \|contribution\| (0 for the root) |
+| baseline / target / delta / deltaRatio | Double | The node's own values |
+| localContribution | Double            | Contribution to the **parent's** change (kept even under a degenerate parent) |
+| contribution      | Double            | Contribution to the **root's** change (`C_c`) |
+| explanatoryPower  | Double            | `contribution / Δroot` |
+| rootBaseline / rootTarget | Double    | Root values for context |
+| degenerate        | Boolean           | This node's children were zeroed (see above) |
+| residual          | Double (nullable) | Non-additive local decomposition (see above) |
+| causalAdjusted    | Boolean           | A causal edge was applied to this node |
+| estimator         | String (nullable) | `simplified`, `full`, `elasticity`, or `fallback` |
+| diagnostics       | Struct (nullable) | `beta[]`, `r2`, `baselineGranules`, `targetGranules`, `interactionPValue` |
+| warning           | String (nullable) | e.g. why an edge was not applied |
+| noFinding         | Boolean           | `true` on the single row emitted when the root did not change at all |
+
+### Drilldown (why × where)
+
+`output.drilldown` closes the loop between the two axes inside one step: for the
+`drilldown.topK` highest-ranked non-root nodes, the module runs the **slice attribution** of
+this document (same `engine.*` algorithm and guards) with
+
+- the node's value as the measure — its `field`, its `expression`, or the composition of its
+  static children (`(units_new) + (units_repeat)`, `(units) * (revenue / units)`), as a
+  fundamental or derived measure; a `share` child localizes its `weight` column;
+- the node's own rows as the input — a breakdown child only sees the rows of its group;
+- `drilldown.dimensions` (default: every declared dimension) **minus** the dimensions already
+  fixed on the node's path as the vocabulary.
+
+| parameter           | optional | type          | description |
+|---------------------|----------|---------------|-------------|
+| topK                | optional | Integer       | Number of top-ranked nodes to drill into. Default `3`. |
+| dimensions          | optional | Array<String\> | Subset of `vocabulary.dimensions` to localize on. Default: all. |
+| minExplanatoryPower | optional | Double        | Skip nodes whose \|explanatoryPower\| is below this (e.g. nodes zeroed by a degenerate parent). Default `0`. |
+
+The findings go to the secondary output **`<name>.drilldown`** with the
+[slice report schema](#output-schema-report-mode-unit-slice) (`elements`, `explanatoryPower`,
+`riskScore`, `externalCandidate`, `noFinding`, …) prefixed by the node being explained:
+
+| field                | type    | description |
+|----------------------|---------|-------------|
+| node / path / nodeEffect | String | The tree node (as in the primary output) |
+| nodeRank             | Long    | Its rank in the tree |
+| nodeContribution / nodeExplanatoryPower | Double | Its contribution to the root change |
+| nodeExpression       | String  | The measure expression that was localized |
+| measure              | String  | The tree root name; `algorithm` is the slice algorithm (`riskloc`, …) |
+
+Reading it together: the primary output says *"units (volume) explains 80% of the revenue
+drop"*; the drilldown row for `revenue/units` says *"…and that is `region=east AND
+channel=app`"*. A `noFinding` drilldown row (or `externalCandidate: true`) means the driver moved
+uniformly across the declared dimensions — a global cause rather than a segment.
+
+### Example: revenue driver tree with a causal edge
+
+```yaml
+sources:
+  - name: daily
+    module: bigquery
+    parameters:
+      query: |
+        SELECT period, day, deal_status, account_type,
+               SUM(units) AS units, SUM(units_new) AS units_new, SUM(revenue) AS revenue
+        FROM `myproject.kpi.daily_sales`
+        WHERE period IN ('2025-07', '2025-08')
+        GROUP BY period, day, deal_status, account_type
+transforms:
+  - name: whyRevenue
+    module: attribution
+    inputs: [daily]
+    parameters:
+      measures:
+        - name: revenue
+      comparison:
+        reference:
+          strategy: external
+          labelField: period
+          baselineLabel: "2025-07"
+          targetLabel: "2025-08"
+      vocabulary:
+        unit: metric
+        dimensions:
+          - name: deal_status
+          - name: account_type
+        tree:
+          nodes:
+            - name: revenue
+              decomposition: product
+              volume: units
+              rate: aup
+            - name: units
+              field: units
+              decomposition: sum
+              components: [units_new, units_repeat]
+            - name: units_new
+              field: units_new
+            - name: units_repeat
+              expression: "units - units_new"
+            - name: aup
+              expression: "revenue / units"
+              breakdowns:
+                - by: deal_status
+                  decomposition: weightedAverage
+                  weight: units
+                  breakdowns:
+                    - by: account_type
+                      decomposition: weightedAverage
+                      weight: units
+      semantics:
+        basis: causalAdjusted
+        causal:
+          granularity: { field: day }
+          edges:
+            - from: aup
+              to: units
+      output:
+        topK: 10
+        drilldown:
+          topK: 3
+          dimensions: [deal_status, account_type]
+sinks:
+  - name: treeReport
+    module: bigquery
+    inputs: [whyRevenue]
+    parameters: { table: "myproject:kpi.revenue_tree" }
+  - name: sliceReport
+    module: bigquery
+    inputs: [whyRevenue.drilldown]
+    parameters: { table: "myproject:kpi.revenue_tree_slices" }
+```
+
+Reading the output: the row `revenue/units` (effect `volume`, `causalAdjusted: true`) is the
+part of the revenue change caused by the units mechanism itself; `revenue/aup` carries AUP's
+direct effect plus the volume it induced; `revenue/aup/deal_status=deal/rate` and its nested
+`account_type` rows say which segment's price moved. Rank orders every node by absolute
+contribution, and `localContribution` lets you read each level on its own scale. The
+`whyRevenue.drilldown` rows then name the segment behind each of the top three nodes.
 
 ## Choosing an algorithm
 
@@ -644,4 +923,8 @@ The pipeline runs in two stages:
   (Gson behavior common to all modules); validation rejects reserved values only when
   spelled exactly.
 - The module always re-aggregates duplicate dimension tuples by summing before analysis.
+- Metric-tree causal edges are limited to the rate → volume siblings of a `product` node (the
+  paper's validated case); dependent shares in `weightedAverage` breakdowns and edges across
+  subtrees are not adjusted. The adjustment is unbiased when the causal order is unique and the
+  declared direction is right; it is as outlier-sensitive as any regression (`robust: true`).
 - Streaming inputs are rejected at validation time in this version.
