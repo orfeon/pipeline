@@ -132,9 +132,11 @@ public class GrpcLookupSourceTest {
             }
         });
         tokenServer.start();
+        // a dedicated gRPC server: tests run in parallel and the shared one must stay unauthenticated
+        final DynamicGrpcTestServer authServer = new DynamicGrpcTestServer();
+        final Path authDescriptorSetPath = authServer.writeDescriptorSet(Files.createTempDirectory("grpc-lookup-auth-test"));
         try {
-            server.requiredToken.set("token-2");   // token-1 is rejected → the source must refresh once
-            server.seenAuthorizations.clear();
+            authServer.requiredToken.set("token-2");   // token-1 is rejected → the source must refresh once
             final com.mercari.solution.util.pipeline.outbound.AuthProvider.Parameters auth =
                     new com.mercari.solution.util.pipeline.outbound.AuthProvider.Parameters();
             auth.type = com.mercari.solution.util.pipeline.outbound.AuthProvider.Type.oauth2;
@@ -143,7 +145,14 @@ public class GrpcLookupSourceTest {
             auth.clientSecret = "secret";
             final Query2 query = Query2.builder()
                     .withInput("INPUT", userInputSchema())
-                    .withSource(source().withAuth(auth).withTable(usersTable()).build())
+                    .withSource(GrpcLookupSource.builder()
+                            .withName("grpc")
+                            .withTarget("localhost:" + authServer.port())
+                            .withPlaintext(true)
+                            .withDescriptorSetPath(authDescriptorSetPath.toString())
+                            .withAuth(auth)
+                            .withTable(usersTable())
+                            .build())
                     .withSql("SELECT i.userId AS userId, u.name AS name FROM INPUT AS i JOIN grpc.users AS u ON u.id = i.userId")
                     .build();
             query.setup();
@@ -152,12 +161,12 @@ public class GrpcLookupSourceTest {
                 Assertions.assertEquals(2, outputs.size());
                 Assertions.assertEquals("alice", byUser(outputs, 1L).getAsString("name"));
                 Assertions.assertEquals(2, issued.get());
-                Assertions.assertEquals(List.of("Bearer token-1", "Bearer token-2", "Bearer token-2"), server.seenAuthorizations);
+                Assertions.assertEquals(List.of("Bearer token-1", "Bearer token-2", "Bearer token-2"), authServer.seenAuthorizations);
             } finally {
                 query.teardown();
             }
         } finally {
-            server.requiredToken.set(null);
+            authServer.shutdown();
             tokenServer.stop(0);
         }
     }
