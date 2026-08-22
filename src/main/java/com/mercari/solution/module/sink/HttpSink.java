@@ -2,10 +2,9 @@ package com.mercari.solution.module.sink;
 
 import com.google.common.util.concurrent.RateLimiter;
 import com.mercari.solution.module.*;
-import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.outbound.AuthProvider;
-import com.mercari.solution.util.pipeline.outbound.Durations;
+import com.mercari.solution.util.pipeline.outbound.BatchSpec;
 import com.mercari.solution.util.pipeline.outbound.HttpTransport;
 import com.mercari.solution.util.pipeline.outbound.OutboundRequest;
 import com.mercari.solution.util.pipeline.outbound.RequestRenderer;
@@ -15,7 +14,6 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -55,7 +53,7 @@ public class HttpSink extends Sink {
         private RequestSpec.Target target;
         private RequestSpec.Body body;
         private ResponsePolicy.Parameters response;
-        private BatchParameters batch;
+        private BatchSpec batch;
         private Integer concurrency;
         private RateParameters rate;
         private HttpTransport.TimeoutParameters timeout;
@@ -75,8 +73,18 @@ public class HttpSink extends Sink {
                 errorMessages.addAll(response.validate("parameters.response"));
             }
             if(batch != null) {
-                errorMessages.addAll(batch.validate());
-                errorMessages.addAll(validateBatchTemplateArgs(inputSchema));
+                errorMessages.addAll(batch.validate("parameters.batch"));
+                if(target != null) {
+                    final Map<String, String> perRequestTemplates = new LinkedHashMap<>();
+                    perRequestTemplates.put("parameters.target.url", target.url);
+                    if(target.headers != null) {
+                        target.headers.forEach((k, v) -> perRequestTemplates.put("parameters.target.headers." + k, v));
+                    }
+                    if(target.params != null) {
+                        target.params.forEach((k, v) -> perRequestTemplates.put("parameters.target.params." + k, v));
+                    }
+                    errorMessages.addAll(batch.validateKeyConstraint("parameters.batch", inputSchema, perRequestTemplates));
+                }
             } else if(response != null && response.partialFailure != null) {
                 errorMessages.add("parameters.response.partialFailure requires parameters.batch");
             }
@@ -95,37 +103,6 @@ public class HttpSink extends Sink {
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
-        }
-
-        /** In batch mode per-request templates may only reference batch.key fields (see TasksSink). */
-        private List<String> validateBatchTemplateArgs(final Schema inputSchema) {
-            final List<String> errorMessages = new ArrayList<>();
-            final Set<String> keyArgs = new HashSet<>();
-            if(batch.key != null) {
-                keyArgs.addAll(TemplateUtil.extractTemplateArgs(batch.key, inputSchema));
-            }
-            final Map<String, String> perRequestTemplates = new LinkedHashMap<>();
-            if(target != null) {
-                perRequestTemplates.put("target.url", target.url);
-                if(target.headers != null) {
-                    target.headers.forEach((k, v) -> perRequestTemplates.put("target.headers." + k, v));
-                }
-                if(target.params != null) {
-                    target.params.forEach((k, v) -> perRequestTemplates.put("target.params." + k, v));
-                }
-            }
-            for(final Map.Entry<String, String> entry : perRequestTemplates.entrySet()) {
-                if(entry.getValue() == null) {
-                    continue;
-                }
-                for(final String arg : TemplateUtil.extractTemplateArgs(entry.getValue(), inputSchema)) {
-                    if(!keyArgs.contains(arg)) {
-                        errorMessages.add("parameters." + entry.getKey() + " references field '" + arg
-                                + "' which is not part of parameters.batch.key (in batch mode per-request templates may only use batch.key fields)");
-                    }
-                }
-            }
-            return errorMessages;
         }
 
         private void setDefaults() {
@@ -157,52 +134,6 @@ public class HttpSink extends Sink {
                 if(origin != null) {
                     http.allowedHosts = List.of(java.net.URI.create(origin).getHost());
                 }
-            }
-        }
-    }
-
-    public static class BatchParameters implements Serializable {
-
-        private Integer maxSize;
-        private String maxBytes;
-        private String maxBufferingDuration;
-        private String key;
-        private Integer shards;
-
-        private List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(maxSize != null && maxSize < 1) {
-                errorMessages.add("parameters.batch.maxSize must be >= 1 but: " + maxSize);
-            }
-            if(maxBytes != null) {
-                try {
-                    Durations.parseBytes(maxBytes);
-                } catch (final IllegalArgumentException e) {
-                    errorMessages.add("parameters.batch.maxBytes is illegal: " + e.getMessage());
-                }
-            }
-            if(maxSize == null && maxBytes == null) {
-                errorMessages.add("parameters.batch requires maxSize and/or maxBytes");
-            }
-            if(maxBufferingDuration != null) {
-                try {
-                    Durations.parse(maxBufferingDuration);
-                } catch (final IllegalArgumentException e) {
-                    errorMessages.add("parameters.batch.maxBufferingDuration is illegal: " + e.getMessage());
-                }
-            }
-            if(shards != null && shards < 1) {
-                errorMessages.add("parameters.batch.shards must be >= 1 but: " + shards);
-            }
-            if(key != null && !TemplateUtil.isTemplateText(key)) {
-                errorMessages.add("parameters.batch.key must be a template on element fields but: " + key);
-            }
-            return errorMessages;
-        }
-
-        private void setDefaults() {
-            if(shards == null) {
-                shards = 8;
             }
         }
     }
@@ -277,21 +208,10 @@ public class HttpSink extends Sink {
         } else {
             @SuppressWarnings("unchecked")
             final Coder<MElement> elementCoder = (Coder<MElement>) input.getCoder();
-            final Long maxBytes = parameters.batch.maxBytes == null ? null : Durations.parseBytes(parameters.batch.maxBytes);
-            GroupIntoBatches<String, MElement> groupIntoBatches = parameters.batch.maxSize != null
-                    ? GroupIntoBatches.ofSize(parameters.batch.maxSize.longValue())
-                    : GroupIntoBatches.ofByteSize(maxBytes);
-            if(parameters.batch.maxSize != null && maxBytes != null) {
-                groupIntoBatches = groupIntoBatches.withByteSize(maxBytes);
-            }
-            if(parameters.batch.maxBufferingDuration != null) {
-                groupIntoBatches = groupIntoBatches.withMaxBufferingDuration(
-                        org.joda.time.Duration.millis(Durations.parse(parameters.batch.maxBufferingDuration).toMillis()));
-            }
             outputs = input
-                    .apply("WithBatchKey", ParDo.of(new BatchKeyDoFn(getName(), parameters, inputSchema, inputs.getAllInputs())))
+                    .apply("WithBatchKey", ParDo.of(new BatchSpec.KeyDoFn(new BatchKeyRenderer(getName(), parameters, inputSchema, inputs.getAllInputs()), parameters.batch.shards)))
                     .setCoder(KvCoder.of(StringUtf8Coder.of(), elementCoder))
-                    .apply("GroupIntoBatches", groupIntoBatches)
+                    .apply("GroupIntoBatches", parameters.batch.groupIntoBatches())
                     .apply("SendBatchRequests", ParDo
                             .of(new SendBatchDoFn(getName(), parameters, policy, inputSchema, outputSchema, inputs.getAllInputs(), failureTag, getFailFast(), getLoggings()))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
@@ -672,34 +592,22 @@ public class HttpSink extends Sink {
         }
     }
 
-    /** Assigns the batch grouping key: rendered batch.key, or a random shard when omitted. */
-    private static class BatchKeyDoFn extends DoFn<MElement, KV<String, MElement>> {
+    /** Renders batch.key with the sink's request renderer. */
+    private static class BatchKeyRenderer implements BatchSpec.KeyRenderer {
+        private final RequestRenderer renderer;
 
-        private final RequestRenderer builder;
-        private final int shards;
-
-        BatchKeyDoFn(final String name, final Parameters parameters, final Schema inputSchema, final List<String> inputNames) {
-            this.builder = new RequestRenderer(name, parameters.target, parameters.body, parameters.batch.key, true, inputSchema, inputSchema, inputNames);
-            this.shards = parameters.batch.shards;
+        BatchKeyRenderer(final String name, final Parameters parameters, final Schema inputSchema, final List<String> inputNames) {
+            this.renderer = new RequestRenderer(name, parameters.target, parameters.body, parameters.batch.key, true, inputSchema, inputSchema, inputNames);
         }
 
-        @Setup
+        @Override
         public void setup() {
-            builder.setup();
+            renderer.setup();
         }
 
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement input = c.element();
-            if(input == null) {
-                return;
-            }
-            final String key = builder.renderBatchKey(input);
-            if(key != null) {
-                c.output(KV.of(key, input));
-            } else {
-                c.output(KV.of("shard-" + java.util.concurrent.ThreadLocalRandom.current().nextInt(shards), input));
-            }
+        @Override
+        public String render(final MElement element) {
+            return renderer.renderBatchKey(element);
         }
     }
 

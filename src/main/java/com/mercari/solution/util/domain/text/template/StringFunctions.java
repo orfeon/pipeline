@@ -52,6 +52,11 @@ public class StringFunctions {
         return digest("SHA-256", text);
     }
 
+    /** Static form for callers outside templates. */
+    public static String sha256Hex(String text) {
+        return digest("SHA-256", text);
+    }
+
     public String md5(String text) {
         return digest("MD5", text);
     }

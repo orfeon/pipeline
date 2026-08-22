@@ -351,17 +351,7 @@ public class BigQueryAction implements Action {
     }
 
     private static String sha256Hex(final String text) {
-        try {
-            final MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            final byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
-            final StringBuilder sb = new StringBuilder();
-            for(final byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (final NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return com.mercari.solution.util.domain.text.template.StringFunctions.sha256Hex(text);
     }
 
 }

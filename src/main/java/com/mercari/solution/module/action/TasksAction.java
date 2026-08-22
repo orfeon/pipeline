@@ -457,26 +457,7 @@ public class TasksAction implements Action {
     }
 
     static java.time.Duration parseDuration(final String text) {
-        if(text == null || text.isBlank()) {
-            throw new IllegalArgumentException("duration must not be empty");
-        }
-        final String t = text.trim();
-        final Matcher matcher = PATTERN_SHORT_DURATION.matcher(t);
-        if(matcher.matches()) {
-            final long n = Long.parseLong(matcher.group(1));
-            return switch (matcher.group(2)) {
-                case "ms" -> java.time.Duration.ofMillis(n);
-                case "s" -> java.time.Duration.ofSeconds(n);
-                case "m" -> java.time.Duration.ofMinutes(n);
-                case "h" -> java.time.Duration.ofHours(n);
-                default -> java.time.Duration.ofDays(n);
-            };
-        }
-        try {
-            return java.time.Duration.parse(t);
-        } catch (final Exception e) {
-            throw new IllegalArgumentException("illegal duration: " + text + " (expected ISO-8601 like PT10M or short form like 10m)");
-        }
+        return com.mercari.solution.util.pipeline.outbound.Durations.parse(text);
     }
 
 }

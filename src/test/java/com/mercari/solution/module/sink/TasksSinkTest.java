@@ -666,13 +666,13 @@ public class TasksSinkTest {
 
     @Test
     public void testHelpers() {
-        Assertions.assertEquals(Duration.ofMinutes(10), TasksSink.parseDuration("PT10M"));
-        Assertions.assertEquals(Duration.ofMinutes(10), TasksSink.parseDuration("10m"));
-        Assertions.assertEquals(Duration.ofHours(2), TasksSink.parseDuration("2h"));
-        Assertions.assertEquals(Duration.ofSeconds(30), TasksSink.parseDuration("30s"));
-        Assertions.assertEquals(Duration.ofDays(1), TasksSink.parseDuration("1d"));
-        Assertions.assertEquals(Duration.ofMillis(500), TasksSink.parseDuration("500ms"));
-        Assertions.assertThrows(IllegalArgumentException.class, () -> TasksSink.parseDuration("10 minutes"));
+        Assertions.assertEquals(Duration.ofMinutes(10), com.mercari.solution.util.pipeline.outbound.Durations.parse("PT10M"));
+        Assertions.assertEquals(Duration.ofMinutes(10), com.mercari.solution.util.pipeline.outbound.Durations.parse("10m"));
+        Assertions.assertEquals(Duration.ofHours(2), com.mercari.solution.util.pipeline.outbound.Durations.parse("2h"));
+        Assertions.assertEquals(Duration.ofSeconds(30), com.mercari.solution.util.pipeline.outbound.Durations.parse("30s"));
+        Assertions.assertEquals(Duration.ofDays(1), com.mercari.solution.util.pipeline.outbound.Durations.parse("1d"));
+        Assertions.assertEquals(Duration.ofMillis(500), com.mercari.solution.util.pipeline.outbound.Durations.parse("500ms"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> com.mercari.solution.util.pipeline.outbound.Durations.parse("10 minutes"));
 
         Assertions.assertEquals(Instant.parse("2030-01-01T00:00:00Z"), TasksSink.toInstant("2030-01-01T00:00:00Z"));
         Assertions.assertEquals(Instant.ofEpochSecond(1_700_000_000L), TasksSink.toInstant(1_700_000_000L));
