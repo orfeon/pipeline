@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class MutationToTableRowConverter {
 
@@ -60,11 +61,12 @@ public class MutationToTableRowConverter {
     }
 
     private static Object convertTableRowValue(final Value value) {
-        if(value == null) {
+        if(value == null || value.isNull()) {
             return null;
         }
         return switch (value.getType().getCode()) {
             case STRING -> value.getString();
+            case UUID -> value.getUuid().toString();
             case BOOL -> value.getBool();
             case INT64 -> value.getInt64();
             case FLOAT64 -> value.getFloat64();
@@ -96,6 +98,8 @@ public class MutationToTableRowConverter {
                 || value instanceof Double
                 || value instanceof Boolean) {
             return value;
+        } else if(value instanceof UUID uuid) {
+            return uuid.toString();
         } else if(value instanceof Date date) {
             return date.toString();
         } else if(value instanceof Timestamp timestamp) {

@@ -224,8 +224,7 @@ public class ToStatementConverter {
                     }
                 }
                 case STRING -> {
-                    if(field.getOptions().hasOption("spannerType")
-                            && "UUID".equalsIgnoreCase(field.getOptions().getValue("spannerType"))) {
+                    if(RowSchemaUtil.hasSpannerType(field.getOptions(), "UUID")) {
                         statement.setUUID(index, isNull ? null : row.getString(field.getName()));
                     } else if (isNull) {
                         statement.setNull(index, Types.VARCHAR);

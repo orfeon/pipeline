@@ -208,7 +208,8 @@ public class StructToAvroConverter {
             case BOOLEAN -> builder.set(fieldName, struct.getBoolean(fieldName));
             case FLOAT -> builder.set(fieldName, struct.getFloat(fieldName));
             case DOUBLE -> builder.set(fieldName, struct.getDouble(fieldName));
-            case ENUM, STRING -> builder.set(fieldName, struct.getString(fieldName));
+            case ENUM, STRING -> builder.set(fieldName, Type.Code.UUID.equals(type.getCode())
+                    ? struct.getUuid(fieldName).toString() : struct.getString(fieldName));
             case FIXED, BYTES -> builder.set(fieldName, struct.getBytes(fieldName).asReadOnlyByteBuffer());
             case INT -> {
                 if (Type.date().equals(type)) {
@@ -263,7 +264,9 @@ public class StructToAvroConverter {
             case BOOLEAN -> builder.set(fieldName, struct.getBooleanList(fieldName));
             case FLOAT -> builder.set(fieldName, struct.getFloatList(fieldName));
             case DOUBLE -> builder.set(fieldName, struct.getDoubleList(fieldName));
-            case ENUM, STRING -> builder.set(fieldName, struct.getStringList(fieldName));
+            case ENUM, STRING -> builder.set(fieldName, Type.Code.UUID.equals(type.getArrayElementType().getCode())
+                    ? struct.getUuidList(fieldName).stream().map(v -> v == null ? null : v.toString()).toList()
+                    : struct.getStringList(fieldName));
             case FIXED, BYTES -> builder.set(fieldName, struct.getBytesList(fieldName)
                         .stream()
                         .map(ByteArray::asReadOnlyByteBuffer)
@@ -310,6 +313,8 @@ public class StructToAvroConverter {
                 return nullable ? AvroSchemaUtil.NULLABLE_BYTES : AvroSchemaUtil.REQUIRED_BYTES;
             case STRING:
                 return nullable ? AvroSchemaUtil.NULLABLE_STRING : AvroSchemaUtil.REQUIRED_STRING;
+            case UUID:
+                return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_UUID_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_UUID_TYPE;
             case JSON: {
                 final Schema jsonSchema = Schema.create(Schema.Type.STRING);
                 jsonSchema.addProp("sqlType", "JSON");

@@ -37,8 +37,19 @@ public class RowToMutationConverter {
 
     public static Type convertSchema(final Schema schema) {
         return Type.struct(schema.getFields().stream()
-                .map(f -> Type.StructField.of(f.getName(), convertFieldType(f.getType())))
+                .map(f -> Type.StructField.of(f.getName(), convertFieldType(f)))
                 .collect(Collectors.toList()));
+    }
+
+    private static Type convertFieldType(final Schema.Field field) {
+        if(RowSchemaUtil.hasSpannerType(field.getOptions(), "UUID")) {
+            return switch (field.getType().getTypeName()) {
+                case STRING -> Type.uuid();
+                case ARRAY, ITERABLE -> Type.array(Type.uuid());
+                default -> convertFieldType(field.getType());
+            };
+        }
+        return convertFieldType(field.getType());
     }
 
     public static Mutation convert(final Row row, final String table, final String mutationOp) {
@@ -91,7 +102,11 @@ public class RowToMutationConverter {
                     } else {
                         stringValue = isNullField ? null : row.getString(fieldName);
                     }
-                    builder.set(fieldName).to(stringValue);
+                    if(RowSchemaUtil.hasSpannerType(field.getOptions(), "UUID")) {
+                        builder.set(fieldName).to(stringValue == null ? null : UUID.fromString(stringValue));
+                    } else {
+                        builder.set(fieldName).to(stringValue);
+                    }
                     break;
                 case BYTES:
                     final ByteArray bytesValue = hide ? (nullableField ? null : ByteArray.copyFrom("")) : (isNullField ? null : ByteArray.copyFrom(row.getBytes(fieldName)));
@@ -213,7 +228,14 @@ public class RowToMutationConverter {
                             }
                             break;
                         case STRING:
-                            if(hide) {
+                            if(RowSchemaUtil.hasSpannerType(field.getOptions(), "UUID")) {
+                                builder.set(fieldName).toUuidArray(hide
+                                        ? new ArrayList<>()
+                                        : isNullField
+                                        ? null
+                                        : row.<String>getArray(fieldName).stream()
+                                                .map(v -> v == null ? null : UUID.fromString(v)).toList());
+                            } else if(hide) {
                                 builder.set(fieldName).toStringArray(new ArrayList<>());
                             } else {
                                 builder.set(fieldName).toStringArray(isNullField ? null : row.getArray(fieldName));
@@ -447,7 +469,7 @@ public class RowToMutationConverter {
                 }
             case ROW:
                 return Type.struct(fieldType.getRowSchema().getFields().stream()
-                        .map(f -> Type.StructField.of(f.getName(), convertFieldType(f.getType())))
+                        .map(f -> Type.StructField.of(f.getName(), convertFieldType(f)))
                         .collect(Collectors.toList()));
             case ITERABLE:
             case ARRAY:
@@ -467,7 +489,12 @@ public class RowToMutationConverter {
                     keyBuilder = keyBuilder.append(row.getBoolean(keyField));
                     break;
                 case STRING:
-                    keyBuilder = keyBuilder.append(row.getString(keyField));
+                    if(RowSchemaUtil.hasSpannerType(field.getOptions(), "UUID")) {
+                        keyBuilder = keyBuilder.append(Optional.ofNullable(row.getString(keyField))
+                                .map(UUID::fromString).orElse(null));
+                    } else {
+                        keyBuilder = keyBuilder.append(row.getString(keyField));
+                    }
                     break;
                 case BYTE: {
                     final Long longValue = Optional.ofNullable(row.getByte(keyField)).map(Byte::longValue).orElse(null);

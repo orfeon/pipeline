@@ -86,6 +86,7 @@ public class StructToEntityConverter {
                 }
                 builder = Value.newBuilder().setStringValue(stringValue);
             }
+            case UUID -> builder = Value.newBuilder().setStringValue(struct.getUuid(field.getName()).toString());
             case INT64 -> builder = Value.newBuilder().setIntegerValue(struct.getLong(field.getName()));
             case FLOAT32 -> builder = Value.newBuilder().setDoubleValue(struct.getFloat(field.getName()));
             case FLOAT64 -> builder = Value.newBuilder().setDoubleValue(struct.getDouble(field.getName()));
@@ -119,6 +120,12 @@ public class StructToEntityConverter {
                     case STRING -> Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
                                     .addAllValues((struct.getStringList(field.getName()).stream()
                                             .map(o -> Value.newBuilder().setStringValue(o).build())
+                                            .collect(Collectors.toList())))
+                                    .build())
+                            .build();
+                    case UUID -> Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                                    .addAllValues((struct.getUuidList(field.getName()).stream()
+                                            .map(o -> Value.newBuilder().setStringValue(o.toString()).build())
                                             .collect(Collectors.toList())))
                                     .build())
                             .build();

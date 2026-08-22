@@ -15,6 +15,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 public class StructToTableRowConverter {
@@ -50,6 +51,7 @@ public class StructToTableRowConverter {
             case BOOL -> value.getBool();
             case BYTES -> value.getBytes().toByteArray();
             case STRING -> value.getString();
+            case UUID -> value.getUuid().toString();
             case JSON -> value.getJson();
             case INT64 -> value.getInt64();
             case FLOAT32 -> value.getFloat32();
@@ -64,6 +66,7 @@ public class StructToTableRowConverter {
                 switch (value.getType().getArrayElementType().getCode()) {
                     case BOOL -> value.getBoolArray();
                     case STRING -> value.getStringArray();
+                    case UUID -> value.getUuidArray().stream().map(v -> v == null ? null : v.toString()).toList();
                     case JSON -> value.getJsonArray();
                     case BYTES -> value.getBytesArray().stream().map(ByteArray::toByteArray).toList();
                     case INT64 -> value.getInt64Array();
@@ -95,6 +98,7 @@ public class StructToTableRowConverter {
         return switch (fieldType.getCode()) {
             case BOOL -> tableFieldSchema.setType("BOOLEAN");
             case STRING -> tableFieldSchema.setType("STRING");
+            case UUID -> tableFieldSchema.setType("STRING");
             case JSON -> tableFieldSchema.setType("JSON");
             case BYTES -> tableFieldSchema.setType("BYTES");
             case INT64 -> tableFieldSchema.setType("INTEGER");
@@ -134,6 +138,7 @@ public class StructToTableRowConverter {
         return switch (type.getCode()) {
             case JSON -> row.set(fieldName, struct.getJson(fieldName));
             case STRING -> row.set(fieldName, struct.getString(fieldName));
+            case UUID -> row.set(fieldName, struct.getUuid(fieldName).toString());
             case BYTES -> row.set(fieldName, struct.getBytes(fieldName).toByteArray());
             case BOOL -> row.set(fieldName, struct.getBoolean(fieldName));
             case INT64 -> row.set(fieldName, struct.getLong(fieldName));
@@ -167,6 +172,8 @@ public class StructToTableRowConverter {
             case STRING -> row.set(fieldName, struct.getStringList(fieldName).stream()
                         .filter(Objects::nonNull)
                         .collect(Collectors.toList()));
+            case UUID -> row.set(fieldName, struct.getUuidList(fieldName).stream()
+                    .filter(Objects::nonNull).map(UUID::toString).collect(Collectors.toList()));
             case JSON -> row.set(fieldName, struct.getJsonList(fieldName).stream()
                         .filter(Objects::nonNull)
                         .collect(Collectors.toList()));
