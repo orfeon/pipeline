@@ -26,7 +26,6 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
@@ -79,7 +78,7 @@ public class GrpcSink extends Sink {
         private AuthProvider.Parameters auth;
         private RequestParameters request;
         private ResponseParameters response;
-        private BatchParameters batch;
+        private GrpcBatch batch;
         private String deadline;
         private Integer concurrency;
         private RateParameters rate;
@@ -113,18 +112,12 @@ public class GrpcSink extends Sink {
                 errorMessages.addAll(response.validate());
             }
             if(batch != null) {
-                errorMessages.addAll(batch.validate());
-                if(batch.key != null && metadata != null) {
-                    final Set<String> keyArgs = new HashSet<>(TemplateUtil.extractTemplateArgs(batch.key, inputSchema));
-                    for(final Map.Entry<String, String> entry : metadata.entrySet()) {
-                        for(final String arg : TemplateUtil.extractTemplateArgs(entry.getValue(), inputSchema)) {
-                            if(!keyArgs.contains(arg)) {
-                                errorMessages.add("parameters.metadata." + entry.getKey() + " references field '" + arg
-                                        + "' which is not part of parameters.batch.key");
-                            }
-                        }
-                    }
+                errorMessages.addAll(batch.validate("parameters.batch"));
+                final Map<String, String> perRequestTemplates = new LinkedHashMap<>();
+                if(metadata != null) {
+                    metadata.forEach((k, v) -> perRequestTemplates.put("parameters.metadata." + k, v));
                 }
+                errorMessages.addAll(batch.validateKeyConstraint("parameters.batch", inputSchema, perRequestTemplates));
             }
             if(deadline != null) {
                 try {
@@ -283,50 +276,9 @@ public class GrpcSink extends Sink {
         }
     }
 
-    public static class BatchParameters implements Serializable {
-        private Integer maxSize;
-        private String maxBytes;
-        private String maxBufferingDuration;
-        private String key;
-        private Integer shards;
+    /** Batch spec plus the gRPC-specific target of a unary batch. */
+    public static class GrpcBatch extends BatchSpec {
         private String repeatedField;
-
-        private List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(maxSize != null && maxSize < 1) {
-                errorMessages.add("parameters.batch.maxSize must be >= 1 but: " + maxSize);
-            }
-            if(maxBytes != null) {
-                try {
-                    Durations.parseBytes(maxBytes);
-                } catch (final IllegalArgumentException e) {
-                    errorMessages.add("parameters.batch.maxBytes is illegal: " + e.getMessage());
-                }
-            }
-            if(maxSize == null && maxBytes == null) {
-                errorMessages.add("parameters.batch requires maxSize and/or maxBytes");
-            }
-            if(maxBufferingDuration != null) {
-                try {
-                    Durations.parse(maxBufferingDuration);
-                } catch (final IllegalArgumentException e) {
-                    errorMessages.add("parameters.batch.maxBufferingDuration is illegal: " + e.getMessage());
-                }
-            }
-            if(shards != null && shards < 1) {
-                errorMessages.add("parameters.batch.shards must be >= 1 but: " + shards);
-            }
-            if(key != null && !TemplateUtil.isTemplateText(key)) {
-                errorMessages.add("parameters.batch.key must be a template on element fields but: " + key);
-            }
-            return errorMessages;
-        }
-
-        private void setDefaults() {
-            if(shards == null) {
-                shards = 8;
-            }
-        }
     }
 
     public static class RateParameters implements Serializable {
@@ -402,21 +354,10 @@ public class GrpcSink extends Sink {
         } else {
             @SuppressWarnings("unchecked")
             final Coder<MElement> elementCoder = (Coder<MElement>) input.getCoder();
-            final Long maxBytes = parameters.batch.maxBytes == null ? null : Durations.parseBytes(parameters.batch.maxBytes);
-            GroupIntoBatches<String, MElement> groupIntoBatches = parameters.batch.maxSize != null
-                    ? GroupIntoBatches.ofSize(parameters.batch.maxSize.longValue())
-                    : GroupIntoBatches.ofByteSize(maxBytes);
-            if(parameters.batch.maxSize != null && maxBytes != null) {
-                groupIntoBatches = groupIntoBatches.withByteSize(maxBytes);
-            }
-            if(parameters.batch.maxBufferingDuration != null) {
-                groupIntoBatches = groupIntoBatches.withMaxBufferingDuration(
-                        org.joda.time.Duration.millis(Durations.parse(parameters.batch.maxBufferingDuration).toMillis()));
-            }
             outputs = input
-                    .apply("WithBatchKey", ParDo.of(new BatchKeyDoFn(getName(), parameters, inputSchema, inputs.getAllInputs())))
+                    .apply("WithBatchKey", ParDo.of(new BatchSpec.KeyDoFn(new BatchKeyRenderer(getName(), parameters, inputSchema, inputs.getAllInputs()), parameters.batch.shards)))
                     .setCoder(KvCoder.of(StringUtf8Coder.of(), elementCoder))
-                    .apply("GroupIntoBatches", groupIntoBatches)
+                    .apply("GroupIntoBatches", parameters.batch.groupIntoBatches())
                     .apply("SendBatchRequests", ParDo
                             .of(new SendBatchDoFn(getName(), parameters, descriptorSetBytes, inputSchema, inputs.getAllInputs(), failureTag, getFailFast(), getLoggings()))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
@@ -907,29 +848,21 @@ public class GrpcSink extends Sink {
         }
     }
 
-    private static class BatchKeyDoFn extends DoFn<MElement, KV<String, MElement>> {
+    private static class BatchKeyRenderer implements BatchSpec.KeyRenderer {
         private final RequestBuilder builder;
-        private final int shards;
 
-        BatchKeyDoFn(String name, Parameters parameters, Schema inputSchema, List<String> inputNames) {
+        BatchKeyRenderer(String name, Parameters parameters, Schema inputSchema, List<String> inputNames) {
             this.builder = new RequestBuilder(name, parameters, inputSchema, inputNames);
-            this.shards = parameters.batch.shards;
         }
 
-        @Setup
+        @Override
         public void setup() {
-            // only the key template is needed here; no descriptor required
             builder.setupKeyOnly();
         }
 
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement input = c.element();
-            if(input == null) {
-                return;
-            }
-            final String key = builder.renderBatchKey(input);
-            c.output(KV.of(key != null ? key : "shard-" + java.util.concurrent.ThreadLocalRandom.current().nextInt(shards), input));
+        @Override
+        public String render(final MElement element) {
+            return builder.renderBatchKey(element);
         }
     }
 

@@ -16,13 +16,11 @@ import com.mercari.solution.util.pipeline.outbound.ResponsePolicy;
 import com.mercari.solution.util.pipeline.outbound.SyncCaller;
 import com.mercari.solution.util.pipeline.lookup.PerKeyLookup;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;

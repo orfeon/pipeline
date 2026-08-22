@@ -17,7 +17,10 @@ import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import com.mercari.solution.util.cloud.google.IAMUtil;
 import com.mercari.solution.util.pipeline.Union;
+import com.mercari.solution.util.domain.text.template.StringFunctions;
 import com.mercari.solution.util.pipeline.outbound.AuthProvider;
+import com.mercari.solution.util.pipeline.outbound.BatchSpec;
+import com.mercari.solution.util.pipeline.outbound.Durations;
 import com.mercari.solution.util.pipeline.outbound.OutboundRequest;
 import com.mercari.solution.util.pipeline.outbound.RequestRenderer;
 import com.mercari.solution.util.pipeline.outbound.RequestSpec;
@@ -26,7 +29,6 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.GroupIntoBatches;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
@@ -41,8 +43,6 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -68,7 +68,6 @@ public class TasksSink extends Sink {
             .compile("^projects/[^/]+/locations/[^/]+/queues/[^/]+$");
     private static final Pattern PATTERN_TASK_ID = Pattern.compile("^[A-Za-z0-9_-]{1,500}$");
     private static final Pattern PATTERN_SIMPLE_FIELD = Pattern.compile("^\\$\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*}$");
-    private static final Pattern PATTERN_SHORT_DURATION = Pattern.compile("^(\\d+)\\s*(ms|s|m|h|d)$");
     private static final String SCOPE_CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform";
 
     public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
@@ -79,7 +78,7 @@ public class TasksSink extends Sink {
         private RequestSpec.Target target;
         private RequestSpec.Body body;
         private TaskParameters task;
-        private BatchParameters batch;
+        private BatchSpec batch;
         private RetryParameters retry;
         private OnAlreadyExists onAlreadyExists;
         private Integer concurrency;
@@ -116,53 +115,28 @@ public class TasksSink extends Sink {
                 errorMessages.addAll(retry.validate());
             }
             if(batch != null) {
-                errorMessages.addAll(batch.validate());
-                errorMessages.addAll(validateBatchTemplateArgs(inputSchema));
+                errorMessages.addAll(batch.validate("parameters.batch"));
+                final Map<String, String> perTaskTemplates = new LinkedHashMap<>();
+                perTaskTemplates.put("parameters.queue", queue);
+                if(target != null) {
+                    perTaskTemplates.put("parameters.target.url", target.url);
+                    if(target.headers != null) {
+                        target.headers.forEach((k, v) -> perTaskTemplates.put("parameters.target.headers." + k, v));
+                    }
+                    if(target.params != null) {
+                        target.params.forEach((k, v) -> perTaskTemplates.put("parameters.target.params." + k, v));
+                    }
+                }
+                if(task != null) {
+                    perTaskTemplates.put("parameters.task.id", task.id);
+                    perTaskTemplates.put("parameters.task.scheduleTime", task.scheduleTime);
+                    perTaskTemplates.put("parameters.task.delay", task.delay);
+                }
+                errorMessages.addAll(batch.validateKeyConstraint("parameters.batch", inputSchema, perTaskTemplates));
             }
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
             }
-        }
-
-        /**
-         * In batch mode every element of a task shares one rendered queue / url / headers / id /
-         * schedule, so those templates may only reference fields that also appear in batch.key
-         * (elements in a batch are equal on those fields by construction).
-         */
-        private List<String> validateBatchTemplateArgs(final Schema inputSchema) {
-            final List<String> errorMessages = new ArrayList<>();
-            final Set<String> keyArgs = new HashSet<>();
-            if(batch.key != null) {
-                keyArgs.addAll(TemplateUtil.extractTemplateArgs(batch.key, inputSchema));
-            }
-            final Map<String, String> perTaskTemplates = new LinkedHashMap<>();
-            perTaskTemplates.put("queue", queue);
-            if(target != null) {
-                perTaskTemplates.put("target.url", target.url);
-                if(target.headers != null) {
-                    target.headers.forEach((k, v) -> perTaskTemplates.put("target.headers." + k, v));
-                }
-                if(target.params != null) {
-                    target.params.forEach((k, v) -> perTaskTemplates.put("target.params." + k, v));
-                }
-            }
-            if(task != null) {
-                perTaskTemplates.put("task.id", task.id);
-                perTaskTemplates.put("task.scheduleTime", task.scheduleTime);
-                perTaskTemplates.put("task.delay", task.delay);
-            }
-            for(final Map.Entry<String, String> entry : perTaskTemplates.entrySet()) {
-                if(entry.getValue() == null) {
-                    continue;
-                }
-                for(final String arg : TemplateUtil.extractTemplateArgs(entry.getValue(), inputSchema)) {
-                    if(!keyArgs.contains(arg)) {
-                        errorMessages.add("parameters." + entry.getKey() + " references field '" + arg
-                                + "' which is not part of parameters.batch.key (in batch mode per-task templates may only use batch.key fields)");
-                    }
-                }
-            }
-            return errorMessages;
         }
 
         private void setDefaults() {
@@ -199,48 +173,6 @@ public class TasksSink extends Sink {
         }
     }
 
-    public static class BatchParameters implements Serializable {
-
-        private Integer maxSize;
-        private Long maxBytes;
-        private String maxBufferingDuration;
-        private String key;
-        private Integer shards;
-
-        private List<String> validate() {
-            final List<String> errorMessages = new ArrayList<>();
-            if(maxSize != null && maxSize < 1) {
-                errorMessages.add("parameters.batch.maxSize must be >= 1 but: " + maxSize);
-            }
-            if(maxBytes != null && maxBytes < 1) {
-                errorMessages.add("parameters.batch.maxBytes must be >= 1 but: " + maxBytes);
-            }
-            if(maxSize == null && maxBytes == null) {
-                errorMessages.add("parameters.batch requires maxSize and/or maxBytes");
-            }
-            if(maxBufferingDuration != null) {
-                try {
-                    parseDuration(maxBufferingDuration);
-                } catch (final IllegalArgumentException e) {
-                    errorMessages.add("parameters.batch.maxBufferingDuration is illegal: " + e.getMessage());
-                }
-            }
-            if(shards != null && shards < 1) {
-                errorMessages.add("parameters.batch.shards must be >= 1 but: " + shards);
-            }
-            if(key != null && !TemplateUtil.isTemplateText(key)) {
-                errorMessages.add("parameters.batch.key must be a template on element fields but: " + key);
-            }
-            return errorMessages;
-        }
-
-        private void setDefaults() {
-            if(shards == null) {
-                shards = 8;
-            }
-        }
-    }
-
     public static class TaskParameters implements Serializable {
 
         private String id;
@@ -256,14 +188,14 @@ public class TasksSink extends Sink {
             }
             if(delay != null && !TemplateUtil.isTemplateText(delay)) {
                 try {
-                    parseDuration(delay);
+                    Durations.parse(delay);
                 } catch (final IllegalArgumentException e) {
                     errorMessages.add("parameters.task.delay is illegal: " + e.getMessage());
                 }
             }
             if(dispatchDeadline != null) {
                 try {
-                    final java.time.Duration d = parseDuration(dispatchDeadline);
+                    final java.time.Duration d = Durations.parse(dispatchDeadline);
                     if(d.getSeconds() < 15 || d.getSeconds() > 30 * 60) {
                         errorMessages.add("parameters.task.dispatchDeadline must be between 15s and 30m but: " + dispatchDeadline);
                     }
@@ -374,20 +306,10 @@ public class TasksSink extends Sink {
         } else {
             @SuppressWarnings("unchecked")
             final Coder<MElement> elementCoder = (Coder<MElement>) input.getCoder();
-            GroupIntoBatches<String, MElement> groupIntoBatches = parameters.batch.maxSize != null
-                    ? GroupIntoBatches.ofSize(parameters.batch.maxSize.longValue())
-                    : GroupIntoBatches.ofByteSize(parameters.batch.maxBytes);
-            if(parameters.batch.maxSize != null && parameters.batch.maxBytes != null) {
-                groupIntoBatches = groupIntoBatches.withByteSize(parameters.batch.maxBytes);
-            }
-            if(parameters.batch.maxBufferingDuration != null) {
-                groupIntoBatches = groupIntoBatches.withMaxBufferingDuration(
-                        org.joda.time.Duration.millis(parseDuration(parameters.batch.maxBufferingDuration).toMillis()));
-            }
             outputs = input
-                    .apply("WithBatchKey", ParDo.of(new BatchKeyDoFn(getName(), parameters, inputSchema, inputs.getAllInputs())))
+                    .apply("WithBatchKey", ParDo.of(new BatchSpec.KeyDoFn(new BatchKeyRenderer(getName(), parameters, inputSchema, inputs.getAllInputs()), parameters.batch.shards)))
                     .setCoder(KvCoder.of(StringUtf8Coder.of(), elementCoder))
-                    .apply("GroupIntoBatches", groupIntoBatches)
+                    .apply("GroupIntoBatches", parameters.batch.groupIntoBatches())
                     .apply("CreateBatchTasks", ParDo
                             .of(new CreateBatchTaskDoFn(getName(), parameters, inputSchema, outputSchema, inputs.getAllInputs(), failureTag, getFailFast(), getLoggings()))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
@@ -693,11 +615,11 @@ public class TasksSink extends Sink {
                 if(TemplateUtil.isTemplateText(parameters.task.delay)) {
                     this.delayTemplate = TemplateUtil.createStrictTemplate(name + ".delay", parameters.task.delay);
                 } else {
-                    this.staticDelay = parseDuration(parameters.task.delay);
+                    this.staticDelay = Durations.parse(parameters.task.delay);
                 }
             }
             if(parameters.task.dispatchDeadline != null) {
-                final java.time.Duration d = parseDuration(parameters.task.dispatchDeadline);
+                final java.time.Duration d = Durations.parse(parameters.task.dispatchDeadline);
                 this.dispatchDeadline = com.google.protobuf.Duration.newBuilder()
                         .setSeconds(d.getSeconds()).setNanos(d.getNano()).build();
             }
@@ -816,7 +738,7 @@ public class TasksSink extends Sink {
                 if(text == null || text.isBlank()) {
                     return null;
                 }
-                delay = parseDuration(text.trim());
+                delay = Durations.parse(text.trim());
             }
             if(delay != null) {
                 return Instant.now().plus(delay);
@@ -861,42 +783,8 @@ public class TasksSink extends Sink {
         };
     }
 
-    /** Accepts ISO-8601 ({@code PT10M}) or short form ({@code 10m}, {@code 2h}, {@code 30s}, {@code 1d}, {@code 500ms}). */
-    static java.time.Duration parseDuration(final String text) {
-        if(text == null || text.isBlank()) {
-            throw new IllegalArgumentException("duration must not be empty");
-        }
-        final String t = text.trim();
-        final Matcher matcher = PATTERN_SHORT_DURATION.matcher(t);
-        if(matcher.matches()) {
-            final long n = Long.parseLong(matcher.group(1));
-            return switch (matcher.group(2)) {
-                case "ms" -> java.time.Duration.ofMillis(n);
-                case "s" -> java.time.Duration.ofSeconds(n);
-                case "m" -> java.time.Duration.ofMinutes(n);
-                case "h" -> java.time.Duration.ofHours(n);
-                default -> java.time.Duration.ofDays(n);
-            };
-        }
-        try {
-            return java.time.Duration.parse(t);
-        } catch (final Exception e) {
-            throw new IllegalArgumentException("illegal duration: " + text + " (expected ISO-8601 like PT10M or short form like 10m)");
-        }
-    }
-
     static String sha256Hex(final String text) {
-        try {
-            final MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            final byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
-            final StringBuilder sb = new StringBuilder(hash.length * 2);
-            for(final byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (final NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return StringFunctions.sha256Hex(text);
     }
 
     static String stripQuery(final String url) {
@@ -1152,34 +1040,22 @@ public class TasksSink extends Sink {
         }
     }
 
-    /** Assigns the batch grouping key: rendered batch.key, or a random shard when omitted. */
-    private static class BatchKeyDoFn extends DoFn<MElement, KV<String, MElement>> {
-
+    /** Renders batch.key with the sink's request builder. */
+    private static class BatchKeyRenderer implements BatchSpec.KeyRenderer {
         private final RequestBuilder builder;
-        private final int shards;
 
-        BatchKeyDoFn(final String name, final Parameters parameters, final Schema inputSchema, final List<String> inputNames) {
+        BatchKeyRenderer(final String name, final Parameters parameters, final Schema inputSchema, final List<String> inputNames) {
             this.builder = new RequestBuilder(name, parameters, inputSchema, inputSchema, inputNames);
-            this.shards = parameters.batch.shards;
         }
 
-        @Setup
+        @Override
         public void setup() {
             builder.setup();
         }
 
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement input = c.element();
-            if(input == null) {
-                return;
-            }
-            final String key = builder.renderBatchKey(input);
-            if(key != null) {
-                c.output(KV.of(key, input));
-            } else {
-                c.output(KV.of("shard-" + java.util.concurrent.ThreadLocalRandom.current().nextInt(shards), input));
-            }
+        @Override
+        public String render(final MElement element) {
+            return builder.renderBatchKey(element);
         }
     }
 

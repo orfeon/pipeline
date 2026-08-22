@@ -24,14 +24,6 @@ public record OutboundRequest(
         return body == null ? 0 : body.length;
     }
 
-    public String host() {
-        try {
-            return java.net.URI.create(url).getHost();
-        } catch (final RuntimeException e) {
-            return null;
-        }
-    }
-
     /** Response of one attempt. */
     public record Response(
             int statusCode,
