@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class AttributionTransformTest {
 
@@ -1610,5 +1611,450 @@ public class AttributionTransformTest {
         });
 
         pipeline.run();
+    }
+
+    // ---- vocabulary.unit: metric (metric tree) ----
+
+    @Test
+    public void testMetricTreeRevenueDecomposition() throws Exception {
+        // revenue = units * aup; aup broken down by deal (weighted by units); units = new + repeat
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "daily",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [
+                          { "period": "prev", "deal": "deal",   "units": 50, "units_new": 20, "revenue": 400 },
+                          { "period": "prev", "deal": "nodeal", "units": 50, "units_new": 10, "revenue": 600 },
+                          { "period": "curr", "deal": "deal",   "units": 70, "units_new": 40, "revenue": 560 },
+                          { "period": "curr", "deal": "nodeal", "units": 50, "units_new": 10, "revenue": 640 }
+                        ]
+                      },
+                      "schema": { "fields": [
+                        { "name": "period", "type": "string" },
+                        { "name": "deal", "type": "string" },
+                        { "name": "units", "type": "float64" },
+                        { "name": "units_new", "type": "float64" },
+                        { "name": "revenue", "type": "float64" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["daily"],
+                      "parameters": {
+                        "measures": [ { "name": "revenue" } ],
+                        "comparison": { "reference": {
+                          "strategy": "external", "labelField": "period", "baselineLabel": "prev", "targetLabel": "curr" } },
+                        "vocabulary": {
+                          "unit": "metric",
+                          "dimensions": [ { "name": "deal" } ],
+                          "tree": { "nodes": [
+                            { "name": "revenue", "decomposition": "product", "volume": "units", "rate": "aup" },
+                            { "name": "units", "field": "units", "decomposition": "sum", "components": ["units_new", "units_repeat"] },
+                            { "name": "units_new", "field": "units_new" },
+                            { "name": "units_repeat", "expression": "units - units_new" },
+                            { "name": "aup", "expression": "revenue / units",
+                              "breakdowns": [ { "by": "deal", "decomposition": "weightedAverage", "weight": "units" } ] }
+                          ] }
+                        },
+                        "output": { "topK": 100 }
+                      }
+                    }
+                  ]
+                }
+                """;
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection output = outputs.get("attribution");
+        Assertions.assertNotNull(output);
+        Assertions.assertTrue(output.getSchema().hasField("path"));
+        Assertions.assertTrue(output.getSchema().hasField("localContribution"));
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            final Map<String, MElement> rows = new java.util.HashMap<>();
+            for(final MElement element : elements) {
+                rows.put(element.getAsString("path"), element);
+            }
+            // root + units + aup + units_new + units_repeat + 2 deal groups x (share, rate)
+            Assertions.assertEquals(9, rows.size(), rows.keySet().toString());
+
+            final MElement root = rows.get("revenue");
+            Assertions.assertEquals("revenue", root.getAsString("measure"));
+            Assertions.assertEquals("mtcd", root.getAsString("algorithm"));
+            Assertions.assertEquals("root", root.getAsString("effect"));
+            Assertions.assertEquals(0L, root.getAsLong("rank"));
+            Assertions.assertEquals(0L, root.getAsLong("depth"));
+            Assertions.assertEquals(1000.0, root.getAsDouble("baseline"), DELTA);
+            Assertions.assertEquals(1200.0, root.getAsDouble("target"), DELTA);
+            Assertions.assertEquals(200.0, root.getAsDouble("contribution"), DELTA);
+            Assertions.assertEquals(1.0, root.getAsDouble("explanatoryPower"), DELTA);
+            Assertions.assertNull(root.getPrimitiveValue("parent"));
+            Assertions.assertEquals(false, root.getPrimitiveValue("degenerate"));
+            Assertions.assertEquals(false, root.getPrimitiveValue("noFinding"));
+
+            // Type 2: n0 = 100, n1 = 120, aup0 = 10, aup1 = 10 -> volume 20*10 = 200, rate 0
+            final MElement units = rows.get("revenue/units");
+            Assertions.assertEquals("volume", units.getAsString("effect"));
+            Assertions.assertEquals("product", units.getAsString("decomposition"));
+            Assertions.assertEquals("revenue", units.getAsString("parent"));
+            Assertions.assertEquals(200.0, units.getAsDouble("contribution"), DELTA);
+            Assertions.assertEquals(1L, units.getAsLong("rank"));
+            Assertions.assertEquals(0.2, units.getAsDouble("deltaRatio"), DELTA);
+            final MElement aup = rows.get("revenue/aup");
+            Assertions.assertEquals("rate", aup.getAsString("effect"));
+            Assertions.assertEquals(0.0, aup.getAsDouble("contribution"), DELTA);
+            Assertions.assertEquals(true, aup.getPrimitiveValue("degenerate"));  // Δaup = 0 -> children scaled to 0
+
+            // Type 1 under units: new 30 -> +20, repeat 70 -> 70 -> 0 ; scaled by C_units/Δunits = 10
+            Assertions.assertEquals(200.0, rows.get("revenue/units/units_new").getAsDouble("contribution"), DELTA);
+            Assertions.assertEquals(20.0, rows.get("revenue/units/units_new").getAsDouble("localContribution"), DELTA);
+            Assertions.assertEquals(0.0, rows.get("revenue/units/units_repeat").getAsDouble("contribution"), DELTA);
+            Assertions.assertEquals(2L, rows.get("revenue/units/units_new").getAsLong("depth"));
+
+            // Type 4 children under the degenerate aup keep their local contributions
+            final MElement dealShare = rows.get("revenue/aup/deal=deal/share");
+            Assertions.assertEquals("deal", dealShare.getAsString("dimension"));
+            Assertions.assertEquals("deal", dealShare.getAsString("value"));
+            Assertions.assertEquals("weightedAverage", dealShare.getAsString("decomposition"));
+            Assertions.assertEquals("share", dealShare.getAsString("effect"));
+            Assertions.assertEquals(0.0, dealShare.getAsDouble("contribution"), DELTA);
+            // Δp_deal = 70/120 - 0.5 ; (aup_deal,0 - aup0) = 8 - 10
+            Assertions.assertEquals((70.0 / 120.0 - 0.5) * (8.0 - 10.0), dealShare.getAsDouble("localContribution"), DELTA);
+            Assertions.assertEquals(false, dealShare.getPrimitiveValue("causalAdjusted"));
+            Assertions.assertNull(dealShare.getPrimitiveValue("estimator"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testMetricTreeCausalAdjustedWithGranularity() throws Exception {
+        // units = 500 - 20 * aup (exact, no noise) on 20 days; only aup shifts in the new period.
+        // Plain MTCD blames units; the causal edge aup -> units moves everything to aup.
+        final StringBuilder elements = new StringBuilder();
+        for(int d = 0; d < 20; d++) {
+            for(final String period : List.of("prev", "curr")) {
+                final double aup = 10 + (d % 5) * 0.5 + ("curr".equals(period) ? 1.0 : 0.0);
+                final double units = 500 - 20 * aup;
+                if(!elements.isEmpty()) {
+                    elements.append(",");
+                }
+                elements.append(String.format(
+                        "{ \"period\": \"%s\", \"day\": \"%s-%02d\", \"units\": %s, \"revenue\": %s }",
+                        period, period, d, units, units * aup));
+            }
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "daily",
+                      "module": "create",
+                      "parameters": { "type": "element", "elements": [ %s ] },
+                      "schema": { "fields": [
+                        { "name": "period", "type": "string" },
+                        { "name": "day", "type": "string" },
+                        { "name": "units", "type": "float64" },
+                        { "name": "revenue", "type": "float64" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["daily"],
+                      "parameters": {
+                        "measures": [ { "name": "revenue" } ],
+                        "comparison": { "reference": {
+                          "strategy": "external", "labelField": "period", "baselineLabel": "prev", "targetLabel": "curr" } },
+                        "vocabulary": {
+                          "unit": "metric",
+                          "tree": { "nodes": [
+                            { "name": "revenue", "decomposition": "product", "volume": "units", "rate": "aup" },
+                            { "name": "units", "field": "units" },
+                            { "name": "aup", "expression": "revenue / units" }
+                          ] }
+                        },
+                        "semantics": {
+                          "basis": "causalAdjusted",
+                          "causal": {
+                            "granularity": { "field": "day" },
+                            "edges": [ { "from": "aup", "to": "units" } ]
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection output = outputs.get("attribution");
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byPath = new java.util.HashMap<>();
+            for(final MElement element : rows) {
+                byPath.put(element.getAsString("path"), element);
+            }
+            Assertions.assertEquals(3, byPath.size(), byPath.keySet().toString());
+            final MElement root = byPath.get("revenue");
+            final MElement units = byPath.get("revenue/units");
+            final MElement aup = byPath.get("revenue/aup");
+            final double delta = root.getAsDouble("delta");
+            Assertions.assertEquals(true, units.getPrimitiveValue("causalAdjusted"));
+            Assertions.assertEquals("simplified", units.getAsString("estimator"));
+            Assertions.assertEquals(0.0, units.getAsDouble("contribution"), 1e-6);
+            Assertions.assertEquals(delta, aup.getAsDouble("contribution"), 1e-6);
+            final Map<String, Object> diagnostics = (Map<String, Object>) units.getPrimitiveValue("diagnostics");
+            Assertions.assertNotNull(diagnostics);
+            Assertions.assertEquals(20L, ((Number) diagnostics.get("baselineGranules")).longValue());
+            Assertions.assertEquals(20L, ((Number) diagnostics.get("targetGranules")).longValue());
+            final List<Double> beta = (List<Double>) diagnostics.get("beta");
+            Assertions.assertEquals(500.0, beta.get(0), 1e-6);
+            Assertions.assertEquals(-20.0, beta.get(1), 1e-6);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testMetricTreeValidationErrors() throws Exception {
+        final String[][] cases = {
+                {
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "unit": "metric" }
+                        """, 2),
+                        "vocabulary.tree.nodes parameter is required"
+                },
+                {
+                        transform("""
+                        "measures": [ { "name": "gmv" } ],
+                        "vocabulary": { "unit": "metric", "tree": { "nodes": [ { "name": "sales", "field": "sales" } ] } }
+                        """, 2),
+                        "measures[gmv] must name a tree node"
+                },
+                {
+                        // breakdown dimension must be declared
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "unit": "metric", "tree": { "nodes": [
+                          { "name": "sales", "field": "sales", "breakdowns": [ { "by": "region" } ] } ] } }
+                        """, 2),
+                        "breakdown dimension: region must be declared"
+                },
+                {
+                        // tree field must exist and be numeric
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "unit": "metric", "tree": { "nodes": [ { "name": "sales", "field": "region" } ] } }
+                        """, 2),
+                        "must be a numeric type"
+                },
+                {
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] },
+                        "semantics": { "basis": "causalAdjusted" }
+                        """, 2),
+                        "causalAdjusted requires vocabulary.unit: metric"
+                },
+                {
+                        // causal edges need a granularity or an elasticity
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "unit": "metric", "tree": { "nodes": [
+                          { "name": "sales", "decomposition": "product", "volume": "n", "rate": "x" },
+                          { "name": "n", "field": "sales" }, { "name": "x", "expression": "sales / sales" } ] } },
+                        "semantics": { "basis": "causalAdjusted", "causal": { "edges": [ { "from": "x", "to": "n" } ] } }
+                        """, 2),
+                        "causal.granularity.field is required"
+                },
+                {
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ],
+                          "tree": { "nodes": [ { "name": "sales", "field": "sales" } ] } }
+                        """, 2),
+                        "vocabulary.tree requires vocabulary.unit: metric"
+                }
+        };
+
+        for(final String[] testCase : cases) {
+            final Config config = Config.load(testCase[0]);
+            final TestPipeline errorPipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+            final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                    () -> MPipeline.apply(errorPipeline, config));
+            Assertions.assertTrue(e.getMessage().contains(testCase[1]),
+                    "expected message to contain [" + testCase[1] + "] but was: " + e.getMessage());
+        }
+    }
+
+    @Test
+    public void testMetricTreeDrilldown() throws Exception {
+        // revenue = units * aup. Units triple in (deal=deal, region=east) only; the tree blames
+        // units (why), the drilldown localizes it to that slice (where).
+        final StringBuilder elements = new StringBuilder();
+        for(final String period : List.of("prev", "curr")) {
+            for(final String deal : List.of("deal", "nodeal")) {
+                for(final String region : List.of("east", "west")) {
+                    final boolean culprit = "curr".equals(period) && "deal".equals(deal) && "east".equals(region);
+                    final int units = culprit ? 300 : 100;
+                    if(!elements.isEmpty()) {
+                        elements.append(",");
+                    }
+                    elements.append(String.format(
+                            "{ \"period\": \"%s\", \"deal\": \"%s\", \"region\": \"%s\", \"units\": %d, \"revenue\": %d }",
+                            period, deal, region, units, units * 10));
+                }
+            }
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "daily",
+                      "module": "create",
+                      "parameters": { "type": "element", "elements": [ %s ] },
+                      "schema": { "fields": [
+                        { "name": "period", "type": "string" },
+                        { "name": "deal", "type": "string" },
+                        { "name": "region", "type": "string" },
+                        { "name": "units", "type": "float64" },
+                        { "name": "revenue", "type": "float64" }
+                      ] }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "attribution",
+                      "module": "attribution",
+                      "inputs": ["daily"],
+                      "parameters": {
+                        "measures": [ { "name": "revenue" } ],
+                        "comparison": { "reference": {
+                          "strategy": "external", "labelField": "period", "baselineLabel": "prev", "targetLabel": "curr" } },
+                        "vocabulary": {
+                          "unit": "metric",
+                          "dimensions": [ { "name": "deal" }, { "name": "region" } ],
+                          "tree": { "nodes": [
+                            { "name": "revenue", "decomposition": "product", "volume": "units", "rate": "aup" },
+                            { "name": "units", "field": "units",
+                              "breakdowns": [ { "by": "deal" } ] },
+                            { "name": "aup", "expression": "revenue / units" }
+                          ] }
+                        },
+                        "output": { "drilldown": { "topK": 2, "minExplanatoryPower": 0.01 } }
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements);
+
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection tree = outputs.get("attribution");
+        final MCollection drilldown = outputs.get("attribution.drilldown");
+        Assertions.assertNotNull(tree);
+        Assertions.assertNotNull(drilldown);
+        Assertions.assertTrue(drilldown.getSchema().hasField("elements"));
+        Assertions.assertTrue(drilldown.getSchema().hasField("nodeContribution"));
+
+        PAssert.that(tree.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byPath = new java.util.HashMap<>();
+            for(final MElement element : rows) {
+                byPath.put(element.getAsString("path"), element);
+            }
+            Assertions.assertEquals(1L, byPath.get("revenue/units").getAsLong("rank"));
+            Assertions.assertEquals(2L, byPath.get("revenue/units/deal=deal").getAsLong("rank"));
+            return null;
+        });
+
+        PAssert.that(drilldown.getCollection()).satisfies(rows -> {
+            final List<MElement> list = toList(rows);
+            // rank 1 = units (drilled on deal x region), rank 2 = units/deal=deal (deal fixed -> region only);
+            // aup has EP 0 and is skipped by minExplanatoryPower
+            final Map<String, List<MElement>> byPath = new java.util.HashMap<>();
+            for(final MElement element : list) {
+                byPath.computeIfAbsent(element.getAsString("path"), k -> new ArrayList<>()).add(element);
+            }
+            Assertions.assertEquals(Set.of("revenue/units", "revenue/units/deal=deal"), byPath.keySet());
+
+            final MElement units = byPath.get("revenue/units").getFirst();
+            Assertions.assertEquals(1, byPath.get("revenue/units").size());
+            Assertions.assertEquals("revenue", units.getAsString("measure"));
+            Assertions.assertEquals("units", units.getAsString("node"));
+            Assertions.assertEquals("volume", units.getAsString("nodeEffect"));
+            Assertions.assertEquals(1L, units.getAsLong("nodeRank"));
+            Assertions.assertEquals(2000.0, units.getAsDouble("nodeContribution"), DELTA);
+            Assertions.assertEquals("units", units.getAsString("nodeExpression"));
+            Assertions.assertEquals("riskloc", units.getAsString("algorithm"));
+            Assertions.assertEquals(1L, units.getAsLong("rank"));
+            Assertions.assertEquals(false, units.getPrimitiveValue("noFinding"));
+            Assertions.assertEquals(2L, units.getAsLong("layer"));
+            assertElements(units, "deal=deal,region=east");
+            Assertions.assertEquals(100.0, units.getAsDouble("baseline"), DELTA);
+            Assertions.assertEquals(300.0, units.getAsDouble("target"), DELTA);
+            Assertions.assertEquals(1.0, units.getAsDouble("explanatoryPower"), DELTA);
+
+            final MElement dealGroup = byPath.get("revenue/units/deal=deal").getFirst();
+            Assertions.assertEquals(1, byPath.get("revenue/units/deal=deal").size());
+            Assertions.assertEquals(1L, dealGroup.getAsLong("layer"));
+            assertElements(dealGroup, "region=east");   // deal is fixed on the path
+            Assertions.assertEquals(2L, dealGroup.getAsLong("nodeRank"));
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testMetricTreeDrilldownValidationErrors() throws Exception {
+        final String[][] cases = {
+                {
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "dimensions": [ { "name": "region" } ] },
+                        "output": { "drilldown": { "topK": 3 } }
+                        """, 2),
+                        "output.drilldown requires vocabulary.unit: metric"
+                },
+                {
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "unit": "metric", "dimensions": [ { "name": "region" } ],
+                          "tree": { "nodes": [ { "name": "sales", "field": "sales" } ] } },
+                        "output": { "drilldown": { "dimensions": ["country"] } }
+                        """, 2),
+                        "output.drilldown.dimensions: country must be declared"
+                },
+                {
+                        transform("""
+                        "measures": [ { "name": "sales" } ],
+                        "vocabulary": { "unit": "metric", "tree": { "nodes": [ { "name": "sales", "field": "sales" } ] } },
+                        "output": { "drilldown": { } }
+                        """, 2),
+                        "output.drilldown requires at least one vocabulary.dimensions entry"
+                }
+        };
+        for(final String[] testCase : cases) {
+            final Config config = Config.load(testCase[0]);
+            final TestPipeline errorPipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+            final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                    () -> MPipeline.apply(errorPipeline, config));
+            Assertions.assertTrue(e.getMessage().contains(testCase[1]),
+                    "expected message to contain [" + testCase[1] + "] but was: " + e.getMessage());
+        }
     }
 }

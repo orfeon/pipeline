@@ -5,6 +5,9 @@ import com.mercari.solution.module.*;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.domain.attribution.*;
+import com.mercari.solution.util.domain.attribution.tree.CausalAdjustment;
+import com.mercari.solution.util.domain.attribution.tree.MetricTreeEngine;
+import com.mercari.solution.util.domain.attribution.tree.MetricTreeSpec;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -36,6 +39,7 @@ import java.io.Serializable;
 import java.time.Duration;
 import java.time.Period;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -62,7 +66,7 @@ public class AttributionTransform extends Transform {
     private enum VocabularyUnit { slice, metric }
     private enum DimensionType { flat, binned, hierarchy, embedding }
     private enum Expressiveness { slice, predicate, ruleList }
-    private enum SemanticsBasis { contribution, mixRate, causalAdjusted }
+    private enum SemanticsBasis { contribution, causalAdjusted }
     private enum Algorithm { riskloc, adtributor, squeeze, exhaustive }
     private enum FdrControl { none, bh }
     private enum OutputMode { report, featureSpec, interventionSpec }
@@ -122,7 +126,31 @@ public class AttributionTransform extends Transform {
             private VocabularyUnit unit;
             private List<DimensionParameter> dimensions;
             private Expressiveness expressiveness;
-            private JsonElement candidates; // reserved for unit: metric
+            private TreeParameter tree;      // unit: metric
+            private JsonElement candidates; // reserved for unit: metric (data-driven candidates)
+        }
+
+        private static class TreeParameter implements Serializable {
+            private List<NodeParameter> nodes;
+        }
+
+        private static class NodeParameter implements Serializable {
+            private String name;
+            private String field;
+            private String expression;
+            private MetricTreeSpec.Decomposition decomposition;
+            private List<String> components;
+            private String volume;
+            private String rate;
+            private List<BreakdownParameter> breakdowns;
+        }
+
+        private static class BreakdownParameter implements Serializable {
+            private String by;
+            private MetricTreeSpec.Decomposition decomposition;
+            private String volume;
+            private String weight;
+            private List<BreakdownParameter> breakdowns;
         }
 
         private static class DimensionParameter implements Serializable {
@@ -142,6 +170,27 @@ public class AttributionTransform extends Transform {
             private SemanticsBasis basis;
             private DerivedAllocation.Method derivedAllocation;
             private EngineConfig.EpBasis epBasis;
+            private CausalParameter causal;  // basis: causalAdjusted
+        }
+
+        private static class CausalParameter implements Serializable {
+            private GranularityParameter granularity;
+            private List<EdgeParameter> edges;
+            private Double slopeStabilityAlpha;
+            private Integer minGranules;
+        }
+
+        private static class GranularityParameter implements Serializable {
+            private String field;
+        }
+
+        private static class EdgeParameter implements Serializable {
+            private String from;
+            private String to;
+            private MetricTreeSpec.Model model;
+            private Boolean robust;
+            private MetricTreeSpec.Estimator estimator;
+            private Double elasticity;
         }
 
         private static class EngineParameter implements Serializable {
@@ -150,6 +199,11 @@ public class AttributionTransform extends Transform {
             private AdtributorParameter adtributor;
             private SqueezeParameter squeeze;
             private GuardsParameter guards;
+            private MetricTreeParameter metricTree;
+        }
+
+        private static class MetricTreeParameter implements Serializable {
+            private Double minParentDeltaRatio;
         }
 
         private static class SqueezeParameter implements Serializable {
@@ -182,6 +236,13 @@ public class AttributionTransform extends Transform {
             private Integer topK;
             private Boolean includeUncertainty; // reserved for bayesian algorithms
             private Boolean emitNoFinding;
+            private DrilldownParameter drilldown; // unit: metric
+        }
+
+        private static class DrilldownParameter implements Serializable {
+            private Integer topK;
+            private List<String> dimensions;
+            private Double minExplanatoryPower;
         }
 
         private void validate(final String name, final MCollectionTuple inputs) {
@@ -190,8 +251,12 @@ public class AttributionTransform extends Transform {
             final Map<String, Schema> inputSchemas = inputs.getAllSchemaAsMap();
 
             validateReserved(prefix, errorMessages);
-            validateMeasures(prefix, errorMessages, inputSchemas);
-            validateDimensions(prefix, errorMessages, inputSchemas);
+            if(isMetricUnit()) {
+                validateMetricTree(prefix, errorMessages, inputSchemas);
+            } else {
+                validateMeasures(prefix, errorMessages, inputSchemas);
+                validateDimensions(prefix, errorMessages, inputSchemas);
+            }
             validateReference(prefix, errorMessages, inputSchemas, inputs.size());
             validateEngineAndOutput(prefix, errorMessages);
 
@@ -200,10 +265,13 @@ public class AttributionTransform extends Transform {
             }
         }
 
+        private boolean isMetricUnit() {
+            return vocabulary != null && VocabularyUnit.metric.equals(vocabulary.unit);
+        }
+
         // Rejections of enum values reserved for future versions. These subsume the spec's
-        // cross-parameter constraints 1 (mixRate requires a derived measure), 2 (unit: metric
-        // requires mode: series) and 5 (expressiveness above slice requires fdrControl):
-        // re-instate those checks verbatim when the corresponding values are unlocked.
+        // cross-parameter constraint 5 (expressiveness above slice requires fdrControl):
+        // re-instate that check verbatim when the corresponding value is unlocked.
         // Constraint 6 (distribution measures cannot use shapley) lives in validateMeasures.
         private void validateReserved(final String prefix, final List<String> errorMessages) {
             if(comparison != null) {
@@ -217,14 +285,14 @@ public class AttributionTransform extends Transform {
                 }
             }
             if(vocabulary != null) {
-                if(vocabulary.unit != null && !VocabularyUnit.slice.equals(vocabulary.unit)) {
-                    errorMessages.add(prefix + "vocabulary.unit: " + vocabulary.unit + " is reserved and not implemented yet");
-                }
                 if(vocabulary.expressiveness != null && !Expressiveness.slice.equals(vocabulary.expressiveness)) {
                     errorMessages.add(prefix + "vocabulary.expressiveness: " + vocabulary.expressiveness + " is reserved and not implemented yet");
                 }
                 if(vocabulary.candidates != null && !vocabulary.candidates.isJsonNull()) {
-                    errorMessages.add(prefix + "vocabulary.candidates is reserved for unit: metric and not implemented yet");
+                    errorMessages.add(prefix + "vocabulary.candidates (data-driven metric candidates) is reserved and not implemented yet; declare vocabulary.tree instead");
+                }
+                if(vocabulary.tree != null && !isMetricUnit()) {
+                    errorMessages.add(prefix + "vocabulary.tree requires vocabulary.unit: metric");
                 }
                 if(vocabulary.dimensions != null) {
                     for(final DimensionParameter dimension : vocabulary.dimensions) {
@@ -234,8 +302,13 @@ public class AttributionTransform extends Transform {
                     }
                 }
             }
-            if(semantics != null && semantics.basis != null && !SemanticsBasis.contribution.equals(semantics.basis)) {
-                errorMessages.add(prefix + "semantics.basis: " + semantics.basis + " is reserved and not implemented yet");
+            if(semantics != null) {
+                if(SemanticsBasis.causalAdjusted.equals(semantics.basis) && !isMetricUnit()) {
+                    errorMessages.add(prefix + "semantics.basis: causalAdjusted requires vocabulary.unit: metric (a metric tree with causal edges)");
+                }
+                if(semantics.causal != null && !SemanticsBasis.causalAdjusted.equals(semantics.basis)) {
+                    errorMessages.add(prefix + "semantics.causal requires semantics.basis: causalAdjusted");
+                }
             }
             if(engine != null) {
                 if(engine.guards != null && FdrControl.bh.equals(engine.guards.fdrControl)) {
@@ -389,11 +462,121 @@ public class AttributionTransform extends Transform {
             }
         }
 
+        private void validateMetricTree(
+                final String prefix, final List<String> errorMessages, final Map<String, Schema> inputSchemas) {
+
+            if(measures == null || measures.isEmpty()) {
+                errorMessages.add(prefix + "measures parameter is required");
+                return;
+            }
+            final Set<String> roots = new LinkedHashSet<>();
+            for(final MeasureParameter measure : measures) {
+                if(measure.name == null || measure.name.isEmpty()) {
+                    errorMessages.add(prefix + "measures.name parameter is required");
+                    continue;
+                }
+                if((measure.type != null && !MeasureType.fundamental.equals(measure.type))
+                        || measure.expression != null || measure.quantiles != null || measure.format != null) {
+                    errorMessages.add(prefix + "measures[" + measure.name
+                            + "] must only name a tree root node when vocabulary.unit is metric");
+                }
+                roots.add(measure.name);
+            }
+            if(vocabulary.tree == null || vocabulary.tree.nodes == null || vocabulary.tree.nodes.isEmpty()) {
+                errorMessages.add(prefix + "vocabulary.tree.nodes parameter is required when vocabulary.unit is metric");
+                return;
+            }
+            final Set<String> dimensionNames = new HashSet<>();
+            if(vocabulary.dimensions != null) {
+                validateDimensions(prefix, errorMessages, inputSchemas);
+                for(final DimensionParameter dimension : vocabulary.dimensions) {
+                    dimensionNames.add(dimension.name);
+                }
+            }
+            final MetricTreeSpec spec;
+            try {
+                spec = createTreeSpec();
+            } catch (final RuntimeException e) {
+                errorMessages.add(prefix + "vocabulary.tree is invalid: " + e.getMessage());
+                return;
+            }
+            for(final String error : spec.validate(roots)) {
+                errorMessages.add(prefix + error);
+            }
+            for(final String field : spec.referencedFields()) {
+                validateNumericField(prefix, errorMessages, inputSchemas, field, "vocabulary.tree field");
+                if(dimensionNames.contains(field)) {
+                    errorMessages.add(prefix + "vocabulary.tree field: " + field + " must not also be declared as a dimension");
+                }
+            }
+            for(final String dimension : spec.breakdownDimensions()) {
+                if(!dimensionNames.contains(dimension)) {
+                    errorMessages.add(prefix + "vocabulary.tree breakdown dimension: " + dimension
+                            + " must be declared in vocabulary.dimensions");
+                }
+            }
+            if(spec.causal() != null && spec.causal().granularityField() != null) {
+                final String granularity = spec.causal().granularityField();
+                validateFieldExists(prefix, errorMessages, inputSchemas, granularity, "semantics.causal.granularity.field");
+                if(dimensionNames.contains(granularity)) {
+                    errorMessages.add(prefix + "semantics.causal.granularity.field: " + granularity
+                            + " must not also be declared as a dimension");
+                }
+            }
+            if(SemanticsBasis.causalAdjusted.equals(semantics == null ? null : semantics.basis)
+                    && (spec.edges() == null || spec.edges().isEmpty())) {
+                errorMessages.add(prefix + "semantics.basis: causalAdjusted requires at least one semantics.causal.edges entry");
+            }
+        }
+
+        private MetricTreeSpec createTreeSpec() {
+            final List<MetricTreeSpec.Node> nodes = new ArrayList<>();
+            for(final NodeParameter node : vocabulary.tree.nodes) {
+                nodes.add(new MetricTreeSpec.Node(node.name, node.field, node.expression, node.decomposition,
+                        node.components, node.volume, node.rate, toBreakdowns(node.breakdowns)));
+            }
+            final List<MetricTreeSpec.Edge> edges = new ArrayList<>();
+            MetricTreeSpec.Causal causal = null;
+            if(semantics != null && semantics.causal != null) {
+                final CausalParameter c = semantics.causal;
+                if(c.edges != null) {
+                    for(final EdgeParameter edge : c.edges) {
+                        edges.add(new MetricTreeSpec.Edge(edge.from, edge.to,
+                                edge.model == null ? MetricTreeSpec.Model.linear : edge.model,
+                                Boolean.TRUE.equals(edge.robust),
+                                edge.estimator == null ? MetricTreeSpec.Estimator.auto : edge.estimator,
+                                edge.elasticity));
+                    }
+                }
+                causal = new MetricTreeSpec.Causal(
+                        c.granularity == null ? null : c.granularity.field,
+                        c.slopeStabilityAlpha == null ? MetricTreeSpec.Causal.DEFAULT_ALPHA : c.slopeStabilityAlpha,
+                        c.minGranules == null ? MetricTreeSpec.Causal.DEFAULT_MIN_GRANULES : c.minGranules);
+            }
+            final double minParentDeltaRatio = engine == null || engine.metricTree == null || engine.metricTree.minParentDeltaRatio == null
+                    ? MetricTreeSpec.DEFAULT_MIN_PARENT_DELTA_RATIO : engine.metricTree.minParentDeltaRatio;
+            return new MetricTreeSpec(nodes, edges, causal, minParentDeltaRatio);
+        }
+
+        private static List<MetricTreeSpec.Breakdown> toBreakdowns(final List<BreakdownParameter> breakdowns) {
+            if(breakdowns == null) {
+                return null;
+            }
+            final List<MetricTreeSpec.Breakdown> out = new ArrayList<>();
+            for(final BreakdownParameter breakdown : breakdowns) {
+                out.add(new MetricTreeSpec.Breakdown(breakdown.by, breakdown.decomposition,
+                        breakdown.volume, breakdown.weight, toBreakdowns(breakdown.breakdowns)));
+            }
+            return out;
+        }
+
         private void validateDimensions(
                 final String prefix, final List<String> errorMessages, final Map<String, Schema> inputSchemas) {
 
             if(vocabulary == null || vocabulary.dimensions == null || vocabulary.dimensions.isEmpty()) {
-                errorMessages.add(prefix + "vocabulary.dimensions parameter is required");
+                if(!isMetricUnit()) {
+                    errorMessages.add(prefix + "vocabulary.dimensions parameter is required");
+                }
                 return;
             }
             if(vocabulary.dimensions.size() > 31) {
@@ -542,6 +725,35 @@ public class AttributionTransform extends Transform {
             if(output != null && output.topK != null && output.topK < 1) {
                 errorMessages.add(prefix + "output.topK must be greater than 0");
             }
+            if(output != null && output.drilldown != null) {
+                if(!isMetricUnit()) {
+                    errorMessages.add(prefix + "output.drilldown requires vocabulary.unit: metric");
+                } else {
+                    if(output.drilldown.topK != null && output.drilldown.topK < 1) {
+                        errorMessages.add(prefix + "output.drilldown.topK must be greater than 0");
+                    }
+                    if(output.drilldown.minExplanatoryPower != null
+                            && (output.drilldown.minExplanatoryPower < 0 || output.drilldown.minExplanatoryPower >= 1)) {
+                        errorMessages.add(prefix + "output.drilldown.minExplanatoryPower must be in [0, 1)");
+                    }
+                    final Set<String> declared = new HashSet<>();
+                    if(vocabulary.dimensions != null) {
+                        for(final DimensionParameter dimension : vocabulary.dimensions) {
+                            declared.add(dimension.name);
+                        }
+                    }
+                    if(output.drilldown.dimensions != null) {
+                        for(final String dimension : output.drilldown.dimensions) {
+                            if(!declared.contains(dimension)) {
+                                errorMessages.add(prefix + "output.drilldown.dimensions: " + dimension
+                                        + " must be declared in vocabulary.dimensions");
+                            }
+                        }
+                    } else if(declared.isEmpty()) {
+                        errorMessages.add(prefix + "output.drilldown requires at least one vocabulary.dimensions entry");
+                    }
+                }
+            }
         }
 
         private static void validateNumericField(
@@ -627,13 +839,16 @@ public class AttributionTransform extends Transform {
             if(comparison.reference.synthetic != null && comparison.reference.synthetic.method == null) {
                 comparison.reference.synthetic.method = SyntheticMethod.marginal;
             }
+            if(vocabulary.unit == null) {
+                vocabulary.unit = VocabularyUnit.slice;
+            }
+            if(vocabulary.dimensions == null) {
+                vocabulary.dimensions = new ArrayList<>();
+            }
             for(final DimensionParameter dimension : vocabulary.dimensions) {
                 if(dimension.type == null) {
                     dimension.type = DimensionType.flat;
                 }
-            }
-            if(vocabulary.unit == null) {
-                vocabulary.unit = VocabularyUnit.slice;
             }
             if(vocabulary.expressiveness == null) {
                 vocabulary.expressiveness = Expressiveness.slice;
@@ -714,10 +929,21 @@ public class AttributionTransform extends Transform {
                 output.mode = OutputMode.report;
             }
             if(output.topK == null) {
-                output.topK = 3;
+                output.topK = VocabularyUnit.metric.equals(vocabulary.unit) ? 10 : 3;
             }
             if(output.emitNoFinding == null) {
                 output.emitNoFinding = true;
+            }
+            if(output.drilldown != null) {
+                if(output.drilldown.topK == null) {
+                    output.drilldown.topK = 3;
+                }
+                if(output.drilldown.dimensions == null) {
+                    output.drilldown.dimensions = vocabulary.dimensions.stream().map(d -> d.name).toList();
+                }
+                if(output.drilldown.minExplanatoryPower == null) {
+                    output.drilldown.minExplanatoryPower = 0.0;
+                }
             }
         }
     }
@@ -739,7 +965,7 @@ public class AttributionTransform extends Transform {
         }
 
         final Task task = Task.of(parameters, inputs.getAllInputs());
-        final Schema outputSchema = createOutputSchema();
+        final Schema outputSchema = task.tree != null ? createTreeOutputSchema() : createOutputSchema();
 
         // Input rows may be raw events or pre-aggregated leaves: leaf aggregation (sums, KLL and
         // Theta sketches, row counts) runs distributed per dimension tuple with combiner lifting,
@@ -779,23 +1005,34 @@ public class AttributionTransform extends Transform {
                 .setCoder(leafCoder);
 
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
+        final TupleTag<MElement> drilldownTag = new TupleTag<>() {};
         final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
         final PCollectionTuple outputs = leaves
                 .apply("WithGatherKey", WithKeys.of(""))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), leafCoder))
                 .apply("GatherLeaves", GroupByKey.create())
                 .apply("Attribute", ParDo
-                        .of(new AttributionDoFn(task, getLoggings(), getFailFast(), failureTag))
-                        .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                        .of(new AttributionDoFn(task, getLoggings(), getFailFast(), failureTag, drilldownTag))
+                        .withOutputTags(outputTag, TupleTagList.of(failureTag).and(drilldownTag)));
 
         if(errorHandler != null) {
             errorHandler.addError(resolved.get(resolveFailureTag));
             errorHandler.addError(outputs.get(failureTag));
         }
 
-        return MCollectionTuple
+        MCollectionTuple tuple = MCollectionTuple
                 .of(outputs.get(outputTag).setCoder(ElementCoder.of(outputSchema)), outputSchema);
+        if(task.drilldownTopK > 0) {
+            // Slice localization of the top tree nodes: "why" (tree) joined with "where" (slices)
+            final Schema drilldownSchema = createDrilldownOutputSchema();
+            tuple = tuple.and(DRILLDOWN_OUTPUT,
+                    outputs.get(drilldownTag).setCoder(ElementCoder.of(drilldownSchema)), drilldownSchema);
+        }
+        return tuple;
     }
+
+    /** Name of the secondary output carrying the metric-tree drilldown slices ({@code <name>.drilldown}). */
+    public static final String DRILLDOWN_OUTPUT = "drilldown";
 
     /** Serializable execution spec derived from the validated parameters. */
     private static class Task implements Serializable {
@@ -825,14 +1062,57 @@ public class AttributionTransform extends Transform {
 
         private boolean emitNoFinding;
 
+        // unit: metric
+        private MetricTreeSpec tree;
+        private List<String> roots;
+        private int topK;
+        private int drilldownTopK;               // 0 = no drilldown
+        private List<DimensionSpec> drilldownDimensions;
+        private double drilldownMinExplanatoryPower;
+
         private static Task of(final Parameters parameters, final List<String> inputNames) {
             final Task task = new Task();
 
-            task.dimensions = parameters.vocabulary.dimensions.stream()
+            final List<DimensionSpec> dimensions = new ArrayList<>(parameters.vocabulary.dimensions.stream()
                     .map(dimension -> DimensionType.binned.equals(dimension.type)
                             ? DimensionSpec.binned(dimension.name, dimension.binning.method, dimension.binning.bins)
                             : DimensionSpec.flat(dimension.name))
-                    .toList();
+                    .toList());
+            task.emitNoFinding = parameters.output.emitNoFinding;
+            task.topK = parameters.output.topK;
+
+            if(VocabularyUnit.metric.equals(parameters.vocabulary.unit)) {
+                task.tree = parameters.createTreeSpec();
+                task.roots = parameters.measures.stream().map(m -> m.name).toList();
+                // The causal granularity column (e.g. date) rides along as a hidden flat dimension
+                // so the per-granule regression data is available from the same leaf aggregates
+                if(task.tree.causal() != null && task.tree.causal().granularityField() != null) {
+                    dimensions.add(DimensionSpec.flat(task.tree.causal().granularityField()));
+                }
+                if(dimensions.isEmpty()) {
+                    // A purely static tree needs no dimension: key every row on one constant leaf
+                    dimensions.add(DimensionSpec.flat(ALL_LEAF_DIMENSION));
+                }
+                task.dimensions = dimensions;
+                task.columnNames = new ArrayList<>(task.tree.referencedFields());
+                task.measures = task.columnNames.stream().map(MeasureSpec::fundamental).toList();
+                task.distributionNames = List.of();
+                task.distinctNames = List.of();
+                task.distributionFromSketch = new boolean[0];
+                task.distinctFromSketch = new boolean[0];
+                task.algorithm = "mtcd";
+                task.engineConfig = createEngineConfig(parameters);
+                if(parameters.output.drilldown != null) {
+                    task.drilldownTopK = parameters.output.drilldown.topK;
+                    task.drilldownMinExplanatoryPower = parameters.output.drilldown.minExplanatoryPower;
+                    task.drilldownDimensions = dimensions.stream()
+                            .filter(d -> parameters.output.drilldown.dimensions.contains(d.name()))
+                            .toList();
+                }
+                resolveReference(task, parameters);
+                return task;
+            }
+            task.dimensions = dimensions;
 
             final Set<String> columnNames = new LinkedHashSet<>();
             final List<String> distributionNames = new ArrayList<>();
@@ -879,7 +1159,13 @@ public class AttributionTransform extends Transform {
             task.distinctFromSketch = toArray(distinctFromSketch);
 
             task.algorithm = parameters.engine.algorithm.name();
-            task.engineConfig = new EngineConfig(
+            task.engineConfig = createEngineConfig(parameters);
+            resolveReference(task, parameters);
+            return task;
+        }
+
+        private static EngineConfig createEngineConfig(final Parameters parameters) {
+            return new EngineConfig(
                     EngineConfig.Algorithm.valueOf(parameters.engine.algorithm.name()),
                     new EngineConfig.RiskLocParams(
                             parameters.engine.riskloc.riskThreshold,
@@ -900,7 +1186,9 @@ public class AttributionTransform extends Transform {
                     parameters.semantics.derivedAllocation,
                     parameters.semantics.epBasis,
                     parameters.output.topK);
+        }
 
+        private static void resolveReference(final Task task, final Parameters parameters) {
             final Parameters.ReferenceParameter reference = parameters.comparison.reference;
             task.strategy = reference.strategy;
             switch (reference.strategy) {
@@ -920,9 +1208,6 @@ public class AttributionTransform extends Transform {
                 }
                 case synthetic -> task.syntheticMarginal = true;
             }
-
-            task.emitNoFinding = parameters.output.emitNoFinding;
-            return task;
         }
 
         private static boolean[] toArray(final List<Boolean> flags) {
@@ -938,6 +1223,8 @@ public class AttributionTransform extends Transform {
 
     /** Key marker for the target role in the leaf aggregation key (first key element). */
     private static final String ROLE_TARGET = "t";
+    /** Hidden dimension used when a metric tree declares no dimensions (absent field = one constant value). */
+    private static final String ALL_LEAF_DIMENSION = "__all__";
     private static final String ROLE_BASELINE = "b";
 
     private static Long extractEpochMillis(final Task task, final MElement element) {
@@ -1355,24 +1642,32 @@ public class AttributionTransform extends Transform {
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+        private final TupleTag<MElement> drilldownTag;
         private final Schema outputSchema;
+        private final Schema drilldownSchema;
 
         AttributionDoFn(
                 final Task task,
                 final List<Logging> logs,
                 final boolean failFast,
-                final TupleTag<BadRecord> failureTag) {
+                final TupleTag<BadRecord> failureTag,
+                final TupleTag<MElement> drilldownTag) {
 
             this.task = task;
             this.logs = Logging.map(logs);
             this.failFast = failFast;
             this.failureTag = failureTag;
-            this.outputSchema = createOutputSchema();
+            this.drilldownTag = drilldownTag;
+            this.outputSchema = task.tree != null ? createTreeOutputSchema() : createOutputSchema();
+            this.drilldownSchema = task.drilldownTopK > 0 ? createDrilldownOutputSchema() : null;
         }
 
         @Setup
         public void setup() {
             this.outputSchema.setup();
+            if(this.drilldownSchema != null) {
+                this.drilldownSchema.setup();
+            }
         }
 
         @ProcessElement
@@ -1420,6 +1715,33 @@ public class AttributionTransform extends Transform {
                 if(builder.isEmpty()) {
                     return;
                 }
+                if(task.tree != null) {
+                    final LeafTable table = builder.build();
+                    final MetricTreeEngine engine = new MetricTreeEngine(task.tree, table);
+                    for(final String root : task.roots) {
+                        final MetricTreeEngine.TreeResult treeResult = engine.run(root);
+                        if(treeResult.rootDelta() == 0 && treeResult.nodes().size() <= 1) {
+                            if(task.emitNoFinding) {
+                                final MElement output = createTreeNoFindingElement(treeResult, c.timestamp());
+                                Logging.log(LOG, logs, "output", output);
+                                c.output(output);
+                            }
+                            continue;
+                        }
+                        for(final MetricTreeEngine.NodeResult node : treeResult.nodes()) {
+                            if(node.depth() > 0 && node.rank() > task.topK) {
+                                continue;
+                            }
+                            final MElement output = createTreeElement(node, treeResult, c.timestamp());
+                            Logging.log(LOG, logs, "output", output);
+                            c.output(output);
+                        }
+                        if(task.drilldownTopK > 0) {
+                            drilldown(table, treeResult, c);
+                        }
+                    }
+                    return;
+                }
 
                 final AttributionResult result = AttributionEngine.run(
                         builder.build(), task.dimensions, task.measures, task.engineConfig, task.syntheticMarginal);
@@ -1429,12 +1751,15 @@ public class AttributionTransform extends Transform {
                             .externalRootCauseCandidate(measureResult, task.engineConfig);
                     int rank = 1;
                     for(final Finding finding : measureResult.findings()) {
-                        final MElement output = createFindingElement(measureResult, finding, rank++, external, c.timestamp());
+                        final MElement output = findingBuilder(
+                                DimensionSpec.names(task.dimensions), measureResult, finding, rank++, external)
+                                .withEventTime(c.timestamp()).build();
                         Logging.log(LOG, logs, "output", output);
                         c.output(output);
                     }
                     if(measureResult.findings().isEmpty() && task.emitNoFinding) {
-                        final MElement output = createNoFindingElement(measureResult, external, c.timestamp());
+                        final MElement output = noFindingBuilder(measureResult, external)
+                                .withEventTime(c.timestamp()).build();
                         Logging.log(LOG, logs, "output", output);
                         c.output(output);
                     }
@@ -1445,18 +1770,18 @@ public class AttributionTransform extends Transform {
             }
         }
 
-        private MElement createFindingElement(
+        private MElement.Builder findingBuilder(
+                final List<String> dimensionNames,
                 final MeasureResult measureResult,
                 final Finding finding,
                 final int rank,
-                final boolean externalCandidate,
-                final org.joda.time.Instant timestamp) {
+                final boolean externalCandidate) {
 
             final List<MElement> elements = new ArrayList<>();
             for(final Slice slice : finding.slices()) {
                 for(int i = 0; i < slice.dims().length; i++) {
                     elements.add(MElement.builder()
-                            .withString("dimension", DimensionSpec.names(task.dimensions).get(slice.dims()[i]))
+                            .withString("dimension", dimensionNames.get(slice.dims()[i]))
                             .withString("value", slice.values()[i])
                             .build());
                 }
@@ -1491,13 +1816,190 @@ public class AttributionTransform extends Transform {
             if(finding.baselineSum() != 0) {
                 builder.withFloat64("deltaRatio", delta / finding.baselineSum());
             }
+            return builder;
+        }
+
+        /**
+         * Runs slice localization for the top drilldown nodes of a tree: the node's value
+         * expression becomes the measure, its leaves (the breakdown group it belongs to) the
+         * input, and the drilldown dimensions not already fixed on its path the vocabulary.
+         */
+        private void drilldown(
+                final LeafTable table,
+                final MetricTreeEngine.TreeResult tree,
+                final ProcessContext c) {
+
+            final List<MetricTreeEngine.NodeResult> candidates = tree.nodes().stream()
+                    .filter(n -> n.depth() > 0 && n.rank() > 0 && n.rank() <= task.drilldownTopK)
+                    .filter(n -> n.measureExpression() != null)
+                    .filter(n -> Math.abs(n.explanatoryPower()) >= task.drilldownMinExplanatoryPower)
+                    .sorted(java.util.Comparator.comparingInt(MetricTreeEngine.NodeResult::rank))
+                    .toList();
+            for(final MetricTreeEngine.NodeResult node : candidates) {
+                final List<DimensionSpec> dimensions = task.drilldownDimensions.stream()
+                        .filter(d -> !node.fixedDimensions().containsKey(d.name()))
+                        .toList();
+                if(dimensions.isEmpty()) {
+                    continue;
+                }
+                // Re-key the node's leaves on the drilldown dimensions only (merging the rest)
+                final int[] dimIndexes = dimensions.stream().mapToInt(d -> table.dimensionIndex(d.name())).toArray();
+                final LeafTable.Builder builder = LeafTable.builder(DimensionSpec.names(dimensions), table.getColumnNames());
+                for(final int leaf : node.leaves()) {
+                    final String[] dims = new String[dimIndexes.length];
+                    for(int i = 0; i < dims.length; i++) {
+                        dims[i] = table.dimValue(leaf, dimIndexes[i]);
+                    }
+                    final double[] baseline = new double[table.columnCount()];
+                    final double[] target = new double[table.columnCount()];
+                    for(int col = 0; col < baseline.length; col++) {
+                        baseline[col] = table.baselineValue(col, leaf);
+                        target[col] = table.targetValue(col, leaf);
+                    }
+                    builder.addBaseline(dims, baseline);
+                    builder.addTarget(dims, target);
+                    builder.addBaselineRows(dims, table.baselineRows(leaf));
+                    builder.addTargetRows(dims, table.targetRows(leaf));
+                }
+                final MeasureSpec measure;
+                final String expression = node.measureExpression();
+                if(table.getColumnNames().contains(expression)) {
+                    measure = MeasureSpec.fundamental(expression);
+                } else {
+                    final List<String> variables = new ArrayList<>(new TreeSet<>(ExpressionUtil.estimateVariables(expression)));
+                    measure = MeasureSpec.derived(node.path(), expression, variables);
+                }
+                final AttributionResult result = AttributionEngine.run(
+                        builder.build(), dimensions, List.of(measure), task.engineConfig, false);
+                for(final MeasureResult measureResult : result.results()) {
+                    final boolean external = AttributionEngine.externalRootCauseCandidate(measureResult, task.engineConfig);
+                    int rank = 1;
+                    for(final Finding finding : measureResult.findings()) {
+                        final MElement output = withNode(findingBuilder(
+                                DimensionSpec.names(dimensions), measureResult, finding, rank++, external), tree, node)
+                                .withEventTime(c.timestamp()).build();
+                        Logging.log(LOG, logs, "drilldown", output);
+                        c.output(drilldownTag, output);
+                    }
+                    if(measureResult.findings().isEmpty() && task.emitNoFinding) {
+                        final MElement output = withNode(noFindingBuilder(measureResult, external), tree, node)
+                                .withEventTime(c.timestamp()).build();
+                        Logging.log(LOG, logs, "drilldown", output);
+                        c.output(drilldownTag, output);
+                    }
+                }
+            }
+        }
+
+        private MElement.Builder withNode(
+                final MElement.Builder builder,
+                final MetricTreeEngine.TreeResult tree,
+                final MetricTreeEngine.NodeResult node) {
+            return builder
+                    .withString("measure", tree.measure())
+                    .withString("algorithm", task.engineConfig.algorithm().name())
+                    .withString("node", node.node())
+                    .withString("path", node.path())
+                    .withString("nodeEffect", node.effect().name())
+                    .withInt64("nodeRank", (long) node.rank())
+                    .withFloat64("nodeContribution", node.contribution())
+                    .withFloat64("nodeExplanatoryPower", node.explanatoryPower())
+                    .withString("nodeExpression", node.measureExpression());
+        }
+
+        private MElement createTreeElement(
+                final MetricTreeEngine.NodeResult node,
+                final MetricTreeEngine.TreeResult tree,
+                final org.joda.time.Instant timestamp) {
+
+            final MElement.Builder builder = MElement.builder()
+                    .withString("measure", node.measure())
+                    .withString("algorithm", task.algorithm)
+                    .withString("node", node.node())
+                    .withString("path", node.path())
+                    .withInt64("depth", (long) node.depth())
+                    .withString("effect", node.effect().name())
+                    .withInt64("rank", (long) node.rank())
+                    .withFloat64("baseline", node.baseline())
+                    .withFloat64("target", node.target())
+                    .withFloat64("delta", node.delta())
+                    .withFloat64("localContribution", node.localContribution())
+                    .withFloat64("contribution", node.contribution())
+                    .withFloat64("explanatoryPower", node.explanatoryPower())
+                    .withFloat64("rootBaseline", tree.rootBaseline())
+                    .withFloat64("rootTarget", tree.rootTarget())
+                    .withBool("degenerate", node.degenerate())
+                    .withBool("causalAdjusted", node.causalAdjusted())
+                    .withBool("noFinding", false);
+            if(node.parent() != null) {
+                builder.withString("parent", node.parent());
+            }
+            if(node.dimension() != null) {
+                builder.withString("dimension", node.dimension());
+                builder.withString("value", node.value());
+            }
+            if(node.decomposition() != null) {
+                builder.withString("decomposition", node.decomposition().name());
+            }
+            if(node.baseline() != 0) {
+                builder.withFloat64("deltaRatio", node.delta() / node.baseline());
+            }
+            if(node.residual() != null) {
+                builder.withFloat64("residual", node.residual());
+            }
+            if(node.estimator() != null) {
+                builder.withString("estimator", node.estimator());
+            }
+            if(node.diagnostics() != null && node.diagnostics().beta().length > 0) {
+                final CausalAdjustment.Diagnostics d = node.diagnostics();
+                final MElement.Builder diagnostics = MElement.builder()
+                        .withPrimitiveValue("beta", java.util.Arrays.stream(d.beta()).boxed().toList())
+                        .withInt64("baselineGranules", (long) d.baselineGranules())
+                        .withInt64("targetGranules", (long) d.targetGranules());
+                if(Double.isFinite(d.r2())) {
+                    diagnostics.withFloat64("r2", d.r2());
+                }
+                if(d.interactionPValue() != null) {
+                    diagnostics.withFloat64("interactionPValue", d.interactionPValue());
+                }
+                builder.withElement("diagnostics", diagnostics.build());
+            }
+            if(node.warning() != null) {
+                builder.withString("warning", node.warning());
+            }
             return builder.withEventTime(timestamp).build();
         }
 
-        private MElement createNoFindingElement(
-                final MeasureResult measureResult,
-                final boolean externalCandidate,
+        private MElement createTreeNoFindingElement(
+                final MetricTreeEngine.TreeResult tree,
                 final org.joda.time.Instant timestamp) {
+
+            return MElement.builder()
+                    .withString("measure", tree.measure())
+                    .withString("algorithm", task.algorithm)
+                    .withString("node", tree.measure())
+                    .withString("path", tree.measure())
+                    .withInt64("depth", 0L)
+                    .withString("effect", MetricTreeEngine.Effect.root.name())
+                    .withInt64("rank", 0L)
+                    .withFloat64("baseline", tree.rootBaseline())
+                    .withFloat64("target", tree.rootTarget())
+                    .withFloat64("delta", 0D)
+                    .withFloat64("localContribution", 0D)
+                    .withFloat64("contribution", 0D)
+                    .withFloat64("explanatoryPower", 0D)
+                    .withFloat64("rootBaseline", tree.rootBaseline())
+                    .withFloat64("rootTarget", tree.rootTarget())
+                    .withBool("degenerate", true)
+                    .withBool("causalAdjusted", false)
+                    .withBool("noFinding", true)
+                    .withEventTime(timestamp)
+                    .build();
+        }
+
+        private MElement.Builder noFindingBuilder(
+                final MeasureResult measureResult,
+                final boolean externalCandidate) {
 
             final MElement.Builder builder = MElement.builder()
                     .withBool("externalCandidate", externalCandidate);
@@ -1519,9 +2021,7 @@ public class AttributionTransform extends Transform {
                     .withFloat64("totalBaseline", measureResult.baselineTotal())
                     .withFloat64("totalTarget", measureResult.targetTotal())
                     .withInt64("leafCount", 0L)
-                    .withBool("noFinding", true)
-                    .withEventTime(timestamp)
-                    .build();
+                    .withBool("noFinding", true);
         }
     }
 
@@ -1543,6 +2043,60 @@ public class AttributionTransform extends Transform {
         } catch (final Exception e) {
             throw new IllegalArgumentException("failed to parse as ISO-8601 duration: " + offset);
         }
+    }
+
+    private static Schema createTreeOutputSchema() {
+        return Schema.builder()
+                .withField("measure", Schema.FieldType.STRING)
+                .withField("algorithm", Schema.FieldType.STRING)
+                .withField("node", Schema.FieldType.STRING)
+                .withField("parent", Schema.FieldType.STRING.withNullable(true))
+                .withField("path", Schema.FieldType.STRING)
+                .withField("depth", Schema.FieldType.INT64)
+                .withField("dimension", Schema.FieldType.STRING.withNullable(true))
+                .withField("value", Schema.FieldType.STRING.withNullable(true))
+                .withField("decomposition", Schema.FieldType.STRING.withNullable(true))
+                .withField("effect", Schema.FieldType.STRING)
+                .withField("rank", Schema.FieldType.INT64)
+                .withField("baseline", Schema.FieldType.FLOAT64)
+                .withField("target", Schema.FieldType.FLOAT64)
+                .withField("delta", Schema.FieldType.FLOAT64)
+                .withField("deltaRatio", Schema.FieldType.FLOAT64.withNullable(true))
+                .withField("localContribution", Schema.FieldType.FLOAT64)
+                .withField("contribution", Schema.FieldType.FLOAT64)
+                .withField("explanatoryPower", Schema.FieldType.FLOAT64)
+                .withField("rootBaseline", Schema.FieldType.FLOAT64)
+                .withField("rootTarget", Schema.FieldType.FLOAT64)
+                .withField("degenerate", Schema.FieldType.BOOLEAN)
+                .withField("residual", Schema.FieldType.FLOAT64.withNullable(true))
+                .withField("causalAdjusted", Schema.FieldType.BOOLEAN)
+                .withField("estimator", Schema.FieldType.STRING.withNullable(true))
+                .withField("diagnostics", Schema.FieldType.element(Schema.builder()
+                        .withField("beta", Schema.FieldType.array(Schema.FieldType.FLOAT64))
+                        .withField("r2", Schema.FieldType.FLOAT64.withNullable(true))
+                        .withField("baselineGranules", Schema.FieldType.INT64)
+                        .withField("targetGranules", Schema.FieldType.INT64)
+                        .withField("interactionPValue", Schema.FieldType.FLOAT64.withNullable(true))
+                        .build()).withNullable(true))
+                .withField("warning", Schema.FieldType.STRING.withNullable(true))
+                .withField("noFinding", Schema.FieldType.BOOLEAN)
+                .build();
+    }
+
+    private static Schema createDrilldownOutputSchema() {
+        final Schema slice = createOutputSchema();
+        final Schema.Builder builder = Schema.builder()
+                .withField("node", Schema.FieldType.STRING)
+                .withField("path", Schema.FieldType.STRING)
+                .withField("nodeEffect", Schema.FieldType.STRING)
+                .withField("nodeRank", Schema.FieldType.INT64)
+                .withField("nodeContribution", Schema.FieldType.FLOAT64)
+                .withField("nodeExplanatoryPower", Schema.FieldType.FLOAT64)
+                .withField("nodeExpression", Schema.FieldType.STRING);
+        for(final Schema.Field field : slice.getFields()) {
+            builder.withField(field.getName(), field.getFieldType());
+        }
+        return builder.build();
     }
 
     private static Schema createOutputSchema() {
