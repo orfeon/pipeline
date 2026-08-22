@@ -76,7 +76,8 @@
           "type": "string",
           "enum": [
             "clientCredentials",
-            "jwtBearer"
+            "jwtBearer",
+            "refreshToken"
           ],
           "default": "clientCredentials"
         },
@@ -95,7 +96,8 @@
         "audience": {
           "type": "string"
         },
-        "refreshBeforeSeconds": {
+        "refreshToken": { "type": "string", "description": "refreshToken grant: long-lived refresh token (use utils.secrets.get)" },
+                "refreshBeforeSeconds": {
           "type": "integer",
           "default": 60
         },

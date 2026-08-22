@@ -124,6 +124,30 @@ public class HttpSinkTest {
                 respond(ex, 500, e.toString());
             }
         }));
+        // refresh-token grant: public client (client_id in form), rotates the refresh token on each call;
+        // the resource rejects access-1 once so the sink refreshes with the rotated refresh token
+        server.createContext("/oauth/refresh", record("refresh", (ex, body) -> {
+            final Map<String, String> form = new HashMap<>();
+            for(final String kv : body.split("&")) {
+                final String[] p = kv.split("=", 2);
+                form.put(java.net.URLDecoder.decode(p[0], StandardCharsets.UTF_8), java.net.URLDecoder.decode(p[1], StandardCharsets.UTF_8));
+            }
+            if(!"refresh_token".equals(form.get("grant_type")) || !"my-client".equals(form.get("client_id"))) {
+                respond(ex, 400, "{\"error\":\"invalid_request\"}");
+                return;
+            }
+            final int n = COUNTERS.computeIfAbsent("refresh", k -> new AtomicInteger()).incrementAndGet();
+            final String expected = n == 1 ? "rt-0" : "rt-" + (n - 1);
+            if(!expected.equals(form.get("refresh_token"))) {
+                respond(ex, 400, "{\"error\":\"invalid_grant\",\"got\":\"" + form.get("refresh_token") + "\"}");
+                return;
+            }
+            respond(ex, 200, "{\"access_token\":\"access-" + n + "\",\"refresh_token\":\"rt-" + n + "\",\"expires_in\":3600}");
+        }));
+        server.createContext("/secure-refresh", record("secure-refresh", (ex, body) -> {
+            final String auth = ex.getRequestHeaders().getFirst("Authorization");
+            respond(ex, auth != null && auth.equals("Bearer access-2") ? 200 : 401, "{}");
+        }));
         server.createContext("/secure-jwt", record("secure-jwt", (ex, body) -> {
             final String auth = ex.getRequestHeaders().getFirst("Authorization");
             respond(ex, "Bearer jwt-token".equals(auth) ? 200 : 401, "{}");
@@ -795,6 +819,38 @@ public class HttpSinkTest {
             sb.append(String.format("%02x", b));
         }
         return sb.toString();
+    }
+
+    @Test
+    public void testOauth2RefreshTokenGrantWithRotation() throws Exception {
+        COUNTERS.remove("refresh");
+        final String configYaml = SOURCE_YAML + """
+                sinks:
+                  - name: http
+                    module: http
+                    inputs: [input]
+                    parameters:
+                      target:
+                        url: %s
+                        auth:
+                          type: oauth2
+                          grant: refreshToken
+                          tokenUrl: %s
+                          clientId: my-client
+                          refreshToken: rt-0
+                """.formatted(url("/secure-refresh"), url("/oauth/refresh"));
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("http");
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            Assertions.assertEquals(Map.of("SUCCEEDED", 2), states(elements));
+            return null;
+        });
+        pipeline.run();
+
+        // access-1 rejected once -> refreshed with the rotated rt-1 -> access-2 accepted for both elements
+        Assertions.assertEquals(2, COUNTERS.get("refresh").get());
+        Assertions.assertEquals(3, received("secure-refresh").size());
+        Assertions.assertTrue(received("refresh").get(1).body().contains("refresh_token=rt-1"));
     }
 
     @Test
