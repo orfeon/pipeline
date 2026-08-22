@@ -71,7 +71,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
-`pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `localH2`.
+`pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
 
 **Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks` `http`.
 Registered as `action.<service>` in all three module registries (thin adapters `ActionSource` /
@@ -111,11 +111,12 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 - `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`.
   - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
     still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
-- `pipeline/outbound/` — shared core for modules that call external HTTP endpoints (`http` source/sink,
-  `action.http`, `tasks` sink; planned: `grpc` sink): `AuthProvider` (basic/bearer/apiKey/oauth2/
+- `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
+  `action.http`, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
   (declarative success/retry/partial-failure classification, Retry-After backoff), `RequestSpec`/`RequestRenderer`
-  (target/body config + template rendering), `SyncCaller` (blocking send-with-retry). Design notes in
+  (target/body config + template rendering), `SyncCaller` (blocking send-with-retry), `GrpcSupport` (descriptor-set linking, dynamic
+  method descriptors, metadata/auth interceptor — shared by the grpc sink and the grpc lookup source). Design notes in
   repo-root `work_http.md` (uncommitted).
 - `coder/` — Beam coders.
 

@@ -25,6 +25,7 @@ Typical use cases:
 | Strict, cluster-wide rate limit of the target / delayed execution / decouple target outages from the pipeline's lifetime | [tasks](tasks.md) sink (the Cloud Tasks queue does it) |
 | Synchronous call, the response matters, no GCP dependency, low latency, bodies over 100KB | **http** sink |
 | Read from an API to add columns to records | [query](../transform/query.md) transform `rest` lookup source |
+| The target is a gRPC service | [grpc](grpc.md) sink (same auth / retry / batch / output conventions) |
 
 The `target` / `body` / `batch` parameters are the same as the tasks sink's: moving between the two is a matter of adding or removing `queue`.
 
