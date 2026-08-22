@@ -62,7 +62,8 @@ public interface AuthProvider {
 
     enum Grant {
         clientCredentials,
-        jwtBearer
+        jwtBearer,
+        refreshToken
     }
 
     /** Headers to add to the request (may be empty). */
@@ -100,6 +101,8 @@ public interface AuthProvider {
         public String scope;        // oauth2 / gcpOauth
         public String audience;     // oauth2 / gcpOidc
         public Integer refreshBeforeSeconds;
+        // oauth2 refreshToken
+        public String refreshToken;
         // oauth2 jwtBearer
         public String issuer;
         public String subject;
@@ -149,6 +152,13 @@ public interface AuthProvider {
                         }
                         if(jwtLifetimeMinutes != null && jwtLifetimeMinutes < 1) {
                             errorMessages.add(prefix + ".jwtLifetimeMinutes must be >= 1");
+                        }
+                    } else if(Grant.refreshToken.equals(grant)) {
+                        if(refreshToken == null) {
+                            errorMessages.add(prefix + ".refreshToken must not be null for oauth2 grant refreshToken");
+                        }
+                        if(clientId == null) {
+                            errorMessages.add(prefix + ".clientId must not be null for oauth2 grant refreshToken");
                         }
                     } else {
                         if(clientId == null) {
@@ -217,7 +227,15 @@ public interface AuthProvider {
                         ? new StaticAuth(Map.of(), Map.of(name, value))
                         : new StaticAuth(Map.of(name, value), Map.of());
             }
-            case oauth2 -> Grant.jwtBearer.equals(parameters.grant)
+            case oauth2 -> Grant.refreshToken.equals(parameters.grant)
+                    ? new OAuth2RefreshToken(
+                            render(parameters.tokenUrl, values),
+                            render(parameters.clientId, values),
+                            render(parameters.clientSecret, values),
+                            render(parameters.refreshToken, values),
+                            render(parameters.scope, values),
+                            parameters.refreshBeforeSeconds)
+                    : Grant.jwtBearer.equals(parameters.grant)
                     ? new OAuth2JwtBearer(
                             render(parameters.tokenUrl, values),
                             render(parameters.issuer, values),
@@ -373,6 +391,59 @@ public interface AuthProvider {
         }
     }
 
+    /**
+     * OAuth2 refresh-token grant (RFC 6749 §6): a long-lived refresh token obtained out of band
+     * (user-delegated APIs) is exchanged for access tokens. Client authentication is HTTP basic
+     * when {@code clientSecret} is set, otherwise {@code client_id} in the form (public clients).
+     * A rotated refresh token in the response replaces the current one for the worker's lifetime.
+     */
+    class OAuth2RefreshToken extends CachedTokenAuth {
+
+        private final String tokenUrl;
+        private final String clientId;
+        private final String clientSecret;
+        private final String scope;
+        private volatile String refreshToken;
+        private transient HttpClient client;
+
+        OAuth2RefreshToken(String tokenUrl, String clientId, String clientSecret, String refreshToken, String scope, int refreshBeforeSeconds) {
+            super(refreshBeforeSeconds);
+            this.tokenUrl = tokenUrl;
+            this.clientId = clientId;
+            this.clientSecret = clientSecret;
+            this.refreshToken = refreshToken;
+            this.scope = scope;
+        }
+
+        @Override
+        protected Cached fetch() throws IOException {
+            if(client == null) {
+                client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+            }
+            final Map<String, String> form = new LinkedHashMap<>();
+            form.put("grant_type", "refresh_token");
+            form.put("refresh_token", refreshToken);
+            if(scope != null) {
+                form.put("scope", scope);
+            }
+            final HttpRequest.Builder request = HttpRequest.newBuilder()
+                    .uri(URI.create(tokenUrl))
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .header("Accept", "application/json");
+            if(clientSecret != null) {
+                request.header("Authorization", "Basic " + Base64.getEncoder().encodeToString((clientId + ":" + clientSecret).getBytes(StandardCharsets.UTF_8)));
+            } else {
+                form.put("client_id", clientId);
+            }
+            final TokenResponse response = postTokenRequestFull(client, request.POST(HttpRequest.BodyPublishers.ofString(formEncode(form))).build(), tokenUrl);
+            if(response.refreshToken() != null && !response.refreshToken().isBlank()) {
+                refreshToken = response.refreshToken();   // rotation
+            }
+            return response.cached();
+        }
+    }
+
     /** OAuth2 JWT bearer grant (RFC 7523): a self-signed RS256 assertion is exchanged for an access token. */
     class OAuth2JwtBearer extends CachedTokenAuth {
 
@@ -427,8 +498,14 @@ public interface AuthProvider {
         }
     }
 
+    record TokenResponse(CachedTokenAuth.Cached cached, String refreshToken) {}
+
     /** Sends a token request and reads access_token / expires_in. */
     static CachedTokenAuth.Cached postTokenRequest(final HttpClient client, final HttpRequest request, final String tokenUrl) throws IOException {
+        return postTokenRequestFull(client, request, tokenUrl).cached();
+    }
+
+    static TokenResponse postTokenRequestFull(final HttpClient client, final HttpRequest request, final String tokenUrl) throws IOException {
         try {
             final HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             if(response.statusCode() / 100 != 2) {
@@ -443,7 +520,8 @@ public interface AuthProvider {
                     ? Instant.now().plusSeconds(json.get("expires_in").getAsLong())
                     : null;
             LOG.info("oauth2 access token acquired from {} (expires at {})", tokenUrl, expiresAt);
-            return new CachedTokenAuth.Cached(token, expiresAt);
+            final String rotated = json.has("refresh_token") && !json.get("refresh_token").isJsonNull() ? json.get("refresh_token").getAsString() : null;
+            return new TokenResponse(new CachedTokenAuth.Cached(token, expiresAt), rotated);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IOException("oauth2 token request interrupted", e);

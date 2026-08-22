@@ -82,7 +82,7 @@ public final class RequestSpec {
         private static List<String> authTexts(final AuthProvider.Parameters auth) {
             return Arrays.asList(auth.username, auth.password, auth.token, auth.name, auth.value,
                     auth.tokenUrl, auth.clientId, auth.clientSecret, auth.scope, auth.audience, auth.serviceAccount,
-                    auth.issuer, auth.subject, auth.privateKey, auth.keyId);
+                    auth.issuer, auth.subject, auth.privateKey, auth.keyId, auth.refreshToken);
         }
 
         public void setDefaults() {

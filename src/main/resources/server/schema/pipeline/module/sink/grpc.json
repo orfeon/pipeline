@@ -79,7 +79,8 @@
           "type": "string",
           "enum": [
             "clientCredentials",
-            "jwtBearer"
+            "jwtBearer",
+            "refreshToken"
           ],
           "default": "clientCredentials"
         },
@@ -101,7 +102,8 @@
           "type": "string",
           "description": "oauth2 audience / gcpOidc audience (default: origin of url)"
         },
-        "refreshBeforeSeconds": {
+        "refreshToken": { "type": "string", "description": "refreshToken grant: long-lived refresh token (use utils.secrets.get)" },
+                "refreshBeforeSeconds": {
           "type": "integer",
           "default": 60
         },
