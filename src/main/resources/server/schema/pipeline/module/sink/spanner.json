@@ -84,6 +84,35 @@
           "type": "boolean",
           "title": "Emulator",
           "default": false
+        },
+        "cdc": {
+          "type": "boolean",
+          "title": "CDC apply mode",
+          "description": "Consume unified change records (cdc transform output) and apply them as upserts/deletes",
+          "default": false
+        },
+        "transactional": {
+          "type": "boolean",
+          "title": "Transactional",
+          "description": "(cdc) Commit the changes of one source transaction atomically; requires a windowing strategy in streaming",
+          "default": false
+        },
+        "onTruncate": {
+          "type": "string",
+          "title": "On TRUNCATE",
+          "enum": ["skip", "fail"],
+          "default": "skip"
+        },
+        "onLate": {
+          "type": "string",
+          "title": "On late records",
+          "enum": ["apply", "fail"],
+          "default": "apply"
+        },
+        "maxMutationsPerCommit": {
+          "type": "integer",
+          "title": "Max mutations per commit",
+          "default": 20000
         }
       },
       "required": ["projectId", "instanceId", "databaseId", "table"]

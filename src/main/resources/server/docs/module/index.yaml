@@ -122,8 +122,8 @@ sinks:
     description: Publishes input data as messages to Google Cloud Pub/Sub topics. Supports JSON, Avro, and Protocol Buffers serialization formats. Includes dynamic topic routing via FreeMarker templates, custom message attributes with template expressions, message ID and ordering key control, batch size tuning, and passthrough of PubsubMessage inputs.
     tags: [sink, pubsub, batch, streaming, gcp, messaging]
   - title: spanner
-    description: Writes input data to Google Cloud Spanner tables using mutations. Supports INSERT, UPDATE, INSERT_OR_UPDATE, REPLACE, and DELETE operations. Includes commit timestamp injection, batch tuning parameters, RPC priority control, max commit delay, failure handling with dead-letter output, and emulator support.
-    tags: [sink, spanner, batch, streaming, gcp, sql]
+    description: Writes input data to Google Cloud Spanner tables using mutations. Supports INSERT, UPDATE, INSERT_OR_UPDATE, REPLACE, and DELETE operations. Includes commit timestamp injection, batch tuning parameters, RPC priority control, max commit delay, failure handling with dead-letter output, and emulator support. A cdc mode applies unified change records (cdc transform output) as upserts/deletes, optionally committing each source transaction atomically (transactional, grouped by transaction id within the input window).
+    tags: [sink, spanner, batch, streaming, gcp, sql, cdc, replication]
   - title: storage
     description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
     tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
