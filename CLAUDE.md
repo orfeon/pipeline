@@ -68,7 +68,7 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
 
 **Transforms** (`module/transform/`): `select` `aggregation` `beamsql` `query` `partition`
-`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract`.
+`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
 `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
@@ -111,6 +111,11 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 - `domain/` — domain logic: `sql/` (BeamSQL + Calcite), `ml/onnx/`, `text/` (tokenizer/analyzer/template), `db/`, `math/`.
   - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
     still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
+- `pipeline/feature/` — the `feature` transform: `FeaturePlanCompiler` (pure compile layer: sources
+  contract, availability-time algebra, DAG expansion, leak checks, `describe()` = validate --expand) and
+  `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &
+  population). Spec in repo-root `work-feature.md`, engine design in `work-feature-engine-beam.md`
+  (uncommitted working docs). Keep examples/tests domain-neutral.
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
   `action.http`, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`

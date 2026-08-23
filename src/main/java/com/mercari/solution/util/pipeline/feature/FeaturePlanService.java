@@ -1,0 +1,146 @@
+package com.mercari.solution.util.pipeline.feature;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.mercari.solution.config.Config;
+import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.TemplateUtil;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Entry point shared by the {@code feature} transform, the REST API and the MCP / agent tools:
+ * resolves the {@code sources} / {@code features} documents referenced from a parameters block (inline
+ * object, URI, local path or {@code data:} text) and compiles the plan ({@code validate --expand}).
+ */
+public final class FeaturePlanService {
+
+    private FeaturePlanService() {}
+
+    /** Resolved documents of one feature step: the sources contract and the parameters with inline features. */
+    public record Documents(JsonElement sources, JsonObject parameters) {}
+
+    /**
+     * Resolves document references inside {@code parameters}. The returned parameters object is a copy with
+     * {@code features} inlined; {@code sources} is returned separately (null when absent).
+     */
+    public static Documents resolve(final JsonObject parameters, final Map<String, String> templateArgs) {
+        final JsonObject copy = parameters.deepCopy();
+        final JsonElement sources = loadDocument(copy, "sources", templateArgs);
+        final JsonElement features = loadDocument(copy, "features", templateArgs);
+        if (features != null && features.isJsonArray()) {
+            copy.add("features", features);
+        }
+        return new Documents(sources, copy);
+    }
+
+    /**
+     * Compiles a feature step from its parameters block.
+     *
+     * @param inputSchema input relation schema when known (null skips the lineage ↔ schema cross-check)
+     */
+    public static FeaturePlan compile(final JsonObject parameters, final Map<String, String> templateArgs, final Schema inputSchema) {
+        final Documents documents = resolve(parameters, templateArgs);
+        return FeaturePlanCompiler.compile(documents.sources(), documents.parameters(),
+                inputSchema == null ? null : inputSchema.getFields());
+    }
+
+    /**
+     * Request shape of the validate / expand API:
+     * {@code {parameters: {...}, inputSchema: {fields: [...]} | [fields], args: {k: v}}} or a whole
+     * pipeline config with a {@code transforms[].module == feature} step selected by {@code name}.
+     */
+    public static JsonObject validate(final JsonObject request) {
+        JsonObject parameters = null;
+        if (request.has("parameters") && request.get("parameters").isJsonObject()) {
+            parameters = request.getAsJsonObject("parameters");
+        } else if (request.has("transforms") && request.get("transforms").isJsonArray()) {
+            final String name = request.has("name") && request.get("name").isJsonPrimitive() ? request.get("name").getAsString() : null;
+            for (final JsonElement e : request.getAsJsonArray("transforms")) {
+                if (!e.isJsonObject()) continue;
+                final JsonObject step = e.getAsJsonObject();
+                final boolean isFeature = step.has("module") && "feature".equals(step.get("module").getAsString());
+                final boolean matches = name == null || (step.has("name") && name.equals(step.get("name").getAsString()));
+                if (isFeature && matches && step.has("parameters")) {
+                    parameters = step.getAsJsonObject("parameters");
+                    break;
+                }
+            }
+        }
+        final JsonObject response = new JsonObject();
+        if (parameters == null) {
+            response.addProperty("ok", false);
+            response.addProperty("error", "request requires 'parameters' (a feature step's parameters block) or a config with a feature transform");
+            return response;
+        }
+        final Map<String, String> args = new java.util.HashMap<>();
+        if (request.has("args") && request.get("args").isJsonObject()) {
+            for (final Map.Entry<String, JsonElement> e : request.getAsJsonObject("args").entrySet()) {
+                args.put(e.getKey(), e.getValue().isJsonPrimitive() ? e.getValue().getAsString() : e.getValue().toString());
+            }
+        }
+        final Schema inputSchema = parseInputSchema(request.get("inputSchema"));
+        try {
+            final FeaturePlan plan = compile(parameters, args, inputSchema);
+            final boolean streaming = request.has("streaming") && request.get("streaming").isJsonPrimitive() && request.get("streaming").getAsBoolean();
+            final List<String> engine = FeatureStages.engineConstraints(plan, streaming);
+            response.addProperty("ok", !plan.getDiagnostics().hasErrors() && engine.isEmpty());
+            response.add("plan", plan.toJson());
+            final JsonArray engineErrors = new JsonArray();
+            engine.forEach(engineErrors::add);
+            response.add("engineErrors", engineErrors);
+            response.addProperty("describe", plan.describe() + (engine.isEmpty() ? "" : "-- engine\n  " + String.join("\n  ", engine) + "\n"));
+        } catch (final RuntimeException e) {
+            response.addProperty("ok", false);
+            response.addProperty("error", e.getMessage() == null ? e.toString() : e.getMessage());
+        }
+        return response;
+    }
+
+    private static Schema parseInputSchema(final JsonElement element) {
+        if (element == null || element.isJsonNull()) return null;
+        final JsonArray fields;
+        if (element.isJsonArray()) {
+            fields = element.getAsJsonArray();
+        } else if (element.isJsonObject() && element.getAsJsonObject().has("fields")) {
+            fields = element.getAsJsonObject().getAsJsonArray("fields");
+        } else {
+            return null;
+        }
+        final List<Schema.Field> list = new ArrayList<>();
+        for (final JsonElement f : fields) {
+            if (!f.isJsonObject()) continue;
+            final Schema.Field field = Schema.Field.parse(f.getAsJsonObject());
+            if (field != null) list.add(field);
+        }
+        return Schema.of(list);
+    }
+
+    private static JsonElement loadDocument(final JsonObject parameters, final String key, final Map<String, String> templateArgs) {
+        if (!parameters.has(key) || parameters.get(key).isJsonNull()) {
+            return null;
+        }
+        final JsonElement element = parameters.get(key);
+        if (!element.isJsonPrimitive()) {
+            return element;
+        }
+        final String reference = element.getAsString();
+        final String raw;
+        try {
+            raw = Config.readContent(reference);
+        } catch (final IOException e) {
+            throw new IllegalArgumentException("failed to read parameters." + key + ": " + reference, e);
+        }
+        final String text = templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs);
+        final JsonObject document = Config.convertConfigJson(text, Config.Format.unknown);
+        if ("features".equals(key) && document.has("features")) {
+            return document.get("features");
+        }
+        return document;
+    }
+
+}

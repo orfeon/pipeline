@@ -1,0 +1,581 @@
+package com.mercari.solution.util.pipeline.feature;
+
+import com.google.gson.JsonObject;
+import com.mercari.solution.config.Config;
+import com.mercari.solution.module.Schema;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.util.List;
+
+public class FeaturePlanCompilerTest {
+
+    private static final String SOURCES = """
+            version: 1
+            sources:
+              - name: listings
+                eventTime: session_time
+                availability: atEventTime
+                mutability: appendOnly
+                keys: [session_id, seller_id]
+                fields:
+                  - {name: session_id, type: string}
+                  - {name: seller_id, type: string}
+                  - {name: category, type: string}
+                  - {name: quantity, type: int}
+                  - {name: start_price, type: double, kind: attribute}
+                  - {name: condition_grade, type: string}
+              - name: price_snapshots
+                eventTime: session_time
+                ingestionLag: PT1M
+                keys: [session_id, seller_id]
+                fields:
+                  - {name: current_bid_t10, type: double, availableAt: "event_time - PT10M", observedAtField: snapshot_time, kind: market, validFor: PT15M}
+                  - {name: snapshot_time, type: timestamp, availableAt: "event_time - PT10M", observedAtField: snapshot_time}
+              - name: auction_results
+                eventTime: session_time
+                availability: atEventTime
+                settlementLag: PT30M
+                ingestionLag: P6D
+                mutability: corrections
+                keys: [session_id, seller_id]
+                fields:
+                  - {name: sold, type: int, availableAt: after(event), kind: outcome}
+                  - {name: final_price, type: double, availableAt: after(event), kind: outcome}
+            """;
+
+    private static final String SPEC = """
+            lineage:
+              - {fields: [session_id, seller_id, category, quantity, start_price, condition_grade], from: listings}
+              - {fields: [current_bid_t10], from: price_snapshots}
+              - {fields: [sold, final_price], from: auction_results}
+            time: {field: session_time, orderTieBreak: [session_id]}
+            predictAt: "event_time - PT8M"
+            entities:
+              - {name: seller, keys: [seller_id]}
+              - {name: cat, keys: [category]}
+            contexts:
+              - {name: session, keys: [session_id]}
+            baselines:
+              - {name: market, context: session, expr: "share(1 / current_bid_t10)"}
+            features:
+              - name: price_per_unit
+                scope: row
+                expr: "start_price / quantity"
+              - name: time_parts
+                scope: row
+                type: datetime
+                input: session_time
+                derive: [month, dayOfWeek]
+                cyclical: true
+              - name: relative
+                scope: context
+                context: session
+                inputs: [start_price, current_bid_t10]
+                ops: [rank, zscore]
+              - name: composition
+                scope: context
+                context: session
+                ops:
+                  - {type: countByValue, fields: [condition_grade]}
+                  - {type: entropy, fields: [condition_grade]}
+              - name: recent
+                scope: sequence
+                entity: seller
+                windows:
+                  - {maxEvents: 5}
+                  - {maxAge: P365D}
+                ops:
+                  - {type: lag, fields: [sold, start_price], k: 2}
+                  - {type: ewma, expr: "sold >= 1", halflife: [5]}
+                  - {type: aggregate, field: sold, funcs: [count, mean]}
+              - name: vs_market
+                scope: row
+                type: residual
+                input: price_per_unit
+                baseline: market
+                on: identity
+              - name: enc
+                scope: population
+                type: encoding
+                keySets:
+                  - keys: [seller_id]
+                  - keys: [category]
+                    windows: [{maxAge: P365D}]
+                targets:
+                  - {stats: [count, share]}
+                  - {expr: "sold >= 1", stats: [mean]}
+                maxFeatures: 50
+            output:
+              prefix: f_
+            """;
+
+    private static FeaturePlan compile(final String sources, final String spec) {
+        final JsonObject sourcesJson = Config.convertConfigJson(sources, Config.Format.yaml);
+        final JsonObject specJson = Config.convertConfigJson(spec, Config.Format.yaml);
+        return FeaturePlanCompiler.compile(sourcesJson, specJson, null);
+    }
+
+    private static OutputColumn column(final FeaturePlan plan, final String canonical) {
+        final OutputColumn c = plan.getColumn(canonical);
+        Assertions.assertNotNull(c, () -> "missing column " + canonical + "\n" + plan.describe());
+        return c;
+    }
+
+    private static boolean hasCode(final FeaturePlan plan, final String code) {
+        return plan.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals(code));
+    }
+
+    @Test
+    public void testCompileHappyPath() {
+        final FeaturePlan plan = compile(SOURCES, SPEC);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        // row: expression over pre-event attributes is statically safe
+        final OutputColumn ratio = column(plan, "price_per_unit");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, ratio.getStatus());
+        Assertions.assertEquals("f_price_per_unit", ratio.getOutputName());
+        Assertions.assertEquals(List.of("start_price", "quantity"), List.copyOf(ratio.getInputs()));
+
+        // row datetime cyclical → sin/cos
+        column(plan, "time_parts_month_sin");
+        column(plan, "time_parts_dayOfWeek_cos");
+
+        // context: inputs × ops sugar, market lineage propagates
+        final OutputColumn bidRank = column(plan, "relative_current_bid_t10_rank");
+        Assertions.assertEquals(Schema.Type.int64, bidRank.getFieldType().getType());
+        Assertions.assertTrue(bidRank.getDerivedFrom().contains("market"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, bidRank.getStatus());
+        Assertions.assertEquals(OutputColumn.Placement.child, bidRank.getPlacement());
+        final OutputColumn entropy = column(plan, "composition_condition_grade_entropy");
+        Assertions.assertEquals(OutputColumn.Placement.child, entropy.getPlacement()); // no output.groupBy
+
+        // sequence: lag of an outcome field needs the near edge shifted by settlementLag + ingestionLag + predict offset
+        final OutputColumn lagRank = column(plan, "recent_n5_sold_lag1");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, lagRank.getStatus());
+        Assertions.assertEquals(Duration.ofDays(6).plusMinutes(38), lagRank.getWindowShift());
+        Assertions.assertTrue(lagRank.getDerivedFrom().contains("outcome"));
+        Assertions.assertEquals(Schema.Type.int32, lagRank.getFieldType().getType());
+        column(plan, "recent_365d_sold_lag2");
+
+        // sequence: lag of a pre-event attribute is safe without a shift
+        final OutputColumn lagPrice = column(plan, "recent_n5_start_price_lag1");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, lagPrice.getStatus());
+
+        // desugared expression → anonymous intermediate row column consumed by ewma
+        final OutputColumn ewma = column(plan, "recent_n5_recent__e1_ewma5");
+        final OutputColumn anonymous = column(plan, "recent__e1");
+        Assertions.assertTrue(anonymous.isIntermediate());
+        Assertions.assertTrue(anonymous.isAnonymous());
+        Assertions.assertTrue(ewma.getInputs().contains("recent__e1"));
+
+        // mean over an outcome field → hint to use encoding
+        Assertions.assertTrue(hasCode(plan, "sequence.aggregate.encoding"), plan::describe);
+
+        // baseline is intermediate and the residual consumes it
+        final OutputColumn baseline = column(plan, "__baseline_market");
+        Assertions.assertTrue(baseline.isIntermediate());
+        final OutputColumn residual = column(plan, "vs_market");
+        Assertions.assertTrue(residual.getInputs().contains("__baseline_market"));
+        Assertions.assertTrue(residual.getDerivedFrom().contains("market"));
+
+        // encoding: keySet × window × target × stat
+        column(plan, "enc__seller_id__count");
+        column(plan, "enc__seller_id__share");
+        final OutputColumn encMean = column(plan, "enc__category__365d__e2__mean");
+        Assertions.assertTrue(encMean.isFitted());
+        Assertions.assertEquals(OutputColumn.Status.windowShift, encMean.getStatus());
+        Assertions.assertEquals("expanding", encMean.getCoordinates().get("fit"));
+
+        // schema carries lineage options
+        final Schema.Field field = plan.getOutputSchema().getFields().stream()
+                .filter(f -> f.getName().equals("f_recent_n5_sold_lag1")).findFirst().orElseThrow();
+        Assertions.assertEquals("windowShift", field.getOptions().get("feature.status"));
+        Assertions.assertEquals("outcome", field.getOptions().get("feature.derivedFrom"));
+
+        // share = n_key / n_global: the global level is a hidden population stage shared by the block
+        final OutputColumn share = column(plan, "enc__seller_id__share");
+        Assertions.assertEquals("share", share.getOperator());
+        Assertions.assertEquals(FeatureSpec.Scope.row, share.getScope());
+        Assertions.assertTrue(column(plan, "enc__global__n").isIntermediate());
+        Assertions.assertTrue(share.getInputs().contains("enc__global__n"));
+
+        // stages: context(session) → sequence(seller_id) → global level → encoding(seller_id) → encoding(category)
+        Assertions.assertEquals(5, plan.getStages().size(), plan::describe);
+        Assertions.assertEquals(5, plan.getShuffleCount(), plan::describe);
+        Assertions.assertEquals(FeaturePlan.StageKind.context, plan.getStages().get(0).kind());
+        Assertions.assertEquals(List.of("seller_id"), plan.getStages().get(1).keys());
+        Assertions.assertEquals(List.of(), plan.getStages().get(2).keys());
+        Assertions.assertEquals(16, plan.getHash().length());
+    }
+
+    @Test
+    public void testOutcomeInFinalOutputIsViolation() {
+        final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"final_price / start_price\"");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertTrue(hasCode(plan, "availability.violation"), plan::describe);
+    }
+
+    @Test
+    public void testConsumedOutcomeBecomesIntermediate() {
+        final String spec = SPEC
+                .replace("expr: \"start_price / quantity\"", "expr: \"final_price / start_price\"")
+                .replace("fields: [sold, start_price], k: 2", "fields: [sold, start_price, price_per_unit], k: 2")
+                .replace("input: price_per_unit", "input: start_price");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn ratio = column(plan, "price_per_unit");
+        Assertions.assertTrue(ratio.isIntermediate());
+        Assertions.assertEquals("_f_price_per_unit", ratio.getOutputName());
+        final OutputColumn lag = column(plan, "recent_n5_price_per_unit_lag1");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, lag.getStatus());
+        Assertions.assertFalse(lag.isIntermediate());
+    }
+
+    @Test
+    public void testDeclaredMarketIsErrorUnlessJustified() {
+        final String declared = SOURCES.replace(
+                "observedAtField: snapshot_time, kind: market, validFor: PT15M",
+                "evidence: declared, kind: market");
+        final FeaturePlan plan = compile(declared, SPEC);
+        Assertions.assertTrue(hasCode(plan, "sources.fields.declaredMarket"), plan::describe);
+        Assertions.assertTrue(plan.getDiagnostics().hasErrors());
+
+        final String allowedNoJustification = SOURCES.replace(
+                "observedAtField: snapshot_time, kind: market, validFor: PT15M",
+                "evidence: declared, kind: market, allowDeclared: true");
+        Assertions.assertTrue(hasCode(compile(allowedNoJustification, SPEC), "sources.fields.allowDeclared"));
+
+        final String allowed = SOURCES.replace(
+                "observedAtField: snapshot_time, kind: market, validFor: PT15M",
+                "evidence: declared, kind: market, allowDeclared: true, justification: \"feed spec §3\"");
+        final FeaturePlan ok = compile(allowed, SPEC);
+        Assertions.assertFalse(ok.getDiagnostics().hasErrors(), ok::describe);
+        Assertions.assertTrue(hasCode(ok, "evidence.declared"));
+        Assertions.assertTrue(column(ok, "relative_current_bid_t10_rank").isDeclaredEvidence());
+    }
+
+    @Test
+    public void testPreEventClaimRequiresObservedAtField() {
+        final String sources = SOURCES.replace(
+                "availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market, validFor: PT15M",
+                "availableAt: \"event_time - PT10M\", kind: market");
+        Assertions.assertTrue(hasCode(compile(sources, SPEC), "sources.fields.observedAtField"));
+    }
+
+    @Test
+    public void testUnresolvedReferenceAndCycle() {
+        final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / nosuchfield\"");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "reference.unresolved"));
+
+        final String cyclic = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / vs_market\"");
+        final FeaturePlan plan = compile(SOURCES, cyclic);
+        Assertions.assertTrue(hasCode(plan, "reference.unresolved"), plan::describe);
+    }
+
+    @Test
+    public void testSelfInOpExpressionIsRejected() {
+        final String spec = SPEC.replace("expr: \"sold >= 1\", halflife: [5]", "expr: \"start_price - $self.start_price\", halflife: [5]");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "sequence.self"));
+    }
+
+    @Test
+    public void testWindowFilterWithSelfIsAllowed() {
+        final String spec = SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, filter: \"condition_grade = $self.condition_grade\"}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn lag = column(plan, "recent_n5_start_price_lag1");
+        Assertions.assertTrue(lag.getInputs().contains("condition_grade"));
+        Assertions.assertEquals("condition_grade = $self.condition_grade", lag.getCoordinates().get("filter"));
+    }
+
+    @Test
+    public void testContextRowSetDriftWarning() {
+        final String corrections = SOURCES.replace("mutability: appendOnly", "mutability: corrections");
+        Assertions.assertTrue(hasCode(compile(corrections, SPEC), "context.rowSetDrift"));
+
+        final String snapshot = corrections.replace("mutability: corrections\n    keys: [session_id, seller_id]\n    fields:\n      - {name: session_id",
+                "mutability: corrections\n    snapshotOf: {source: listings_snapshot, at: \"event_time - PT6H\"}\n    keys: [session_id, seller_id]\n    fields:\n      - {name: session_id");
+        final FeaturePlan plan = compile(snapshot, SPEC);
+        Assertions.assertFalse(hasCode(plan, "context.rowSetDrift"), plan::describe);
+        Assertions.assertEquals(SourceContract.TrainingPath.snapshotBackfill, plan.getSources().get("listings").getTrainingPath());
+        Assertions.assertEquals(SourceContract.TrainingPath.logAndWait, plan.getSources().get("auction_results").getTrainingPath());
+    }
+
+    @Test
+    public void testIngestionLagRelativeToAvailableAt() {
+        final FeaturePlan plan = compile(SOURCES, SPEC);
+        final SourceContract.FieldContract bid = plan.getInputFields().get("current_bid_t10");
+        Assertions.assertEquals(Duration.ofMinutes(-9), bid.getEffectiveAvailableAt().getOffset());
+        final SourceContract.FieldContract rank = plan.getInputFields().get("sold");
+        Assertions.assertEquals(Duration.ofDays(6).plusMinutes(30), rank.getEffectiveAvailableAt().getOffset());
+    }
+
+    @Test
+    public void testExcludeByLineageSelector() {
+        final String spec = SPEC.replace("prefix: f_", "prefix: f_\n  exclude: [\"derivedFrom:market\", \"composition.*\"]");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(column(plan, "relative_current_bid_t10_rank").isIntermediate());
+        Assertions.assertTrue(column(plan, "vs_market").isIntermediate());
+        Assertions.assertTrue(column(plan, "composition_condition_grade_entropy").isIntermediate());
+        Assertions.assertFalse(column(plan, "relative_start_price_rank").isIntermediate());
+    }
+
+    @Test
+    public void testGroupByPlacementAndIndicator() {
+        final String spec = SPEC.replace("prefix: f_", "prefix: f_\n  groupBy: session\n  nullPolicy: indicator");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(OutputColumn.Placement.parent, column(plan, "composition_condition_grade_entropy").getPlacement());
+        Assertions.assertEquals(OutputColumn.Placement.child, column(plan, "relative_start_price_rank").getPlacement());
+        Assertions.assertEquals("f_recent_n5_start_price_lag1_isnull", column(plan, "recent_n5_start_price_lag1_isnull").getOutputName());
+        Assertions.assertEquals(FeaturePlan.StageKind.groupBy, plan.getStages().get(plan.getStages().size() - 1).kind());
+    }
+
+    @Test
+    public void testHashIsOrderIndependent() {
+        final String reordered = SPEC.replace("predictAt: \"event_time - PT8M\"\n", "")
+                .replace("lineage:", "predictAt: \"event_time - PT8M\"\nlineage:");
+        Assertions.assertEquals(compile(SOURCES, SPEC).getHash(), compile(SOURCES, reordered).getHash());
+        Assertions.assertNotEquals(compile(SOURCES, SPEC).getHash(), compile(SOURCES, SPEC.replace("PT8M", "PT5M")).getHash());
+    }
+
+    @Test
+    public void testUnsupportedPopulationTypeAndFitMode() {
+        final String svd = SPEC.replace("type: encoding", "type: svd");
+        Assertions.assertTrue(hasCode(compile(SOURCES, svd), "population.unsupported"));
+        final String fold = SPEC.replace("output:\n  prefix: f_", "fit: {mode: fold}\noutput:\n  prefix: f_");
+        Assertions.assertTrue(hasCode(compile(SOURCES, fold), "fit.mode.unsupported"));
+    }
+
+    @Test
+    public void testOffsetRequiresPredictAtComputeAt() {
+        final String spec = SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    computeAt: \"event_time - PT1H\"");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertTrue(hasCode(plan, "encoding.offset.computeAt"), plan::describe);
+        final String ok = SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market");
+        final FeaturePlan okPlan = compile(SOURCES, ok);
+        Assertions.assertFalse(okPlan.getDiagnostics().hasErrors(), okPlan::describe);
+        Assertions.assertEquals("market", column(okPlan, "enc__seller_id__count").getCoordinates().get("offset"));
+    }
+
+    private static final String LATTICE_ENC = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                        hierarchy: [[category], []]
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {priorWeight: 2, scale: identity, output: [composed, deviations, effectiveN]}
+            """;
+
+    private static String withEncoding(final String encodingBlock) {
+        final int start = SPEC.indexOf("  - name: enc\n");
+        final int end = SPEC.indexOf("output:\n");
+        return SPEC.substring(0, start) + encodingBlock.replaceAll("(?m)^    ", "") + SPEC.substring(end);
+    }
+
+    @Test
+    public void testShrinkageLatticeExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(LATTICE_ENC));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        // hidden sufficient statistics per level (leaf, parent, global), composed in a row column
+        for (final String hidden : List.of("enc__seller_id__e1__n", "enc__seller_id__e1__sum", "enc__category__e1__n", "enc__global__e1__n", "enc__global__e1__sum")) {
+            final OutputColumn c = column(plan, hidden);
+            Assertions.assertTrue(c.isIntermediate(), hidden);
+            Assertions.assertEquals(FeatureSpec.Scope.population, c.getScope());
+            Assertions.assertEquals(OutputColumn.Status.windowShift, c.getStatus());
+        }
+        final OutputColumn composed = column(plan, "enc__seller_id__e1__mean");
+        Assertions.assertEquals("compose", composed.getOperator());
+        Assertions.assertEquals(FeatureSpec.Scope.row, composed.getScope());
+        Assertions.assertFalse(composed.isIntermediate());
+        Assertions.assertEquals("2.0", composed.getCoordinates().get("priorWeight"));
+        Assertions.assertEquals("backoff", composed.getCoordinates().get("estimator"));
+        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("global"));
+        Assertions.assertTrue(composed.getInputs().contains("enc__category__e1__sum"));
+        Assertions.assertTrue(composed.getDerivedFrom().contains("outcome"));
+        Assertions.assertEquals("0", column(plan, "enc__seller_id__e1__dev0").getCoordinates().get("level"));
+        Assertions.assertEquals("category", column(plan, "enc__seller_id__e1__dev1").getCoordinates().get("levelKeys"));
+        column(plan, "enc__seller_id__e1__mean__neff");
+
+        // stages: ... → global level → seller_id level → category level (+ fused compose rows)
+        final List<FeaturePlan.Stage> stages = plan.getStages();
+        final FeaturePlan.Stage last = stages.get(stages.size() - 1);
+        Assertions.assertEquals(List.of("category"), last.keys());
+        Assertions.assertTrue(last.columnNames().contains("enc__seller_id__e1__mean"));
+        Assertions.assertEquals(List.of(), stages.get(stages.size() - 3).keys());
+    }
+
+    @Test
+    public void testAdditiveLatticeValidation() {
+        final String cross = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id, category]
+                        structure: cross
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {scale: logit}
+            """;
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(cross)), "encoding.hierarchy.additive"));
+
+        final String withMains = cross.replace("          - keys: [seller_id, category]", "          - {keys: [seller_id]}\n          - {keys: [category]}\n          - keys: [seller_id, category]");
+        final FeaturePlan ok = compile(SOURCES, withEncoding(withMains));
+        Assertions.assertFalse(ok.getDiagnostics().hasErrors(), ok::describe);
+        final OutputColumn cell = column(ok, "enc__seller_id_category__e1__mean");
+        Assertions.assertEquals("sequential", cell.getCoordinates().get("estimator"));
+        Assertions.assertTrue(cell.getCoordinates().get("levels").contains("additive("));
+        Assertions.assertEquals("logit", cell.getCoordinates().get("scale"));
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(withMains.replace("shrinkage: {scale: logit}", "shrinkage: {priorWeight: 5}"))), "encoding.hierarchy.scale"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(withMains.replace("shrinkage: {scale: logit}", "shrinkage: {scale: logit, estimator: backoff}"))), "encoding.shrinkage.estimator"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(withMains.replace("shrinkage: {scale: logit}", "shrinkage: {scale: logit, estimator: joint}"))), "encoding.shrinkage.estimator"));
+        final FeaturePlan vc = compile(SOURCES, withEncoding(withMains.replace("shrinkage: {scale: logit}", "shrinkage: {scale: logit, weights: varianceComponents}")));
+        Assertions.assertFalse(vc.getDiagnostics().hasErrors(), vc::describe);
+        Assertions.assertEquals("varianceComponents", column(vc, "enc__seller_id_category__e1__mean").getCoordinates().get("weights"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(withMains.replace("shrinkage: {scale: logit}", "shrinkage: {scale: logit, weights: heldOut}"))), "encoding.shrinkage.weights"));
+    }
+
+    @Test
+    public void testLegacySmoothingIsShrinkageSugar() {
+        final String legacy = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    smoothing: {type: bayesian, priorWeight: 10}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(legacy));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn composed = column(plan, "enc__seller_id__e1__mean");
+        Assertions.assertEquals("compose", composed.getOperator());
+        Assertions.assertEquals("10.0", composed.getCoordinates().get("priorWeight"));
+        Assertions.assertEquals("seller_id,enc__seller_id__e1__n,enc__seller_id__e1__sum;global,enc__global__e1__n,enc__global__e1__sum",
+                composed.getCoordinates().get("levels"));
+    }
+
+    @Test
+    public void testMaxFeaturesGuard() {
+        final String spec = SPEC.replace("maxFeatures: 50", "maxFeatures: 2");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "encoding.maxFeatures"));
+    }
+
+    @Test
+    public void testStaticFitExpansion() {
+        final String block = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: static, artifact: {uri: "gs://bucket/features", refit: true}}
+                    keySets:
+                      - keys: [seller_id]
+                        windows: [{maxAge: P365D}]
+                    targets:
+                      - {stats: [count]}
+                      - {expr: "sold >= 1", stats: [mean, std]}
+                    shrinkage: {priorWeight: 5}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(block));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.static"));
+        Assertions.assertTrue(hasCode(plan, "fit.mode.static.windows"));
+
+        // hidden fitted statistics (windows ignored in static mode) incl. Σy², applied by a fit stage
+        for (final String hidden : List.of("enc__seller_id__e2__n", "enc__seller_id__e2__sum", "enc__seller_id__e2__sumsq", "enc__global__e2__n")) {
+            final OutputColumn c = column(plan, hidden);
+            Assertions.assertTrue(c.isIntermediate(), hidden);
+            Assertions.assertEquals("static", c.getCoordinates().get("fit"));
+            Assertions.assertEquals("gs://bucket/features", c.getCoordinates().get("artifactUri"));
+            Assertions.assertEquals("true", c.getCoordinates().get("refit"));
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+        }
+        Assertions.assertEquals("fitStat", column(plan, "enc__seller_id__count").getOperator());
+        Assertions.assertEquals("fitStat", column(plan, "enc__seller_id__e2__std").getOperator());
+        Assertions.assertEquals("compose", column(plan, "enc__seller_id__e2__mean").getOperator());
+        Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() == FeaturePlan.StageKind.fit), plan::describe);
+        Assertions.assertTrue(plan.getStages().stream().noneMatch(s -> s.kind() == FeaturePlan.StageKind.population), plan::describe);
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("mean, std", "distribution"))), "encoding.stat.static"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("mode: static", "mode: fold"))), "fit.mode.unsupported"));
+    }
+
+    private static final String FM_BLOCK = """
+                  - name: fm
+                    scope: population
+                    type: factorization
+                    variant: fwfm
+                    fields: [seller_id, category, condition_grade]
+                    latentDim: 4
+                    task: {expr: "sold >= 1", offset: market}
+                    fit: {artifact: "gs://bucket/features", window: "trailing(P3Y)"}
+                    outputs:
+                      - {pair: [seller_id, category], as: fm_seller_category}
+                      - {embedding: category, as: cat_emb, dims: 2}
+                      - {sum: true, as: fm_linear}
+            """;
+
+    @Test
+    public void testFactorizationExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(FM_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "factorization.fit.window"));
+        for (final String name : List.of("fm_seller_category", "cat_emb_0", "cat_emb_1", "fm_linear")) {
+            final OutputColumn c = column(plan, name);
+            Assertions.assertEquals("fm", c.getOperator(), name);
+            Assertions.assertEquals("static", c.getCoordinates().get("fit"));
+            Assertions.assertEquals("fwfm", c.getCoordinates().get("variant"));
+            Assertions.assertEquals("seller_id,category,condition_grade", c.getCoordinates().get("fields"));
+            Assertions.assertEquals("gs://bucket/features", c.getCoordinates().get("artifactUri"));
+            Assertions.assertTrue(c.getDerivedFrom().contains("outcome"), name);
+            Assertions.assertTrue(c.getDerivedFrom().contains("market"), name);
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+            Assertions.assertFalse(c.isIntermediate());
+        }
+        Assertions.assertNull(plan.getColumn("cat_emb_2"));
+        Assertions.assertEquals("1", column(plan, "cat_emb_1").getCoordinates().get("dim"));
+        Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() == FeaturePlan.StageKind.fit), plan::describe);
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("variant: fwfm", "variant: bayesian"))), "factorization.variant"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fit: {artifact", "fit: {mode: expanding, artifact"))), "factorization.fit.mode"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("pair: [seller_id, category]", "pair: [seller_id, quantity]"))), "factorization.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id, category, condition_grade]", "fields: [seller_id, start_price]"))), "factorization.fields"));
+    }
+
+    @Test
+    public void testLambdaFromMoments() {
+        // keys A: [1,1,1,0], B: [0,0,0,1] → σ² = 0.25, τ² = 0.0625 → λ = 4
+        Assertions.assertEquals(4.0, Shrinkage.lambdaFromMoments(2, 8, 4, 4, 2.5, 32), 1e-9);
+        // identical key means → τ² ≤ 0 → full shrinkage
+        Assertions.assertTrue(Double.isInfinite(Shrinkage.lambdaFromMoments(2, 4, 2, 2, 1.0, 8)));
+        // no within-key variance → λ = 0 (no shrinkage)
+        Assertions.assertEquals(0.0, Shrinkage.lambdaFromMoments(2, 6, 3, 3, 3.0, 18), 1e-9);
+        // a single key cannot be estimated
+        Assertions.assertNull(Shrinkage.lambdaFromMoments(1, 6, 3, 3, 1.5, 36));
+    }
+
+    @Test
+    public void testAvailableAtAlgebra() {
+        final AvailableAt a = AvailableAt.parse("event_time - PT10M", null);
+        final AvailableAt b = AvailableAt.parse("after(event)", Duration.ofMinutes(30));
+        Assertions.assertEquals(Duration.ofMinutes(30), AvailableAt.max(a, b).getOffset());
+        Assertions.assertTrue(a.isStaticallyAtOrBefore(b));
+        final AvailableAt dynamic = AvailableAt.parse("atRowCreation", null);
+        Assertions.assertFalse(AvailableAt.max(a, dynamic).isStatic());
+        Assertions.assertTrue(AvailableAt.max(b, dynamic).isProvablyAfter(a));
+        Assertions.assertEquals(Duration.ofDays(730), Durations.parse("P2Y"));
+        Assertions.assertEquals("365d", Durations.shortName(Durations.parse("P365D")));
+        Assertions.assertEquals("10m", Durations.shortName(Durations.parse("PT10M")));
+    }
+
+}
