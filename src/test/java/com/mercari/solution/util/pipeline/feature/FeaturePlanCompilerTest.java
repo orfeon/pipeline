@@ -553,6 +553,57 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testPredictAtLiteralEventTime() {
+        // predictAt: "event_time" is the literal event time (offset 0), not the pre-event keyword
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("predictAt: \"event_time - PT8M\"", "predictAt: \"event_time\""));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn lag = column(plan, "recent_n5_sold_lag1");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, lag.getStatus());
+        Assertions.assertEquals(Duration.ofDays(6).plusMinutes(30), lag.getWindowShift());
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(plan, "recent_n5_start_price_lag1").getStatus());
+        Assertions.assertEquals(Duration.ZERO, AvailableAt.parseTimeExpression("event_time").getOffset());
+        Assertions.assertTrue(AvailableAt.parse("atEventTime", null).isPreEvent());
+    }
+
+    @Test
+    public void testScientificNotationIsNotAReference() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / 1e6 + 2E3 * quantity\""));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(List.of("start_price", "quantity"), List.copyOf(column(plan, "price_per_unit").getInputs()));
+    }
+
+    @Test
+    public void testFeatureMustNotShadowInputField() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("- name: price_per_unit", "- name: quantity"));
+        Assertions.assertTrue(hasCode(plan, "column.shadowsInput"), plan::describe);
+    }
+
+    @Test
+    public void testDatetimeOnDateField() {
+        final String sources = SOURCES.replace("- {name: condition_grade, type: string}", "- {name: condition_grade, type: string}\n      - {name: listed_on, type: date}");
+        final String spec = SPEC.replace("from: listings}", "from: listings}\n  - {fields: [listed_on], from: listings}")
+                .replace("input: session_time", "input: listed_on");
+        final FeaturePlan plan = compile(sources, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals("date", column(plan, "time_parts_month_sin").getCoordinates().get("inputType"));
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("derive: [month, dayOfWeek]", "derive: [hour]")), "row.datetime.derive"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("input: session_time", "input: start_price")), "row.datetime.input"));
+    }
+
+    @Test
+    public void testArtifactSettingsDoNotChangeTheHash() {
+        final String base = SPEC.replace("output:\n  prefix: f_", "fit: {mode: static, artifact: {uri: \"gs://a\", refit: false}}\noutput:\n  prefix: f_");
+        final String refit = base.replace("refit: false", "refit: true").replace("gs://a", "gs://b");
+        final FeaturePlan a = compile(SOURCES, base);
+        final FeaturePlan b = compile(SOURCES, refit);
+        Assertions.assertEquals(a.getHash(), b.getHash());
+        Assertions.assertEquals(a.getHash(), a.getArtifactVersion());
+        final FeaturePlan pinned = compile(SOURCES, base.replace("refit: false", "refit: false, id: v42"));
+        Assertions.assertEquals("v42", pinned.getArtifactVersion());
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "fit: {minHistory: P30D}\noutput:\n  prefix: f_")), "fit.minHistory"));
+    }
+
+    @Test
     public void testLambdaFromMoments() {
         // keys A: [1,1,1,0], B: [0,0,0,1] → σ² = 0.25, τ² = 0.0625 → λ = 4
         Assertions.assertEquals(4.0, Shrinkage.lambdaFromMoments(2, 8, 4, 4, 2.5, 32), 1e-9);

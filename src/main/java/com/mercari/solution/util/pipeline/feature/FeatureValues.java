@@ -39,7 +39,7 @@ final class FeatureValues {
         return value == null ? null : value.toString();
     }
 
-    /** Epoch millis of a timestamp-like primitive (micros Long, Instant, ISO string). */
+    /** Epoch millis of a timestamp-like primitive (micros Long, Instant, ISO or framework-accepted string). */
     static Long toEpochMillis(final Object value) {
         if (value == null) return null;
         if (value instanceof Long l) return l / 1000L;
@@ -50,13 +50,34 @@ final class FeatureValues {
             try {
                 return Instant.parse(s).toEpochMilli();
             } catch (final RuntimeException e) {
-                return null;
+                final Instant parsed = com.mercari.solution.util.DateTimeUtil.toInstant(s, true);
+                return parsed == null ? null : parsed.toEpochMilli();
             }
         }
         return null;
     }
 
     static LocalDateTime toDateTime(final Object value) {
+        return toDateTime(value, null);
+    }
+
+    /**
+     * @param inputType schema type name of the field: {@code date} values are epoch days (Integer/Long) in
+     *                  the primitive-map convention, everything else is treated as a timestamp
+     */
+    static LocalDateTime toDateTime(final Object value, final String inputType) {
+        if (value == null) return null;
+        if ("date".equals(inputType)) {
+            if (value instanceof Number n) return java.time.LocalDate.ofEpochDay(n.longValue()).atStartOfDay();
+            if (value instanceof String s) {
+                try {
+                    return java.time.LocalDate.parse(s).atStartOfDay();
+                } catch (final RuntimeException e) {
+                    return null;
+                }
+            }
+            return null;
+        }
         final Long millis = toEpochMillis(value);
         return millis == null ? null : LocalDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneOffset.UTC);
     }

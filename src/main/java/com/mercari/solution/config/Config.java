@@ -564,7 +564,8 @@ public class Config implements Serializable {
         }
     }
 
-    private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
+    /** Substitutes {@code ${args.*}} from {@code args} / {@code system.args} (+ extra params) over the whole config text. */
+    public static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
         final JsonObject argsJsonObject;
         if(configJson.has("args") && configJson.get("args").isJsonObject()) {
             argsJsonObject = configJson.getAsJsonObject("args");

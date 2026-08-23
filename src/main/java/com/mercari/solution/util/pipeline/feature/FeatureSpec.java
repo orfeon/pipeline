@@ -142,6 +142,8 @@ public class FeatureSpec implements Serializable {
         public String artifactUri;
         /** Re-fit and overwrite even when an artifact for the plan hash exists. */
         public boolean refit;
+        /** Explicit artifact version replacing the plan hash in artifact paths (pin a fitted version). */
+        public String artifactId;
 
         static void parseArtifact(final JsonObject fit, final FitSpec spec) {
             if (fit == null || !fit.has("artifact")) return;
@@ -151,6 +153,7 @@ public class FeatureSpec implements Serializable {
             } else if (a.isJsonObject()) {
                 spec.artifactUri = Json.string(a.getAsJsonObject(), "uri");
                 spec.refit = Json.bool(a.getAsJsonObject(), "refit", false);
+                if (Json.string(a.getAsJsonObject(), "id") != null) spec.artifactId = Json.string(a.getAsJsonObject(), "id");
             }
         }
     }
@@ -380,7 +383,7 @@ public class FeatureSpec implements Serializable {
         def.latentDim = Json.integer(o, "latentDim");
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");
-            def.taskTarget = Json.string(task, "target");
+            def.taskTarget = Json.string(task, "target") != null ? Json.string(task, "target") : Json.string(task, "field");
             def.taskTargetExpr = Json.string(task, "expr");
             def.taskOffset = Json.string(task, "offset");
         }

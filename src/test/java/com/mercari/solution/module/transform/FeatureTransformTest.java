@@ -380,6 +380,32 @@ public class FeatureTransformTest {
     }
 
     @Test
+    public void testAvroInputWithoutTimestampAttributeAndKeyedFirstStage() throws java.io.IOException {
+        // Avro-typed input, no timestampAttribute (all elements share the default timestamp), and a spec whose
+        // first block is keyed: rows must still be converted to the element form and ordered by time.field
+        final String source = SOURCE_CONFIG.replace("        timestampAttribute: session_time\n", "        outputType: avro\n");
+        final String config = FEATURE_CONFIG.replace("      output:\n        prefix: f_", "      output:\n        prefix: f_\n        nullPolicy: fillZero");
+        // make a sequence block the first feature
+        final String reordered = config.replace("      features:\n", "      features:\n        - name: first\n          scope: sequence\n          entity: seller\n          ops:\n            - {type: lag, fields: [start_price], k: 1}\n");
+        Assertions.assertNotEquals(config, reordered);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(source + reordered));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // ordering comes from time.field, not from the element timestamp
+            Assertions.assertEquals(100.0, byKey.get("B/s1").getAsDouble("f_first_all_start_price_lag1"), 1e-9);
+            Assertions.assertEquals(200.0, byKey.get("C/s1").getAsDouble("f_first_all_start_price_lag1"), 1e-9);
+            Assertions.assertEquals(0L, ((Number) byKey.get("C/s1").getPrimitiveValue("f_recent_n5_sold_lag1")).longValue());
+            // fillZero: missing numeric features become 0 instead of null
+            Assertions.assertEquals(0.0, byKey.get("A/s1").getAsDouble("f_first_all_start_price_lag1"), 1e-9);
+            Assertions.assertEquals(0L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_recent_n5_sold_lag1")).longValue());
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testLeakIsRejectedAtAssembly() throws java.io.IOException {
         // a row feature that reads an outcome directly is available after predictAt → compile error
         final String leaking = FEATURE_CONFIG.replace("expr: \"start_price / quantity\"", "expr: \"final_price / quantity\"");

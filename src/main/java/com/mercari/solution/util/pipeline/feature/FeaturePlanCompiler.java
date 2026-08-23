@@ -30,7 +30,7 @@ import java.util.regex.Pattern;
  */
 public final class FeaturePlanCompiler {
 
-    private static final Pattern IDENTIFIER = Pattern.compile("\\$self\\.([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_.]*)\\s*(\\()?");
+    private static final Pattern IDENTIFIER = Pattern.compile("(?<![A-Za-z0-9_.$])(?:\\$self\\.([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_.]*)\\s*(\\()?)");
     private static final Pattern QUOTED = Pattern.compile("'[^']*'|\"[^\"]*\"");
     private static final Set<String> KEYWORDS = Set.of(
             "and", "or", "not", "null", "true", "false", "in", "is", "like", "between", "case", "when", "then", "else", "end");
@@ -139,6 +139,9 @@ public final class FeaturePlanCompiler {
         }
         if (spec.fit.orderBy != null && !spec.fit.orderBy.equals(spec.timeField)) {
             diagnostics.error("fit.orderBy", "fit", "fit.orderBy must equal time.field (" + spec.timeField + ")");
+        }
+        if (spec.fit.minHistory != null) {
+            diagnostics.warning("fit.minHistory", "fit", "fit.minHistory is not implemented yet and ignored");
         }
         if (spec.fit.groupBy != null && !entities.containsKey(spec.fit.groupBy)) {
             diagnostics.error("fit.groupBy", "fit", "fit.groupBy must reference an entity: " + spec.fit.groupBy);
@@ -350,6 +353,11 @@ public final class FeaturePlanCompiler {
             diagnostics.error("column.duplicate", "features." + c.block, "duplicate output column: " + c.canonicalName);
             return;
         }
+        if (inputFields.containsKey(c.canonicalName)) {
+            diagnostics.error("column.shadowsInput", "features." + c.block,
+                    "output column '" + c.canonicalName + "' has the same name as an input field; choose another name (in-place overwrite is not supported)");
+            return;
+        }
         columnsByCanonical.put(c.canonicalName, c);
         columns.add(c);
     }
@@ -440,10 +448,20 @@ public final class FeaturePlanCompiler {
             case "datetime" -> {
                 final String input = singleInput(def);
                 if (input == null) return;
+                final Ref inputRef = resolve(input);
+                final String inputType = inputRef == null || inputRef.type() == null ? "timestamp" : inputRef.type().getType().name();
+                if (!List.of("timestamp", "datetime", "date", "string", "int64").contains(inputType)) {
+                    diagnostics.error("row.datetime.input", loc, "datetime input '" + input + "' must be a timestamp / datetime / date field (is " + inputType + ")");
+                    return;
+                }
                 final List<String> derive = def.derive.isEmpty() ? List.of("month", "dayOfWeek") : def.derive;
                 for (final String d : derive) {
                     if (!OperatorCatalog.datetimeDerivations().contains(d)) {
                         diagnostics.error("row.datetime.derive", loc, "unknown derivation: " + d + " (" + OperatorCatalog.datetimeDerivations() + ")");
+                        continue;
+                    }
+                    if ("date".equals(inputType) && List.of("hour", "minute").contains(d)) {
+                        diagnostics.error("row.datetime.derive", loc, "derivation " + d + " is not defined for a date field");
                         continue;
                     }
                     if (def.cyclical) {
@@ -451,12 +469,14 @@ public final class FeaturePlanCompiler {
                             final OutputColumn c = newColumn(def.name, Scope.row, "datetime", def.name + "_" + d + "_" + trig, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("derive", d);
                             c.coordinates.put("trig", trig);
+                            c.coordinates.put("inputType", inputType);
                             addSelfInput(c, input);
                             finishRow(c, def);
                         }
                     } else {
                         final OutputColumn c = newColumn(def.name, Scope.row, "datetime", def.name + "_" + d, Schema.FieldType.INT64, computeAt);
                         c.coordinates.put("derive", d);
+                        c.coordinates.put("inputType", inputType);
                         addSelfInput(c, input);
                         finishRow(c, def);
                     }
@@ -1370,7 +1390,10 @@ public final class FeaturePlanCompiler {
         if (ks.structure != null) c.coordinates.put("structure", ks.structure);
         for (final String key : ks.keys) addSelfInput(c, key);
         if (targetReference != null) addPastInput(c, targetReference);
-        else for (final String key : ks.keys) c.pastInputs.add(resolve(key).canonical);
+        else for (final String key : ks.keys) {
+            final Ref r = resolve(key);
+            if (r != null) c.pastInputs.add(r.canonical);
+        }
         if (offsetColumn != null) {
             addSelfInput(c, offsetColumn);
             addPastInput(c, offsetColumn);
@@ -1567,13 +1590,28 @@ public final class FeaturePlanCompiler {
             final MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update(canonical(sourcesDocument).getBytes(StandardCharsets.UTF_8));
             digest.update((byte) 0);
-            digest.update(canonical(parameters).getBytes(StandardCharsets.UTF_8));
+            // fit.artifact (uri / refit / id) is excluded: re-fitting or relocating artifacts must not change
+            // the identity of what was fitted
+            digest.update(canonical(withoutArtifact(parameters)).getBytes(StandardCharsets.UTF_8));
             final StringBuilder sb = new StringBuilder();
             for (final byte b : digest.digest()) sb.append(String.format("%02x", b));
             return sb.substring(0, 16);
         } catch (final NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    static JsonObject withoutArtifact(final JsonObject parameters) {
+        final JsonObject copy = parameters.deepCopy();
+        if (copy.has("fit") && copy.get("fit").isJsonObject()) copy.getAsJsonObject("fit").remove("artifact");
+        if (copy.has("features") && copy.get("features").isJsonArray()) {
+            for (final JsonElement f : copy.getAsJsonArray("features")) {
+                if (f.isJsonObject() && f.getAsJsonObject().has("fit") && f.getAsJsonObject().get("fit").isJsonObject()) {
+                    f.getAsJsonObject().getAsJsonObject("fit").remove("artifact");
+                }
+            }
+        }
+        return copy;
     }
 
     /** JSON with object keys sorted recursively, so formatting / key order do not change the hash. */

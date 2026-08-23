@@ -62,7 +62,15 @@ public final class FeatureStages {
         final Map<String, OutputColumn> columns = new HashMap<>();
         for (final OutputColumn c : plan.getColumns()) columns.put(c.getCanonicalName(), c);
 
-        PCollection<MElement> current = input;
+        // every row becomes an ELEMENT map (whatever the source type) timestamped by time.field, which is
+        // the time axis of all keyed stages (strictly-past windows, maxAge, ordering)
+        final TupleTag<MElement> elementTag = new TupleTag<>() {};
+        final TupleTag<BadRecord> elementFailureTag = new TupleTag<>() {};
+        final PCollectionTuple elements = input.apply("ToElement", ParDo
+                .of(new ToElementDoFn(plan.getSpec().timeField, failFast, elementFailureTag))
+                .withOutputTags(elementTag, TupleTagList.of(elementFailureTag)));
+        failures.add(elements.get(elementFailureTag));
+        PCollection<MElement> current = elements.get(elementTag).setCoder(elementCoder);
         for (final Stage stage : plan.getStages()) {
             if (stage.kind() == StageKind.groupBy) continue;
             final List<OutputColumn> stageColumns = new ArrayList<>();
@@ -95,7 +103,7 @@ public final class FeatureStages {
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
-                case fit -> applyFit(current, stageColumns, evaluator, plan.getHash(), label, loggings, failFast, outputTag, failureTag);
+                case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), label, loggings, failFast, outputTag, failureTag);
                 default -> throw new IllegalStateException("unexpected stage kind: " + stage.kind());
             };
             failures.add(outputs.get(failureTag));
@@ -108,14 +116,14 @@ public final class FeatureStages {
         final FeatureSpec.ContextDef groupBy = groupByContext(plan);
         if (groupBy == null) {
             finalized = current.apply("Finalize", ParDo
-                    .of(new FinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, loggings, failFast, failureTag))
+                    .of(new FinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, plan.getSpec().output.nullPolicy, loggings, failFast, failureTag))
                     .withOutputTags(outputTag, TupleTagList.of(failureTag)));
         } else {
             finalized = current
                     .apply("Finalize_Key", ParDo.of(new KeyDoFn(groupBy.keys()))).setCoder(kvCoder)
                     .apply("Finalize_Group", GroupByKey.create())
                     .apply("Finalize", ParDo
-                            .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema,
+                            .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, plan.getSpec().output.nullPolicy,
                                     groupBy.keys(), plan.getSpec().output.parentFields, loggings, failFast, failureTag))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
         }
@@ -655,6 +663,41 @@ public final class FeatureStages {
     // DoFns
     // ------------------------------------------------------------------------------------------
 
+    /** Converts any input element to the ELEMENT map form and sets its timestamp from {@code time.field}. */
+    static class ToElementDoFn extends DoFn<MElement, MElement> {
+        private final String timeField;
+        private final boolean failFast;
+        private final TupleTag<BadRecord> failureTag;
+
+        ToElementDoFn(final String timeField, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+            this.timeField = timeField;
+            this.failFast = failFast;
+            this.failureTag = failureTag;
+        }
+
+        @Override
+        public org.joda.time.Duration getAllowedTimestampSkew() {
+            return org.joda.time.Duration.millis(Long.MAX_VALUE);
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement input = c.element();
+            if (input == null) return;
+            try {
+                final Map<String, Object> values = input.asPrimitiveMap();
+                final Long millis = FeatureValues.toEpochMillis(values.get(timeField));
+                if (millis == null) {
+                    throw new IllegalArgumentException("time.field '" + timeField + "' is null or not a timestamp; rows cannot be ordered");
+                }
+                final Instant ts = Instant.ofEpochMilli(millis);
+                c.outputWithTimestamp(MElement.of(values, ts), ts);
+            } catch (final Throwable e) {
+                c.output(failureTag, Module.processError("Failed to prepare feature input", input, e, failFast));
+            }
+        }
+    }
+
     static class KeyDoFn extends DoFn<MElement, KV<String, MElement>> {
         private final List<String> keys;
 
@@ -834,10 +877,12 @@ public final class FeatureStages {
     static class Finalizer implements Serializable {
         private final List<OutputColumn> emitted;
         private final List<String> inputNames;
+        private final boolean fillZero;
 
-        Finalizer(final List<OutputColumn> emitted, final Schema inputSchema) {
+        Finalizer(final List<OutputColumn> emitted, final Schema inputSchema, final FeatureSpec.NullPolicy nullPolicy) {
             this.emitted = emitted;
             this.inputNames = inputSchema.getFields().stream().map(Schema.Field::getName).toList();
+            this.fillZero = nullPolicy == FeatureSpec.NullPolicy.fillZero;
         }
 
         Map<String, Object> outputValues(final Map<String, Object> values, final Collection<String> names,
@@ -846,7 +891,11 @@ public final class FeatureStages {
             for (final String name : names) out.put(name, values.get(name));
             for (final OutputColumn c : emitted) {
                 if (placement != null && c.getPlacement() != placement) continue;
-                out.put(c.getOutputName(), values.get(c.getCanonicalName()));
+                Object v = values.get(c.getCanonicalName());
+                if (v == null && fillZero && c.getFieldType() != null && OperatorCatalog.isNumeric(c.getFieldType())) {
+                    v = FeatureValues.cast(0d, c.getFieldType());
+                }
+                out.put(c.getOutputName(), v);
             }
             return out;
         }
@@ -859,9 +908,9 @@ public final class FeatureStages {
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
-        FinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema,
+        FinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
-            this.finalizer = new Finalizer(emitted, inputSchema);
+            this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy);
             this.outputSchema = outputSchema;
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
@@ -897,10 +946,10 @@ public final class FeatureStages {
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
-        GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema,
+        GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
                             final List<String> keys, final List<String> parentFields,
                             final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
-            this.finalizer = new Finalizer(emitted, inputSchema);
+            this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy);
             this.outputSchema = outputSchema;
             this.keys = keys;
             this.parentFields = parentFields;

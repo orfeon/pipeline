@@ -81,7 +81,8 @@ public final class AvailableAt implements Serializable {
         final Matcher rel = EVENT_RELATIVE.matcher(expr);
         if (rel.matches()) {
             if (rel.group(1) == null) {
-                return atEventTime();
+                // the literal event time (predictAt: "event_time"); the pre-event keyword is atEventTime
+                return eventRelative(Duration.ZERO);
             }
             final Duration d = Durations.parse(rel.group(2));
             return eventRelative("-".equals(rel.group(1)) ? d.negated() : d);

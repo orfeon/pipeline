@@ -71,6 +71,8 @@ public class FeaturePlan implements Serializable {
     public Diagnostics getDiagnostics() { return diagnostics; }
     /** Canonical-form hash of the spec + sources (content address for fit artifacts / candidate identity). */
     public String getHash() { return hash; }
+    /** Version directory of fit artifacts: {@code fit.artifact.id} when pinned, else the plan hash. */
+    public String getArtifactVersion() { return spec.fit.artifactId != null ? spec.fit.artifactId : hash; }
 
     public OutputColumn getColumn(final String canonicalName) {
         for (final OutputColumn c : columns) {

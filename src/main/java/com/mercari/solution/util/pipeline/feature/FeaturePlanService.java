@@ -54,7 +54,23 @@ public final class FeaturePlanService {
      * {@code {parameters: {...}, inputSchema: {fields: [...]} | [fields], args: {k: v}}} or a whole
      * pipeline config with a {@code transforms[].module == feature} step selected by {@code name}.
      */
-    public static JsonObject validate(final JsonObject request) {
+    public static JsonObject validate(final JsonObject rawRequest) {
+        final JsonObject response = new JsonObject();
+        // same ${args.*} substitution as Config.load (request.args / system.args), so references such as
+        // sources: gs://${args.bucket}/sources.yaml validate exactly as they run
+        final JsonObject request;
+        try {
+            request = Config.processArgs(rawRequest, null);
+        } catch (final RuntimeException e) {
+            response.addProperty("ok", false);
+            response.addProperty("error", "failed to substitute args: " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+            return response;
+        }
+        if (request.has("system") && request.get("system").isJsonObject() && request.getAsJsonObject("system").has("imports")) {
+            response.addProperty("ok", false);
+            response.addProperty("error", "system.imports is not resolved by validate; pass the feature step's parameters (or a config with the step inlined)");
+            return response;
+        }
         JsonObject parameters = null;
         if (request.has("parameters") && request.get("parameters").isJsonObject()) {
             parameters = request.getAsJsonObject("parameters");
@@ -71,7 +87,6 @@ public final class FeaturePlanService {
                 }
             }
         }
-        final JsonObject response = new JsonObject();
         if (parameters == null) {
             response.addProperty("ok", false);
             response.addProperty("error", "request requires 'parameters' (a feature step's parameters block) or a config with a feature transform");

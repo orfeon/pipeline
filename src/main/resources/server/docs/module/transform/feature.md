@@ -57,14 +57,14 @@ time; warnings and hints from the compiler are part of that report.
 |------------|----------|--------------------------------|-------------|
 | sources    | required | String or Object               | Sources contract (see below): inline object, or a URI / local path / `data:` reference to a YAML or JSON document. File content is rendered with FreeMarker using the step `args`. |
 | lineage    | required | Array<Object\>                 | Maps input fields to their source: `{fields: [...], from: <source name>, eventTime: <field>}`. Every field used by a feature must be declared here. |
-| time       | required | Object                         | `field`: the event-time field of the input (must equal the sources' `eventTime`; it is also the element timestamp used for ordering). `orderTieBreak`: fields declaring a total order for rows that share a timestamp. |
-| predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time`, ... Every emitted column must be available at or before this time. |
+| time       | required | Object                         | `field`: the event-time field of the input (must equal the sources' `eventTime`). The transform re-timestamps every element from this field, so it is the time axis of all history windows regardless of the source's `timestampAttribute`; rows whose value is null go to the failure output. `orderTieBreak`: fields declaring a total order for rows that share a timestamp. |
+| predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
 | entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
-| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static`; `fold` is not implemented yet), `groupBy` (entity name), `artifact` (`{uri, refit}` or the URI string — see *Static fits and artifacts*). |
-| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record). |
+| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static`; `fold` is not implemented yet), `groupBy` (entity name), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*). `minHistory` is accepted but not implemented yet (warning). |
+| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record). |
 
 ### Sources contract
 
@@ -161,7 +161,8 @@ contributions and is the leak-safe choice for training backfill. `static` fits e
 over the whole input (windows are ignored) and applies it to every row as a pure map — rows then see
 their own outcome, so use it for serving / offline analysis, not for training. With `artifact.uri` the
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
-hash covers the spec and the sources contract, so any change produces a new directory. When an artifact
+hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
+produces a new directory. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
 for the current plan hash already exists it is loaded at worker setup instead of re-fitting (`refit: true`
 forces a new fit) — this is the serving path: the same config, run on request data, applies the fitted
 statistics without any history. Streaming runs require an existing artifact. Paths use the Beam
@@ -176,7 +177,7 @@ filesystems (`gs://`, `s3://`, relative local paths).
     variant: fwfm                                 # fm | fwfm (field-pair weights r_fg; bayesian is v2)
     fields: [seller_id, category, condition_grade] # categorical fields (≥ 2)
     latentDim: 8
-    task: {expr: "sold >= 1", offset: market}     # target field or expr, optional baseline offset
+    task: {target: sold, offset: market}          # target: <field> (alias field) or expr: <numeric expr>, optional baseline offset
     fit: {artifact: {uri: "gs://bucket/features"}} # always fit.mode static; cadence / window / warmStart are not implemented yet
     als: {epochs: 10, reg: 0.01, seed: 0}
     outputs:
@@ -225,7 +226,8 @@ window and target, and the composition is a per-row formula: `est(level) = est(p
 est(parent))` from the global level down to the key, on the declared scale. `share` is
 `n_key / n_global` over strictly-past rows.
 
-Generated column names: row `<name>` (datetime `<name>_<derive>[_sin|_cos]`), context
+A feature must not reuse the name of an input field (in-place overwrite is rejected). Generated column
+names: row `<name>` (datetime `<name>_<derive>[_sin|_cos]`), context
 `<name>_<field>_<op>`, sequence `<name>_<window>_<field>_<op><param>` (window token: `n5`, `365d`,
 `365d_n20`, `all`), encoding per `naming` (empty segments collapse). `output.prefix` is prepended; columns
 that are only usable offline get a leading `_` and are not emitted.

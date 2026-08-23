@@ -134,7 +134,7 @@ public class RowEvaluator implements Serializable {
     }
 
     private static Object datetime(final OutputColumn c, final Object value) {
-        final LocalDateTime dt = FeatureValues.toDateTime(value);
+        final LocalDateTime dt = FeatureValues.toDateTime(value, c.coordinates.get("inputType"));
         if (dt == null) return null;
         final String derive = c.coordinates.get("derive");
         final long raw;
