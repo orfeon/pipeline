@@ -57,6 +57,33 @@ public class SpannerChangeCaptureTest {
         final Map<String, Object> source = (Map<String, Object>) first.get(ChangeRecord.FIELD_SOURCE);
         Assertions.assertEquals(SpannerChangeCapture.PROVIDER, source.get(ChangeRecord.FIELD_SOURCE_PROVIDER));
         Assertions.assertNotNull(source.get(ChangeRecord.FIELD_SOURCE_METADATA));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> transaction = (Map<String, Object>) first.get(ChangeRecord.FIELD_TRANSACTION);
+        Assertions.assertEquals("tx1", transaction.get(ChangeRecord.FIELD_TRANSACTION_ID));
+        Assertions.assertNull(transaction.get(ChangeRecord.FIELD_TRANSACTION_TOTAL_RECORDS));
+        Assertions.assertEquals(65536L, transaction.get(ChangeRecord.FIELD_TRANSACTION_INDEX));
+        Assertions.assertNull(first.get(ChangeRecord.FIELD_SCHEMA));
+    }
+
+    @Test
+    public void testColumnsAndSchemaChange() {
+        final MElement element = MElement.of(createRecordValues(
+                "INSERT", List.of(mod("{\"userId\":\"u1\"}", null, "{\"name\":\"alice\"}"))), 0L);
+
+        final List<ChangeSchema.Column> columns = SpannerChangeCapture.columns(element);
+        Assertions.assertEquals(List.of(
+                new ChangeSchema.Column("userId", ChangeSchema.TYPE_STRING, true),
+                new ChangeSchema.Column("name", ChangeSchema.TYPE_STRING, false)), columns);
+
+        final Map<String, Object> schemaChange = SpannerChangeCapture.schemaChange(element, ChangeSchema.toJson(columns));
+        Assertions.assertEquals(ChangeRecord.Op.SCHEMA.getId(), schemaChange.get(ChangeRecord.FIELD_OP));
+        Assertions.assertEquals("Users", schemaChange.get(ChangeRecord.FIELD_TABLE));
+        Assertions.assertNull(schemaChange.get(ChangeRecord.FIELD_KEYS));
+        Assertions.assertNotNull(schemaChange.get(ChangeRecord.FIELD_SCHEMA));
+        // the SCHEMA record sorts before every mod of the record
+        final String modSequence = (String) SpannerChangeCapture.normalize(element).getFirst().get(ChangeRecord.FIELD_SEQUENCE);
+        Assertions.assertTrue(ChangeRecord.compareSequence((String) schemaChange.get(ChangeRecord.FIELD_SEQUENCE), modSequence) < 0);
     }
 
     @Test
@@ -90,7 +117,10 @@ public class SpannerChangeCaptureTest {
         values.put(SpannerChangeCapture.FIELD_IS_LAST_RECORD, true);
         values.put(SpannerChangeCapture.FIELD_RECORD_SEQUENCE, "00000001");
         values.put(SpannerChangeCapture.FIELD_TABLE_NAME, "Users");
-        values.put(SpannerChangeCapture.FIELD_ROW_TYPE, new ArrayList<>());
+        final List<Map<String, Object>> rowType = new ArrayList<>();
+        rowType.add(rowType("userId", "STRING", true));
+        rowType.add(rowType("name", "{\"code\":\"STRING\"}", false));
+        values.put(SpannerChangeCapture.FIELD_ROW_TYPE, rowType);
         values.put(SpannerChangeCapture.FIELD_MODS, mods);
         values.put(SpannerChangeCapture.FIELD_MOD_TYPE, modType);
         values.put(SpannerChangeCapture.FIELD_VALUE_CAPTURE_TYPE, "OLD_AND_NEW_VALUES");
@@ -99,6 +129,15 @@ public class SpannerChangeCaptureTest {
         values.put("numberOfRecordsInTransaction", 1L);
         values.put("numberOfPartitionsInTransaction", 1L);
         return values;
+    }
+
+    private static Map<String, Object> rowType(final String name, final String code, final boolean isPrimaryKey) {
+        final Map<String, Object> columnType = new HashMap<>();
+        columnType.put("name", name);
+        columnType.put("code", code);
+        columnType.put("isPrimaryKey", isPrimaryKey);
+        columnType.put("ordinalPosition", 0L);
+        return columnType;
     }
 
     private static Map<String, Object> mod(final String keysJson, final String oldValuesJson, final String newValuesJson) {

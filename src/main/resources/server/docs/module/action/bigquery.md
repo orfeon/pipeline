@@ -28,7 +28,7 @@ The job id is derived deterministically from the pipeline job name, the step nam
 | trigger           | optional | Enum           | `once` (default), `perElement`, `collect`. See [action modules](README.md#trigger).                                     |
 | op                | required | Enum           | Job type: `query` or `load`.                                                                                             |
 | projectId         | optional | String         | GCP project ID to run the job in. Defaults to the pipeline's project.                                                    |
-| query             | conditionally required | String | SQL to execute (SELECT/DML/DDL). Required when `op` is `query`.                                                 |
+| query             | conditionally required | String | SQL to execute (SELECT/DML/DDL). Required when `op` is `query`. A template that resolves to an empty string (e.g. a cdc `SCHEMA` record without a generated `statement`) submits no job: the firing is reported with `state: SKIPPED` and a null `jobId`. |
 | useLegacySql      | optional | Boolean        | Whether the query uses legacy SQL. Default: `false` (standard SQL). (`op: query` only)                                   |
 | priority          | optional | Enum           | Query priority: `INTERACTIVE` or `BATCH`. Default: `INTERACTIVE`. (`op: query` only)                                     |
 | sourceUris        | conditionally required | Array<String\> | GCS URIs of files to load. Required when `op` is `load` unless `sourceUrisField` is set.                  |

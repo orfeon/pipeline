@@ -206,6 +206,9 @@ public class PgOutputTest {
         Assertions.assertEquals(42L, insert.transactionId);
         Assertions.assertEquals(0L, insert.sequence);
         Assertions.assertEquals("{\"id\":1}", insert.keysJson);
+        Assertions.assertEquals(
+                "[{\"name\":\"id\",\"type\":\"INT64\",\"key\":true},{\"name\":\"name\",\"type\":\"STRING\",\"key\":false},{\"name\":\"active\",\"type\":\"BOOL\",\"key\":false},{\"name\":\"updated\",\"type\":\"TIMESTAMP\",\"key\":false}]",
+                insert.columnsJson);
         Assertions.assertNull(insert.oldValuesJson);
         final JsonObject newValues = JsonParser.parseString(insert.newValuesJson).getAsJsonObject();
         Assertions.assertEquals(1, newValues.get("id").getAsInt());
@@ -350,15 +353,18 @@ public class PgOutputTest {
     }
 
     @Test
-    public void testNormalizeSkipsTruncateAndQualifiesSchema() {
+    public void testNormalizeTruncateAndQualifiesSchema() {
         final PgOutput.Decoder decoder = new PgOutput.Decoder();
         decode(decoder, beginMessage(9000L, 47L), 9101L);
         decode(decoder, relationMessage(REL_ID, "audit", "log", new TestColumn(true, "id", 23)), 9102L);
 
         final PgOutput.ChangeEvent truncate = decode(decoder, truncateMessage(REL_ID), 9103L).get(0);
-        Assertions.assertTrue(PostgresChangeCapture
+        final Map<String, Object> truncated = PostgresChangeCapture
                 .normalize(PostgresChangeCapture.convert(truncate, "mydb", Instant.now()))
-                .isEmpty());
+                .get(0);
+        Assertions.assertEquals(ChangeRecord.Op.TRUNCATE.getId(), truncated.get(ChangeRecord.FIELD_OP));
+        Assertions.assertEquals("audit.log", truncated.get(ChangeRecord.FIELD_TABLE));
+        Assertions.assertNull(truncated.get(ChangeRecord.FIELD_KEYS));
 
         final PgOutput.ChangeEvent insert = decode(decoder, insertMessage(REL_ID, binaryInt4(1)), 9104L).get(0);
         final Map<String, Object> envelope = PostgresChangeCapture

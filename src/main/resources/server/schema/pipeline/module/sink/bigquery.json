@@ -39,6 +39,19 @@
           "title": "Method",
           "enum": ["DEFAULT", "FILE_LOADS", "STREAMING_INSERTS", "STORAGE_WRITE_API", "STORAGE_API_AT_LEAST_ONCE"]
         },
+        "cdc": {
+          "type": "boolean",
+          "title": "CDC apply mode",
+          "description": "Consume unified change records (cdc transform output) and upsert/delete rows on the destination table",
+          "default": false
+        },
+        "onTruncate": {
+          "type": "string",
+          "title": "On TRUNCATE",
+          "description": "(cdc mode) Reaction to a TRUNCATE control record",
+          "enum": ["skip", "fail"],
+          "default": "skip"
+        },
         "partitioning": {
           "type": "string",
           "title": "Partitioning Unit",

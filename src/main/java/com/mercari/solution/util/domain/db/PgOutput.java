@@ -58,6 +58,8 @@ public class PgOutput {
         public final String keysJson;
         public final String oldValuesJson;
         public final String newValuesJson;
+        // relation columns as a JSON array of {name, type, key} (unified cdc type names), or null
+        public final String columnsJson;
 
         ChangeEvent(
                 final long lsn,
@@ -70,7 +72,8 @@ public class PgOutput {
                 final Op op,
                 final String keysJson,
                 final String oldValuesJson,
-                final String newValuesJson) {
+                final String newValuesJson,
+                final String columnsJson) {
 
             this.lsn = lsn;
             this.commitLsn = commitLsn;
@@ -83,6 +86,7 @@ public class PgOutput {
             this.keysJson = keysJson;
             this.oldValuesJson = oldValuesJson;
             this.newValuesJson = newValuesJson;
+            this.columnsJson = columnsJson;
         }
     }
 
@@ -348,7 +352,23 @@ public class PgOutput {
             return new ChangeEvent(
                     lsn, txCommitLsn, txCommitTimestampMicros, txId, txSequence++,
                     relation.namespace, relation.name, op,
-                    keysJson, oldValuesJson, newValuesJson);
+                    keysJson, oldValuesJson, newValuesJson,
+                    toColumnsJson(relation, primaryKeyColumns));
+        }
+
+        // the relation's columns in unified cdc type names, key flags as resolved for keysJson
+        private static String toColumnsJson(final Relation relation, final List<String> primaryKeyColumns) {
+            final JsonArray columns = new JsonArray();
+            for(final RelationColumn column : relation.columns) {
+                final boolean key = primaryKeyColumns != null ? primaryKeyColumns.contains(column.name) : column.key;
+                final JsonObject json = new JsonObject();
+                json.addProperty("name", column.name);
+                json.addProperty("type", com.mercari.solution.util.pipeline.cdc.ChangeSchema
+                        .fromPostgresType(column.column.type, column.column.elementType));
+                json.addProperty("key", key);
+                columns.add(json);
+            }
+            return columns.toString();
         }
 
         // keys: the launch-resolved primary key columns, or the protocol's replica-identity

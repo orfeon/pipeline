@@ -188,6 +188,12 @@ public class BigQueryAction implements Action {
     @Override
     public ActionResult execute(final List<MElement> elements) throws Exception {
         final Parameters p = templateParameters(elements);
+        if(Op.query.equals(p.op) && (p.query == null || p.query.isBlank())) {
+            // a template that resolved to nothing (e.g. a cdc SCHEMA record without a generated
+            // statement): nothing to run, report it instead of submitting an empty job
+            LOG.info("bigquery action[{}] skips an empty query", name);
+            return ActionResult.of(p.op.name(), null, "SKIPPED", null);
+        }
         final Job job = switch (p.op) {
             case query -> executeJob(p, createQueryJobConfiguration(p));
             case load -> executeJob(p, createLoadJobConfiguration(p));

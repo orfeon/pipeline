@@ -16,7 +16,12 @@ import java.util.Map;
  * the TiCDC storage sink (newline-delimited canal-json files synced to GCS/S3, read back with
  * the storage/files source).
  *
- * <p>DDL events ({@code isDdl: true} / type {@code QUERY}) and watermark events are skipped.</p>
+ * <p>DDL events ({@code isDdl: true}) become control records: {@code TRUNCATE TABLE} /
+ * {@code DROP TABLE} statements a {@code TRUNCATE} record, any other DDL a {@code SCHEMA}
+ * record carrying the SQL text as {@code statement} (canal-json DDL events have no column
+ * types, so {@code schema} is null — the cdc transform synthesizes a second SCHEMA record
+ * with the new schema from the {@code mysqlType} of the next row event). Watermark events
+ * are skipped.</p>
  */
 public class TiCdcChangeCapture {
 
@@ -30,15 +35,81 @@ public class TiCdcChangeCapture {
      * the event's {@code data} array. Returns an empty list for DDL/watermark events.
      */
     public static List<Map<String, Object>> normalize(final String eventJson) {
+        return normalize(parse(eventJson));
+    }
 
+    public static JsonObject parse(final String eventJson) {
         final JsonElement parsed = JsonParser.parseString(eventJson);
         if(!parsed.isJsonObject()) {
             throw new IllegalArgumentException("ticdc canal-json event must be a JSON object: " + eventJson);
         }
-        final JsonObject event = parsed.getAsJsonObject();
+        return parsed.getAsJsonObject();
+    }
+
+    /** The table name of the event, or null. */
+    public static String table(final JsonObject event) {
+        return getAsString(event, "table");
+    }
+
+    /** The row schema of a row event ({@code mysqlType} + {@code pkNames}), or null for DDL/watermark events. */
+    public static List<ChangeSchema.Column> columns(final JsonObject event) {
+        if(!event.has("mysqlType") || !event.get("mysqlType").isJsonObject()) {
+            return null;
+        }
+        return ChangeSchema.fromTiCdcEvent(event.getAsJsonObject("mysqlType"), pkNames(event));
+    }
+
+    /** Builds a {@code SCHEMA} control record ordered before the rows of the given event. */
+    public static Map<String, Object> schemaChange(final JsonObject event, final String schemaJson) {
+        final String table = table(event);
+        if(table == null) {
+            throw new IllegalArgumentException("ticdc canal-json event misses table: " + event);
+        }
+        final Timing timing = timing(event);
+        return ChangeRecord.control(
+                table, ChangeRecord.Op.SCHEMA, timing.commitTimestampMicros,
+                ChangeRecord.sequence(timing.orderKey),
+                createSource(event, timing.commitTs), ChangeRecord.transaction(Long.toString(timing.orderKey), null, null),
+                schemaJson, null);
+    }
+
+    private record Timing(long commitTimestampMicros, Long commitTs, long orderKey) { }
+
+    private static Timing timing(final JsonObject event) {
+        // es: the event commit time in epoch millis
+        final Long es = getAsLong(event, "es");
+        final long commitTimestampMicros = (es == null ? 0L : es) * 1000L;
+        // _tidb.commitTs: the TiDB TSO, present when the canal-json extension is enabled
+        final Long commitTs = event.has("_tidb") && event.get("_tidb").isJsonObject()
+                ? getAsLong(event.getAsJsonObject("_tidb"), "commitTs")
+                : null;
+        return new Timing(commitTimestampMicros, commitTs, commitTs != null ? commitTs : commitTimestampMicros);
+    }
+
+    private static List<String> pkNames(final JsonObject event) {
+        final List<String> pkNames = new ArrayList<>();
+        if(event.has("pkNames") && event.get("pkNames").isJsonArray()) {
+            for(final JsonElement pkName : event.getAsJsonArray("pkNames")) {
+                if(pkName.isJsonPrimitive()) {
+                    pkNames.add(pkName.getAsString());
+                }
+            }
+        }
+        return pkNames;
+    }
+
+    private static Map<String, Object> createSource(final JsonObject event, final Long commitTs) {
+        final Map<String, Object> source = new HashMap<>();
+        source.put(ChangeRecord.FIELD_SOURCE_PROVIDER, PROVIDER);
+        source.put(ChangeRecord.FIELD_SOURCE_DATABASE, getAsString(event, "database"));
+        source.put(ChangeRecord.FIELD_SOURCE_METADATA, createSourceMetadataJson(event, commitTs));
+        return source;
+    }
+
+    public static List<Map<String, Object>> normalize(final JsonObject event) {
 
         if(getAsBoolean(event, "isDdl")) {
-            return new ArrayList<>();
+            return normalizeDdl(event);
         }
         final String type = getAsString(event, "type");
         final ChangeRecord.Op op = switch (type) {
@@ -53,26 +124,12 @@ public class TiCdcChangeCapture {
 
         final String table = getAsString(event, "table");
         if(table == null) {
-            throw new IllegalArgumentException("ticdc canal-json event misses table: " + eventJson);
+            throw new IllegalArgumentException("ticdc canal-json event misses table: " + event);
         }
-        final String database = getAsString(event, "database");
-
-        // es: the event commit time in epoch millis
-        final Long es = getAsLong(event, "es");
-        final long commitTimestampMicros = (es == null ? 0L : es) * 1000L;
-        // _tidb.commitTs: the TiDB TSO, present when the canal-json extension is enabled
-        final Long commitTs = event.has("_tidb") && event.get("_tidb").isJsonObject()
-                ? getAsLong(event.getAsJsonObject("_tidb"), "commitTs")
-                : null;
-
-        final List<String> pkNames = new ArrayList<>();
-        if(event.has("pkNames") && event.get("pkNames").isJsonArray()) {
-            for(final JsonElement pkName : event.getAsJsonArray("pkNames")) {
-                if(pkName.isJsonPrimitive()) {
-                    pkNames.add(pkName.getAsString());
-                }
-            }
-        }
+        final Timing timing = timing(event);
+        final long commitTimestampMicros = timing.commitTimestampMicros;
+        final Long commitTs = timing.commitTs;
+        final List<String> pkNames = pkNames(event);
 
         final JsonArray data = event.has("data") && event.get("data").isJsonArray()
                 ? event.getAsJsonArray("data")
@@ -81,7 +138,7 @@ public class TiCdcChangeCapture {
                 ? event.getAsJsonArray("old")
                 : null;
 
-        final String metadataJson = createSourceMetadataJson(event, commitTs);
+        final Map<String, Object> source = createSource(event, commitTs);
 
         final List<Map<String, Object>> envelopes = new ArrayList<>();
         for(int i = 0; i < data.size(); i++) {
@@ -117,15 +174,41 @@ public class TiCdcChangeCapture {
                 }
             }
 
-            final Map<String, Object> source = new HashMap<>();
-            source.put(ChangeRecord.FIELD_SOURCE_PROVIDER, PROVIDER);
-            source.put(ChangeRecord.FIELD_SOURCE_DATABASE, database);
-            source.put(ChangeRecord.FIELD_SOURCE_METADATA, metadataJson);
             envelope.put(ChangeRecord.FIELD_SOURCE, source);
+            // canal-json has no transaction id: rows of one commit share the TSO / event time
+            envelope.put(ChangeRecord.FIELD_TRANSACTION, ChangeRecord.transaction(Long.toString(timing.orderKey), null, (long) i));
+            envelope.put(ChangeRecord.FIELD_SCHEMA, null);
+            envelope.put(ChangeRecord.FIELD_STATEMENT, null);
 
             envelopes.add(envelope);
         }
         return envelopes;
+    }
+
+    // DDL event: {"isDdl":true,"type":"QUERY","sql":"ALTER TABLE ...","table":"t","database":"d",...}
+    private static List<Map<String, Object>> normalizeDdl(final JsonObject event) {
+        final List<Map<String, Object>> envelopes = new ArrayList<>();
+        final String table = table(event);
+        final String sql = getAsString(event, "sql");
+        if(table == null || table.isBlank()) {
+            return envelopes; // database-level DDL
+        }
+        final ChangeRecord.Op op = isTruncateStatement(sql) ? ChangeRecord.Op.TRUNCATE : ChangeRecord.Op.SCHEMA;
+        final Timing timing = timing(event);
+        envelopes.add(ChangeRecord.control(
+                table, op, timing.commitTimestampMicros,
+                ChangeRecord.sequence(timing.orderKey, 0L),
+                createSource(event, timing.commitTs), ChangeRecord.transaction(Long.toString(timing.orderKey), null, 0L),
+                null, sql));
+        return envelopes;
+    }
+
+    static boolean isTruncateStatement(final String sql) {
+        if(sql == null) {
+            return false;
+        }
+        final String normalized = sql.trim().toUpperCase(java.util.Locale.ROOT).replaceAll("\\s+", " ");
+        return normalized.startsWith("TRUNCATE") || normalized.startsWith("DROP TABLE");
     }
 
     private static String createKeysJson(final List<String> pkNames, final JsonObject row) {
