@@ -52,6 +52,7 @@ The destination table can be specified statically or dynamically using FreeMarke
 | writeFormat       | optional | Enum | Internal data format for writing. Values: `json`, `avro`, `row`, `avrofile`. Auto-determined based on method and mode. Specify only when needed for performance or schema compatibility.             |
 | outputResult      | optional | Boolean | If `true`, output successful write results. Default: `true` for batch mode with FILE_LOADS/STREAMING_INSERTS/DEFAULT, `false` otherwise.                                                         |
 | cdc               | optional | Boolean | CDC apply mode: consume unified change records (the [`cdc` transform](../transform/cdc.md) output) and upsert/delete rows on the destination table. See [CDC apply mode](#cdc-apply-mode). Default: `false`. |
+| onTruncate        | optional | Enum | (cdc mode) Reaction to a `TRUNCATE` control record: `skip` (log and drop) or `fail` (fail the pipeline). Default: `skip`. |
 
 ### Table creation parameters
 
@@ -85,7 +86,7 @@ These parameters are applicable only in streaming mode.
 | kmsKey               | optional | String         | [Cloud KMS key](https://cloud.google.com/bigquery/docs/customer-managed-encryption) for encrypting data written to BigQuery.                                                                                  |
 | ignoreUnknownValues  | optional | Boolean        | If `true`, values that do not match the destination table schema (e.g. columns not present on the table) are dropped instead of failing the row. Applies to all write methods, in both batch and streaming mode. Cannot be combined with `schemaUpdateOptions`. Default: `false`. |
 | schemaUpdateOptions  | optional | Array<Enum\>   | Allows schema updates during writes. Values: `ALLOW_FIELD_ADDITION`, `ALLOW_FIELD_RELAXATION`. Only applicable with `FILE_LOADS` method. Cannot be combined with `ignoreUnknownValues` or `autoSchemaUpdate`. |
-| autoSchemaUpdate     | optional | Boolean        | If `true`, enables [automatic schema update](https://cloud.google.com/bigquery/docs/write-api#update_the_schema): a streaming pipeline picks up destination table schema changes (e.g. `ALTER TABLE ... ADD COLUMN`) without a restart. Only applicable with `STORAGE_WRITE_API` method, and requires `ignoreUnknownValues: true`. |
+| autoSchemaUpdate     | optional | Boolean        | If `true`, enables [automatic schema update](https://cloud.google.com/bigquery/docs/write-api#update_the_schema): a streaming pipeline picks up destination table schema changes (e.g. `ALTER TABLE ... ADD COLUMN`) without a restart. Only applicable with `STORAGE_WRITE_API` or `STORAGE_API_AT_LEAST_ONCE` method, and requires `ignoreUnknownValues: true` (unknown values are then held back and merged once the write stream reports the updated schema, instead of being dropped). |
 | optimizedWrites      | optional | Boolean        | If `true`, enables optimized write codepaths that use fewer resources. Default: `false`.                                                                                                                      |
 | withoutValidation    | optional | Boolean        | If `true`, skips validation of the destination table. Default: `false`.                                                                                                                                       |
 | customGcsTempLocation| optional | String         | Custom GCS path for temporary files during load jobs. If not specified, uses the pipeline's `tempLocation` setting.                                                                                           |
@@ -143,6 +144,16 @@ records) pipelines.
 - The destination table must already exist (`CREATE_NEVER`) with a
   [primary key](https://cloud.google.com/bigquery/docs/information-schema-table-constraints) and
   `max_staleness` configured as needed; its schema cannot be derived from change records.
+- `after` is applied as a whole-row `UPSERT`: every column missing from `keys ∪ after` is written
+  as NULL. The change records must therefore carry the **full row** — with Spanner change streams
+  use `valueCaptureType: NEW_ROW` (or `NEW_ROW_AND_OLD_VALUES`); the default `OLD_AND_NEW_VALUES`
+  delivers only the modified columns and would null out the others.
+- Control records (`TRUNCATE`, `SCHEMA`, ...) carry no row mutation and are dropped (counted in
+  the `bigquery_sink_cdc_control_records` metric). `onTruncate: fail` stops the pipeline on a
+  `TRUNCATE` instead, since the destination would otherwise keep rows the source no longer has. To
+  apply truncations and schema changes, route the control records to an action (e.g.
+  `partition` on `op` → `action.bigquery` running `TRUNCATE TABLE` / `ALTER TABLE`) — the
+  [`cdc` transform](../transform/cdc.md#control-records) describes the records.
 - A template `table` (e.g. `myproject.mydataset.${table}`) routes each change record to its own
   destination table — one sink applies a whole change stream to many tables. The schema of each
   destination table is fetched from BigQuery at write time. **Every table the template resolves to
@@ -162,29 +173,118 @@ sinks:
 
 ### Schema evolution
 
-The change record envelope carries row data as JSON, so a schema change on the source database
-(e.g. `ALTER TABLE ... ADD COLUMN` on Spanner or TiDB) never breaks the pipeline itself — new
-columns simply start appearing inside the envelope `after` values. What needs an operational
-procedure is the destination table, whose schema is not updated automatically:
+Source schema changes never break the pipeline — the change records carry row data as JSON, and
+the [`cdc` transform](../transform/cdc.md#control-records) reports each change as a `SCHEMA`
+control record. Keeping the destination table in sync has two independent parts: **adding the
+column** on BigQuery and **not losing the values** written before the column existed.
 
-1. **Set `ignoreUnknownValues: true` on the sink.** Columns that are not (yet) present on the
-   destination table are dropped from each row instead of failing it, so the pipeline keeps
-   applying all other columns while the destination schema lags behind.
-2. **Add the column on the destination table** (`ALTER TABLE ... ADD COLUMN`) when ready.
-   - Streaming pipelines with `method: STORAGE_WRITE_API` can additionally set
-     `autoSchemaUpdate: true` (requires `ignoreUnknownValues: true`) to pick up the new destination
-     schema without a pipeline restart. With `STORAGE_API_AT_LEAST_ONCE`, restart (update) the
-     pipeline after the `ALTER` instead.
-3. **Backfill the gap.** Rows applied between the source schema change and the destination `ALTER`
-   were written without the new column. If the change records are archived (see the
-   [`cdc` transform](../transform/cdc.md) archive example), replay the archived records in a batch
-   pipeline with `accumulate: true` and `method: STORAGE_WRITE_API` — the envelope `sequence`
-   guarantees only rows still at their latest version are re-applied, now including the new column.
+**Recommended setup (additive changes, no restart):**
 
-Without `ignoreUnknownValues`, rows containing unknown columns fail row-by-row and are routed to
-the failure output (`failureSinks`), while the other rows keep flowing — choose this stricter mode
-when dropping a column silently is not acceptable. Request-level problems (destination table
-missing, no primary key on the table) are not row failures and fail the pipeline instead.
+```yaml
+transforms:
+  - name: normalize
+    module: cdc
+    inputs: [change_stream]
+    parameters:
+      format: spanner
+      schemaChanges:                  # SCHEMA records carry BigQuery DDL in `statement`
+        dialect: bigquery
+        table: myproject.mydataset.${table}
+  - name: route
+    module: partition
+    inputs: [normalize]
+    parameters:
+      partitions:
+        - name: ddl
+          filter: { key: op, op: "=", value: SCHEMA }
+        - name: rows
+          filter: { key: op, op: in, value: [INSERT, UPDATE, DELETE, SNAPSHOT] }
+
+sinks:
+  - name: apply_ddl                   # ALTER TABLE ... ADD COLUMN IF NOT EXISTS (idempotent)
+    module: action.bigquery
+    inputs: [route.ddl]
+    parameters:
+      trigger: perElement
+      op: query
+      query: ${statement}
+  - name: bq
+    module: bigquery
+    inputs: [route.rows]
+    parameters:
+      table: myproject.mydataset.${table}
+      cdc: true
+      method: STORAGE_WRITE_API
+      ignoreUnknownValues: true       # required by autoSchemaUpdate
+      autoSchemaUpdate: true          # pick up the new column without a restart
+  - name: archive                     # envelope archive: the backfill source (see below)
+    module: storage
+    inputs: [normalize]
+    parameters:
+      output: gs://mybucket/cdc/envelope/
+      format: avro
+```
+
+How it behaves:
+
+1. The `cdc` transform detects the new column from the change records (Spanner: requires
+   `valueCaptureType: NEW_ROW` / `NEW_ROW_AND_OLD_VALUES`), emits a `SCHEMA` record with the
+   `ALTER TABLE` statement, and — with the default `schemaChanges.baseline: destination` — also
+   reports a column that was added while the pipeline was down.
+2. `action.bigquery` runs the statement. Duplicate reports (one per worker) are harmless: the DDL
+   is `IF NOT EXISTS` and the action's job id is derived from the statement.
+3. With `autoSchemaUpdate: true` the Storage Write API writer does **not** drop unknown columns:
+   it keeps them aside and merges them once the write stream reports the updated table schema
+   (Beam requires `ignoreUnknownValues: true` for this mode — the sink rejects the combination
+   without it). Rows written after the writer refreshed its schema carry the new column.
+4. **Gap**: rows written between the `ALTER` and the writer's schema refresh (typically the first
+   append batch per worker after the change) are stored without the new column. Backfill them
+   from the envelope archive: replay the window around the `SCHEMA` record's `commitTimestamp`
+   with `format: envelope` + `accumulate: true` (example below). Replaying more than the window is
+   harmless — `_CHANGE_SEQUENCE_NUMBER` ignores changes the destination already has.
+
+Replay (batch) of an archived window:
+
+```yaml
+sources:
+  - name: archived
+    module: storage
+    parameters:
+      input: gs://mybucket/cdc/envelope/2024-08-09/*.avro
+      format: avro
+transforms:
+  - name: latest
+    module: cdc
+    inputs: [archived]
+    parameters:
+      format: envelope
+      accumulate: true
+sinks:
+  - name: bq
+    module: bigquery
+    inputs: [latest]
+    parameters:
+      table: myproject.mydataset.${table}
+      cdc: true
+      method: STORAGE_WRITE_API
+```
+
+**Strict alternative (no silent gap, restart required):** `autoSchemaUpdate: false` +
+`ignoreUnknownValues: false`. Rows with unknown columns fail row-by-row and are routed to the
+failure output as **replayable envelopes** (see [Failure output](#failure-output)) while the other
+rows keep flowing; after the `ALTER` (manual, or by the action above) restart/update the pipeline
+so the writer fetches the new schema, then replay the failure records with `format: envelope`
+(`field: record.json`). Use a failure path distinct from the replay pipeline's own failure sink.
+
+**Manual operation:** replace `apply_ddl` by a `pubsub` sink (or any notification) and run the
+`ALTER TABLE` from `statement` by hand — everything else stays the same. This is the setup for
+destinations whose schema is governed (policy tags, column descriptions) or where the pipeline's
+service account must not hold `bigquery.tables.update`.
+
+**Not automated** (reported by the `SCHEMA` record, handled by hand): type changes
+(`schemaChanges.onTypeChange`), dropped and renamed columns (the destination column is kept; a
+rename appears as drop + add), key changes, `NOT NULL` constraints, policy tags, and existing-row
+backfills of `ADD COLUMN ... DEFAULT` (not part of the change stream).
 
 ### Performance and quotas
 
@@ -223,6 +323,11 @@ Sharding is tuned the same way as normal storage-API writes: `numStorageWriteApi
 ## Failure output
 
 Failed insert records are captured and available as error output. The failure output follows the standard MFailure schema:
+
+In [CDC apply mode](#cdc-apply-mode) the `record.json` of a failed write is the **change record
+envelope itself** (`table`, `op`, `keys`, `after`, `sequence`, ...), not the merged destination
+row, so failure records can be replayed with the `cdc` transform (`format: envelope`,
+`field: record.json`).
 
 | field     | type      | description                                      |
 |-----------|-----------|--------------------------------------------------|

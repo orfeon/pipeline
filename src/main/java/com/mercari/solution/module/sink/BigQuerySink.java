@@ -49,6 +49,7 @@ public class BigQuerySink extends Sink {
         private BigQueryIO.Write.CreateDisposition createDisposition;
         private BigQueryIO.Write.Method method;
         private Boolean cdc;
+        private OnTruncate onTruncate;
         private Boolean outputResult;
 
         // for table creation
@@ -120,6 +121,9 @@ public class BigQuerySink extends Sink {
             }
             if(this.cdc == null) {
                 this.cdc = false;
+            }
+            if(this.onTruncate == null) {
+                this.onTruncate = OnTruncate.skip;
             }
             if(this.cdc) {
                 if(this.method == null || BigQueryIO.Write.Method.DEFAULT.equals(this.method)) {
@@ -344,11 +348,66 @@ public class BigQuerySink extends Sink {
         BigQueryIO.Write<MElement> write = BigQueryIO
                 .<MElement>write()
                 .withFormatFunction(ChangeRecord::toTableRow)
+                // a failed change is reported as the envelope itself (replayable with the cdc
+                // transform `format: envelope`), not as the merged destination row
+                .withFormatRecordOnFailureFunction(ChangeRecord::toEnvelopeTableRow)
                 .withRowMutationInformationFn(element -> ChangeRecord.toRowMutationInformation(
                         ChangeRecord.getOp(element), element.getAsString(ChangeRecord.FIELD_SEQUENCE)));
         final SerializableFunction<MElement, String> destinationFunction = createDestinationFunction(inputSchema, parameters.table, templateVariables);
         write = applyParameters(write, parameters, inputSchema, isStreaming, destinationFunction, errorHandler);
-        return elements.apply("WriteChangeRecords", write);
+        final PCollection<MElement> rows = elements
+                .apply("DropControlRecords", ParDo.of(new DropControlRecordsDoFn(getName(), parameters.onTruncate)))
+                .setCoder(elements.getCoder());
+        return rows.apply("WriteChangeRecords", write);
+    }
+
+    /** How the cdc apply mode reacts to a {@code TRUNCATE} control record. */
+    public enum OnTruncate {
+        /** Log and drop the record (default). Apply the truncation out of band (e.g. {@code action.bigquery}). */
+        skip,
+        /** Fail the bundle: the destination would silently keep rows the source no longer has. */
+        fail
+    }
+
+    /**
+     * Control records (TRUNCATE / SCHEMA / ...) carry no row mutation: they are dropped here,
+     * counted, and TRUNCATE optionally fails the pipeline.
+     */
+    private static class DropControlRecordsDoFn extends DoFn<MElement, MElement> {
+
+        private final String name;
+        private final OnTruncate onTruncate;
+        private transient Counter controlCounter;
+
+        DropControlRecordsDoFn(final String name, final OnTruncate onTruncate) {
+            this.name = name;
+            this.onTruncate = onTruncate;
+        }
+
+        @Setup
+        public void setup() {
+            this.controlCounter = Metrics.counter(name, "bigquery_sink_cdc_control_records");
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if(element == null) {
+                return;
+            }
+            final ChangeRecord.Op op = ChangeRecord.getOp(element);
+            if(!op.isControl()) {
+                c.output(element);
+                return;
+            }
+            controlCounter.inc();
+            final String table = element.getAsString(ChangeRecord.FIELD_TABLE);
+            if(ChangeRecord.Op.TRUNCATE.equals(op) && OnTruncate.fail.equals(onTruncate)) {
+                throw new IllegalStateException(
+                        "bigquery sink module[" + name + "] received TRUNCATE of table: " + table + " (onTruncate: fail)");
+            }
+            LOG.info("bigquery sink module[{}] skips cdc control record: {} of table: {}", name, op, table);
+        }
     }
 
     private MCollectionTuple createOutputs(
@@ -600,10 +659,17 @@ public class BigQuerySink extends Sink {
             write = write.withSchemaUpdateOptions(new HashSet<>(parameters.schemaUpdateOptions));
         }
         if(parameters.autoSchemaUpdate != null) {
-            if(BigQueryIO.Write.Method.STORAGE_WRITE_API.equals(parameters.method)) {
+            if(BigQueryIO.Write.Method.STORAGE_WRITE_API.equals(parameters.method)
+                    || BigQueryIO.Write.Method.STORAGE_API_AT_LEAST_ONCE.equals(parameters.method)) {
+                if(parameters.autoSchemaUpdate && !parameters.ignoreUnknownValues) {
+                    // BigQueryIO rejects the combination at expansion: unknown values are held
+                    // back and merged once the stream schema is refreshed, which needs ignoreUnknownValues
+                    throw new IllegalModuleException(
+                            "bigquery sink autoSchemaUpdate: true requires ignoreUnknownValues: true (Beam Storage Write API constraint)");
+                }
                 write = write.withAutoSchemaUpdate(parameters.autoSchemaUpdate);
             } else {
-                LOG.warn("BigQuery sink autoSchemaUpdate parameter is applicable for only STORAGE_WRITE_API method");
+                LOG.warn("BigQuery sink autoSchemaUpdate parameter is applicable for only STORAGE_WRITE_API or STORAGE_API_AT_LEAST_ONCE method");
             }
         }
 

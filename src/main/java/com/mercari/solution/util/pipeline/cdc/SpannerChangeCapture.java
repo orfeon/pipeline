@@ -46,6 +46,8 @@ public class SpannerChangeCapture {
     public static final String FIELD_KEYS_JSON = "keysJson";
     public static final String FIELD_OLD_VALUES_JSON = "oldValuesJson";
     public static final String FIELD_NEW_VALUES_JSON = "newValuesJson";
+    public static final String FIELD_NUMBER_OF_RECORDS_IN_TRANSACTION = "numberOfRecordsInTransaction";
+    public static final String FIELD_NUMBER_OF_PARTITIONS_IN_TRANSACTION = "numberOfPartitionsInTransaction";
 
     private SpannerChangeCapture() {
     }
@@ -102,21 +104,69 @@ public class SpannerChangeCapture {
         values.put(FIELD_VALUE_CAPTURE_TYPE, record.getValueCaptureType().name());
         values.put(FIELD_TRANSACTION_TAG, record.getTransactionTag());
         values.put(FIELD_IS_SYSTEM_TRANSACTION, record.isSystemTransaction());
-        values.put("numberOfRecordsInTransaction", record.getNumberOfRecordsInTransaction());
-        values.put("numberOfPartitionsInTransaction", record.getNumberOfPartitionsInTransaction());
+        values.put(FIELD_NUMBER_OF_RECORDS_IN_TRANSACTION, record.getNumberOfRecordsInTransaction());
+        values.put(FIELD_NUMBER_OF_PARTITIONS_IN_TRANSACTION, record.getNumberOfPartitionsInTransaction());
 
         return MElement.of(values, timestamp);
     }
 
-    // TypeCode.getCode() may hold the raw json form {"code":"STRING"}
+    // TypeCode.getCode() may hold the raw json form {"code":"STRING"} or, for arrays,
+    // {"code":"ARRAY","array_element_type":{"code":"STRING"}}: keep the structure as the
+    // unified type name (STRING, ARRAY<STRING>, ...)
     private static String extractTypeCode(final String code) {
         if(code == null) {
             return "";
         }
-        return code
-                .replaceAll("\\{\"code\":", "")
-                .replaceAll("}", "")
-                .replaceAll("\"", "");
+        return ChangeSchema.fromSpannerTypeCode(code);
+    }
+
+    /**
+     * The row schema carried by a provider-native record ({@code rowType}). Note that with
+     * {@code valueCaptureType: OLD_AND_NEW_VALUES} the row type only lists the modified
+     * columns and the key columns.
+     */
+    public static List<ChangeSchema.Column> columns(final MElement element) {
+        final Object rowType = element.asPrimitiveMap().get(FIELD_ROW_TYPE);
+        if(!(rowType instanceof List<?> list)) {
+            return null;
+        }
+        return ChangeSchema.fromSpannerRowType(list);
+    }
+
+    /**
+     * Builds a {@code SCHEMA} control record for the table of the given provider-native record,
+     * ordered before that record's own mods (two sequence sections: commit timestamp and record
+     * sequence, which sort before the three-section mod sequences).
+     */
+    public static Map<String, Object> schemaChange(final MElement element, final String schemaJson) {
+        final Map<String, Object> values = element.asPrimitiveMap();
+        final String table = asString(values.get(FIELD_TABLE_NAME));
+        final Long commitTimestampMicros = asLong(values.get(FIELD_COMMIT_TIMESTAMP));
+        if(table == null || commitTimestampMicros == null) {
+            throw new IllegalArgumentException("spanner change record misses tableName or commitTimestamp: " + values);
+        }
+        final long recordSequence = parseRecordSequence(asString(values.get(FIELD_RECORD_SEQUENCE)));
+        return ChangeRecord.control(
+                table, ChangeRecord.Op.SCHEMA, commitTimestampMicros,
+                ChangeRecord.sequence(commitTimestampMicros, recordSequence),
+                createSource(values), createTransaction(values, recordSequence, null), schemaJson, null);
+    }
+
+    private static Map<String, Object> createSource(final Map<String, Object> values) {
+        final Map<String, Object> source = new HashMap<>();
+        source.put(ChangeRecord.FIELD_SOURCE_PROVIDER, PROVIDER);
+        source.put(ChangeRecord.FIELD_SOURCE_DATABASE, null);
+        source.put(ChangeRecord.FIELD_SOURCE_METADATA, createSourceMetadataJson(values));
+        return source;
+    }
+
+    // index: the record sequence within the transaction partition and the mod index, as one
+    // number (a change stream record never carries more than 2^16 mods). totalRecords is
+    // unknown: numberOfRecordsInTransaction counts records (of many mods), not mods.
+    private static Map<String, Object> createTransaction(final Map<String, Object> values, final long recordSequence, final Integer modIndex) {
+        final String transactionId = asString(values.get(FIELD_SERVER_TRANSACTION_ID));
+        return ChangeRecord.transaction(
+                transactionId, null, modIndex == null ? null : recordSequence * 65536L + modIndex);
     }
 
     /**
@@ -144,7 +194,7 @@ public class SpannerChangeCapture {
                     "spanner change record has unsupported modType: " + values.get(FIELD_MOD_TYPE));
         };
 
-        final String metadataJson = createSourceMetadataJson(values);
+        final Map<String, Object> source = createSource(values);
 
         final List<Map<String, Object>> envelopes = new ArrayList<>();
         final Object modsValue = values.get(FIELD_MODS);
@@ -165,11 +215,10 @@ public class SpannerChangeCapture {
             envelope.put(ChangeRecord.FIELD_COMMIT_TIMESTAMP, commitTimestampMicros);
             envelope.put(ChangeRecord.FIELD_SEQUENCE, ChangeRecord.sequence(commitTimestampMicros, recordSequence, index));
 
-            final Map<String, Object> source = new HashMap<>();
-            source.put(ChangeRecord.FIELD_SOURCE_PROVIDER, PROVIDER);
-            source.put(ChangeRecord.FIELD_SOURCE_DATABASE, null);
-            source.put(ChangeRecord.FIELD_SOURCE_METADATA, metadataJson);
             envelope.put(ChangeRecord.FIELD_SOURCE, source);
+            envelope.put(ChangeRecord.FIELD_TRANSACTION, createTransaction(values, recordSequence, index));
+            envelope.put(ChangeRecord.FIELD_SCHEMA, null);
+            envelope.put(ChangeRecord.FIELD_STATEMENT, null);
 
             if(envelope.get(ChangeRecord.FIELD_KEYS) == null) {
                 envelope.put(ChangeRecord.FIELD_KEYS, "{}");
@@ -187,6 +236,9 @@ public class SpannerChangeCapture {
         metadata.addProperty(FIELD_TRANSACTION_TAG, asString(values.get(FIELD_TRANSACTION_TAG)));
         metadata.addProperty(FIELD_VALUE_CAPTURE_TYPE, asString(values.get(FIELD_VALUE_CAPTURE_TYPE)));
         metadata.addProperty(FIELD_PARTITION_TOKEN, asString(values.get(FIELD_PARTITION_TOKEN)));
+        metadata.addProperty(FIELD_IS_LAST_RECORD, asBoolean(values.get(FIELD_IS_LAST_RECORD)));
+        metadata.addProperty(FIELD_NUMBER_OF_RECORDS_IN_TRANSACTION, asLong(values.get(FIELD_NUMBER_OF_RECORDS_IN_TRANSACTION)));
+        metadata.addProperty(FIELD_NUMBER_OF_PARTITIONS_IN_TRANSACTION, asLong(values.get(FIELD_NUMBER_OF_PARTITIONS_IN_TRANSACTION)));
         return metadata.toString();
     }
 
@@ -214,6 +266,14 @@ public class SpannerChangeCapture {
 
     private static String asString(final Object value) {
         return value == null ? null : value.toString();
+    }
+
+    private static Boolean asBoolean(final Object value) {
+        return switch (value) {
+            case Boolean b -> b;
+            case String string -> Boolean.parseBoolean(string);
+            case null, default -> null;
+        };
     }
 
     private static Long asLong(final Object value) {
