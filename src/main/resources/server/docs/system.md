@@ -135,9 +135,10 @@ This imports feature simply merges modules defined across multiple config files,
 
 | parameter | type                | description                                                                                     |
 |-----------|---------------------|-------------------------------------------------------------------------------------------------|
-| failFast  | Boolean             | Default values of variables at pipeline startup, which can also be rewritten by Template Engine |
-| union     | Boolean             | Specify pipeline execution path.                                                                |
-| sinks     | Array<FailureSink\> | Pipeline-wide dead-letter sink definitions                                                      |
+| failFast    | Boolean             | true: fail the job on the first error. false: keep running and route failed records to `sinks`  |
+| union       | Boolean             | Collect the failure records of all modules into a single dead-letter output                      |
+| sinks       | Array<FailureSink\> | Pipeline-wide dead-letter sink definitions                                                      |
+| alterConfig | String              | Config (path or text) to assemble instead when assembling this pipeline throws                  |
 
 
 In the `system.failure` parameter, behavior when errors occur can be specified across all modules.

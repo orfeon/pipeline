@@ -706,7 +706,10 @@ public class Schema implements Serializable {
                     jsonObject.add("symbols", symbols);
                 }
                 case map -> {
+                    // valueType (name) is what the parser reads back; mapValueType carries the
+                    // full nested type so UIs can show the fields of map<string, element>.
                     jsonObject.addProperty("valueType", type.getMapValueType().getType().name());
+                    jsonObject.add("mapValueType", type.getMapValueType().toJsonObject());
                 }
                 case array -> {
                     jsonObject.add("arrayValueType", type.getArrayValueType().toJsonObject());
@@ -1100,7 +1103,7 @@ public class Schema implements Serializable {
                 case matrix -> {
                     jsonObject.add("matrixValueType", matrixValueType.toJsonObject());
                     final JsonArray shapeArray = new JsonArray();
-                    if(symbols != null) {
+                    if(shape != null) {
                         for(final Integer s : shape) {
                             shapeArray.add(s);
                         }

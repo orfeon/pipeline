@@ -26,7 +26,8 @@ function loadSpec() {
         return {
             sources: (modules.sources || []).map(toModuleDef),
             transforms: (modules.transforms || []).map(toModuleDef),
-            sinks: (modules.sinks || []).map(toModuleDef)
+            sinks: (modules.sinks || []).map(toModuleDef),
+            actions: (modules.actions || []).map(toModuleDef)
         };
     });
 }

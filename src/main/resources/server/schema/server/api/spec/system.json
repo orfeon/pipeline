@@ -10,52 +10,114 @@
   },
   "properties": {
     "args": {
-      "type": [
-        "object",
-        "array",
-        "string"
-      ],
-      "x-format": "json",
+      "type": "object",
       "title": "Arguments",
-      "description": "Template variables accessible via ${args.key}"
+      "description": "Default values of template variables, referenced as ${args.<key>} anywhere in the config and overridable at launch (--parameters=args.<key>=...). Earlier keys can be referenced by later ones. Values are used as strings; numbers and booleans are accepted and converted.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      }
     },
     "context": {
       "type": "string",
       "title": "Context",
-      "description": "Base path for relative file references"
+      "description": "Execution context: only modules whose `tags` contain this value are assembled (switch e.g. train/predict paths in one config)."
     },
     "imports": {
-      "type": [
-        "object",
-        "array",
-        "string"
-      ],
-      "x-format": "json",
+      "type": "array",
       "title": "Imports",
-      "description": "Import configuration files (JSON array)"
+      "description": "Merge modules defined in other config files into this pipeline (module names must be unique across files).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "base": {
+            "type": "string",
+            "title": "Base",
+            "description": "Prefix for the file paths (e.g. gs://bucket/configs/)"
+          },
+          "files": {
+            "type": "array",
+            "title": "Files",
+            "description": "Config files to import, relative to base",
+            "items": {
+              "type": "string"
+            }
+          },
+          "args": {
+            "type": "object",
+            "title": "Args",
+            "description": "Template variables applied when loading the imported files (override system.args for those files)",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
+            }
+          }
+        },
+        "required": [
+          "files"
+        ]
+      }
     },
     "failure": {
       "type": "object",
       "title": "Failure Handling",
-      "description": "Failure handling options",
+      "description": "Pipeline-wide handling of failed records",
       "properties": {
         "failFast": {
           "type": "boolean",
           "title": "Fail Fast",
-          "description": "Stop pipeline immediately on first error"
+          "description": "true: fail the job on the first error. false: keep running and route failed records to the dead-letter sinks."
         },
         "union": {
           "type": "boolean",
           "title": "Union Failures",
-          "description": "Collect all failure records into a single output"
+          "description": "Collect the failure records of all modules into a single dead-letter output."
         },
         "sinks": {
           "type": "array",
-          "title": "Dead-Letter sink modules",
-          "description": "dead-letter sinks",
+          "title": "Dead-Letter sinks",
+          "description": "Dead-letter sink module definitions (same shape as a sink: name, module, parameters)",
           "items": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Sink name"
+              },
+              "module": {
+                "type": "string",
+                "description": "Sink module (e.g. pubsub, bigquery, storage)"
+              },
+              "parameters": {
+                "type": "object",
+                "description": "Module parameters"
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "ignore": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "module"
+            ]
           }
+        },
+        "alterConfig": {
+          "type": "string",
+          "title": "Alternative config",
+          "description": "Config (path or text) to assemble instead when assembling this pipeline throws."
         }
       }
     }
