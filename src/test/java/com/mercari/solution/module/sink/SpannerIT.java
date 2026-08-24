@@ -111,7 +111,18 @@ public class SpannerIT {
                                     "id STRING(64) NOT NULL, " +
                                     "f32 FLOAT32, " +
                                     "uid UUID " +
-                                    ") PRIMARY KEY (id)"))
+                                    ") PRIMARY KEY (id)",
+                            // interleaved parent/child tables for the cdc apply mode tests
+                            "CREATE TABLE CdcOrders ( " +
+                                    "orderId STRING(64) NOT NULL, " +
+                                    "status STRING(64), " +
+                                    "amount INT64 " +
+                                    ") PRIMARY KEY (orderId)",
+                            "CREATE TABLE CdcOrderItems ( " +
+                                    "orderId STRING(64) NOT NULL, " +
+                                    "itemId INT64 NOT NULL, " +
+                                    "sku STRING(64) " +
+                                    ") PRIMARY KEY (orderId, itemId), INTERLEAVE IN PARENT CdcOrders ON DELETE CASCADE"))
                     .get(60, TimeUnit.SECONDS);
         }
     }
@@ -819,6 +830,153 @@ public class SpannerIT {
         });
 
         readPipeline.run().waitUntilFinish();
+    }
+
+
+    // ---- cdc apply mode ----
+
+    private static String envelope(final String table, final String op, final String keys, final String after, final long commitMicros, final String sequence, final String transactionId) {
+        final com.google.gson.JsonObject json = new com.google.gson.JsonObject();
+        json.addProperty("table", table);
+        json.addProperty("op", op);
+        json.addProperty("keys", keys);
+        json.addProperty("after", after);
+        json.addProperty("commitTimestamp", commitMicros);
+        json.addProperty("sequence", sequence);
+        final com.google.gson.JsonObject source = new com.google.gson.JsonObject();
+        source.addProperty("provider", "test");
+        json.add("source", source);
+        if(transactionId != null) {
+            final com.google.gson.JsonObject transaction = new com.google.gson.JsonObject();
+            transaction.addProperty("id", transactionId);
+            json.add("transaction", transaction);
+        }
+        return json.toString();
+    }
+
+    private static String cdcConfig(final boolean transactional, final List<String> envelopes) {
+        final StringBuilder elements = new StringBuilder();
+        for(final String envelope : envelopes) {
+            if(!elements.isEmpty()) {
+                elements.append(",");
+            }
+            elements.append("{ \"payload\": ").append(new com.google.gson.Gson().toJson(envelope)).append(" }");
+        }
+        return """
+                {
+                  "sources": [
+                    {
+                      "name": "changes",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [ %s ]
+                      },
+                      "schema": {
+                        "fields": [ { "name": "payload", "type": "string" } ]
+                      }
+                    }
+                  ],
+                  "transforms": [
+                    {
+                      "name": "normalize",
+                      "module": "cdc",
+                      "inputs": ["changes"],
+                      "parameters": { "format": "envelope", "field": "payload" }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "replica",
+                      "module": "spanner",
+                      "inputs": ["normalize"],
+                      "parameters": {
+                        "projectId": "%s",
+                        "instanceId": "%s",
+                        "databaseId": "%s",
+                        "table": "${table}",
+                        "cdc": true,
+                        "transactional": %s,
+                        "emulator": true
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements, PROJECT, INSTANCE, DATABASE, transactional);
+    }
+
+    private static Map<String, com.google.cloud.spanner.Struct> readRows(final String sql, final String keyColumn) {
+        final Map<String, com.google.cloud.spanner.Struct> rows = new java.util.HashMap<>();
+        try(final Spanner spanner = SpannerOptions.newBuilder()
+                .setProjectId(PROJECT)
+                .setEmulatorHost(emulator.getEmulatorGrpcEndpoint())
+                .setCredentials(NoCredentials.getInstance())
+                .build()
+                .getService()) {
+            final com.google.cloud.spanner.DatabaseClient client = spanner
+                    .getDatabaseClient(com.google.cloud.spanner.DatabaseId.of(PROJECT, INSTANCE, DATABASE));
+            try(final com.google.cloud.spanner.ResultSet resultSet = client.singleUse()
+                    .executeQuery(com.google.cloud.spanner.Statement.of(sql))) {
+                while(resultSet.next()) {
+                    rows.put(resultSet.getCurrentRowAsStruct().getString(keyColumn), resultSet.getCurrentRowAsStruct());
+                }
+            }
+        }
+        return rows;
+    }
+
+    @Test
+    public void testCdcApplyUpsertAndDelete() throws Exception {
+        // parent first, then children, an update, a delete of a child, a control record
+        final List<String> envelopes = List.of(
+                envelope("CdcOrders", "INSERT", "{\"orderId\":\"o1\"}", "{\"status\":\"new\",\"amount\":10}", 1000L, "3e8/0", null),
+                envelope("CdcOrders", "INSERT", "{\"orderId\":\"o2\"}", "{\"status\":\"new\",\"amount\":20}", 1000L, "3e8/1", null));
+        final TestPipeline p1 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(p1, Config.load(cdcConfig(false, envelopes)));
+        p1.run().waitUntilFinish();
+
+        final List<String> envelopes2 = List.of(
+                envelope("CdcOrderItems", "INSERT", "{\"orderId\":\"o1\",\"itemId\":1}", "{\"sku\":\"A\"}", 2000L, "7d0/0", null),
+                envelope("CdcOrderItems", "INSERT", "{\"orderId\":\"o1\",\"itemId\":2}", "{\"sku\":\"B\"}", 2000L, "7d0/1", null),
+                // partial after: amount must be kept
+                envelope("CdcOrders", "UPDATE", "{\"orderId\":\"o1\"}", "{\"status\":\"paid\"}", 2000L, "7d0/2", null),
+                envelope("CdcOrders", "DELETE", "{\"orderId\":\"o2\"}", null, 2000L, "7d0/3", null),
+                envelope("CdcOrders", "SCHEMA", null, null, 2000L, "7d0", null));
+        final TestPipeline p2 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(p2, Config.load(cdcConfig(false, envelopes2)));
+        p2.run().waitUntilFinish();
+
+        final Map<String, com.google.cloud.spanner.Struct> orders = readRows("SELECT orderId, status, amount FROM CdcOrders WHERE orderId LIKE 'o%'", "orderId");
+        Assertions.assertEquals(1, orders.size());
+        Assertions.assertEquals("paid", orders.get("o1").getString("status"));
+        Assertions.assertEquals(10L, orders.get("o1").getLong("amount"));
+        final Map<String, com.google.cloud.spanner.Struct> items = readRows("SELECT CAST(itemId AS STRING) AS itemId, sku FROM CdcOrderItems WHERE orderId = 'o1'", "itemId");
+        Assertions.assertEquals(2, items.size());
+        Assertions.assertEquals("B", items.get("2").getString("sku"));
+    }
+
+    @Test
+    public void testCdcApplyTransactional() throws Exception {
+        // one transaction inserts a parent and its children: the child before the parent in the
+        // input, which only works when the whole transaction is one commit
+        final List<String> envelopes = List.of(
+                envelope("CdcOrderItems", "INSERT", "{\"orderId\":\"t1\",\"itemId\":1}", "{\"sku\":\"X\"}", 5000L, "1388/1", "tx-1"),
+                envelope("CdcOrders", "INSERT", "{\"orderId\":\"t1\"}", "{\"status\":\"new\",\"amount\":1}", 5000L, "1388/0", "tx-1"),
+                // same row twice in one transaction: collapsed to the latest
+                envelope("CdcOrders", "UPDATE", "{\"orderId\":\"t1\"}", "{\"status\":\"paid\"}", 5000L, "1388/2", "tx-1"),
+                // another transaction
+                envelope("CdcOrders", "INSERT", "{\"orderId\":\"t2\"}", "{\"status\":\"new\",\"amount\":2}", 6000L, "1770/0", "tx-2"));
+        final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        MPipeline.apply(p, Config.load(cdcConfig(true, envelopes)));
+        p.run().waitUntilFinish();
+
+        final Map<String, com.google.cloud.spanner.Struct> orders = readRows("SELECT orderId, status, amount FROM CdcOrders WHERE orderId LIKE 't%'", "orderId");
+        Assertions.assertEquals(2, orders.size());
+        Assertions.assertEquals("paid", orders.get("t1").getString("status"));
+        Assertions.assertEquals(1L, orders.get("t1").getLong("amount"));
+        Assertions.assertEquals("new", orders.get("t2").getString("status"));
+        final Map<String, com.google.cloud.spanner.Struct> items = readRows("SELECT CAST(itemId AS STRING) AS itemId, sku FROM CdcOrderItems WHERE orderId = 't1'", "itemId");
+        Assertions.assertEquals("X", items.get("1").getString("sku"));
     }
 
 }

@@ -28,7 +28,7 @@ public class JsonToMutationConverter {
         return values;
     }
 
-    private static Value convertValue(final Schema.Field field, final JsonElement jsonElement) {
+    public static Value convertValue(final Schema.Field field, final JsonElement jsonElement) {
         final Schema.Options options = field.getOptions();
         final boolean isNull = jsonElement == null || jsonElement.isJsonNull();
         return switch (field.getType().getTypeName()) {

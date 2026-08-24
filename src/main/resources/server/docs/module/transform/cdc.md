@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: CDC Transform Module
-description: Normalizes provider-specific change data capture records (Spanner change streams, PostgreSQL logical replication, TiCDC canal-json) into a unified change record envelope consumed by apply-capable sinks such as the bigquery sink cdc mode. Emits table-level control records (TRUNCATE, SCHEMA on schema drift), splits primary key changes into DELETE+INSERT, and supports per-key accumulation to collapse a batch of changes into the latest state.
+description: Normalizes provider-specific change data capture records (Spanner change streams, PostgreSQL logical replication, TiCDC canal-json) into a unified change record envelope consumed by apply-capable sinks (bigquery and spanner sink cdc mode). Emits table-level control records (TRUNCATE, SCHEMA on schema drift), splits primary key changes into DELETE+INSERT, and supports per-key accumulation to collapse a batch of changes into the latest state.
 tags: [transform, cdc, changestream, changedatacapture, spanner, postgres, tidb, ticdc, canal, streaming, batch]
 timestamp: 2026-08-17T00:00:00Z
 ---
@@ -13,7 +13,8 @@ unified **change record envelope**. Provider formats differ (Spanner change stre
 canal-json events, ...), but after this transform every change is an ordinary record with the same
 schema, so it can be:
 
-- applied to a destination by an apply-capable sink (`bigquery` sink with `cdc: true`),
+- applied to a destination by an apply-capable sink (`bigquery` or `spanner` sink with `cdc: true`;
+  the spanner sink can apply each source transaction atomically),
 - archived as-is with any file sink (`storage` sink as Avro/Parquet — including Iceberg changelog tables),
 - filtered/reshaped by any other transform (`select`, `query`, `partition`, ...).
 
