@@ -72,7 +72,7 @@ asynchronously on a single background worker.
 | `MERCARI_PIPELINE_DIAGNOSIS_SLACK_WEBHOOK` | Slack incoming-webhook URL to post the verdict to |
 | `MERCARI_PIPELINE_DIAGNOSIS_WEBHOOK` | Generic endpoint that receives the full diagnosis record as JSON |
 | `MERCARI_PIPELINE_DIAGNOSIS_LOG_NAME` | Cloud Logging log name for the structured diagnosis history (default `mercari-pipeline-diagnosis`) |
-| `MERCARI_PIPELINE_AGENT_MODEL` / `MERCARI_PIPELINE_AGENT_LOCATION` | Gemini model used by the agents (default `gemini-3.1-flash-lite` / `global`) |
+| `MERCARI_PIPELINE_AGENT_MODEL` / `MERCARI_PIPELINE_AGENT_LOCATION` | Gemini model used by the agents (default `gemini-3.7-flash` / `global`) |
 
 The server's service account needs, in addition to its launch permissions:
 

@@ -450,14 +450,10 @@ public class SpecService {
                 for (final String type : List.of("sources", "transforms", "sinks")) {
                     result.add(type, toModuleArray(index.get(type)));
                 }
-                // Action modules (action.<service>) are placeable in any of the three sections,
-                // so the catalog lists them under their own key AND appends them to each
-                // section's array (making them selectable in every position in the Builder UI).
-                final JsonArray actions = toModuleArray(index.get("actions"));
-                result.add("actions", actions);
-                for (final String type : List.of("sources", "transforms", "sinks")) {
-                    result.getAsJsonArray(type).addAll(actions.deepCopy());
-                }
+                // Action modules (action.<service>) are placeable in any of the three config
+                // sections (placement never changes behavior), so the catalog lists them once
+                // under their own key; the Builder UI shows them as a separate "Actions" group.
+                result.add("actions", toModuleArray(index.get("actions")));
                 modules = result;
             } catch (final IOException e) {
                 throw new RuntimeException("Failed to read module index: " + RESOURCES_MODULE_INDEX, e);

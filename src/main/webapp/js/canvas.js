@@ -10,7 +10,18 @@
 import { $id, setStatus, escapeHtml } from './util.js';
 
 let editor = null;
-let nodeCounter = { source: 0, transform: 0, sink: 0 };
+
+// action.<service> modules are placeable in any config section (placement never
+// changes behavior); the canvas shows them as their own 'action' node type and
+// exports them under `transforms`.
+const ACTION_MODULE_PREFIX = 'action.';
+export function isActionModule(moduleName) {
+    return typeof moduleName === 'string' && moduleName.indexOf(ACTION_MODULE_PREFIX) === 0;
+}
+// Label without the redundant 'action.' prefix (the sidebar group already says Actions)
+function displayModuleName(moduleName) {
+    return isActionModule(moduleName) ? moduleName.substring(ACTION_MODULE_PREFIX.length) : moduleName;
+}
 let systemConfig = {};
 let optionsConfig = {};
 const moduleSchemas = {};   // dryrun result cache (module name -> schema)
@@ -183,7 +194,8 @@ export function initModuleList(moduleDefs) {
     const lists = {
         source: $id('source-modules'),
         transform: $id('transform-modules'),
-        sink: $id('sink-modules')
+        sink: $id('sink-modules'),
+        action: $id('action-modules')
     };
     Object.keys(lists).forEach(function(type) {
         moduleDefs[type + 's'].forEach(function(module) {
@@ -199,7 +211,7 @@ function createModuleItem(module, type) {
     item.dataset.type = type;
     item.title = module.description
         + (module.tags && module.tags.length ? '\n\nTags: ' + module.tags.join(', ') : '');
-    item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(module.name);
+    item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(displayModuleName(module.name));
     item.addEventListener('click', function() {
         addModuleToCanvas(module.name, type);
     });
@@ -257,8 +269,7 @@ function ensureOutputPort(nodeId, tag) {
 
 export function addModuleToCanvas(moduleName, moduleType, config) {
     config = config || null;
-    nodeCounter[moduleType]++;
-    const defaultName = (config && config.name) ? config.name : (moduleName + '_' + nodeCounter[moduleType]);
+    const defaultName = (config && config.name) ? config.name : nextDefaultName(moduleName);
 
     const inputs = 3;   // input_1: data, input_2: wait, input_3: sideInput
     // Nodes start with a single default output port. Named-output ports
@@ -312,7 +323,8 @@ function createNodeHtml(moduleName, moduleType, name, outputCount) {
     const icons = {
         source: 'bi-box-arrow-in-right',
         transform: 'bi-arrow-left-right',
-        sink: 'bi-box-arrow-right'
+        sink: 'bi-box-arrow-right',
+        action: 'bi-lightning-charge'
     };
 
     // Give the node enough height for its output dot column
@@ -347,6 +359,24 @@ export function updateNodeData(nodeId, data) {
     }
     applyOutputLabels(nodeId);
     notifyChanged();
+}
+
+/**
+ * Default node name '<module>_<n>' with the smallest n not used by any node
+ * on the canvas (regardless of module type, since names are pipeline-global).
+ * 'action.http' -> 'http_<n>': a dot in the name would collide with the
+ * 'module.outputTag' reference syntax used by inputs.
+ */
+function nextDefaultName(moduleName) {
+    const baseName = displayModuleName(moduleName);
+    const taken = {};
+    const nodes = editor.export().drawflow.Home.data;
+    for (const id in nodes) {
+        taken[nodes[id].data.name] = true;
+    }
+    let n = 1;
+    while (taken[baseName + '_' + n]) n++;
+    return baseName + '_' + n;
 }
 
 export function isNodeNameTaken(name, excludeNodeId) {
@@ -610,6 +640,8 @@ export function generateConfig() {
             config.transforms.push(moduleConfig);
         } else if (data.moduleType === 'sink') {
             config.sinks.push(moduleConfig);
+        } else if (data.moduleType === 'action') {
+            config.transforms.push(moduleConfig);
         }
     }
 
@@ -654,13 +686,12 @@ export function getValidationErrors(config) {
  */
 export function importConfigToCanvas(config) {
     editor.clear();
-    nodeCounter = { source: 0, transform: 0, sink: 0 };
 
     const nodeIdMap = {};
     const layout = {
         startY: 50,
         nodeSpacingY: 150,
-        columnX: { source: 100, transform: 400, sink: 700 }
+        columnX: { source: 100, transform: 400, sink: 700, action: 400 }
     };
 
     // sourceRef may be "moduleName" or "moduleName.outputTag" (named outputs
@@ -685,7 +716,8 @@ export function importConfigToCanvas(config) {
 
     function importModules(moduleConfigs, type) {
         (moduleConfigs || []).forEach(function(moduleConfig, index) {
-            const nodeId = addModuleToCanvas(moduleConfig.module, type, moduleConfig);
+            const nodeType = isActionModule(moduleConfig.module) ? 'action' : type;
+            const nodeId = addModuleToCanvas(moduleConfig.module, nodeType, moduleConfig);
             nodeIdMap[moduleConfig.name] = nodeId;
             positionNode(nodeId, layout.columnX[type], layout.startY + index * layout.nodeSpacingY);
         });
@@ -703,7 +735,9 @@ export function importConfigToCanvas(config) {
         const nodeId = nodeIdMap[moduleConfig.name];
         if (!nodeId) return;
         if (moduleConfig.module && moduleConfig.inputs) {
-            const isSource = (config.sources || []).indexOf(moduleConfig) >= 0;
+            // action modules listed under `sources` still take inputs (as pure signals)
+            const isSource = (config.sources || []).indexOf(moduleConfig) >= 0
+                && !isActionModule(moduleConfig.module);
             if (!isSource) {
                 moduleConfig.inputs.forEach(function(inputName) {
                     connect(inputName, nodeId, 'input_1');

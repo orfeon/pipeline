@@ -11,6 +11,8 @@
     --source-bg: #d1e7dd;
     --transform-bg: #cfe2ff;
     --sink-bg: #ffe5d0;
+    --action-color: #6f42c1;
+    --action-bg: #e2d9f3;
     --focus-color: #fff3cd;
     --focus-border-color: #ffc107;
 }
@@ -151,6 +153,16 @@ header.navbar {
 
 .module-item.sink:hover {
     background-color: #ffd3b0;
+}
+
+.module-item.action {
+    background-color: var(--action-bg);
+    color: var(--action-color);
+    border-left: 3px solid var(--action-color);
+}
+
+.module-item.action:hover {
+    background-color: #c5b3e6;
 }
 
 /* Drawflow Node Styles */
@@ -361,6 +373,11 @@ header.navbar {
     color: var(--sink-color);
 }
 
+.node-header.action {
+    background-color: var(--action-bg);
+    color: var(--action-color);
+}
+
 .node-body {
     padding: 10px 15px;
     font-size: 12px;
@@ -425,6 +442,10 @@ header.navbar {
 
 .modal-header .badge.sink {
     background-color: var(--sink-color) !important;
+}
+
+.modal-header .badge.action {
+    background-color: var(--action-color) !important;
 }
 
 /* Custom Scrollbar */
@@ -1254,4 +1275,31 @@ header.navbar {
 
 .agent-welcome {
     color: #6c757d;
+}
+
+/* Snippet chips above the System editor */
+.snippet-chips {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.snippet-chips .btn {
+    padding: 1px 8px;
+    font-size: 12px;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+/* Schema panel toolbar / rows */
+.schema-toggle-spacer {
+    display: inline-block;
+    width: 12px;
+}
+.schema-field-item .badge {
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-weight: 500;
+}
+.schema-field-nullable {
+    font-size: 11px;
+    color: #adb5bd;
 }

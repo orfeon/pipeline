@@ -4,7 +4,7 @@
 'use strict';
 
 import { $id, on, show, hide, showModal, escapeHtml, setStatus, postJson,
-         renderSchemaFields, renderRecordsTable } from './util.js';
+         renderSchemaPanel, renderRecordsTable, initSchemaPanelEvents } from './util.js';
 import { generateConfig, getValidationErrors,
          updateNodeSchemaIndicator, updateNodeOutputIndicator } from './canvas.js';
 
@@ -122,7 +122,7 @@ export function showPipelineResult(type, result) {
         } else if (modules.length > 0) {
             modules.forEach(function(module, index) {
                 const accordionId = 'schema-' + index;
-                const schemaHtml = renderSchemaFields(module.schema.fields);
+                const schemaHtml = renderSchemaPanel(module.schema);
 
                 accordion.insertAdjacentHTML('beforeend',
                     '<div class="accordion-item">' +
@@ -190,7 +190,7 @@ export function showPipelineResult(type, result) {
 
 export function showModuleSchema(moduleName, schema) {
     showModuleDetail('Schema: ' + moduleName, 'bi bi-file-earmark-text me-2 text-primary',
-        renderSchemaFields(schema.fields), '');
+        renderSchemaPanel(schema), '');
 }
 
 export function showModuleRecords(moduleName, output) {
@@ -291,6 +291,7 @@ function setRunningState(isRunning, button, originalHtml) {
 }
 
 export function initRunButtons() {
+    initSchemaPanelEvents();
     on('btn-dryrun', 'click', function() { runPipeline('dryrun'); });
     on('btn-run', 'click', function() { runPipeline('run'); });
 }

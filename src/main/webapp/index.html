@@ -97,6 +97,17 @@
                     </div>
                 </div>
             </div>
+
+            <div class="module-category mt-3">
+                <h6 class="module-category-header text-muted px-2 mb-2" data-bs-toggle="collapse" data-bs-target="#collapse-actions" role="button">
+                    <i class="bi bi-lightning-charge me-1"></i> Actions
+                    <i class="bi bi-chevron-down float-end collapse-icon"></i>
+                </h6>
+                <div id="collapse-actions" class="collapse show">
+                    <div id="action-modules" class="module-list">
+                    </div>
+                </div>
+            </div>
         </div>
     </aside>
 
@@ -293,7 +304,7 @@
 
 <!-- System Settings Modal -->
 <div class="modal fade" id="systemModal" tabindex="-1" aria-labelledby="systemModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="systemModalLabel">
@@ -303,6 +314,13 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
+                <div id="system-snippets" class="snippet-chips mb-2">
+                    <span class="text-muted small me-1">Insert:</span>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="args">args</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="context">context</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="imports">imports</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="failure">failure</button>
+                </div>
                 <div id="system-yaml-editor" class="monaco-container monaco-md"></div>
             </div>
             <div class="modal-footer">
@@ -327,6 +345,20 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
+                <div id="options-snippets" class="snippet-chips mb-2">
+                    <span class="text-muted small me-1">Insert:</span>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="jobName">jobName</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="streaming">streaming</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="dataflow">dataflow</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="direct">direct</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="prism">prism</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="portable">portable</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="flink">flink</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="spark">spark</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="gcp">gcp</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="aws">aws</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-snippet="beamsql">beamsql</button>
+                </div>
                 <div id="options-yaml-editor" class="monaco-container monaco-md"></div>
             </div>
             <div class="modal-footer">

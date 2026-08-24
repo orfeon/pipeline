@@ -33,7 +33,7 @@ export function openModuleConfig(nodeId) {
     // Set modal title
     const typeBadge = $id('modal-module-type');
     typeBadge.textContent = data.moduleType;
-    typeBadge.classList.remove('source', 'transform', 'sink');
+    typeBadge.classList.remove('source', 'transform', 'sink', 'action');
     typeBadge.classList.add(data.moduleType);
     $id('modal-module-name').textContent = data.moduleName;
 
@@ -127,8 +127,133 @@ function deleteModule() {
 // System & Options Modals
 // =============================
 
+// =============================
+// Snippet chips (System / Options editors)
+// =============================
+//
+// Each editor has a set of named YAML snippets. When the section is empty the
+// editor opens with all snippets as a commented template; the "Insert" chips
+// above the editor append a snippet (uncommented) and are disabled while the
+// editor already contains that top-level key.
+
+const SYSTEM_SNIPPETS = {
+    args: 'args:            # template variables: ${args.<key>}, overridable at launch\n'
+        + '  today: "${utils.datetime.currentDate(\'Asia/Tokyo\')}"\n',
+    context: 'context: train   # assemble only modules whose tags contain this value\n',
+    imports: 'imports:         # merge modules from other config files\n'
+        + '  - base: gs://bucket/configs/\n'
+        + '    files: [common.yaml]\n',
+    failure: 'failure:\n'
+        + '  failFast: false      # false = keep running, route errors to dead-letter sinks\n'
+        + '  union: false\n'
+        + '  sinks:\n'
+        + '    - name: dead_letter\n'
+        + '      module: pubsub\n'
+        + '      parameters:\n'
+        + '        topic: projects/xxx/topics/dead-letter\n'
+};
+
+const OPTIONS_SNIPPETS = {
+    jobName: 'jobName: my-pipeline\n',
+    streaming: 'streaming: false     # true = unbounded (streaming) job\n',
+    dataflow: 'dataflow:            # Cloud Dataflow runner options\n'
+        + '  workerMachineType: n2-standard-2\n'
+        + '  numWorkers: 1\n'
+        + '  maxNumWorkers: 4\n'
+        + '  serviceAccount: sa@project.iam.gserviceaccount.com\n'
+        + '  subnetwork: regions/asia-northeast1/subnetworks/default\n'
+        + '  usePublicIps: false\n',
+    direct: 'direct:              # Direct runner options (local execution)\n'
+        + '  targetParallelism: 4\n'
+        + '  blockOnRun: true\n',
+    prism: 'prism:               # Prism runner options (local portable runner)\n'
+        + '  enableWebUI: false\n',
+    portable: 'portable:            # Portable runner options (job service)\n'
+        + '  jobEndpoint: localhost:8099\n'
+        + '  defaultEnvironmentType: LOOPBACK\n',
+    flink: 'flink:               # Apache Flink runner options\n'
+        + '  flinkMaster: "[auto]"\n'
+        + '  parallelism: 4\n',
+    spark: 'spark:               # Apache Spark runner options\n'
+        + '  sparkMaster: "local[*]"\n',
+    gcp: 'gcp:                 # Google Cloud options\n'
+        + '  project: my-project\n'
+        + '  workerRegion: asia-northeast1\n',
+    aws: 'aws:                 # AWS options\n'
+        + '  region: ap-northeast-1\n',
+    beamsql: 'beamsql:\n'
+        + '  plannerName: org.apache.beam.sdk.extensions.sql.impl.CalciteQueryPlanner\n'
+};
+
+const SNIPPET_EDITORS = {
+    system: { editorId: 'system-yaml-editor', chipsId: 'system-snippets', snippets: SYSTEM_SNIPPETS,
+        header: 'System settings: uncomment what you need, or use the Insert buttons above' },
+    options: { editorId: 'options-yaml-editor', chipsId: 'options-snippets', snippets: OPTIONS_SNIPPETS,
+        header: 'Pipeline options: uncomment what you need, or use the Insert buttons above' }
+};
+
+function snippetTemplateYaml(kind) {
+    const def = SNIPPET_EDITORS[kind];
+    const lines = ['# ' + def.header, '#'];
+    Object.keys(def.snippets).forEach(function(key) {
+        def.snippets[key].trimEnd().split('\n').forEach(function(line) {
+            lines.push('# ' + line);
+        });
+        lines.push('#');
+    });
+    return lines.join('\n') + '\n';
+}
+
+// Parsed top-level object of the editor content ({} when empty or invalid YAML)
+function parseSnippetEditor(kind) {
+    try {
+        const parsed = jsyaml.load(getEditorValue(SNIPPET_EDITORS[kind].editorId));
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function refreshSnippetChips(kind) {
+    const present = parseSnippetEditor(kind);
+    document.querySelectorAll('#' + SNIPPET_EDITORS[kind].chipsId + ' [data-snippet]').forEach(function(btn) {
+        btn.disabled = Object.prototype.hasOwnProperty.call(present, btn.dataset.snippet);
+    });
+}
+
+function insertSnippet(kind, key) {
+    const def = SNIPPET_EDITORS[kind];
+    let current = getEditorValue(def.editorId);
+    // Replace the all-comment template (nothing set yet) instead of appending below it
+    if (Object.keys(parseSnippetEditor(kind)).length === 0) {
+        current = '';
+    }
+    if (current.length && !current.endsWith('\n')) current += '\n';
+    setEditorValue(def.editorId, current + def.snippets[key]).then(function() {
+        refreshSnippetChips(kind);
+    });
+}
+
+// Called after the editor content is set on modal open: sync chips and follow edits
+function wireSnippetChips(kind, ed) {
+    refreshSnippetChips(kind);
+    if (ed && !ed.__snippetChipsWired) {
+        ed.__snippetChipsWired = true;
+        ed.onDidChangeModelContent(function() { refreshSnippetChips(kind); });
+    }
+}
+
+function initSnippetChips() {
+    Object.keys(SNIPPET_EDITORS).forEach(function(kind) {
+        document.querySelectorAll('#' + SNIPPET_EDITORS[kind].chipsId + ' [data-snippet]').forEach(function(btn) {
+            btn.addEventListener('click', function() { insertSnippet(kind, btn.dataset.snippet); });
+        });
+    });
+}
+
 function openSystemModal() {
-    pending.systemYaml = dumpYaml(getSystemConfig());
+    const system = getSystemConfig();
+    pending.systemYaml = Object.keys(system).length ? dumpYaml(system) : snippetTemplateYaml('system');
     showModal('systemModal');
 }
 
@@ -149,7 +274,8 @@ function applySystemConfig() {
 }
 
 function openOptionsModal() {
-    pending.optionsYaml = dumpYaml(getOptionsConfig());
+    const options = getOptionsConfig();
+    pending.optionsYaml = Object.keys(options).length ? dumpYaml(options) : snippetTemplateYaml('options');
     showModal('optionsModal');
 }
 
@@ -585,6 +711,7 @@ export function initModalEvents() {
     // System Modal
     on('btn-system', 'click', openSystemModal);
     on('btn-apply-system', 'click', applySystemConfig);
+    initSnippetChips();
 
     // Options Modal
     on('btn-options', 'click', openOptionsModal);
@@ -635,13 +762,13 @@ export function initModalEvents() {
             applyYamlSchemas();
             buildSchemaHelpTooltip('system-help-icon', getCachedSchema('system'));
             return setEditorValue('system-yaml-editor', pending.systemYaml);
-        });
+        }).then(function(ed) { wireSnippetChips('system', ed); });
     });
     on('optionsModal', 'shown.bs.modal', function() {
         Promise.all([loadMonaco(), ensureSchema('options')]).then(function() {
             applyYamlSchemas();
             buildSchemaHelpTooltip('options-help-icon', getCachedSchema('options'));
             return setEditorValue('options-yaml-editor', pending.optionsYaml);
-        });
+        }).then(function(ed) { wireSnippetChips('options', ed); });
     });
 }
