@@ -275,12 +275,57 @@ export function renderSchemaFields(fields, depth, parentId) {
 }
 
 /**
+ * Convert the server's schema JSON (Schema.toJsonObject: type=array +
+ * arrayValueType, map fields under mapValueType, ...) into the config-file
+ * schema syntax that Schema.parse reads (mode=repeated, map valueType + fields,
+ * matrix valueType + shape), so the copied text can be pasted into a module's
+ * schema.fields. Nested arrays (array<array<..>>) cannot be expressed there and
+ * are kept as-is.
+ */
+function toConfigSchema(schema) {
+    function convertFields(fields) {
+        return (fields || []).map(function(field) {
+            const n = normalizeType(field);
+            const out = { name: field.name };
+            let t = n;
+            let mode = field.mode || 'nullable';
+            if (t.type === 'array' && t.valueType && t.valueType.type !== 'array') {
+                mode = 'repeated';
+                t = t.valueType;
+            }
+            out.type = t.type;
+            // a matrix is inherently repeated; the config form carries only shape/valueType
+            if (mode !== 'nullable' && t.type !== 'matrix') out.mode = mode;
+            if (t.type === 'element' && t.fields) {
+                out.fields = convertFields(t.fields);
+            } else if (t.type === 'map' && t.valueType) {
+                out.valueType = t.valueType.type;
+                if (t.valueType.type === 'element' && t.valueType.fields) out.fields = convertFields(t.valueType.fields);
+            } else if (t.type === 'matrix') {
+                if (t.valueType) out.valueType = t.valueType.type;
+                if (t.shape) out.shape = t.shape;
+            } else if (t.type === 'enumeration') {
+                out.symbols = t.symbols;
+            } else if (t.type === 'array') {
+                out.arrayValueType = field.arrayValueType;   // not expressible; keep raw
+            }
+            return out;
+        });
+    }
+    return { fields: convertFields(schema.fields) };
+}
+
+/**
  * Schema fields with a toolbar: total field count, expand/collapse all,
  * name filter and "Copy JSON". Toolbar events are handled by delegation
  * (initSchemaPanelEvents, once).
  */
 export function renderSchemaPanel(schema) {
     const fields = (schema && schema.fields) || [];
+    // Drop schemas whose panel is no longer in the document (results are re-rendered per run)
+    Object.keys(schemaPanels).forEach(function(id) {
+        if (!document.getElementById(id)) delete schemaPanels[id];
+    });
     const panelId = 'schema-panel-' + (++schemaPanelCounter);
     schemaPanels[panelId] = schema || {};
     const total = countFields(fields);
@@ -294,7 +339,7 @@ export function renderSchemaPanel(schema) {
         html += '<button type="button" class="btn btn-sm btn-outline-secondary" data-schema-action="expand" title="Expand all"><i class="bi bi-arrows-expand"></i></button>';
         html += '<button type="button" class="btn btn-sm btn-outline-secondary" data-schema-action="collapse" title="Collapse all"><i class="bi bi-arrows-collapse"></i></button>';
     }
-    html += '<button type="button" class="btn btn-sm btn-outline-secondary" data-schema-action="copy" title="Copy schema JSON"><i class="bi bi-clipboard"></i></button>';
+    html += '<button type="button" class="btn btn-sm btn-outline-secondary" data-schema-action="copy" title="Copy as config schema (paste into a module\'s schema.fields)"><i class="bi bi-clipboard"></i></button>';
     html += '</div>';
     html += renderSchemaFields(fields);
     html += '</div>';
@@ -315,7 +360,24 @@ function filterSchemaFields(panel, query) {
     const items = panel.querySelectorAll('.schema-field-item');
     if (!q) {
         items.forEach(function(item) { item.classList.remove('d-none'); });
+        // Restore the expand state from before the filter was applied
+        if (panel.__expandedBeforeFilter) {
+            panel.querySelectorAll('.schema-fields-list .collapse').forEach(function(el) {
+                el.classList.toggle('show', !!panel.__expandedBeforeFilter[el.id]);
+            });
+            panel.querySelectorAll('.schema-toggle-btn').forEach(function(btn) {
+                const target = btn.getAttribute('data-bs-target').substring(1);
+                btn.setAttribute('aria-expanded', panel.__expandedBeforeFilter[target] ? 'true' : 'false');
+            });
+            delete panel.__expandedBeforeFilter;
+        }
         return;
+    }
+    if (!panel.__expandedBeforeFilter) {
+        panel.__expandedBeforeFilter = {};
+        panel.querySelectorAll('.schema-fields-list .collapse').forEach(function(el) {
+            panel.__expandedBeforeFilter[el.id] = el.classList.contains('show');
+        });
     }
     // Show items whose name matches or that contain a matching descendant; expand to reveal
     items.forEach(function(item) {
@@ -343,7 +405,7 @@ export function initSchemaPanelEvents() {
         } else if (action === 'collapse') {
             setSchemaCollapsed(panel, true);
         } else if (action === 'copy') {
-            const json = JSON.stringify(schemaPanels[panel.id] || {}, null, 2);
+            const json = JSON.stringify(toConfigSchema(schemaPanels[panel.id] || {}), null, 2);
             navigator.clipboard.writeText(json).then(function() {
                 const icon = btn.querySelector('i');
                 icon.className = 'bi bi-clipboard-check text-success';

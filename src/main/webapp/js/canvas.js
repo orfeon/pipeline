@@ -369,13 +369,8 @@ export function updateNodeData(nodeId, data) {
  */
 function nextDefaultName(moduleName) {
     const baseName = displayModuleName(moduleName);
-    const taken = {};
-    const nodes = editor.export().drawflow.Home.data;
-    for (const id in nodes) {
-        taken[nodes[id].data.name] = true;
-    }
     let n = 1;
-    while (taken[baseName + '_' + n]) n++;
+    while (isNodeNameTaken(baseName + '_' + n)) n++;
     return baseName + '_' + n;
 }
 
@@ -641,7 +636,10 @@ export function generateConfig() {
         } else if (data.moduleType === 'sink') {
             config.sinks.push(moduleConfig);
         } else if (data.moduleType === 'action') {
-            config.transforms.push(moduleConfig);
+            // Placement never changes an action's behavior; an action without data
+            // inputs (trigger once, waits only) is a pipeline start, so put it under
+            // sources where the no-inputs validation does not apply.
+            (moduleConfig.inputs ? config.transforms : config.sources).push(moduleConfig);
         }
     }
 
@@ -665,14 +663,15 @@ export function getValidationErrors(config) {
         errors.push('At least one source module is required');
     }
 
+    // action modules may run on waits alone (trigger once) - no data inputs needed
     config.transforms.forEach(function(t) {
-        if (!t.inputs || t.inputs.length === 0) {
+        if (!isActionModule(t.module) && (!t.inputs || t.inputs.length === 0)) {
             errors.push('Transform "' + t.name + '" has no inputs');
         }
     });
 
     config.sinks.forEach(function(s) {
-        if (!s.inputs || s.inputs.length === 0) {
+        if (!isActionModule(s.module) && (!s.inputs || s.inputs.length === 0)) {
             errors.push('Sink "' + s.name + '" has no inputs');
         }
     });
@@ -691,7 +690,7 @@ export function importConfigToCanvas(config) {
     const layout = {
         startY: 50,
         nodeSpacingY: 150,
-        columnX: { source: 100, transform: 400, sink: 700, action: 400 }
+        columnX: { source: 100, transform: 400, sink: 700 }
     };
 
     // sourceRef may be "moduleName" or "moduleName.outputTag" (named outputs

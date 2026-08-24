@@ -12,9 +12,13 @@
     "args": {
       "type": "object",
       "title": "Arguments",
-      "description": "Default values of template variables, referenced as ${args.<key>} anywhere in the config and overridable at launch (--parameters=args.<key>=...). Earlier keys can be referenced by later ones.",
+      "description": "Default values of template variables, referenced as ${args.<key>} anywhere in the config and overridable at launch (--parameters=args.<key>=...). Earlier keys can be referenced by later ones. Values are used as strings; numbers and booleans are accepted and converted.",
       "additionalProperties": {
-        "type": "string"
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
       }
     },
     "context": {
@@ -40,6 +44,18 @@
             "description": "Config files to import, relative to base",
             "items": {
               "type": "string"
+            }
+          },
+          "args": {
+            "type": "object",
+            "title": "Args",
+            "description": "Template variables applied when loading the imported files (override system.args for those files)",
+            "additionalProperties": {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
             }
           }
         },

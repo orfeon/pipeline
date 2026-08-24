@@ -204,32 +204,43 @@ function snippetTemplateYaml(kind) {
     return lines.join('\n') + '\n';
 }
 
-// Parsed top-level object of the editor content ({} when empty or invalid YAML)
+// Parsed top-level object of the editor content: {} when empty / comments only,
+// null when the YAML does not parse (mid-edit) - callers must not touch the text then.
 function parseSnippetEditor(kind) {
     try {
         const parsed = jsyaml.load(getEditorValue(SNIPPET_EDITORS[kind].editorId));
         return (parsed && typeof parsed === 'object') ? parsed : {};
     } catch (e) {
-        return {};
+        return null;
     }
 }
 
 function refreshSnippetChips(kind) {
     const present = parseSnippetEditor(kind);
     document.querySelectorAll('#' + SNIPPET_EDITORS[kind].chipsId + ' [data-snippet]').forEach(function(btn) {
-        btn.disabled = Object.prototype.hasOwnProperty.call(present, btn.dataset.snippet);
+        if (present === null) {
+            btn.disabled = true;
+            btn.title = 'Fix the YAML syntax first';
+        } else {
+            btn.disabled = Object.prototype.hasOwnProperty.call(present, btn.dataset.snippet);
+            btn.title = '';
+        }
     });
 }
 
 function insertSnippet(kind, key) {
     const def = SNIPPET_EDITORS[kind];
+    const snippet = def.snippets[key];
+    if (!snippet) return;
+    const present = parseSnippetEditor(kind);
+    if (present === null) return;   // invalid YAML: never overwrite what the user is typing
     let current = getEditorValue(def.editorId);
     // Replace the all-comment template (nothing set yet) instead of appending below it
-    if (Object.keys(parseSnippetEditor(kind)).length === 0) {
+    if (Object.keys(present).length === 0) {
         current = '';
     }
     if (current.length && !current.endsWith('\n')) current += '\n';
-    setEditorValue(def.editorId, current + def.snippets[key]).then(function() {
+    setEditorValue(def.editorId, current + snippet).then(function() {
         refreshSnippetChips(kind);
     });
 }
@@ -243,10 +254,19 @@ function wireSnippetChips(kind, ed) {
     }
 }
 
+// Build the chip buttons from the snippet maps so the two cannot drift apart
 function initSnippetChips() {
     Object.keys(SNIPPET_EDITORS).forEach(function(kind) {
-        document.querySelectorAll('#' + SNIPPET_EDITORS[kind].chipsId + ' [data-snippet]').forEach(function(btn) {
-            btn.addEventListener('click', function() { insertSnippet(kind, btn.dataset.snippet); });
+        const def = SNIPPET_EDITORS[kind];
+        const container = $id(def.chipsId);
+        Object.keys(def.snippets).forEach(function(key) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-outline-secondary btn-sm';
+            btn.dataset.snippet = key;
+            btn.textContent = key;
+            btn.addEventListener('click', function() { insertSnippet(kind, key); });
+            container.appendChild(btn);
         });
     });
 }
