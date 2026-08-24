@@ -53,7 +53,7 @@ public class TasksIT {
     @Container
     private static final GenericContainer<?> emulator = new GenericContainer<>(
             DockerImageName.parse("ghcr.io/aertje/cloud-tasks-emulator:latest"))
-            .withCommand("-host", "0.0.0.0", "-port", "8123", "-queue", QUEUE)
+            .withCommand("-host", "0.0.0.0", "-port", "8123", "-initial-queue", QUEUE)
             .withExposedPorts(8123)
             .withAccessToHost(true)
             .waitingFor(Wait.forListeningPort());
