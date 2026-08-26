@@ -1,5 +1,8 @@
 package com.mercari.solution.module.action.vertexai;
 
+import com.mercari.solution.module.Action;
+import com.mercari.solution.module.Action.Trigger;
+
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.BackOffUtils;
 import com.google.api.client.util.ExponentialBackOff;
@@ -12,7 +15,8 @@ import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.util.cloud.google.IAMUtil;
 import com.mercari.solution.util.cloud.google.vertexai.GeminiUtil;
-import com.mercari.solution.module.action.Action;
+import com.mercari.solution.module.action.ActionService;
+import com.mercari.solution.module.Schema;
 import com.mercari.solution.module.action.ActionResult;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.slf4j.Logger;
@@ -33,8 +37,8 @@ import java.util.Set;
  * idempotent — a retried Beam bundle may submit a duplicate job. Use the {@code once} trigger
  * (the default) unless duplicates are acceptable.
  */
-@Action.Service(name = "vertexai_gemini")
-public class GeminiAction implements Action {
+@Action.Service(name = "vertexai_gemini", operations = {"batchPredictionJobs.create"})
+public class GeminiAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(GeminiAction.class);
 
@@ -64,9 +68,7 @@ public class GeminiAction implements Action {
             if(this.region == null) {
                 errorMessages.add("action sink[" + name + "].parameters.region must not be null");
             }
-            if(this.op == null) {
-                errorMessages.add("action sink[" + name + "].parameters.op must not be null");
-            } else {
+            {
                 switch (this.op) {
                     case batchPrediction -> {
                         if(this.batchPredictionJobsRequest == null) {
@@ -100,21 +102,40 @@ public class GeminiAction implements Action {
 
     }
 
+    /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
-        batchPrediction
+        batchPrediction("batchPredictionJobs.create");
+
+        public final String operation;
+
+        Op(final String operation) {
+            this.operation = operation;
+        }
+
+        static Op of(final String operation) {
+            for(final Op op : values()) {
+                if(op.operation.equals(operation)) {
+                    return op;
+                }
+            }
+            throw new IllegalModuleException("Not supported operation: " + operation);
+        }
     }
 
     private String name;
+    private String operation;
     private Parameters parameters;
 
 
     @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options) {
+    public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
         this.name = name;
+        this.operation = operation;
         this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action sink[" + name + "].parameters must not be empty");
         }
+        this.parameters.op = Op.of(operation);
         final List<String> errorMessages = this.parameters.validate(name);
         if(!errorMessages.isEmpty()) {
             throw new IllegalModuleException(errorMessages);
@@ -153,7 +174,7 @@ public class GeminiAction implements Action {
                         "vertexai batch prediction job: " + jobResourceName + " ended in state: " + state
                                 + ", error: " + Optional.ofNullable(job.get("error")).map(Object::toString).orElse("unknown"));
             }
-            return ActionResult.of(Op.batchPrediction.name(), jobResourceName, state, job.toString());
+            return ActionResult.of(operation, jobResourceName, state, job.toString());
         }
     }
 

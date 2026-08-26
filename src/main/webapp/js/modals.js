@@ -98,7 +98,7 @@ function saveModuleConfig() {
     data.parameters = parsed.parameters || data.parameters || {};
 
     // Update additional properties from parsed YAML (waits/sideInputs are managed via canvas connections)
-    const configProps = ['schema', 'strategy', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
+    const configProps = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
     configProps.forEach(function(prop) {
         if (parsed[prop] !== undefined) {
             data[prop] = parsed[prop];

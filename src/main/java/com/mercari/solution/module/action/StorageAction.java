@@ -1,5 +1,9 @@
 package com.mercari.solution.module.action;
 
+import com.mercari.solution.module.Action;
+import com.mercari.solution.module.Schema;
+import com.mercari.solution.module.Action.Trigger;
+
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.IllegalModuleException;
@@ -37,7 +41,7 @@ import java.util.Map;
  * same content.
  */
 @Action.Service(name = "storage")
-public class StorageAction implements Action {
+public class StorageAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(StorageAction.class);
 
@@ -62,9 +66,9 @@ public class StorageAction implements Action {
 
 
     @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options) {
+    public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
         this.name = name;
-        this.trigger = Trigger.of(parametersJson);
+        this.trigger = trigger;
         this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");

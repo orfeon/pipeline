@@ -134,7 +134,7 @@ The sink emits one **control record** per input record (consumable by `waits` of
 
 ## Notes
 
-- Queue management (create with rate limits, pause/resume, purge, waiting until the queue has drained before a next step) is the job of the [tasks action](../action/tasks.md) (`action.tasks`).
+- Queue management (create with rate limits, pause/resume, purge, waiting until the queue has drained before a next step) is the job of the [tasks action](../action/tasks.md).
 
 - `createTask` throughput is limited per queue (on the order of several hundred requests per second). For very large batch loads shard across queues with a template in `queue`.
 - Headers (including API keys) are stored in the task and visible to anyone with `cloudtasks.tasks.fullView`. To keep secrets out of tasks, configure the API key as a header override on a queue-level HTTP target and omit `target` in the sink.

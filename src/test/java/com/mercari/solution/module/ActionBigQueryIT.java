@@ -29,7 +29,7 @@ import java.util.List;
 
 /**
  * Integration test (run via maven-failsafe: {@code mvn verify -DskipITs=false -Dit.test=ActionBigQueryIT})
- * for the action.bigquery module against the goccy BigQuery emulator managed by Testcontainers.
+ * for the bigquery action against the goccy BigQuery emulator managed by Testcontainers.
  * Exercises the real Jobs API path: jobs.insert with a deterministic job id and jobs.get polling
  * until DONE — for all three triggers (once / perElement / collect with an elements-list template).
  * See BigQueryIT for the emulator wiring notes.
@@ -105,11 +105,11 @@ public class ActionBigQueryIT {
     public void testQueryJobOnce() throws Exception {
         final TestPipeline pipeline = createPipeline();
         final String configYaml = """
-                sinks:
+                actions:
                   - name: bqjob
-                    module: action.bigquery
+                    module: bigquery
+                    operation: jobs.query
                     parameters:
-                      op: query
                       projectId: test-project
                       query: SELECT 1 AS one
                 """;
@@ -121,7 +121,7 @@ public class ActionBigQueryIT {
             for(final MElement element : elements) {
                 count++;
                 Assertions.assertEquals("bigquery", element.getPrimitiveValue("service"));
-                Assertions.assertEquals("query", element.getPrimitiveValue("op"));
+                Assertions.assertEquals("jobs.query", element.getPrimitiveValue("operation"));
                 Assertions.assertNotNull(element.getPrimitiveValue("jobId"));
                 Assertions.assertEquals("DONE", element.getPrimitiveValue("state"));
             }
@@ -136,14 +136,14 @@ public class ActionBigQueryIT {
     public void testDmlQueryJobPerElement() throws Exception {
         final TestPipeline pipeline = createPipeline();
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: bqjob
-                    module: action.bigquery
+                    module: bigquery
+                    operation: jobs.query
+                    trigger: perElement
                     inputs:
                       - input
                     parameters:
-                      trigger: perElement
-                      op: query
                       projectId: test-project
                       query: INSERT INTO testds.action_rows (id, val) VALUES ('${field_string}', ${field_long})
                 """;
@@ -173,14 +173,14 @@ public class ActionBigQueryIT {
         // collect: all input elements gathered into ONE job, via the elements-list template
         final TestPipeline pipeline = createPipeline();
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: bqjob
-                    module: action.bigquery
+                    module: bigquery
+                    operation: jobs.query
+                    trigger: collect
                     inputs:
                       - input
                     parameters:
-                      trigger: collect
-                      op: query
                       projectId: test-project
                       query: "INSERT INTO testds.action_rows_collect (id, val) VALUES <#list elements as e>('${e.field_string}', ${e.field_long})<#if e?has_next>,</#if></#list>"
                 """;

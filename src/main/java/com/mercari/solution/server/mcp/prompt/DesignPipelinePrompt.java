@@ -18,7 +18,7 @@ public class DesignPipelinePrompt implements Prompt {
         Data pipelines are defined in config files in YAML or JSON format.
         Please refer to the resource 'docs://README.md' for details on how to define the config file.
         In this context, an overview of how to define a config file.
-        The config file contains the following five sections.
+        The config file contains the following six sections.
 
         * system (resource: 'docs://system.md')
           * Options run environment.
@@ -30,9 +30,11 @@ public class DesignPipelinePrompt implements Prompt {
           * Defines modules that specifies the processing content of the data
         * sinks
           * Defines modules that specifies the output destination of the data
+        * actions (resource: 'docs://module/action/README.md')
+          * Defines workflow steps against external services (run a BigQuery job, call an HTTP endpoint, manage a Cloud Tasks queue) with 'module' (service), 'operation' and 'trigger'
        
         'system' and 'options' specify pipeline options and execution environment conditions.
-        'sources', 'transforms', and 'sinks' define specific pipeline processing details by combining multiple modules.
+        'sources', 'transforms', 'sinks' and 'actions' define specific pipeline processing details by combining multiple modules.
         The 'module' attribute in module specification the type of module to be used.
         The 'name' attribute in module specification is used as an identifier when specifying the output of this module as the input of another module. It should be unique in the pipeline.
         For 'transforms' and 'sinks' modules, the 'inputs' attribute specifies the name of the module to be used as input.

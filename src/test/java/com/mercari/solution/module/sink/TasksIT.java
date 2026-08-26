@@ -192,19 +192,11 @@ public class TasksIT {
 
     @Test
     public void testActionCreateQueueEnqueueAndWaitForEmpty() throws Exception {
-        // action.tasks create -> sink (waits on create) -> action.tasks waitForEmpty (inputs = sink records)
+        // tasks action create -> sink (waits on create) -> tasks action waitForEmpty (inputs = sink records)
         final String queue2 = "projects/test-project/locations/us-central1/queues/it-queue-2";
         final TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         final String configYaml = """
                 sources:
-                  - name: create
-                    module: action.tasks
-                    parameters:
-                      op: create
-                      queue: %1$s
-                      endpoint: %2$s
-                      rateLimits:
-                        maxConcurrentDispatches: 2
                   - name: input
                     module: create
                     parameters:
@@ -227,11 +219,20 @@ public class TasksIT {
                       concurrency: 2
                       target:
                         url: http://host.testcontainers.internal:%3$d/wait/${id}
+                actions:
+                  - name: create
+                    module: tasks
+                    operation: queues.create
+                    parameters:
+                      queue: %1$s
+                      endpoint: %2$s
+                      rateLimits:
+                        maxConcurrentDispatches: 2
                   - name: drained
-                    module: action.tasks
+                    module: tasks
+                    operation: queues.waitForEmpty
                     inputs: [enqueue]
                     parameters:
-                      op: waitForEmpty
                       queue: %1$s
                       endpoint: %2$s
                       pollIntervalSeconds: 1
@@ -243,7 +244,7 @@ public class TasksIT {
 
         PAssert.that(outputs.get("create").getCollection()).satisfies(elements -> {
             for(final MElement e : elements) {
-                Assertions.assertEquals("create", e.getPrimitiveValue("op"));
+                Assertions.assertEquals("queues.create", e.getPrimitiveValue("operation"));
                 Assertions.assertEquals("DONE", e.getPrimitiveValue("state"));
             }
             return null;
@@ -261,7 +262,7 @@ public class TasksIT {
             int count = 0;
             for(final MElement e : elements) {
                 count++;
-                Assertions.assertEquals("waitForEmpty", e.getPrimitiveValue("op"));
+                Assertions.assertEquals("queues.waitForEmpty", e.getPrimitiveValue("operation"));
                 Assertions.assertEquals("DONE", e.getPrimitiveValue("state"));
             }
             Assertions.assertEquals(1, count);

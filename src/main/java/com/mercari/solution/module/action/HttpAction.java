@@ -1,5 +1,8 @@
 package com.mercari.solution.module.action;
 
+import com.mercari.solution.module.Action;
+import com.mercari.solution.module.Action.Trigger;
+
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -36,7 +39,7 @@ import java.util.*;
  * (PUT, or an {@code Idempotency-Key} header built from {@code utils.string.sha256}).
  */
 @Action.Service(name = "http")
-public class HttpAction implements Action {
+public class HttpAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(HttpAction.class);
 
@@ -63,7 +66,7 @@ public class HttpAction implements Action {
             if(response != null) {
                 errorMessages.addAll(response.validate(prefix + ".response"));
                 if(response.partialFailure != null) {
-                    errorMessages.add(prefix + ".response.partialFailure is not supported by action.http (use the http sink with batch)");
+                    errorMessages.add(prefix + ".response.partialFailure is not supported by the http action (use the http sink with batch)");
                 }
             }
             if(timeout != null) {
@@ -188,14 +191,9 @@ public class HttpAction implements Action {
     private transient Filter.ConditionNode failWhenCondition;
 
     @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options) {
-        configure(name, parametersJson, options, null);
-    }
-
-    @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
+    public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
         this.name = name;
-        this.trigger = Trigger.of(parametersJson);
+        this.trigger = trigger;
         this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");
@@ -239,12 +237,25 @@ public class HttpAction implements Action {
         LOG.info("action[{}] {} {}", name, request.method(), request.url());
         final SyncCaller.Result result = SyncCaller.call(name, transport, policy, request);
         if(!result.succeeded()) {
-            throw new IllegalStateException("action[" + name + "] request " + request.method() + " " + request.url() + " failed: " + result.error());
+            throw failure("action[" + name + "] request " + request.method() + " " + request.url() + " failed: " + result.error(), result);
         }
         if(parameters.poll == null) {
             return ActionResult.of(request.method(), request.url(), "SUCCEEDED", payloadJson(result));
         }
         return poll(values, result);
+    }
+
+    /**
+     * A request the endpoint rejected as a client error (4xx other than the transient 408/425/429)
+     * is not worth re-sending by the module-level retry; other failures (5xx, transport errors,
+     * exhausted policy retries) may be transient.
+     */
+    private static RuntimeException failure(final String message, final SyncCaller.Result result) {
+        final int status = result.response() == null ? -1 : result.response().statusCode();
+        if(status >= 400 && status < 500 && status != 408 && status != 425 && status != 429) {
+            return new NonRetryableException(message);
+        }
+        return new IllegalStateException(message);
     }
 
     private ActionResult poll(final Map<String, Object> values, final SyncCaller.Result first) throws Exception {
@@ -263,11 +274,12 @@ public class HttpAction implements Action {
             polls++;
             final SyncCaller.Result result = SyncCaller.call(name, transport, policy, pollRequest);
             if(!result.succeeded()) {
-                throw new IllegalStateException("action[" + name + "] poll " + url + " failed: " + result.error());
+                throw failure("action[" + name + "] poll " + url + " failed: " + result.error(), result);
             }
             final Map<String, Object> conditionValues = result.parsed().values();
             if(failWhenCondition != null && Filter.filter(failWhenCondition, conditionValues)) {
-                throw new IllegalStateException("action[" + name + "] poll " + url + " reported failure: " + SyncCaller.abbreviate(result.parsed().text()));
+                // the endpoint itself reported a terminal failure: re-sending the request cannot fix it
+                throw new NonRetryableException("action[" + name + "] poll " + url + " reported failure: " + SyncCaller.abbreviate(result.parsed().text()));
             }
             if(Filter.filter(untilCondition, conditionValues)) {
                 LOG.info("action[{}] poll {} completed after {} poll(s)", name, url, polls);

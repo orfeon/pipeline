@@ -7,29 +7,29 @@ import java.io.Serializable;
 /**
  * Result of a single {@link Action} execution.
  * The action sink wraps it into the common output envelope
- * ({@code service, op, jobId, state, startedAt, finishedAt, payload}) defined by {@link #createOutputSchema()},
+ * ({@code service, operation, jobId, state, startedAt, finishedAt, payload}) defined by {@link #createOutputSchema()},
  * so every action service produces records with the same schema.
  */
 public class ActionResult implements Serializable {
 
-    private final String op;
+    private final String operation;
     private final String jobId;
     private final String state;
     private final String payload;
 
-    private ActionResult(final String op, final String jobId, final String state, final String payload) {
-        this.op = op;
+    private ActionResult(final String operation, final String jobId, final String state, final String payload) {
+        this.operation = operation;
         this.jobId = jobId;
         this.state = state;
         this.payload = payload;
     }
 
-    public static ActionResult of(final String op, final String jobId, final String state, final String payload) {
-        return new ActionResult(op, jobId, state, payload);
+    public static ActionResult of(final String operation, final String jobId, final String state, final String payload) {
+        return new ActionResult(operation, jobId, state, payload);
     }
 
-    public String getOp() {
-        return op;
+    public String getOperation() {
+        return operation;
     }
 
     public String getJobId() {
@@ -47,7 +47,7 @@ public class ActionResult implements Serializable {
     public static Schema createOutputSchema() {
         return Schema.builder()
                 .withField(Schema.Field.of("service", Schema.FieldType.STRING))
-                .withField(Schema.Field.of("op", Schema.FieldType.STRING.withNullable(true)))
+                .withField(Schema.Field.of("operation", Schema.FieldType.STRING.withNullable(true)))
                 .withField(Schema.Field.of("jobId", Schema.FieldType.STRING.withNullable(true)))
                 .withField(Schema.Field.of("state", Schema.FieldType.STRING.withNullable(true)))
                 .withField(Schema.Field.of("startedAt", Schema.FieldType.TIMESTAMP))
@@ -58,7 +58,7 @@ public class ActionResult implements Serializable {
 
     @Override
     public String toString() {
-        return "ActionResult{op=" + op + ", jobId=" + jobId + ", state=" + state + "}";
+        return "ActionResult{operation=" + operation + ", jobId=" + jobId + ", state=" + state + "}";
     }
 
 }

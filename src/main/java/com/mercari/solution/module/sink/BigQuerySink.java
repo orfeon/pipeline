@@ -363,7 +363,7 @@ public class BigQuerySink extends Sink {
 
     /** How the cdc apply mode reacts to a {@code TRUNCATE} control record. */
     public enum OnTruncate {
-        /** Log and drop the record (default). Apply the truncation out of band (e.g. {@code action.bigquery}). */
+        /** Log and drop the record (default). Apply the truncation out of band (e.g. a {@code bigquery} action). */
         skip,
         /** Fail the bundle: the destination would silently keep rows the source no longer has. */
         fail

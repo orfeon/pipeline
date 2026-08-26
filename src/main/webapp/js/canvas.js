@@ -11,17 +11,9 @@ import { $id, setStatus, escapeHtml } from './util.js';
 
 let editor = null;
 
-// action.<service> modules are placeable in any config section (placement never
-// changes behavior); the canvas shows them as their own 'action' node type and
-// exports them under `transforms`.
-const ACTION_MODULE_PREFIX = 'action.';
-export function isActionModule(moduleName) {
-    return typeof moduleName === 'string' && moduleName.indexOf(ACTION_MODULE_PREFIX) === 0;
-}
-// Label without the redundant 'action.' prefix (the sidebar group already says Actions)
-function displayModuleName(moduleName) {
-    return isActionModule(moduleName) ? moduleName.substring(ACTION_MODULE_PREFIX.length) : moduleName;
-}
+// Node types map 1:1 to config sections: source/transform/sink/action ->
+// sources/transforms/sinks/actions. Action nodes carry the service name as
+// their module name (actions[].module) and a module-level `trigger`.
 let systemConfig = {};
 let optionsConfig = {};
 const moduleSchemas = {};   // dryrun result cache (module name -> schema)
@@ -211,7 +203,7 @@ function createModuleItem(module, type) {
     item.dataset.type = type;
     item.title = module.description
         + (module.tags && module.tags.length ? '\n\nTags: ' + module.tags.join(', ') : '');
-    item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(displayModuleName(module.name));
+    item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(module.name);
     item.addEventListener('click', function() {
         addModuleToCanvas(module.name, type);
     });
@@ -296,7 +288,7 @@ export function addModuleToCanvas(moduleName, moduleType, config) {
 
     // Store all config properties in nodeData
     if (config) {
-        const configProps = ['schema', 'strategy', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
+        const configProps = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
         configProps.forEach(function(prop) {
             if (config[prop] !== undefined && config[prop] !== null) {
                 nodeData[prop] = config[prop];
@@ -364,11 +356,9 @@ export function updateNodeData(nodeId, data) {
 /**
  * Default node name '<module>_<n>' with the smallest n not used by any node
  * on the canvas (regardless of module type, since names are pipeline-global).
- * 'action.http' -> 'http_<n>': a dot in the name would collide with the
- * 'module.outputTag' reference syntax used by inputs.
  */
 function nextDefaultName(moduleName) {
-    const baseName = displayModuleName(moduleName);
+    const baseName = moduleName;
     let n = 1;
     while (isNodeNameTaken(baseName + '_' + n)) n++;
     return baseName + '_' + n;
@@ -580,7 +570,8 @@ export function generateConfig() {
     const config = {
         sources: [],
         transforms: [],
-        sinks: []
+        sinks: [],
+        actions: []
     };
 
     const nodeMap = {};
@@ -605,6 +596,14 @@ export function generateConfig() {
 
         if (data.strategy) {
             moduleConfig.strategy = data.strategy;
+        }
+
+        if (data.moduleType === 'action') {
+            ['trigger', 'operation', 'retry', 'fireOnEmpty'].forEach(function(prop) {
+                if (data[prop] !== undefined && data[prop] !== null) {
+                    moduleConfig[prop] = data[prop];
+                }
+            });
         }
 
         // Additional Module Properties (waits/sideInputs derived from connections, not nodeData)
@@ -636,11 +635,13 @@ export function generateConfig() {
         } else if (data.moduleType === 'sink') {
             config.sinks.push(moduleConfig);
         } else if (data.moduleType === 'action') {
-            // Placement never changes an action's behavior; an action without data
-            // inputs (trigger once, waits only) is a pipeline start, so put it under
-            // sources where the no-inputs validation does not apply.
-            (moduleConfig.inputs ? config.transforms : config.sources).push(moduleConfig);
+            config.actions.push(moduleConfig);
         }
+    }
+
+    // keep configs without actions identical to before the section existed
+    if (config.actions.length === 0) {
+        delete config.actions;
     }
 
     // Add system settings
@@ -659,20 +660,27 @@ export function generateConfig() {
 export function getValidationErrors(config) {
     const errors = [];
 
-    if (config.sources.length === 0) {
-        errors.push('At least one source module is required');
+    // a pipeline may consist of actions alone (e.g. a queue operation gated by nothing)
+    if (config.sources.length === 0 && !(config.actions && config.actions.length > 0)) {
+        errors.push('At least one source or action module is required');
     }
 
-    // action modules may run on waits alone (trigger once) - no data inputs needed
     config.transforms.forEach(function(t) {
-        if (!isActionModule(t.module) && (!t.inputs || t.inputs.length === 0)) {
+        if (!t.inputs || t.inputs.length === 0) {
             errors.push('Transform "' + t.name + '" has no inputs');
         }
     });
 
     config.sinks.forEach(function(s) {
-        if (!isActionModule(s.module) && (!s.inputs || s.inputs.length === 0)) {
+        if (!s.inputs || s.inputs.length === 0) {
             errors.push('Sink "' + s.name + '" has no inputs');
+        }
+    });
+
+    // actions may run on waits alone or standalone (trigger once); perElement/collect need inputs
+    (config.actions || []).forEach(function(a) {
+        if (a.trigger && a.trigger !== 'once' && (!a.inputs || a.inputs.length === 0)) {
+            errors.push('Action "' + a.name + '" with trigger ' + a.trigger + ' has no inputs');
         }
     });
 
@@ -690,7 +698,7 @@ export function importConfigToCanvas(config) {
     const layout = {
         startY: 50,
         nodeSpacingY: 150,
-        columnX: { source: 100, transform: 400, sink: 700 }
+        columnX: { source: 100, transform: 400, sink: 700, action: 1000 }
     };
 
     // sourceRef may be "moduleName" or "moduleName.outputTag" (named outputs
@@ -715,8 +723,7 @@ export function importConfigToCanvas(config) {
 
     function importModules(moduleConfigs, type) {
         (moduleConfigs || []).forEach(function(moduleConfig, index) {
-            const nodeType = isActionModule(moduleConfig.module) ? 'action' : type;
-            const nodeId = addModuleToCanvas(moduleConfig.module, nodeType, moduleConfig);
+            const nodeId = addModuleToCanvas(moduleConfig.module, type, moduleConfig);
             nodeIdMap[moduleConfig.name] = nodeId;
             positionNode(nodeId, layout.columnX[type], layout.startY + index * layout.nodeSpacingY);
         });
@@ -725,18 +732,18 @@ export function importConfigToCanvas(config) {
     importModules(config.sources, 'source');
     importModules(config.transforms, 'transform');
     importModules(config.sinks, 'sink');
+    importModules(config.actions, 'action');
 
     // Wire all connections after every node exists, so references to modules
     // defined later in the config (order does not matter to the engine) and
     // named-output references resolve correctly.
-    const allModuleConfigs = [].concat(config.sources || [], config.transforms || [], config.sinks || []);
+    const allModuleConfigs = [].concat(
+        config.sources || [], config.transforms || [], config.sinks || [], config.actions || []);
     allModuleConfigs.forEach(function(moduleConfig) {
         const nodeId = nodeIdMap[moduleConfig.name];
         if (!nodeId) return;
         if (moduleConfig.module && moduleConfig.inputs) {
-            // action modules listed under `sources` still take inputs (as pure signals)
-            const isSource = (config.sources || []).indexOf(moduleConfig) >= 0
-                && !isActionModule(moduleConfig.module);
+            const isSource = (config.sources || []).indexOf(moduleConfig) >= 0;
             if (!isSource) {
                 moduleConfig.inputs.forEach(function(inputName) {
                     connect(inputName, nodeId, 'input_1');

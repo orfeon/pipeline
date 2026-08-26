@@ -136,21 +136,21 @@ sinks:
   - title: tasks
     description: Enqueues each input record as a Google Cloud Tasks HTTP task so the queue governs rate limiting, retries, delayed/scheduled execution and name-based deduplication. Supports per-record templates for URL, headers, task id (hashed, idempotent), scheduleTime/delay, JSON/Avro/Protobuf/FreeMarker bodies with a size guard, keyed micro-batching of records into one task, OIDC/OAuth target auth, queue-level HTTP routing (tasks:buffer), and emits CREATED/ALREADY_EXISTS/FAILED control records.
     tags: [sink, tasks, cloudtasks, gcp, http, webhook, scheduling, batch, streaming]
-# Action modules are placeable in any of the sources/transforms/sinks sections
-# (the server appends these entries to each section's module list for the Builder UI).
+# Action modules (config section `actions`; `module:` names the service)
+# The Builder UI shows them as their own "Actions" group.
 actions:
-  - title: action.bigquery
-    description: Runs a BigQuery job (query or load) via the Jobs API and waits for its completion, with idempotent deterministic job ids (a retried bundle adopts the running job). trigger once fires after upstream steps complete; perElement runs one job per record with ${field} templates; collect runs one job over all records (e.g. sourceUrisField gathers every written file into a single load job). Emits the common action envelope (service, op, jobId, state, startedAt, finishedAt, payload).
+  - title: bigquery
+    description: Runs a BigQuery job (operation jobs.query or jobs.load) via the Jobs API and waits for its completion, with idempotent deterministic job ids (a retried bundle adopts the running job). trigger once fires after upstream steps complete; perElement runs one job per record with ${field} templates; collect runs one job over all records (e.g. sourceUrisField gathers every written file into a single load job). Emits the common action envelope (service, operation, jobId, state, startedAt, finishedAt, payload).
     tags: [action, bigquery, job, query, load, trigger, batch, workflow]
-  - title: action.vertexai_gemini
+  - title: vertexai_gemini
     description: Launches a Vertex AI batch prediction job (batchPredictionJobs REST API) for a Gemini model and waits for its completion by polling the job state. Submission is not idempotent (no client-supplied job id), so prefer trigger once. Emits the common action envelope.
     tags: [action, vertexai, gemini, batch, prediction, job, trigger, workflow]
-  - title: action.storage
+  - title: storage
     description: Writes a small file from the triggering records — the control-plane counterpart of the storage sink. Keeps execution result histories (e.g. the file list a storage sink emitted) as JSONL, writes templated summary reports, or creates marker files (empty _SUCCESS object with trigger once). Supports GCS/S3/local paths. Emits the common action envelope.
     tags: [action, storage, gcs, file, history, marker, report, trigger, workflow]
-  - title: action.http
+  - title: http
     description: One HTTP request per trigger firing as a workflow step, the control-plane counterpart of the http sink. Notify (Slack/webhook) after upstream steps complete (once), trigger downstream jobs (Cloud Run Jobs, Airflow, Workflows), run maintenance calls around a bulk load (create index, disable refresh, commit, alias swap), or start an asynchronous API job and poll its status endpoint until done (poll with until/failWhen/interval/timeout). Shares target/body/response/auth (basic, bearer, apiKey, OAuth2, GCP OIDC/OAuth) with the http sink and emits the common action envelope with the final response as payload.
     tags: [action, http, rest, api, webhook, notify, trigger, poll, workflow]
-  - title: action.tasks
-    description: Cloud Tasks queue operations as workflow steps, the control-plane counterpart of the tasks sink. create (idempotent, adopts an existing queue) / update rate limits and retry config / pause / resume / purge / delete / get, waitForEmpty (poll until the queue has drained so a later step can rely on every task having run), runTask and deleteTask (perElement templates). Emits the common action envelope.
+  - title: tasks
+    description: Cloud Tasks queue operations as workflow steps, the control-plane counterpart of the tasks sink. Operations (module-level operation field): queues.create (idempotent, adopts an existing queue) / queues.update rate limits and retry config / queues.pause / queues.resume / queues.purge / queues.delete / queues.get, queues.waitForEmpty (poll until the queue has drained so a later step can rely on every task having run), tasks.run and tasks.delete (perElement templates). Emits the common action envelope.
     tags: [action, tasks, cloudtasks, queue, pause, resume, purge, wait, trigger, workflow, gcp]

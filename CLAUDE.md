@@ -55,14 +55,15 @@ fallback config.
   or `data:` base64 (see `Config.load`).
 - FreeMarker templating: `${args.varName}` placeholders are substituted from `system.args` and runtime args.
 - `system.imports` can compose config from other files.
-- `ModuleConfig` (base of `SourceConfig`/`TransformConfig`/`SinkConfig`) common fields: `name`, `module`,
+- `ModuleConfig` (base of `SourceConfig`/`TransformConfig`/`SinkConfig`/`ActionConfig`) common fields: `name`, `module`,
   `parameters`, `inputs`, `tags`, `waits`, `sideInputs`, `logs`, `ignore`, `failFast`, `outputFailure`,
   `failureSinks`, `outputType`, `description`, `args`.
 
 ### Module System (`module/`)
-Three module types are auto-discovered by scanning their packages (Guava `ClassPath`) for annotations —
+Four module kinds are auto-discovered by scanning their packages (Guava `ClassPath`) for annotations —
 **not** a single `@Module`. Each base class defines its own nested annotation:
-`@Source.Module(name="…")`, `@Transform.Module(name="…")`, `@Sink.Module(name="…")`.
+`@Source.Module(name="…")`, `@Transform.Module(name="…")`, `@Sink.Module(name="…")`,
+`@Action.Service(name="…")` (action services, see below).
 
 **Sources** (`module/source/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg`
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
@@ -74,12 +75,13 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
 
 **Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks` `http`.
-Registered as `action.<service>` in all three module registries (thin adapters `ActionSource` /
-`ActionTransform` / `ActionSink`; shared logic in `module/action/Actions.java`), so an action
-step is placeable in `sources` / `transforms` / `sinks` — placement never changes behavior. Triggers:
-`once` (fire after all inputs/waits complete; inputs are pure signals) / `perElement` / `collect`
-(gather all elements into one firing). Every firing emits a common envelope record
-(`service, op, jobId, state, startedAt, finishedAt, payload`). Two-plane rule: sink outputs and action
+The fourth module kind, declared in the `actions` config section (`ActionConfig`: `module` = service
+name, `operation` (service-declared `resource.method` values, e.g. `jobs.load`, `queues.pause`), `trigger`, optional `inputs`, `waits`, `strategy`, `retry`, `fireOnEmpty`). `module/Action.java` is the single concrete
+module class (trigger topologies, envelope output, failure routing); services implement the
+`ActionService` SPI (`configure` / `setup` / `execute`) and are discovered by scanning `module/action`.
+Triggers: `once` (fire after all inputs/waits complete; inputs are pure signals) / `perElement` /
+`collect` (gather all elements into one firing). Every firing emits a common envelope record
+(`service, operation, jobId, state, startedAt, finishedAt, payload`). Two-plane rule: sink outputs and action
 envelopes are control records — consumable by action `inputs` and anyone's `waits`; a data
 transform/sink consuming them via `inputs` gets an assembly-time warning (see
 `docs → module/action/README.md`).
@@ -89,7 +91,7 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 > `@Action.Service` in `src/main/java`.
 
 ### Core Module Classes (`module/`)
-- `Module.java` — base for all modules; `Source`/`Transform`/`Sink` extend it and hold the discovery registries.
+- `Module.java` — base for all modules; `Source`/`Transform`/`Sink`/`Action` extend it and hold the discovery registries.
 - `MElement.java` — universal data element that wraps any backing type (`DataType`: `ROW`, `AVRO`, `STRUCT`
   (Spanner), `DOCUMENT` (Firestore), `ENTITY` (Datastore), `MESSAGE` (Pub/Sub), `JSON`, …).
 - `Schema.java` — unified schema representation used across all data types.
@@ -112,7 +114,7 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
     still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
-  `action.http`, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
+  http action, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
   (declarative success/retry/partial-failure classification, Retry-After backoff), `RequestSpec`/`RequestRenderer`
   (target/body config + template rendering), `SyncCaller` (blocking send-with-retry), `GrpcSupport` (descriptor-set linking, dynamic
@@ -137,12 +139,15 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 ## Adding a New Module
 
 Use the **`add-module` skill** (`.claude/skills/add-module/`) — it walks through implementation, tests,
-and agent-readable docs, with type-specific guides for source/transform/sink. Summary:
+and agent-readable docs, with type-specific guides for source/transform/sink/action. Summary:
 
-1. Create a class in `module/source/`, `module/transform/`, or `module/sink/`.
-2. Extend `Source`, `Transform`, or `Sink`.
-3. Annotate with the matching nested annotation, e.g. `@Transform.Module(name="mymodule")`.
-4. Implement `expand()` returning an `MCollectionTuple` (source/transform) or handling the sink.
+1. Create a class in `module/source/`, `module/transform/`, `module/sink/`, or `module/action/`.
+2. Extend `Source`, `Transform`, or `Sink` — or, for an action service, implement `ActionService`
+   (the `Action` module itself already exists).
+3. Annotate with the matching nested annotation, e.g. `@Transform.Module(name="mymodule")` or
+   `@Action.Service(name="myservice", operations={…})`.
+4. Implement `expand()` returning an `MCollectionTuple` (source/transform) or handling the sink;
+   an action service implements `configure` / `setup` / `execute` instead.
 5. It is auto-discovered via package scanning — no manual registration.
 6. Write user-facing config docs at `src/main/resources/server/docs/module/<type>/<name>.md`
    (YAML front-matter with `title:` — the agent's `listModules` uses it) and add an entry

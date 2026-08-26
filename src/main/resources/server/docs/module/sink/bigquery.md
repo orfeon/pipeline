@@ -152,7 +152,7 @@ records) pipelines.
   the `bigquery_sink_cdc_control_records` metric). `onTruncate: fail` stops the pipeline on a
   `TRUNCATE` instead, since the destination would otherwise keep rows the source no longer has. To
   apply truncations and schema changes, route the control records to an action (e.g.
-  `partition` on `op` → `action.bigquery` running `TRUNCATE TABLE` / `ALTER TABLE`) — the
+  `partition` on `op` → a `bigquery` action running `TRUNCATE TABLE` / `ALTER TABLE`) — the
   [`cdc` transform](../transform/cdc.md#control-records) describes the records.
 - A template `table` (e.g. `myproject.mydataset.${table}`) routes each change record to its own
   destination table — one sink applies a whole change stream to many tables. The schema of each
@@ -201,13 +201,6 @@ transforms:
           filter: { key: op, op: in, value: [INSERT, UPDATE, DELETE, SNAPSHOT] }
 
 sinks:
-  - name: apply_ddl                   # ALTER TABLE ... ADD COLUMN IF NOT EXISTS (idempotent)
-    module: action.bigquery
-    inputs: [route.ddl]
-    parameters:
-      trigger: perElement
-      op: query
-      query: ${statement}
   - name: bq
     module: bigquery
     inputs: [route.rows]
@@ -223,6 +216,14 @@ sinks:
     parameters:
       output: gs://mybucket/cdc/envelope/
       format: avro
+actions:
+  - name: apply_ddl                   # ALTER TABLE ... ADD COLUMN IF NOT EXISTS (idempotent)
+    module: bigquery
+    operation: jobs.query
+    trigger: perElement
+    inputs: [route.ddl]
+    parameters:
+      query: ${statement}
 ```
 
 How it behaves:
@@ -231,7 +232,7 @@ How it behaves:
    `valueCaptureType: NEW_ROW` / `NEW_ROW_AND_OLD_VALUES`), emits a `SCHEMA` record with the
    `ALTER TABLE` statement, and — with the default `schemaChanges.baseline: destination` — also
    reports a column that was added while the pipeline was down.
-2. `action.bigquery` runs the statement. Duplicate reports (one per worker) are harmless: the DDL
+2. The `bigquery` action runs the statement. Duplicate reports (one per worker) are harmless: the DDL
    is `IF NOT EXISTS` and the action's job id is derived from the statement.
 3. With `autoSchemaUpdate: true` the Storage Write API writer does **not** drop unknown columns:
    it keeps them aside and merges them once the write stream reports the updated table schema

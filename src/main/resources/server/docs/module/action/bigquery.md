@@ -8,7 +8,7 @@ timestamp: 2026-08-19T00:00:00Z
 
 # BigQuery Action Module
 
-Action module (`action.bigquery`) that runs a BigQuery job — a query (SELECT/DML/DDL) or a load job — via the BigQuery Jobs API, and by default waits for its completion. Placeable in sources/transforms/sinks; see [action modules](README.md) for placement, trigger semantics and the output envelope.
+Action module (`actions` section, `module: bigquery`) that runs a BigQuery job — a query (SELECT/DML/DDL) or a load job — via the BigQuery Jobs API, and by default waits for its completion. See [action modules](README.md) for the `actions` section, trigger semantics and the output envelope.
 
 Typical uses: run a load job over files a storage sink wrote, run a summary/merge query after other steps complete, run one parameterized job per input record.
 
@@ -21,20 +21,25 @@ The job id is derived deterministically from the pipeline job name, the step nam
 - `trigger: perElement` — `${field}` expressions in `query`, `sourceUris`, `destinationTable` and `jobId` are expanded with the element's values (primitive representation, e.g. timestamps as epoch micros).
 - `trigger: collect` — the same parameters can use `elements` (list of field maps) and `size`, including FreeMarker list directives; `sourceUrisField` gathers one field's value from every element into `sourceUris`.
 
+## Operations
+
+| operation    | effect |
+|--------------|--------|
+| `jobs.query` | Run a query job (SELECT / DML / DDL) — `query` required; `useLegacySql`, `priority`, `destinationTable` (optional) apply. |
+| `jobs.load`  | Run a load job — `sourceUris` or `sourceUrisField`, and `destinationTable` required; `sourceFormat`, `writeDisposition`, `createDisposition` apply. |
+
 ## Parameters
 
 | parameter         | optional | type           | description                                                                                                             |
 |-------------------|----------|----------------|-------------------------------------------------------------------------------------------------------------------------|
-| trigger           | optional | Enum           | `once` (default), `perElement`, `collect`. See [action modules](README.md#trigger).                                     |
-| op                | required | Enum           | Job type: `query` or `load`.                                                                                             |
 | projectId         | optional | String         | GCP project ID to run the job in. Defaults to the pipeline's project.                                                    |
-| query             | conditionally required | String | SQL to execute (SELECT/DML/DDL). Required when `op` is `query`. A template that resolves to an empty string (e.g. a cdc `SCHEMA` record without a generated `statement`) submits no job: the firing is reported with `state: SKIPPED` and a null `jobId`. |
-| useLegacySql      | optional | Boolean        | Whether the query uses legacy SQL. Default: `false` (standard SQL). (`op: query` only)                                   |
-| priority          | optional | Enum           | Query priority: `INTERACTIVE` or `BATCH`. Default: `INTERACTIVE`. (`op: query` only)                                     |
-| sourceUris        | conditionally required | Array<String\> | GCS URIs of files to load. Required when `op` is `load` unless `sourceUrisField` is set.                  |
-| sourceUrisField   | optional | String         | With `trigger: collect` and `op: load`: gathers this field's value from every collected element into `sourceUris` (e.g. `path` from storage sink results — one load job for all written files). |
-| sourceFormat      | optional | String         | Source format for `op: load`: `AVRO`, `PARQUET`, `CSV`, `NEWLINE_DELIMITED_JSON`, `ORC`, … Default: BigQuery's default (`CSV`). |
-| destinationTable  | conditionally required | String | Destination table (e.g. `project.dataset.table`). Required when `op` is `load`; optional for `op: query` (writes query results to the table). |
+| query             | conditionally required | String | SQL to execute (SELECT/DML/DDL). Required for `jobs.query`. A template that resolves to an empty string (e.g. a cdc `SCHEMA` record without a generated `statement`) submits no job: the firing is reported with `state: SKIPPED` and a null `jobId`. |
+| useLegacySql      | optional | Boolean        | Whether the query uses legacy SQL. Default: `false` (standard SQL). (`jobs.query` only)                                   |
+| priority          | optional | Enum           | Query priority: `INTERACTIVE` or `BATCH`. Default: `INTERACTIVE`. (`jobs.query` only)                                     |
+| sourceUris        | conditionally required | Array<String\> | GCS URIs of files to load. Required for `jobs.load` unless `sourceUrisField` is set.                  |
+| sourceUrisField   | optional | String         | With `trigger: collect` and `jobs.load`: gathers this field's value from every collected element into `sourceUris` (e.g. `path` from storage sink results — one load job for all written files). |
+| sourceFormat      | optional | String         | Source format for `jobs.load`: `AVRO`, `PARQUET`, `CSV`, `NEWLINE_DELIMITED_JSON`, `ORC`, … Default: BigQuery's default (`CSV`). |
+| destinationTable  | conditionally required | String | Destination table (e.g. `project.dataset.table`). Required for `jobs.load`; optional for `jobs.query` (writes query results to the table). |
 | writeDisposition  | optional | Enum           | `WRITE_TRUNCATE`, `WRITE_APPEND`, `WRITE_EMPTY`.                                                                         |
 | createDisposition | optional | Enum           | `CREATE_IF_NEEDED`, `CREATE_NEVER`.                                                                                      |
 | location          | optional | String         | Job location (e.g. `US`, `asia-northeast1`). Usually inferred by BigQuery.                                               |
@@ -61,12 +66,13 @@ sinks:
     parameters:
       output: gs://my-bucket/export/data
       format: avro
+actions:
   - name: load
-    module: action.bigquery
+    module: bigquery
+    operation: jobs.load
+    trigger: collect
     inputs: [store]                # storage sink emits {sink, path, timestamp} records
     parameters:
-      trigger: collect
-      op: load
       sourceUrisField: path
       sourceFormat: AVRO
       destinationTable: myproject.mydataset.loaded
@@ -76,12 +82,12 @@ sinks:
 ### Example 2: Summary query after another step
 
 ```yaml
-sinks:
+actions:
   - name: summarize
-    module: action.bigquery
+    module: bigquery
+    operation: jobs.query
     waits: [some_previous_sink]
     parameters:
-      op: query
       query: "SELECT category, COUNT(*) AS cnt FROM `myproject.mydataset.events` GROUP BY category"
       destinationTable: myproject.mydataset.event_summary
       writeDisposition: WRITE_TRUNCATE
@@ -90,13 +96,13 @@ sinks:
 ### Example 3: One parameterized load per input record
 
 ```yaml
-sinks:
+actions:
   - name: load_partitions
-    module: action.bigquery
+    module: bigquery
+    operation: jobs.load
+    trigger: perElement
     inputs: [partitions]           # records with field: date_str
     parameters:
-      trigger: perElement
-      op: load
       sourceUris:
         - gs://my-bucket/export/${date_str}/*.avro
       sourceFormat: AVRO

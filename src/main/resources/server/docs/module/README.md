@@ -70,15 +70,15 @@ This page lists the modules registered in the current codebase.
 
 ## Action Modules
 
-Action modules (`action.<service>`) execute an operation against an external service at a point in the pipeline (run a job, write a result history) — lightweight workflow steps. They are placeable in any of the `sources` / `transforms` / `sinks` sections; see the [action modules overview](action/README.md) for placement, trigger semantics (`once` / `perElement` / `collect`) and the common output envelope.
+Action modules execute an operation against an external service at a point in the pipeline (run a job, write a result history) — lightweight workflow steps. They are declared in the `actions` config section (`module:` names the service); see the [action modules overview](action/README.md) for the section layout, trigger semantics (`once` / `perElement` / `collect`) and the common output envelope.
 
 | module                                                | description                                                                                       |
 |-------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| [action.bigquery](action/bigquery.md)                 | Run a BigQuery job (query or load) and wait for it, with idempotent deterministic job ids           |
-| [action.vertexai_gemini](action/vertexai_gemini.md)   | Launch a Vertex AI Gemini batch prediction job and wait for it                                      |
-| [action.storage](action/storage.md)                   | Write a small file from the triggering records (result histories, summary reports, marker files)    |
-| [action.http](action/http.md)                         | One HTTP request per firing: notify, trigger jobs, maintenance calls, start + poll async jobs |
-| [action.tasks](action/tasks.md)                       | Cloud Tasks queue operations (create/update/pause/resume/purge/delete, waitForEmpty, run/delete task) |
+| [bigquery](action/bigquery.md) | Run a BigQuery job (query or load) and wait for it, with idempotent deterministic job ids           |
+| [vertexai_gemini](action/vertexai_gemini.md) | Launch a Vertex AI Gemini batch prediction job and wait for it                                      |
+| [storage](action/storage.md) | Write a small file from the triggering records (result histories, summary reports, marker files)    |
+| [http](action/http.md) | One HTTP request per firing: notify, trigger jobs, maintenance calls, start + poll async jobs |
+| [tasks](action/tasks.md) | Cloud Tasks queue operations (create/update/pause/resume/purge/delete, waitForEmpty, run/delete task) |
 
 ## Failure Modules
 

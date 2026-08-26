@@ -8,14 +8,14 @@ timestamp: 2026-08-21T00:00:00Z
 
 # HTTP Action Module
 
-Action module (`action.http`) that sends **one HTTP request per firing**. It is the control-plane counterpart of the [http sink](../sink/http.md): the sink delivers data records; this action calls endpoints *about* the pipeline run — notifications, job triggers, maintenance calls, asynchronous job start + status polling. Placeable in sources/transforms/sinks; see [action modules](README.md) for placement, trigger semantics and the output envelope.
+Action module (`actions` section, `module: http`) that sends **one HTTP request per firing**. It is the control-plane counterpart of the [http sink](../sink/http.md): the sink delivers data records; this action calls endpoints *about* the pipeline run — notifications, job triggers, maintenance calls, asynchronous job start + status polling. See [action modules](README.md) for the `actions` section, trigger semantics and the output envelope.
 
 Typical workflows:
 
 ```
-bigquery sink  →  action.http once (POST Slack webhook "load finished")
-action.http once (PUT /items_v2, refresh_interval=-1)  →  http sink (_bulk)  →  action.http once (POST /items_v2/_refresh, waits)  →  action.http once (POST /_aliases)
-action.http once (POST /jobs, poll until state=DONE)  →  next step
+bigquery sink  →  http action once (POST Slack webhook "load finished")
+http action once (PUT /items_v2, refresh_interval=-1)  →  http sink (_bulk)  →  http action once (POST /items_v2/_refresh, waits)  →  http action once (POST /_aliases)
+http action once (POST /jobs, poll until state=DONE)  →  next step
 ```
 
 ## Triggers and templates
@@ -32,7 +32,6 @@ action.http once (POST /jobs, poll until state=DONE)  →  next step
 
 | parameter | optional | type | description |
 |-----------|----------|------|-------------|
-| trigger   | optional | Enum | `once`, `perElement`, `collect`. |
 | target    | required | [Target](../sink/http.md#target-parameters) | URL, method (default `POST`), query params, headers, `auth` — identical to the http sink. |
 | body      | optional | [Body](../sink/http.md#body-parameters) | Body serialization — identical to the http sink. With `once` only `template` / `none` produce a body (there is no record to serialize). With `collect`, `json` sends the array of records (`wrapper` applies), `ndjson` one line per record, `template` sees `elements` / `size`. |
 | response  | optional | [Response](../sink/http.md#response-parameters) | `format` / `schema` / `success` / `retry` — identical to the http sink. Retries happen inside the firing (blocking). `partialFailure` is not supported here (use the sink). |
@@ -61,7 +60,7 @@ Each poll response is classified by `response.success` / `retry` like the initia
 | field | value |
 |-------|-------|
 | service | `http` |
-| op | HTTP method of the request |
+| operation | HTTP method of the request (the service has no config `operation`) |
 | jobId | Request URL (or the poll URL when `poll` is set) |
 | state | `SUCCEEDED` (failures are thrown, not emitted) |
 | payload | JSON `{"statusCode": …, "attempts": …, "body": <json body or text>}` of the final response (the last poll when polling) |
@@ -80,8 +79,9 @@ sinks:
     module: bigquery
     inputs: [rows]
     parameters: { table: "proj:ds.table" }
+actions:
   - name: notify
-    module: action.http
+    module: http
     inputs: [load]            # once: fires after the sink completed
     parameters:
       target:
@@ -95,27 +95,28 @@ sinks:
 
 ```yaml
 sinks:
+  - name: bulk
+    module: http
+    inputs: [items]
+    waits: [prepare]
+    parameters: { target: { url: https://es.example.com/_bulk, auth: {...} }, body: { format: ndjson, template: "..." }, batch: { maxSize: 1000 } }
+actions:
   - name: prepare
-    module: action.http
+    module: http
     parameters:
       target:
         url: https://es.example.com/items_v2/_settings
         method: PUT
         auth: { type: basic, username: elastic, password: "${utils.secrets.get('projects/p/secrets/es-pw/versions/latest')}" }
       body: { format: template, template: '{"index": {"refresh_interval": "-1"}}' }
-  - name: bulk
-    module: http
-    inputs: [items]
-    waits: [prepare]
-    parameters: { target: { url: https://es.example.com/_bulk, auth: {...} }, body: { format: ndjson, template: "..." }, batch: { maxSize: 1000 } }
   - name: refresh
-    module: action.http
+    module: http
     inputs: [bulk]
     parameters:
       target: { url: https://es.example.com/items_v2/_refresh, auth: {...} }
       body: { format: none }
   - name: swap
-    module: action.http
+    module: http
     inputs: [refresh]
     parameters:
       target: { url: https://es.example.com/_aliases, auth: {...} }
@@ -127,9 +128,9 @@ sinks:
 ### Start an asynchronous job and wait for it
 
 ```yaml
-sinks:
+actions:
   - name: export
-    module: action.http
+    module: http
     inputs: [load]
     parameters:
       target:
@@ -147,12 +148,12 @@ sinks:
 ### Per-record trigger of a Cloud Run Job with the pipeline's identity
 
 ```yaml
-sinks:
+actions:
   - name: run_job
-    module: action.http
+    module: http
+    trigger: perElement
     inputs: [tenants]
     parameters:
-      trigger: perElement
       target:
         url: https://run.googleapis.com/v2/projects/p/locations/asia-northeast1/jobs/process-${tenant}:run
         auth: { type: gcpOauth }

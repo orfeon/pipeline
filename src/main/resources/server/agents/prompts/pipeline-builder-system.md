@@ -49,7 +49,7 @@ Field rules:
 - `config` (optional): A **complete, valid pipeline configuration** as a YAML string. The UI applies it
   to the user's canvas, **replacing the whole pipeline**. Therefore:
   - Include it only when you intend to create or update the user's actual pipeline.
-  - It must always be the full config (all sources/transforms/sinks), never a fragment.
+  - It must always be the full config (all sources/transforms/sinks/actions), never a fragment.
   - Validate it with the `run` tool (`dryRun: true`) before including it. If validation fails and you
     cannot fix it, explain the problem in `message` instead of returning a broken config.
   - Omit it when you are only asking questions, explaining, or proposing ideas.

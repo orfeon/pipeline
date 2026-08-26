@@ -23,9 +23,6 @@ public class SinkConfig extends ModuleConfig {
             final List<String> list = new ArrayList<>();
             list.add(input);
             return list;
-        } else if(com.mercari.solution.module.action.Actions.isActionModule(getModule())) {
-            // action modules may be gated by waits alone (or nothing at all with trigger: once)
-            return new ArrayList<>();
         } else {
             throw new IllegalArgumentException("Sink module: " + getName() + " has not input");
         }

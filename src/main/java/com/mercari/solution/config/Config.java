@@ -48,6 +48,7 @@ public class Config implements Serializable {
     private List<SourceConfig> sources;
     private List<TransformConfig> transforms;
     private List<SinkConfig> sinks;
+    private List<ActionConfig> actions;
 
     private Boolean empty;
 
@@ -91,6 +92,10 @@ public class Config implements Serializable {
 
     public List<SinkConfig> getSinks() {
         return sinks;
+    }
+
+    public List<ActionConfig> getActions() {
+        return actions;
     }
 
     public List<FailureConfig> getFailureSinks() {
@@ -436,6 +441,14 @@ public class Config implements Serializable {
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
                     .peek(c -> c.addFailureSinks(failureSinks))
                     .collect(Collectors.toList());
+            final List<ActionConfig> actions = Optional.ofNullable(config.getActions()).orElseGet(ArrayList::new)
+                    .stream()
+                    .filter(Objects::nonNull)
+                    .peek(c -> c.setArgs(templateArgs))
+                    .peek(c -> c.applyContext(config.system.context))
+                    .peek(c -> c.setFailFast(config.system.failure.failFast))
+                    .peek(c -> c.addFailureSinks(failureSinks))
+                    .collect(Collectors.toList());
 
             for(final Import i : config.getSystem().getImports()) {
                 for(final String path : i.getFiles()) {
@@ -468,16 +481,26 @@ public class Config implements Serializable {
                                 .peek(c -> c.addFailureSinks(failureSinks))
                                 .toList());
                     }
+                    if(importConfig.getActions() != null) {
+                        actions.addAll(importConfig.getActions()
+                                .stream()
+                                .peek(c -> c.setArgs(i.args))
+                                .peek(c -> c.applyContext(config.system.context))
+                                .peek(c -> c.setFailFast(config.system.failure.failFast))
+                                .peek(c -> c.addFailureSinks(failureSinks))
+                                .toList());
+                    }
                 }
             }
 
-            if(sources.isEmpty() && transforms.isEmpty() && sinks.isEmpty()) {
-                throw new IllegalModuleException("", "pipeline", List.of("config has no module(sources,transforms,sinks) definition"));
+            if(sources.isEmpty() && transforms.isEmpty() && sinks.isEmpty() && actions.isEmpty()) {
+                throw new IllegalModuleException("", "pipeline", List.of("config has no module(sources,transforms,sinks,actions) definition"));
             }
 
             config.sources = sources;
             config.transforms = transforms;
             config.sinks = sinks;
+            config.actions = actions;
             config.setFailureSinks(failureSinks);
 
             config.content = jsonObject.toString();

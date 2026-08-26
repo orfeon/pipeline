@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * Configuration of an outbound HTTP request shared by the http sink, action.http (and the tasks
+ * Configuration of an outbound HTTP request shared by the http sink, the http action (and the tasks
  * sink): {@code target} (url / method / params / headers / auth) and {@code body} (serialization).
  */
 public final class RequestSpec {

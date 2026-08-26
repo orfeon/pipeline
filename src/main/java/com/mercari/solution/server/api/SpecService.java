@@ -450,9 +450,6 @@ public class SpecService {
                 for (final String type : List.of("sources", "transforms", "sinks")) {
                     result.add(type, toModuleArray(index.get(type)));
                 }
-                // Action modules (action.<service>) are placeable in any of the three config
-                // sections (placement never changes behavior), so the catalog lists them once
-                // under their own key; the Builder UI shows them as a separate "Actions" group.
                 result.add("actions", toModuleArray(index.get("actions")));
                 modules = result;
             } catch (final IOException e) {

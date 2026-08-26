@@ -21,14 +21,14 @@ public class DocsReader {
         source,
         transform,
         sink,
-        // action modules (action.<service>) are placeable in sources/transforms/sinks;
+        // action modules (config section `actions`);
         // their docs live under module/action/<service>.md
         action
     }
 
     @Tool("""
         List available module documentation.
-        If type is specified, returns only modules of that type (source, transform, or sink).
+        If type is specified, returns only modules of that type (source, transform, sink, or action).
         If type is not specified, returns all available module documentation across all types.
         Use this tool to discover what modules are available before reading their details.
     """)
@@ -70,11 +70,11 @@ public class DocsReader {
         Use listModules first to discover available module names if needed.
     """)
     public String getModule(
-            @P(name = "type", description = "Module type: source, transform, or sink.") ModuleType type,
+            @P(name = "type", description = "Module type: source, transform, sink, or action (action = the actions config section).") ModuleType type,
             @P(name = "name", description = "Module name (e.g. 'create', 'bigquery', 'beamsql', 'storage').") String name) {
 
         if (type == null) {
-            return "Error: type is required. Specify one of: source, transform, sink.";
+            return "Error: type is required. Specify one of: source, transform, sink, action.";
         }
         if (name == null || name.isBlank()) {
             return "Error: name is required. Specify the module name (e.g. 'create', 'beamsql', 'storage').";

@@ -2,6 +2,7 @@ package com.mercari.solution.module;
 
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
+import com.mercari.solution.module.action.MockAction;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
@@ -15,7 +16,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Tests for the action modules (action.<service>): placement in sources/transforms/sinks,
+ * Tests for the action module (config section {@code actions}): gating by inputs/waits/nothing,
  * trigger semantics (once/perElement/collect), the common output envelope, control-record
  * chaining, failure routing and validation. Uses the test-only 'mock' action service and the
  * real 'storage' action service (local files).
@@ -46,11 +47,11 @@ public class ActionModuleTest {
             """;
 
     @Test
-    public void testTriggerOnceInSinksWithInputs() throws Exception {
+    public void testTriggerOnceWithInputs() throws Exception {
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
                     inputs:
                       - input
                     parameters:
@@ -65,7 +66,7 @@ public class ActionModuleTest {
             for(final MElement element : elements) {
                 count++;
                 Assertions.assertEquals("mock", element.getPrimitiveValue("service"));
-                Assertions.assertEquals("echo", element.getPrimitiveValue("op"));
+                Assertions.assertEquals("echo", element.getPrimitiveValue("operation"));
                 Assertions.assertEquals("mock-job", element.getPrimitiveValue("jobId"));
                 Assertions.assertEquals("DONE", element.getPrimitiveValue("state"));
                 Assertions.assertEquals("fixed message", element.getPrimitiveValue("payload"));
@@ -82,9 +83,9 @@ public class ActionModuleTest {
     @Test
     public void testTriggerOnceStandalone() throws Exception {
         final String configYaml = """
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
                     parameters:
                       message: standalone
                 """;
@@ -105,17 +106,16 @@ public class ActionModuleTest {
     }
 
     @Test
-    public void testActionInSources() throws Exception {
+    public void testPipelineStartActionGatingAnother() throws Exception {
         // pipeline-start action (no upstream) gating another step via waits
         final String configYaml = """
-                sources:
+                actions:
                   - name: prepare
-                    module: action.mock
+                    module: mock
                     parameters:
                       message: prepared
-                sinks:
                   - name: after
-                    module: action.mock
+                    module: mock
                     waits:
                       - prepare
                     parameters:
@@ -147,24 +147,23 @@ public class ActionModuleTest {
     }
 
     @Test
-    public void testActionInTransformsWaitsOnlyAndChained() throws Exception {
+    public void testWaitsOnlyActionAndChained() throws Exception {
         // mid-flow action gated by waits alone; its envelope (control records) is consumed
         // downstream by another action via inputs — the sanctioned control-plane chaining
         final String configYaml = SOURCE_YAML + """
-                transforms:
+                actions:
                   - name: mid
-                    module: action.mock
+                    module: mock
                     waits:
                       - input
                     parameters:
                       message: mid done
-                sinks:
                   - name: notify
-                    module: action.mock
+                    module: mock
+                    trigger: perElement
                     inputs:
                       - mid
                     parameters:
-                      trigger: perElement
                       message: got ${payload} from ${service}
                 """;
         final Config config = Config.load(configYaml);
@@ -186,13 +185,13 @@ public class ActionModuleTest {
     @Test
     public void testTriggerPerElementWithTemplate() throws Exception {
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
+                    trigger: perElement
                     inputs:
                       - input
                     parameters:
-                      trigger: perElement
                       message: value is ${field_string}-${field_long}
                 """;
         final Config config = Config.load(configYaml);
@@ -217,13 +216,13 @@ public class ActionModuleTest {
         // collect: all input elements gathered into one execution, exposed to templates
         // as `elements` (list of field maps) and `size`
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
+                    trigger: collect
                     inputs:
                       - input
                     parameters:
-                      trigger: collect
                       message: "${size} records:<#list elements?sort_by('field_string') as e> ${e.field_string}=${e.field_long}</#list>"
                 """;
         final Config config = Config.load(configYaml);
@@ -251,13 +250,13 @@ public class ActionModuleTest {
         Files.deleteIfExists(file);
 
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: history
-                    module: action.storage
+                    module: storage
+                    trigger: collect
                     inputs:
                       - input
                     parameters:
-                      trigger: collect
                       output: %s
                 """.formatted(dir + "/history.jsonl");
         final Config config = Config.load(configYaml);
@@ -289,12 +288,13 @@ public class ActionModuleTest {
                       format: json
                       suffix: .json
                       numShards: 1
+                actions:
                   - name: notify
-                    module: action.mock
+                    module: mock
+                    trigger: collect
                     inputs:
                       - store
                     parameters:
-                      trigger: collect
                       message: "wrote ${size} files:<#list elements as e> ${e.path}</#list>"
                 """.formatted(dir);
         final Config config = Config.load(configYaml);
@@ -319,9 +319,9 @@ public class ActionModuleTest {
     public void testFailureIsRoutedNotOutput() throws Exception {
         // failFast: false routes the BadRecord to failure handling; the output must stay empty
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
                     failFast: false
                     inputs:
                       - input
@@ -338,69 +338,351 @@ public class ActionModuleTest {
     }
 
     @Test
+    public void testRetryRecoversTransientFailure() throws Exception {
+        // the first two executions fail, the third succeeds within maxAttempts: 3 -> one envelope, no failure
+        MockAction.EXECUTIONS.remove("flaky");
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: flaky
+                    module: mock
+                    inputs:
+                      - input
+                    retry:
+                      maxAttempts: 3
+                      initialBackoff: 10ms
+                      maxBackoff: 50ms
+                    parameters:
+                      message: recovered
+                      failTimes: 2
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("flaky");
+
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                count++;
+                Assertions.assertEquals("recovered", element.getPrimitiveValue("payload"));
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run().waitUntilFinish();
+        Assertions.assertEquals(3, MockAction.EXECUTIONS.get("flaky").get());
+    }
+
+    @Test
+    public void testRetryExhaustedIsRoutedToFailure() throws Exception {
+        // still failing after maxAttempts: routed as BadRecord (failFast false), output stays empty
+        MockAction.EXECUTIONS.remove("hopeless");
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: hopeless
+                    module: mock
+                    failFast: false
+                    inputs:
+                      - input
+                    retry:
+                      maxAttempts: 2
+                      initialBackoff: 10ms
+                    parameters:
+                      message: never
+                      failTimes: 5
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("hopeless");
+
+        PAssert.that(output.getCollection()).empty();
+
+        pipeline.run().waitUntilFinish();
+        Assertions.assertEquals(2, MockAction.EXECUTIONS.get("hopeless").get());
+    }
+
+    @Test
+    public void testRetrySkipsNonRetryableFailure() throws Exception {
+        // a NonRetryableException goes straight to failure handling: no further attempts
+        MockAction.EXECUTIONS.remove("rejected");
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: rejected
+                    module: mock
+                    failFast: false
+                    inputs:
+                      - input
+                    retry:
+                      maxAttempts: 3
+                      initialBackoff: 10ms
+                    parameters:
+                      message: never
+                      failTimes: 5
+                      nonRetryable: true
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("rejected");
+
+        PAssert.that(output.getCollection()).empty();
+
+        pipeline.run().waitUntilFinish();
+        Assertions.assertEquals(1, MockAction.EXECUTIONS.get("rejected").get());
+    }
+
+    @Test
+    public void testOperationsDeclaredAndEnumsStayInSync() {
+        // the @Action.Service(operations) list (validated at assembly) and each service's Op enum
+        // (used to branch in configure/execute) must describe the same set of config values
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.BigQueryAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("bigquery")));
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.TasksAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("tasks")));
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.vertexai.GeminiAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("vertexai_gemini")));
+        Assertions.assertTrue(Action.operations("storage").isEmpty());
+        Assertions.assertTrue(Action.operations("http").isEmpty());
+    }
+
+    @Test
+    public void testCollectFireOnEmpty() throws Exception {
+        // every input record is filtered out; without fireOnEmpty the collect action does not fire,
+        // with it the action fires once with zero elements
+        final String base = SOURCE_YAML + """
+                transforms:
+                  - name: none
+                    module: select
+                    inputs:
+                      - input
+                    parameters:
+                      filter:
+                        key: field_long
+                        op: ">"
+                        value: 100
+                """;
+        final String silent = base + """
+                actions:
+                  - name: silent
+                    module: mock
+                    trigger: collect
+                    inputs:
+                      - none
+                    parameters:
+                      message: "${size} records"
+                """;
+        final TestPipeline p1 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(MPipeline.apply(p1, Config.load(silent)).get("silent").getCollection()).empty();
+        p1.run();
+
+        final String fired = base + """
+                actions:
+                  - name: fired
+                    module: mock
+                    trigger: collect
+                    fireOnEmpty: true
+                    inputs:
+                      - none
+                    parameters:
+                      message: "${size} records"
+                """;
+        final TestPipeline p2 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(MPipeline.apply(p2, Config.load(fired)).get("fired").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                count++;
+                Assertions.assertEquals("0 records", element.getPrimitiveValue("payload"));
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        p2.run();
+    }
+
+    @Test
     public void testValidationErrors() {
         // unknown service
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.nosuchservice
+                    module: nosuchservice
                     inputs:
                       - input
                     parameters:
                       message: msg
                 """)));
 
-        // bare 'action' module without service suffix
+        // the former action.<service> placement inside sources/transforms/sinks is not a module any more
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
                 sinks:
                   - name: action
-                    module: action
+                    module: action.mock
                     inputs:
                       - input
+                    parameters:
+                      message: msg
+                """)));
+
+        // trigger is a module-level field: parameters.trigger is rejected
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    inputs:
+                      - input
+                    parameters:
+                      trigger: perElement
+                      message: msg
+                """)));
+
+        // unknown trigger value
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    trigger: sometimes
+                    inputs:
+                      - input
+                    parameters:
+                      message: msg
+                """)));
+
+        // operation: required for multi-operation services, must match the declared list,
+        // and must be absent for single-operation services; parameters.op is rejected
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: bigquery
+                    inputs:
+                      - input
+                    parameters:
+                      query: SELECT 1
+                """)));
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: bigquery
+                    operation: jobs.insert
+                    inputs:
+                      - input
+                    parameters:
+                      query: SELECT 1
+                """)));
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    operation: echo
+                    inputs:
+                      - input
+                    parameters:
+                      message: msg
+                """)));
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: bigquery
+                    operation: jobs.query
+                    inputs:
+                      - input
+                    parameters:
+                      op: query
+                      query: SELECT 1
+                """)));
+
+        // fireOnEmpty only applies to collect
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    fireOnEmpty: true
+                    inputs:
+                      - input
+                    parameters:
+                      message: msg
+                """)));
+
+        // fireOnEmpty needs the global window: a windowing strategy is rejected at assembly
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    trigger: collect
+                    fireOnEmpty: true
+                    inputs:
+                      - input
+                    strategy:
+                      window:
+                        type: fixed
+                        unit: minute
+                        size: 1
+                    parameters:
+                      message: msg
+                """)));
+
+        // retry.maxAttempts must be >= 1, backoffs must be durations
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    inputs:
+                      - input
+                    retry:
+                      maxAttempts: 0
+                    parameters:
+                      message: msg
+                """)));
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    inputs:
+                      - input
+                    retry:
+                      initialBackoff: soon
                     parameters:
                       message: msg
                 """)));
 
         // perElement without inputs
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load("""
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
+                    trigger: perElement
                     parameters:
-                      trigger: perElement
                       message: msg
                 """)));
 
         // collect without inputs
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load("""
-                sinks:
+                actions:
                   - name: action
-                    module: action.mock
+                    module: mock
+                    trigger: collect
                     parameters:
-                      trigger: collect
                       message: msg
                 """)));
 
         // bigquery service parameter validation is reached through the module (query op without query)
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.bigquery
+                    module: bigquery
+                    operation: jobs.query
                     inputs:
                       - input
                     parameters:
-                      op: query
                 """)));
 
         // sourceUrisField requires trigger: collect
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: action
-                    module: action.bigquery
+                    module: bigquery
+                    operation: jobs.load
                     inputs:
                       - input
                     parameters:
-                      op: load
                       sourceUrisField: path
                       destinationTable: p.d.t
                 """)));

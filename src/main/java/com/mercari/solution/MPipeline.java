@@ -9,7 +9,6 @@ import com.mercari.solution.config.*;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
-import com.mercari.solution.module.action.Actions;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -149,6 +148,7 @@ public class MPipeline {
                 setResult(pipeline, config.getSources(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
                 setResult(pipeline, config.getTransforms(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
                 setResult(pipeline, config.getSinks(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
+                setResult(pipeline, config.getActions(), outputs, executedModuleNames, controlOutputModuleNames, errorHandler);
                 if(preOutputSize == executedModuleNames.size()) {
                     moduleNames.removeAll(executedModuleNames);
                     final String message = String.format("No input for modules: %s", String.join(",", moduleNames));
@@ -210,6 +210,7 @@ public class MPipeline {
             final List<String> rawInputNames = switch (moduleConfig) {
                 case TransformConfig transformConfig -> transformConfig.getInputs();
                 case SinkConfig sinkConfig -> sinkConfig.getInputs();
+                case ActionConfig actionConfig -> actionConfig.getInputs();
                 default -> new ArrayList<String>();
             };
 
@@ -256,6 +257,14 @@ public class MPipeline {
                                 : MCollectionTuple.mergeCollection(inputs);
                         yield input.apply(moduleConfig.getName(), sink);
                     }
+                    case ActionConfig actionConfig -> {
+                        final Action action = Action.create(
+                                actionConfig, pipeline.getOptions(), waits, errorHandler);
+                        final MCollectionTuple input = inputs.isEmpty()
+                                ? MCollectionTuple.empty(pipeline)
+                                : MCollectionTuple.mergeCollection(inputs);
+                        yield input.apply(moduleConfig.getName(), action);
+                    }
                     default -> throw new IllegalModuleException("Not supported config type: " + moduleConfig);
                 };
                 outputs.putAll(output.withSource(moduleConfig.getName()).asCollectionMap());
@@ -278,21 +287,15 @@ public class MPipeline {
     }
 
     /**
-     * Names of modules whose outputs are control records rather than data: every action module
-     * (in any section — their output is the execution result envelope) and every sink-section
-     * module (their output is the write result, e.g. written file paths).
+     * Names of modules whose outputs are control records rather than data: every action
+     * (their output is the execution result envelope) and every sink (their output is the
+     * write result, e.g. written file paths).
      */
     private static Set<String> controlOutputModuleNames(final Config config) {
         final Set<String> names = new HashSet<>();
-        names.addAll(config.getSources().stream()
+        names.addAll(config.getActions().stream()
                 .filter(Objects::nonNull)
-                .filter(c -> Actions.isActionModule(c.getModule()))
-                .map(SourceConfig::getName)
-                .collect(Collectors.toSet()));
-        names.addAll(config.getTransforms().stream()
-                .filter(Objects::nonNull)
-                .filter(c -> Actions.isActionModule(c.getModule()))
-                .map(TransformConfig::getName)
+                .map(ActionConfig::getName)
                 .collect(Collectors.toSet()));
         names.addAll(config.getSinks().stream()
                 .filter(Objects::nonNull)
@@ -302,7 +305,7 @@ public class MPipeline {
     }
 
     /**
-     * Two-plane lint: data modules (non-action transforms/sinks) should consume data outputs
+     * Two-plane lint: data modules (transforms/sinks) should consume data outputs
      * (sources/transforms) via inputs; control records — action envelopes and sink results —
      * are meant for action inputs or waits. Deliberate crossings (e.g. aggregating a file list
      * before a summary notification) stay allowed, so this warns instead of failing.
@@ -313,9 +316,6 @@ public class MPipeline {
             final Set<String> controlOutputModuleNames) {
 
         if(!(moduleConfig instanceof TransformConfig) && !(moduleConfig instanceof SinkConfig)) {
-            return;
-        }
-        if(Actions.isActionModule(moduleConfig.getModule())) {
             return;
         }
         for(final String inputName : inputNames) {
@@ -500,6 +500,11 @@ public class MPipeline {
                 .filter(Objects::nonNull)
                 .filter(c -> c.getIgnore() == null || !c.getIgnore())
                 .map(SinkConfig::getName)
+                .collect(Collectors.toSet()));
+        moduleNames.addAll(config.getActions().stream()
+                .filter(Objects::nonNull)
+                .filter(c -> c.getIgnore() == null || !c.getIgnore())
+                .map(ActionConfig::getName)
                 .collect(Collectors.toSet()));
         return moduleNames;
     }

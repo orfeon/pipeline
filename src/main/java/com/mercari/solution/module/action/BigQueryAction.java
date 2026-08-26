@@ -1,5 +1,9 @@
 package com.mercari.solution.module.action;
 
+import com.mercari.solution.module.Action;
+import com.mercari.solution.module.Schema;
+import com.mercari.solution.module.Action.Trigger;
+
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.util.ExponentialBackOff;
 import com.google.api.client.util.Sleeper;
@@ -44,8 +48,8 @@ import java.util.Optional;
  * {@code sourceUrisField} gathers one field's value from every element into {@code sourceUris}
  * (e.g. load every written file in a single load job).
  */
-@Action.Service(name = "bigquery")
-public class BigQueryAction implements Action {
+@Action.Service(name = "bigquery", operations = {"jobs.query", "jobs.load"})
+public class BigQueryAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(BigQueryAction.class);
 
@@ -78,9 +82,7 @@ public class BigQueryAction implements Action {
 
         public List<String> validate(final String name, final Trigger trigger) {
             final List<String> errorMessages = new ArrayList<>();
-            if(this.op == null) {
-                errorMessages.add("action module[" + name + "].parameters.op must not be null");
-            } else {
+            {
                 switch (this.op) {
                     case query -> {
                         if(this.query == null) {
@@ -133,9 +135,25 @@ public class BigQueryAction implements Action {
 
     }
 
+    /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
-        query,
-        load
+        query("jobs.query"),
+        load("jobs.load");
+
+        public final String operation;
+
+        Op(final String operation) {
+            this.operation = operation;
+        }
+
+        static Op of(final String operation) {
+            for(final Op op : values()) {
+                if(op.operation.equals(operation)) {
+                    return op;
+                }
+            }
+            throw new IllegalModuleException("Not supported operation: " + operation);
+        }
     }
 
     public enum Priority {
@@ -158,21 +176,24 @@ public class BigQueryAction implements Action {
     private String jobName;
     private String defaultProjectId;
     private Trigger trigger;
+    private String operation;
     private Parameters parameters;
 
     private transient Bigquery bigquery;
 
 
     @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options) {
+    public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
         this.name = name;
         this.jobName = options.getJobName();
         this.defaultProjectId = DataflowOptions.getProject(options);
-        this.trigger = Trigger.of(parametersJson);
+        this.trigger = trigger;
+        this.operation = operation;
         this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");
         }
+        this.parameters.op = Op.of(operation);
         final List<String> errorMessages = this.parameters.validate(name, trigger);
         if(!errorMessages.isEmpty()) {
             throw new IllegalModuleException(errorMessages);
@@ -192,7 +213,7 @@ public class BigQueryAction implements Action {
             // a template that resolved to nothing (e.g. a cdc SCHEMA record without a generated
             // statement): nothing to run, report it instead of submitting an empty job
             LOG.info("bigquery action[{}] skips an empty query", name);
-            return ActionResult.of(p.op.name(), null, "SKIPPED", null);
+            return ActionResult.of(operation, null, "SKIPPED", null);
         }
         final Job job = switch (p.op) {
             case query -> executeJob(p, createQueryJobConfiguration(p));
@@ -200,7 +221,7 @@ public class BigQueryAction implements Action {
         };
         final String state = Optional.ofNullable(job.getStatus()).map(s -> s.getState()).orElse(null);
         final String payload = Optional.ofNullable(job.getStatistics()).map(Object::toString).orElse(null);
-        return ActionResult.of(p.op.name(), job.getJobReference().getJobId(), state, payload);
+        return ActionResult.of(operation, job.getJobReference().getJobId(), state, payload);
     }
 
     /**

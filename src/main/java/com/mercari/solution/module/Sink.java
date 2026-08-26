@@ -27,10 +27,7 @@ public abstract class Sink extends Module<MCollectionTuple> {
         boolean schema() default false;
     }
 
-    private static final Map<String, Class<Sink>> sinks = com.mercari.solution.module.action.Actions
-            .registerActionModules(
-                    findSinksInPackage("com.mercari.solution.module.sink"),
-                    com.mercari.solution.module.sink.ActionSink.class);
+    private static final Map<String, Class<Sink>> sinks = findSinksInPackage("com.mercari.solution.module.sink");
 
     private Schema schema;
     private Strategy strategy;

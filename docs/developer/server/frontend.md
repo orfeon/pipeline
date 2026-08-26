@@ -104,13 +104,14 @@ registered module name; new modules must be added to that file to appear in the 
     "sources":    [{"name": "bigquery", "description": "...", "tags": ["source", "gcp"]}],
     "transforms": [...],
     "sinks":      [...],
-    "actions":    [{"name": "action.bigquery", "description": "...", "tags": ["action", "bigquery"]}]
+    "actions":    [{"name": "bigquery", "description": "...", "tags": ["action", "bigquery"]}]
   }
 }
 ```
 
-`actions` lists the `action.<service>` modules once (they are placeable in any config
-section); the UI shows them as a separate *Actions* sidebar group and an `action` node type.
+`actions` lists the action services (config section `actions`, `module:` = service name); the UI
+shows them as a separate *Actions* sidebar group and an `action` node type, and exports them
+under the `actions` key.
 
 The left pane shows `name` as the label and `description` + `tags` as the tooltip.
 
@@ -160,7 +161,7 @@ Examples:
 | Variable | Description |
 |----------|-------------|
 | `editor` | Drawflow editor instance |
-| `moduleDefs` | Module definitions `{ sources: [], transforms: [], sinks: [], actions: [] }` (`actions` = `action.<service>` modules, shown as their own sidebar group / `action` node type; exported under `sources` when they have no data inputs, else `transforms`) |
+| `moduleDefs` | Module definitions `{ sources: [], transforms: [], sinks: [], actions: [] }` (`actions` = action services, shown as their own sidebar group / `action` node type; exported under the `actions` config section) |
 | `nodeCounter` | Per-type counter for auto-naming `{ source: 0, transform: 0, sink: 0 }` |
 | `systemConfig` | Current system config object |
 | `optionsConfig` | Current pipeline options object |
