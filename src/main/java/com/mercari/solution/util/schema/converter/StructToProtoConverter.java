@@ -3,6 +3,7 @@ package com.mercari.solution.util.schema.converter;
 import com.google.cloud.ByteArray;
 import com.google.cloud.Date;
 import com.google.cloud.spanner.Struct;
+import com.google.cloud.spanner.Type;
 import com.google.protobuf.*;
 import com.mercari.solution.util.schema.ProtoSchemaUtil;
 
@@ -52,7 +53,7 @@ public class StructToProtoConverter {
             case LONG -> struct.getLong(field.getName());
             case FLOAT -> struct.getFloat(field.getName());
             case DOUBLE -> struct.getDouble(field.getName());
-            case STRING -> struct.getString(field.getName());
+            case STRING -> getString(field.getName(), struct);
             case ENUM -> field.getEnumType().findValueByName(struct.getString(field.getName()));
             case BYTE_STRING -> ByteString.copyFrom(struct.getBytes(field.getName()).toByteArray());
             case MESSAGE -> switch (ProtoSchemaUtil.ProtoType.of(field.getMessageType().getFullName())) {
@@ -63,7 +64,7 @@ public class StructToProtoConverter {
                                 .setField(field.getMessageType().findFieldByName("value"), ByteString.copyFrom(struct.getBytes(field.getName()).toByteArray()))
                                 .build();
                     case STRING_VALUE -> DynamicMessage.newBuilder(field.getMessageType())
-                                .setField(field.getMessageType().findFieldByName("value"), struct.getString(field.getName()))
+                                .setField(field.getMessageType().findFieldByName("value"), getString(field.getName(), struct))
                                 .build();
                     case INT32_VALUE, UINT32_VALUE -> DynamicMessage.newBuilder(field.getMessageType())
                                 .setField(field.getMessageType().findFieldByName("value"), Long.valueOf(struct.getLong(field.getName())).intValue())
@@ -118,7 +119,7 @@ public class StructToProtoConverter {
                                 .setField(field.getMessageType().findFieldByName("nanos"), timestamp.getNanos())
                                 .build();
                         }
-                    case ANY -> Any.newBuilder().setValue(ByteString.copyFromUtf8(struct.getString(field.getName()))).build();
+                    case ANY -> Any.newBuilder().setValue(ByteString.copyFromUtf8(getString(field.getName(), struct))).build();
                     case EMPTY -> Empty.newBuilder().build();
                     case NULL_VALUE -> NullValue.NULL_VALUE;
                     default -> convert(field.getMessageType(), struct.getStruct(field.getName()));
@@ -144,7 +145,7 @@ public class StructToProtoConverter {
             case LONG -> struct.getLongList(field.getName());
             case FLOAT -> struct.getFloatList(field.getName());
             case DOUBLE -> struct.getDoubleList(field.getName());
-            case STRING -> struct.getStringList(field.getName());
+            case STRING -> getStringList(field.getName(), struct);
             case ENUM -> struct.getStringList(field.getName()).stream()
                         .map(s -> field.getEnumType().findValueByName(s))
                         .collect(Collectors.toList());
@@ -164,7 +165,7 @@ public class StructToProtoConverter {
                                         .setField(field.getMessageType().findFieldByName("value"), ByteString.copyFrom(b))
                                         .build())
                                 .collect(Collectors.toList());
-                    case STRING_VALUE -> struct.getStringList(field.getName()).stream()
+                    case STRING_VALUE -> getStringList(field.getName(), struct).stream()
                                 .map(b -> DynamicMessage.newBuilder(field.getMessageType())
                                         .setField(field.getMessageType().findFieldByName("value"), b)
                                         .build())
@@ -230,7 +231,7 @@ public class StructToProtoConverter {
                                         .setField(field.getMessageType().findFieldByName("nanos"), timestamp.getNanos())
                                         .build())
                                 .collect(Collectors.toList());
-                    case ANY -> struct.getStringList(field.getName()).stream()
+                    case ANY -> getStringList(field.getName(), struct).stream()
                                 .map(s -> Any.newBuilder().setValue(ByteString.copyFromUtf8(s)).build())
                                 .collect(Collectors.toList());
                     case EMPTY, NULL_VALUE -> new ArrayList<>();
@@ -240,6 +241,20 @@ public class StructToProtoConverter {
             };
             default -> throw new IllegalArgumentException("");
         };
+    }
+
+    private static String getString(final String fieldName, final Struct struct) {
+        return Type.Code.UUID.equals(struct.getColumnType(fieldName).getCode())
+                ? struct.getUuid(fieldName).toString()
+                : struct.getString(fieldName);
+    }
+
+    private static List<String> getStringList(final String fieldName, final Struct struct) {
+        return Type.Code.UUID.equals(struct.getColumnType(fieldName).getArrayElementType().getCode())
+                ? struct.getUuidList(fieldName).stream()
+                        .map(v -> v == null ? null : v.toString())
+                        .toList()
+                : struct.getStringList(fieldName);
     }
 
 }

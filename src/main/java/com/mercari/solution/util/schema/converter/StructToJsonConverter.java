@@ -87,6 +87,7 @@ public class StructToJsonConverter {
                 }
             }
             case STRING -> obj.addProperty(fieldName, isNullField ? null : struct.getString(fieldName));
+            case UUID -> obj.addProperty(fieldName, isNullField ? null : struct.getUuid(fieldName).toString());
             case BYTES -> obj.addProperty(fieldName, isNullField ? null : struct.getBytes(fieldName).toBase64());
             case NUMERIC -> obj.addProperty(fieldName, isNullField ? null : struct.getBigDecimal(fieldName).toString());
             case TIMESTAMP -> obj.addProperty(fieldName, isNullField ? null : struct.getTimestamp(fieldName).toString());
@@ -119,6 +120,8 @@ public class StructToJsonConverter {
             case FLOAT32 -> struct.getFloatList(field.getName()).forEach(array::add);
             case FLOAT64 -> struct.getDoubleList(field.getName()).forEach(array::add);
             case STRING -> struct.getStringList(field.getName()).forEach(array::add);
+            case UUID -> struct.getUuidList(field.getName()).stream()
+                    .map(v -> v == null ? null : v.toString()).forEach(array::add);
             case BYTES -> struct.getBytesList(field.getName()).stream()
                         .map(b -> {
                             if(b == null) {

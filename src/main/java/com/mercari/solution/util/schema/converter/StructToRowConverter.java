@@ -29,12 +29,21 @@ public class StructToRowConverter {
     public static Schema convertSchema(final Type type) {
         final Schema.Builder builder = Schema.builder();
         for(final Type.StructField field : type.getStructFields()) {
-            builder.addField(Schema.Field.of(
+            Schema.Field rowField = Schema.Field.of(
                     field.getName(),
-                    convertFieldType(field.getType()))
-                    .withNullable(true));
+                    convertFieldType(field.getType()));
+            if(isUuid(field.getType())) {
+                rowField = rowField.withOptions(RowSchemaUtil.createSpannerTypeOptions("UUID"));
+            }
+            builder.addField(rowField.withNullable(true));
         }
         return builder.build();
+    }
+
+    private static boolean isUuid(final Type type) {
+        return Type.Code.UUID.equals(type.getCode())
+                || (Type.Code.ARRAY.equals(type.getCode())
+                && Type.Code.UUID.equals(type.getArrayElementType().getCode()));
     }
 
     public static Row convert(final Schema schema, final Struct struct) {
@@ -61,7 +70,9 @@ public class StructToRowConverter {
                 return struct.getBoolean(fieldName);
             }
             case STRING -> {
-                return struct.getString(fieldName);
+                return Type.Code.UUID.equals(struct.getColumnType(fieldName).getCode())
+                        ? struct.getUuid(fieldName).toString()
+                        : struct.getString(fieldName);
             }
             case DECIMAL -> {
                 return struct.getBigDecimal(fieldName);
@@ -109,7 +120,9 @@ public class StructToRowConverter {
             case BOOLEAN:
                 return struct.getBooleanList(fieldName);
             case STRING:
-                return struct.getStringList(fieldName);
+                return Type.Code.UUID.equals(struct.getColumnType(fieldName).getArrayElementType().getCode())
+                        ? struct.getUuidList(fieldName).stream().map(v -> v == null ? null : v.toString()).toList()
+                        : struct.getStringList(fieldName);
             case DECIMAL:
                 return struct.getBigDecimalList(fieldName);
             case BYTES:
@@ -160,6 +173,7 @@ public class StructToRowConverter {
         return switch (type.getCode()) {
             case BYTES -> Schema.FieldType.BYTES.withNullable(true);
             case JSON, STRING -> Schema.FieldType.STRING;
+            case UUID -> Schema.FieldType.STRING;
             case INT64 -> Schema.FieldType.INT64.withNullable(true);
             case FLOAT32 -> Schema.FieldType.FLOAT;
             case FLOAT64 -> Schema.FieldType.DOUBLE;

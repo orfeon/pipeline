@@ -477,10 +477,15 @@ public class SpannerUtil {
                 LOG.info("skipField: " + struct.getString("COLUMN_NAME"));
                 continue;
             }
-            builder.addField(Schema.Field.of(
+            Schema.Field field = Schema.Field.of(
                     struct.getString("COLUMN_NAME"),
                     convertFieldType(struct.getString("SPANNER_TYPE")))
-                    .withNullable("YES".equals(struct.getString("IS_NULLABLE"))));
+                    .withNullable("YES".equals(struct.getString("IS_NULLABLE")));
+            final String spannerType = struct.getString("SPANNER_TYPE").trim().toUpperCase();
+            if("UUID".equals(spannerType) || "ARRAY<UUID>".equals(spannerType)) {
+                field = field.withOptions(RowSchemaUtil.createSpannerTypeOptions("UUID"));
+            }
+            builder.addField(field);
         }
         return builder.build();
     }
@@ -693,6 +698,9 @@ public class SpannerUtil {
             case BOOLEAN:
                 return "BOOL";
             case STRING: {
+                if(RowSchemaUtil.hasSpannerType(fieldOptions, "UUID")) {
+                    return "UUID";
+                }
                 if(fieldOptions.hasOption("sqlType")) {
                     final String sqlType = fieldOptions.getValue("sqlType");
                     switch (sqlType.toUpperCase()) {
@@ -745,6 +753,9 @@ public class SpannerUtil {
                 return "BOOL";
             case ENUM:
             case STRING: {
+                if(LogicalTypes.uuid().equals(fieldSchema.getLogicalType())) {
+                    return "UUID";
+                }
                 if(AvroSchemaUtil.isSqlTypeJson(fieldSchema)) {
                     return "JSON";
                 }
@@ -807,6 +818,8 @@ public class SpannerUtil {
                 return Schema.FieldType.BOOLEAN;
             case "JSON":
                 return Schema.FieldType.STRING;
+            case "UUID":
+                return Schema.FieldType.STRING;
             case "DATE":
                 return CalciteUtils.DATE;
             case "TIMESTAMP":
@@ -840,6 +853,8 @@ public class SpannerUtil {
                 return nullable ? AvroSchemaUtil.NULLABLE_BOOLEAN : AvroSchemaUtil.REQUIRED_BOOLEAN;
             case "JSON":
                 return nullable ? AvroSchemaUtil.NULLABLE_JSON : AvroSchemaUtil.REQUIRED_JSON;
+            case "UUID":
+                return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_UUID_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_UUID_TYPE;
             case "DATE":
                 return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_DATE_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_DATE_TYPE;
             case "TIMESTAMP":
@@ -876,6 +891,8 @@ public class SpannerUtil {
                 return Type.bool();
             case "JSON":
                 return Type.json();
+            case "UUID":
+                return Type.uuid();
             case "DATE":
                 return Type.date();
             case "TIMESTAMP":

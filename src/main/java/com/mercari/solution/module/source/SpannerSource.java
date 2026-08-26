@@ -623,6 +623,7 @@ public class SpannerSource extends Source {
         private static void setRangeKey(final Key.Builder key, final Type.StructField field, final JsonElement element) {
             switch (field.getType().getCode()) {
                 case STRING -> key.append(element.getAsString());
+                case UUID -> key.append(UUID.fromString(element.getAsString()));
                 case INT64 -> key.append(element.getAsLong());
                 case FLOAT64 -> key.append(element.getAsDouble());
                 case BOOL -> key.append(element.getAsBoolean());
