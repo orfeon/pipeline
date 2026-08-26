@@ -43,6 +43,11 @@ public class ElementToRowConverter {
                         .setOption("sqlType", org.apache.beam.sdk.schemas.Schema.FieldType.STRING, "JSON")
                         .build());
             }
+            if(Schema.Type.uuid.equals(field.getFieldType().getType())
+                    || (Schema.Type.array.equals(field.getFieldType().getType())
+                    && Schema.Type.uuid.equals(field.getFieldType().getArrayValueType().getType()))) {
+                optionsList.add(RowSchemaUtil.createSpannerTypeOptions("UUID"));
+            }
             if(field.getFieldType().getDefaultValue() != null) {
                 optionsList.add(RowSchemaUtil.createDefaultValueOptions(field.getFieldType().getDefaultValue()));
             }

@@ -98,7 +98,8 @@ public class ElementToSpannerMutationConverter {
             final Object fieldValue = values.get(field.getName());
             switch (field.getFieldType().getType()) {
                 case bool -> keyBuilder = keyBuilder.append((Boolean)fieldValue);
-                case enumeration, string, uuid -> keyBuilder = keyBuilder.append(fieldValue == null ? null : fieldValue.toString());
+                case enumeration, string -> keyBuilder = keyBuilder.append(fieldValue == null ? null : fieldValue.toString());
+                case uuid -> keyBuilder = keyBuilder.append(fieldValue == null ? null : UUID.fromString(fieldValue.toString()));
                 case float32 -> keyBuilder = keyBuilder.append((Float)fieldValue);
                 case float64 -> keyBuilder = keyBuilder.append((Double)fieldValue);
                 case bytes -> {
@@ -136,7 +137,7 @@ public class ElementToSpannerMutationConverter {
                 final Boolean booleanValue = (Boolean) value;
                 builder.set(fieldName).to(booleanValue);
             }
-            case enumeration, string, uuid -> {
+            case enumeration, string -> {
                 final String stringValue = Optional.ofNullable(value).map(Object::toString).orElse(null);
                 builder.set(fieldName).to(stringValue);
             }
@@ -144,6 +145,7 @@ public class ElementToSpannerMutationConverter {
                 final String jsonValue = Optional.ofNullable(value).map(Object::toString).orElse(null);
                 builder.set(fieldName).to(Value.json(jsonValue));
             }
+            case uuid -> builder.set(fieldName).to(value == null ? null : UUID.fromString(value.toString()));
             case bytes -> {
                 final ByteArray bytesValue;
                 if(value == null) {

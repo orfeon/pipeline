@@ -123,7 +123,9 @@ public class AvroToMutationConverter {
             final Object fieldValue = record.hasField(keyField) ? record.get(keyField) : null;
             switch (fieldSchema.getType()) {
                 case BOOLEAN -> keyBuilder = keyBuilder.append((Boolean)fieldValue);
-                case ENUM, STRING -> keyBuilder = keyBuilder.append(fieldValue == null ? null : fieldValue.toString());
+                case ENUM, STRING -> keyBuilder = LogicalTypes.uuid().equals(fieldSchema.getLogicalType())
+                        ? keyBuilder.append(fieldValue == null ? null : UUID.fromString(fieldValue.toString()))
+                        : keyBuilder.append(fieldValue == null ? null : fieldValue.toString());
                 case FLOAT -> keyBuilder = keyBuilder.append((Float)fieldValue);
                 case DOUBLE -> keyBuilder = keyBuilder.append((Double)fieldValue);
                 case FIXED, BYTES -> {
@@ -213,7 +215,9 @@ public class AvroToMutationConverter {
                         (nullableField ? null : "") :
                         (isNullField ? null : value.toString());
                 final String sqlType = schema.getProp("sqlType");
-                if("DATETIME".equalsIgnoreCase(sqlType)) {
+                if(LogicalTypes.uuid().equals(schema.getLogicalType())) {
+                    builder.set(fieldName).to(stringValue == null ? null : UUID.fromString(stringValue));
+                } else if("DATETIME".equalsIgnoreCase(sqlType)) {
                     builder.set(fieldName).to(stringValue);
                 } else if("GEOGRAPHY".equalsIgnoreCase(sqlType)) {
                     builder.set(fieldName).to(stringValue);
@@ -325,7 +329,12 @@ public class AvroToMutationConverter {
                                         .filter(Objects::nonNull)
                                         .map(Object::toString)
                                         .collect(Collectors.toList());
-                        if(AvroSchemaUtil.isSqlTypeJson(elementSchema)) {
+                        if(LogicalTypes.uuid().equals(elementSchema.getLogicalType())) {
+                            final List<UUID> uuidList = hide || isNullField ? list : ((List<Object>) value).stream()
+                                    .map(v -> v == null ? null : UUID.fromString(v.toString()))
+                                    .toList();
+                            builder.set(fieldName).toUuidArray(uuidList);
+                        } else if(AvroSchemaUtil.isSqlTypeJson(elementSchema)) {
                             builder.set(fieldName).toJsonArray(stringList);
                         } else {
                             builder.set(fieldName).toStringArray(stringList);
@@ -444,6 +453,9 @@ public class AvroToMutationConverter {
             case BOOLEAN -> Type.bool();
             case ENUM -> Type.string();
             case STRING -> {
+                if(LogicalTypes.uuid().equals(schema.getLogicalType())) {
+                    yield Type.uuid();
+                }
                 final String sqlType = schema.getProp("sqlType");
                 if ("DATETIME".equalsIgnoreCase(sqlType)) {
                     yield Type.string();
@@ -505,7 +517,9 @@ public class AvroToMutationConverter {
             case ENUM, STRING -> {
                 final String stringValue = isNull ? null : object.toString();
                 final String sqlType = fieldSchema.getProp("sqlType");
-                if("DATETIME".equalsIgnoreCase(sqlType)) {
+                if(LogicalTypes.uuid().equals(fieldSchema.getLogicalType())) {
+                    yield Value.uuid(isNull ? null : UUID.fromString(stringValue));
+                } else if("DATETIME".equalsIgnoreCase(sqlType)) {
                     yield Value.timestamp(isNull ? null : Timestamp.parseTimestamp(stringValue));
                 } else if("JSON".equalsIgnoreCase(sqlType)) {
                     yield Value.json(stringValue);
@@ -563,7 +577,11 @@ public class AvroToMutationConverter {
                     case BOOLEAN -> Value.boolArray(isNull ? new ArrayList<>() : (List<Boolean>)object);
                     case ENUM, STRING -> {
                         final String sqlType = elementSchema.getProp("sqlType");
-                        if("DATETIME".equalsIgnoreCase(sqlType)) {
+                        if(LogicalTypes.uuid().equals(elementSchema.getLogicalType())) {
+                            yield Value.uuidArray(isNull ? new ArrayList<>() : ((List<Object>) object).stream()
+                                    .map(v -> v == null ? null : UUID.fromString(v.toString()))
+                                    .toList());
+                        } else if("DATETIME".equalsIgnoreCase(sqlType)) {
                             yield Value.timestampArray(isNull ? new ArrayList<>() : ((List<Object>)object)
                                     .stream()
                                     .filter(Objects::nonNull)

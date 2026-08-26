@@ -55,6 +55,7 @@ public class StructToDocumentConverter {
                 final String stringValue = struct.getString(field.getName());
                 builder = Value.newBuilder().setStringValue(stringValue);
             }
+            case UUID -> builder = Value.newBuilder().setStringValue(struct.getUuid(field.getName()).toString());
             case JSON -> {
                 final String stringValue = struct.getJson(field.getName());
                 builder = Value.newBuilder().setStringValue(stringValue);
@@ -92,6 +93,12 @@ public class StructToDocumentConverter {
                     case PG_NUMERIC, STRING -> Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
                                     .addAllValues((struct.getStringList(field.getName()).stream()
                                             .map(o -> Value.newBuilder().setStringValue(o).build())
+                                            .collect(Collectors.toList())))
+                                    .build())
+                            .build();
+                    case UUID -> Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
+                                    .addAllValues((struct.getUuidList(field.getName()).stream()
+                                            .map(o -> Value.newBuilder().setStringValue(o.toString()).build())
                                             .collect(Collectors.toList())))
                                     .build())
                             .build();
