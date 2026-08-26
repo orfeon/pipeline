@@ -14,12 +14,7 @@ public class TransformConfig extends ModuleConfig {
     private Strategy strategy;
 
     public List<String> getInputs() {
-        if(inputs != null && !inputs.isEmpty()) {
-            return inputs;
-        } else if(com.mercari.solution.module.action.Actions.isActionModule(getModule())) {
-            // action modules may be gated by waits alone (a waits-only mid-flow action is valid)
-            return new ArrayList<>();
-        } else if(inputs != null) {
+        if(inputs != null) {
             return inputs;
         } else {
             throw new IllegalArgumentException("Transform module: " + getName() + " has no input");

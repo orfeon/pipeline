@@ -17,7 +17,7 @@ error handling, module lifecycle). Package root is `com.mercari.solution`.
 
 ### The assembly loop (`MPipeline.apply` → `setResult`)
 
-Modules are **not** built in file order. `apply` repeatedly walks sources, transforms, and sinks, building
+Modules are **not** built in file order. `apply` repeatedly walks sources, transforms, sinks and actions, building
 any module whose dependencies are already available in the `outputs` map (`name → MCollection`):
 
 - A module is buildable once all of its `inputs`, `waits`, and `sideInputs` names exist in `outputs`.
@@ -66,13 +66,14 @@ resolved from `system.args` merged with runtime `--arg` values; arg values can t
 
 **Imports.** `system.imports` (`base` + `files`) compose a config from multiple files.
 
-**Module config shape.** `ModuleConfig` is the base of `SourceConfig` / `TransformConfig` / `SinkConfig`.
-Common fields:
+**Module config shape.** `ModuleConfig` is the base of `SourceConfig` / `TransformConfig` / `SinkConfig` /
+`ActionConfig` (config sections `sources` / `transforms` / `sinks` / `actions`). Common fields:
 
 - `name` — unique id, used as the graph node key.
 - `module` — registered module name (see §3).
 - `parameters` — module-specific JSON object.
-- `inputs` — upstream module names (transforms/sinks).
+- `inputs` — upstream module names (transforms/sinks; optional for actions).
+- `trigger` — actions only: `once` / `perElement` / `collect` firing semantics.
 - `waits` — names that must complete before this module starts (ordering without data flow).
 - `sideInputs` — names provided as Beam side inputs.
 - `tags` — additional named outputs.
@@ -83,24 +84,30 @@ Common fields:
 
 ## 3. Module system (`module/`)
 
-Three base classes — `Source`, `Transform`, `Sink` — all extend `Module<InputT>`. Each defines its **own**
-nested runtime annotation used for discovery:
+Four module kinds — `Source`, `Transform`, `Sink`, `Action` — all extend `Module<InputT>`. Each defines its
+**own** nested runtime annotation used for discovery:
 
 ```java
 @Source.Module(name="bigquery")
 @Transform.Module(name="select")
 @Sink.Module(name="spanner")
+@Action.Service(name="bigquery")   // on an ActionService implementation
 ```
 
 At class-load time each base class scans its package with Guava `ClassPath`
-(`findSourcesInPackage("com.mercari.solution.module.source")`, and the transform/sink equivalents) to build a
-`name → Class` registry. `Source.create` / `Transform.create` / `Sink.create` instantiate the right class for
-a config's `module` value and call its `expand()`.
+(`findSourcesInPackage("com.mercari.solution.module.source")`, and the transform/sink/action equivalents) to
+build a `name → Class` registry. `Source.create` / `Transform.create` / `Sink.create` / `Action.create`
+instantiate the right class for a config's `module` value and call its `expand()`.
+
+`Action` differs in shape: it is a single concrete module (trigger topologies `once` / `perElement` /
+`collect`, the common envelope output, failure routing) whose behavior is supplied by a pluggable
+`ActionService` (`module/action/`, `configure` → `setup` → `execute`); the config's `module` value is the
+service name. The service instance is serialized into the DoFn, so it must be `Serializable`.
 
 To find the authoritative module list, grep the annotations:
 
 ```bash
-grep -rhoE '@(Source|Transform|Sink)\.Module\([^)]*\)' src/main/java | sort -u
+grep -rhoE '@(Source|Transform|Sink)\.Module\([^)]*\)|@Action\.Service\([^)]*\)' src/main/java | sort -u
 ```
 
 See the root `CLAUDE.md` for the current enumerated list and for the "Adding a New Module" steps.

@@ -21,7 +21,7 @@ public class DocsReader {
         source,
         transform,
         sink,
-        // action modules (action.<service>) are placeable in sources/transforms/sinks;
+        // action modules (config section `actions`);
         // their docs live under module/action/<service>.md
         action
     }

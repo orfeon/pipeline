@@ -55,14 +55,15 @@ fallback config.
   or `data:` base64 (see `Config.load`).
 - FreeMarker templating: `${args.varName}` placeholders are substituted from `system.args` and runtime args.
 - `system.imports` can compose config from other files.
-- `ModuleConfig` (base of `SourceConfig`/`TransformConfig`/`SinkConfig`) common fields: `name`, `module`,
+- `ModuleConfig` (base of `SourceConfig`/`TransformConfig`/`SinkConfig`/`ActionConfig`) common fields: `name`, `module`,
   `parameters`, `inputs`, `tags`, `waits`, `sideInputs`, `logs`, `ignore`, `failFast`, `outputFailure`,
   `failureSinks`, `outputType`, `description`, `args`.
 
 ### Module System (`module/`)
-Three module types are auto-discovered by scanning their packages (Guava `ClassPath`) for annotations —
+Four module kinds are auto-discovered by scanning their packages (Guava `ClassPath`) for annotations —
 **not** a single `@Module`. Each base class defines its own nested annotation:
-`@Source.Module(name="…")`, `@Transform.Module(name="…")`, `@Sink.Module(name="…")`.
+`@Source.Module(name="…")`, `@Transform.Module(name="…")`, `@Sink.Module(name="…")`,
+`@Action.Service(name="…")` (action services, see below).
 
 **Sources** (`module/source/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg`
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
@@ -74,11 +75,12 @@ Three module types are auto-discovered by scanning their packages (Guava `ClassP
 `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
 
 **Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks` `http`.
-Registered as `action.<service>` in all three module registries (thin adapters `ActionSource` /
-`ActionTransform` / `ActionSink`; shared logic in `module/action/Actions.java`), so an action
-step is placeable in `sources` / `transforms` / `sinks` — placement never changes behavior. Triggers:
-`once` (fire after all inputs/waits complete; inputs are pure signals) / `perElement` / `collect`
-(gather all elements into one firing). Every firing emits a common envelope record
+The fourth module kind, declared in the `actions` config section (`ActionConfig`: `module` = service
+name, `operation` (service-declared `resource.method` values, e.g. `jobs.load`, `queues.pause`), `trigger`, optional `inputs`, `waits`, `strategy`, `retry`, `fireOnEmpty`). `module/Action.java` is the single concrete
+module class (trigger topologies, envelope output, failure routing); services implement the
+`ActionService` SPI (`configure` / `setup` / `execute`) and are discovered by scanning `module/action`.
+Triggers: `once` (fire after all inputs/waits complete; inputs are pure signals) / `perElement` /
+`collect` (gather all elements into one firing). Every firing emits a common envelope record
 (`service, op, jobId, state, startedAt, finishedAt, payload`). Two-plane rule: sink outputs and action
 envelopes are control records — consumable by action `inputs` and anyone's `waits`; a data
 transform/sink consuming them via `inputs` gets an assembly-time warning (see
@@ -89,7 +91,7 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 > `@Action.Service` in `src/main/java`.
 
 ### Core Module Classes (`module/`)
-- `Module.java` — base for all modules; `Source`/`Transform`/`Sink` extend it and hold the discovery registries.
+- `Module.java` — base for all modules; `Source`/`Transform`/`Sink`/`Action` extend it and hold the discovery registries.
 - `MElement.java` — universal data element that wraps any backing type (`DataType`: `ROW`, `AVRO`, `STRUCT`
   (Spanner), `DOCUMENT` (Firestore), `ENTITY` (Datastore), `MESSAGE` (Pub/Sub), `JSON`, …).
 - `Schema.java` — unified schema representation used across all data types.

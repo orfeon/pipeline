@@ -126,7 +126,7 @@ After writing, the module outputs one record per written file (its result, emitt
 | path      | STRING    | The output file path that was written. |
 | timestamp | TIMESTAMP | The timestamp when writing occurred. |
 
-These are the sink's execution results (control records): other steps can `waits` on this step, and [action modules](../action/README.md) can consume the records via `inputs` — e.g. load every written file with a single [action.bigquery](../action/bigquery.md) load job (`trigger: collect` + `sourceUrisField: path`), or keep the file list as a history object with [action.storage](../action/storage.md). Consuming them as data inputs of a non-action transform/sink produces an assembly-time warning.
+These are the sink's execution results (control records): other steps can `waits` on this step, and [action modules](../action/README.md) can consume the records via `inputs` — e.g. load every written file with a single [bigquery action](../action/bigquery.md) load job (`trigger: collect` + `sourceUrisField: path`), or keep the file list as a history object with the [storage action](../action/storage.md). Consuming them as data inputs of a transform/sink produces an assembly-time warning.
 
 ## Examples
 

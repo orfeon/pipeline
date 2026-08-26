@@ -154,12 +154,13 @@ public class SelectTransform extends Transform {
         if(parameters.useSelect()) {
             final List<SelectFunction> selectFunctions = SelectFunction.of(parameters.select, inputSchema.getFields());
             if(selectFunctions.isEmpty()) {
-                outputSchema = inputSchema;
+                // copy: withType below must not mutate the upstream module's schema instance
+                outputSchema = inputSchema.copy();
             } else {
                 outputSchema = SelectFunction.createSchema(selectFunctions);
             }
         } else {
-            outputSchema = inputSchema;
+            outputSchema = inputSchema.copy();
         }
 
         if(parameters.useUnnest()) {

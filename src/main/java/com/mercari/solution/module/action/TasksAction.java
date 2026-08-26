@@ -1,5 +1,9 @@
 package com.mercari.solution.module.action;
 
+import com.mercari.solution.module.Action;
+import com.mercari.solution.module.Schema;
+import com.mercari.solution.module.Action.Trigger;
+
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
 import com.google.api.gax.rpc.AlreadyExistsException;
@@ -45,8 +49,10 @@ import java.util.regex.Pattern;
  * update are naturally idempotent, so a retried bundle is harmless. {@code runTask} forces a
  * dispatch and may dispatch twice if the bundle is retried.
  */
-@Action.Service(name = "tasks")
-public class TasksAction implements Action {
+@Action.Service(name = "tasks", operations = {
+        "queues.create", "queues.update", "queues.delete", "queues.pause", "queues.resume", "queues.purge",
+        "queues.get", "queues.waitForEmpty", "tasks.run", "tasks.delete"})
+public class TasksAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(TasksAction.class);
 
@@ -66,7 +72,23 @@ public class TasksAction implements Action {
         get,
         waitForEmpty,
         runTask,
-        deleteTask
+        deleteTask;
+
+        static Op of(final String operation) {
+            return switch (operation) {
+                case "queues.create" -> create;
+                case "queues.update" -> update;
+                case "queues.delete" -> delete;
+                case "queues.pause" -> pause;
+                case "queues.resume" -> resume;
+                case "queues.purge" -> purge;
+                case "queues.get" -> get;
+                case "queues.waitForEmpty" -> waitForEmpty;
+                case "tasks.run" -> runTask;
+                case "tasks.delete" -> deleteTask;
+                default -> throw new IllegalModuleException("Not supported operation: " + operation);
+            };
+        }
     }
 
     public static class RateLimits implements Serializable {
@@ -96,19 +118,16 @@ public class TasksAction implements Action {
         public List<String> validate(final String name) {
             final List<String> errorMessages = new ArrayList<>();
             final String prefix = "action module[" + name + "].parameters.";
-            if(op == null) {
-                errorMessages.add(prefix + "op must not be null (create|update|delete|pause|resume|purge|get|waitForEmpty|runTask|deleteTask)");
-            }
             if(queue == null) {
                 errorMessages.add(prefix + "queue must not be null");
             } else if(!TemplateUtil.isTemplateText(queue) && !PATTERN_QUEUE.matcher(queue).matches()) {
                 errorMessages.add(prefix + "queue must be in format projects/{project}/locations/{location}/queues/{queue} but: " + queue);
             }
             if((Op.runTask.equals(op) || Op.deleteTask.equals(op)) && task == null) {
-                errorMessages.add(prefix + "task must not be null when op is " + op);
+                errorMessages.add(prefix + "task must not be null for tasks.run / tasks.delete");
             }
             if(Op.update.equals(op) && rateLimits == null && retryConfig == null) {
-                errorMessages.add(prefix + "update requires rateLimits and/or retryConfig");
+                errorMessages.add(prefix + "queues.update requires rateLimits and/or retryConfig");
             }
             if(retryConfig != null) {
                 for(final String d : Arrays.asList(retryConfig.maxRetryDuration, retryConfig.minBackoff, retryConfig.maxBackoff)) {
@@ -278,18 +297,21 @@ public class TasksAction implements Action {
 
     private String name;
     private Trigger trigger;
+    private String operation;
     private Parameters parameters;
 
     private transient QueueClient client;
 
     @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options) {
+    public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
         this.name = name;
-        this.trigger = Trigger.of(parametersJson);
+        this.trigger = trigger;
+        this.operation = operation;
         this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");
         }
+        this.parameters.op = Op.of(operation);
         final List<String> errorMessages = this.parameters.validate(name);
         if(!errorMessages.isEmpty()) {
             throw new IllegalModuleException(errorMessages);
@@ -326,10 +348,10 @@ public class TasksAction implements Action {
                 applyRetryConfig(builder);
                 try {
                     final Queue created = client.createQueue(parent, builder.build());
-                    yield result("create", queue, "DONE", created);
+                    yield result(operation, queue, "DONE", created);
                 } catch (final AlreadyExistsException e) {
                     LOG.info("action module[{}] queue already exists, adopting: {}", name, queue);
-                    yield result("create", queue, "EXISTS", client.getQueue(queue));
+                    yield result(operation, queue, "EXISTS", client.getQueue(queue));
                 }
             }
             case update -> {
@@ -341,20 +363,20 @@ public class TasksAction implements Action {
                 if(applyRetryConfig(builder)) {
                     mask.addPaths("retry_config");
                 }
-                yield result("update", queue, "DONE", client.updateQueue(builder.build(), mask.build()));
+                yield result(operation, queue, "DONE", client.updateQueue(builder.build(), mask.build()));
             }
             case delete -> {
                 try {
                     client.deleteQueue(queue);
-                    yield ActionResult.of("delete", queue, "DONE", null);
+                    yield ActionResult.of(operation, queue, "DONE", null);
                 } catch (final NotFoundException e) {
-                    yield ActionResult.of("delete", queue, "NOT_FOUND", null);
+                    yield ActionResult.of(operation, queue, "NOT_FOUND", null);
                 }
             }
-            case pause -> result("pause", queue, "DONE", client.pauseQueue(queue));
-            case resume -> result("resume", queue, "DONE", client.resumeQueue(queue));
-            case purge -> result("purge", queue, "DONE", client.purgeQueue(queue));
-            case get -> result("get", queue, "DONE", client.getQueue(queue));
+            case pause -> result(operation, queue, "DONE", client.pauseQueue(queue));
+            case resume -> result(operation, queue, "DONE", client.resumeQueue(queue));
+            case purge -> result(operation, queue, "DONE", client.purgeQueue(queue));
+            case get -> result(operation, queue, "DONE", client.getQueue(queue));
             case waitForEmpty -> {
                 final Instant deadline = Instant.now().plusSeconds(parameters.timeoutSeconds);
                 final Instant started = Instant.now();
@@ -377,20 +399,20 @@ public class TasksAction implements Action {
                 final JsonObject payload = new JsonObject();
                 payload.addProperty("polls", polls);
                 payload.addProperty("waitedSeconds", java.time.Duration.between(started, Instant.now()).toSeconds());
-                yield ActionResult.of("waitForEmpty", queue, "DONE", payload.toString());
+                yield ActionResult.of(operation, queue, "DONE", payload.toString());
             }
             case runTask -> {
                 final String taskName = taskName(queue, template(parameters.task, data));
                 final Task task = client.runTask(taskName);
-                yield ActionResult.of("runTask", taskName, "DONE", JsonFormat.printer().omittingInsignificantWhitespace().print(task));
+                yield ActionResult.of(operation, taskName, "DONE", JsonFormat.printer().omittingInsignificantWhitespace().print(task));
             }
             case deleteTask -> {
                 final String taskName = taskName(queue, template(parameters.task, data));
                 try {
                     client.deleteTask(taskName);
-                    yield ActionResult.of("deleteTask", taskName, "DONE", null);
+                    yield ActionResult.of(operation, taskName, "DONE", null);
                 } catch (final NotFoundException e) {
-                    yield ActionResult.of("deleteTask", taskName, "NOT_FOUND", null);
+                    yield ActionResult.of(operation, taskName, "NOT_FOUND", null);
                 }
             }
         };

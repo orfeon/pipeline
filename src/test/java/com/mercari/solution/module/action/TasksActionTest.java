@@ -159,11 +159,11 @@ public class TasksActionTest {
     public void testCreateAdoptsExistingAndUpdate() throws Exception {
         final MemoryQueueClient client = register("create");
         final String yaml = """
-                sources:
+                actions:
                   - name: create
-                    module: action.tasks
+                    module: tasks
+                    operation: queues.create
                     parameters:
-                      op: create
                       queue: %s
                       endpoint: memory://create
                       rateLimits:
@@ -178,7 +178,7 @@ public class TasksActionTest {
         PAssert.that(run(p1, yaml, "create").getCollection()).satisfies(elements -> {
             for(final MElement e : elements) {
                 Assertions.assertEquals("tasks", e.getPrimitiveValue("service"));
-                Assertions.assertEquals("create", e.getPrimitiveValue("op"));
+                Assertions.assertEquals("queues.create", e.getPrimitiveValue("operation"));
                 Assertions.assertEquals(QUEUE, e.getPrimitiveValue("jobId"));
                 Assertions.assertEquals("DONE", e.getPrimitiveValue("state"));
                 final JsonObject payload = JsonParser.parseString((String) e.getPrimitiveValue("payload")).getAsJsonObject();
@@ -204,18 +204,18 @@ public class TasksActionTest {
         // update only rate limits
         final TestPipeline p3 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         PAssert.that(run(p3, """
-                sources:
+                actions:
                   - name: update
-                    module: action.tasks
+                    module: tasks
+                    operation: queues.update
                     parameters:
-                      op: update
                       queue: %s
                       endpoint: memory://create
                       rateLimits:
                         maxConcurrentDispatches: 10
                 """.formatted(QUEUE), "update").getCollection()).satisfies(elements -> {
             for(final MElement e : elements) {
-                Assertions.assertEquals("update", e.getPrimitiveValue("op"));
+                Assertions.assertEquals("queues.update", e.getPrimitiveValue("operation"));
                 Assertions.assertEquals("DONE", e.getPrimitiveValue("state"));
             }
             return null;
@@ -236,18 +236,18 @@ public class TasksActionTest {
             final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
             final boolean secondDelete = op.equals("delete") && client.ops.contains("delete");
             PAssert.that(run(p, """
-                    sinks:
+                    actions:
                       - name: step
-                        module: action.tasks
+                        module: tasks
+                        operation: queues.%s
                         parameters:
-                          op: %s
                           queue: %s
                           endpoint: memory://ops
                     """.formatted(op, QUEUE), "step").getCollection()).satisfies(elements -> {
                 int count = 0;
                 for(final MElement e : elements) {
                     count++;
-                    Assertions.assertEquals(op, e.getPrimitiveValue("op"));
+                    Assertions.assertEquals("queues." + op, e.getPrimitiveValue("operation"));
                     Assertions.assertEquals(secondDelete ? "NOT_FOUND" : "DONE", e.getPrimitiveValue("state"));
                     if(op.equals("pause")) {
                         Assertions.assertTrue(((String) e.getPrimitiveValue("payload")).contains("PAUSED"));
@@ -283,11 +283,12 @@ public class TasksActionTest {
                       endpoint: memory://waitSink
                       target:
                         url: https://api.example.com/${id}
+                actions:
                   - name: wait
-                    module: action.tasks
+                    module: tasks
+                    operation: queues.waitForEmpty
                     inputs: [enqueue]
                     parameters:
-                      op: waitForEmpty
                       queue: %s
                       endpoint: memory://wait
                       pollIntervalSeconds: 1
@@ -296,7 +297,7 @@ public class TasksActionTest {
             int count = 0;
             for(final MElement e : elements) {
                 count++;
-                Assertions.assertEquals("waitForEmpty", e.getPrimitiveValue("op"));
+                Assertions.assertEquals("queues.waitForEmpty", e.getPrimitiveValue("operation"));
                 Assertions.assertEquals("DONE", e.getPrimitiveValue("state"));
                 final JsonObject payload = JsonParser.parseString((String) e.getPrimitiveValue("payload")).getAsJsonObject();
                 Assertions.assertEquals(4, payload.get("polls").getAsInt()); // 3,2,1 remaining then 0
@@ -313,12 +314,12 @@ public class TasksActionTest {
         client.remaining.set(Integer.MAX_VALUE / 2);
         final TestPipeline p2 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         PAssert.that(run(p2, """
-                sources:
+                actions:
                   - name: wait
-                    module: action.tasks
+                    module: tasks
+                    operation: queues.waitForEmpty
                     failFast: false
                     parameters:
-                      op: waitForEmpty
                       queue: %s
                       endpoint: memory://wait
                       pollIntervalSeconds: 1
@@ -334,23 +335,22 @@ public class TasksActionTest {
         client.tasks.add(QUEUE + "/tasks/a");
         final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         final Map<String, MCollection> outputs = MPipeline.apply(p, Config.load(SOURCE_YAML + """
-                transforms:
+                actions:
                   - name: run
-                    module: action.tasks
+                    module: tasks
+                    operation: tasks.run
+                    trigger: perElement
                     inputs: [input]
                     parameters:
-                      trigger: perElement
-                      op: runTask
                       queue: %s
                       task: "${id}"
                       endpoint: memory://perElement
-                sinks:
                   - name: del
-                    module: action.tasks
+                    module: tasks
+                    operation: tasks.delete
+                    trigger: perElement
                     inputs: [input]
                     parameters:
-                      trigger: perElement
-                      op: deleteTask
                       queue: %s
                       task: "${id}"
                       endpoint: memory://perElement
@@ -358,7 +358,7 @@ public class TasksActionTest {
         PAssert.that(outputs.get("run").getCollection()).satisfies(elements -> {
             final Set<String> ids = new TreeSet<>();
             for(final MElement e : elements) {
-                Assertions.assertEquals("runTask", e.getPrimitiveValue("op"));
+                Assertions.assertEquals("tasks.run", e.getPrimitiveValue("operation"));
                 Assertions.assertEquals("DONE", e.getPrimitiveValue("state"));
                 ids.add((String) e.getPrimitiveValue("jobId"));
             }
@@ -381,29 +381,29 @@ public class TasksActionTest {
     @Test
     public void testValidation() {
         final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
-        // missing op
+        // missing operation
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(p, Config.load("""
-                sources:
+                actions:
                   - name: a
-                    module: action.tasks
+                    module: tasks
                     parameters:
                       queue: %s
                 """.formatted(QUEUE))));
         // runTask without task, illegal queue, update without anything
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(p, Config.load("""
-                sources:
+                actions:
                   - name: a
-                    module: action.tasks
+                    module: tasks
+                    operation: tasks.run
                     parameters:
-                      op: runTask
                       queue: myqueue
                 """)));
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(p, Config.load("""
-                sources:
+                actions:
                   - name: a
-                    module: action.tasks
+                    module: tasks
+                    operation: queues.update
                     parameters:
-                      op: update
                       queue: %s
                 """.formatted(QUEUE))));
         Assertions.assertEquals(java.time.Duration.ofMinutes(5), TasksAction.parseDuration("5m"));

@@ -145,7 +145,7 @@ Row data travels through the envelope as JSON, so a schema change on the source 
 change itself is reported as a `SCHEMA` control record (see [Control records](#control-records)).
 Keeping the *destination* table in sync is an apply-sink concern: see
 [Schema evolution in the bigquery sink CDC apply mode](../sink/bigquery.md#schema-evolution) for
-the recommended setup (`schemaChanges` DDL → `action.bigquery`, `autoSchemaUpdate`, archive replay).
+the recommended setup (`schemaChanges` DDL → `bigquery` action, `autoSchemaUpdate`, archive replay).
 
 ### Destination DDL generation
 

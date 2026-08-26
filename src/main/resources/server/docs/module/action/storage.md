@@ -8,7 +8,7 @@ timestamp: 2026-08-19T00:00:00Z
 
 # Storage Action Module
 
-Action module (`action.storage`) that writes a small file from the triggering records. It is the control-plane counterpart of the [storage sink](../sink/storage.md): the sink writes datasets (with formats, schemas and sharding), while this action writes execution artifacts — result histories, summary reports, marker files. Placeable in sources/transforms/sinks; see [action modules](README.md) for placement, trigger semantics and the output envelope.
+Action module (`actions` section, `module: storage`) that writes a small file from the triggering records. It is the control-plane counterpart of the [storage sink](../sink/storage.md): the sink writes datasets (with formats, schemas and sharding), while this action writes execution artifacts — result histories, summary reports, marker files. See [action modules](README.md) for the `actions` section, trigger semantics and the output envelope.
 
 Each execution creates (or overwrites) the object at `output` in full. With `trigger: perElement`, include element fields in the `output` template so firings do not overwrite each other. Paths use the Beam filesystems (GCS `gs://…`, S3 `s3://…`, or local).
 
@@ -21,7 +21,6 @@ Each execution creates (or overwrites) the object at `output` in full. With `tri
 
 | parameter | optional | type   | description                                                                                       |
 |-----------|----------|--------|-----------------------------------------------------------------------------------------------------|
-| trigger   | optional | Enum   | `once` (default), `perElement`, `collect`. See [action modules](README.md#trigger).                  |
 | output    | required | String | Destination path (template-able), e.g. `gs://bucket/history/latest.jsonl`.                           |
 | content   | optional | String | Template for the file body. Omit to write the elements as JSON Lines.                                |
 
@@ -41,23 +40,24 @@ sinks:
     parameters:
       output: gs://my-bucket/export/data
       format: avro
+actions:
   - name: history
-    module: action.storage
+    module: storage
+    trigger: collect
     inputs: [store]                # storage sink emits {sink, path, timestamp} records
     parameters:
-      trigger: collect
       output: gs://my-bucket/history/latest.jsonl
 ```
 
 ### Example 2: Templated summary report
 
 ```yaml
-sinks:
+actions:
   - name: report
-    module: action.storage
+    module: storage
+    trigger: collect
     inputs: [store]
     parameters:
-      trigger: collect
       output: gs://my-bucket/reports/summary.txt
       content: |
         ${size} files written:
@@ -69,9 +69,9 @@ sinks:
 ### Example 3: Marker file after other steps complete
 
 ```yaml
-sinks:
+actions:
   - name: success_marker
-    module: action.storage
+    module: storage
     waits: [store, load]
     parameters:
       output: gs://my-bucket/export/_SUCCESS

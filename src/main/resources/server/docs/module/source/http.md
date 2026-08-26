@@ -75,7 +75,7 @@ The request is repeated until `until` holds. After each response the `next` temp
 |---------------|----------|------|-------------|
 | vars          | optional | Map<String,Object\> | Initial variables (`{ page: 1 }`, `{ cursor: "" }`). |
 | next          | optional | Map<String,String\> | Templates producing the next values (`page: "${page + 1}"`, `cursor: "${payload.next_cursor!''}"`, `cursor: "${headers['x-next-cursor']!''}"`). Numeric results become numbers. |
-| until         | required | [Filter](../common/filter.md) | Stop condition evaluated on the response: `statusCode`, `headers.<name>` (first value; lower-case keys available), `body`, `payload.<path>` (parsed JSON), plus the current loop variables. A list of conditions is AND-ed. Same shape as `poll.until` of [action.http](../action/http.md). |
+| until         | required | [Filter](../common/filter.md) | Stop condition evaluated on the response: `statusCode`, `headers.<name>` (first value; lower-case keys available), `body`, `payload.<path>` (parsed JSON), plus the current loop variables. A list of conditions is AND-ed. Same shape as `poll.until` of the [http action](../action/http.md). |
 | maxIterations | optional | Integer | Safety cap (default `10000`). |
 
 ### Rate parameters

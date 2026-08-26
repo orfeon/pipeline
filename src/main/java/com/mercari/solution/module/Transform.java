@@ -27,10 +27,7 @@ public abstract class Transform extends Module<MCollectionTuple> {
         boolean schema() default false;
     }
 
-    private static final Map<String, Class<Transform>> transforms = com.mercari.solution.module.action.Actions
-            .registerActionModules(
-                    findTransformsInPackage("com.mercari.solution.module.transform"),
-                    com.mercari.solution.module.transform.ActionTransform.class);
+    private static final Map<String, Class<Transform>> transforms = findTransformsInPackage("com.mercari.solution.module.transform");
 
     private Strategy strategy;
     private List<String> inputs;

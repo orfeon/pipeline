@@ -124,11 +124,12 @@ public class HttpActionTest {
                   - name: debug
                     module: debug
                     inputs: [input]
+                actions:
                   - name: notify
-                    module: action.http
+                    module: http
+                    trigger: once
                     inputs: [input]
                     parameters:
-                      trigger: once
                       target:
                         url: %s
                         headers:
@@ -137,10 +138,10 @@ public class HttpActionTest {
                         format: template
                         template: '{"text": "pipeline finished"}'
                   - name: summary
-                    module: action.http
+                    module: http
+                    trigger: collect
                     inputs: [input]
                     parameters:
-                      trigger: collect
                       target:
                         url: %s
                         params:
@@ -156,7 +157,7 @@ public class HttpActionTest {
             for(final MElement element : elements) {
                 count++;
                 Assertions.assertEquals("http", element.getPrimitiveValue("service"));
-                Assertions.assertEquals("POST", element.getPrimitiveValue("op"));
+                Assertions.assertEquals("POST", element.getPrimitiveValue("operation"));
                 Assertions.assertEquals("SUCCEEDED", element.getPrimitiveValue("state"));
                 Assertions.assertTrue(((String) element.getPrimitiveValue("jobId")).endsWith("/notify/once"));
                 final JsonObject payload = JsonParser.parseString((String) element.getPrimitiveValue("payload")).getAsJsonObject();
@@ -185,12 +186,12 @@ public class HttpActionTest {
     @Test
     public void testPerElementWithPoll() throws Exception {
         final String configYaml = SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: job
-                    module: action.http
+                    module: http
+                    trigger: perElement
                     inputs: [input]
                     parameters:
-                      trigger: perElement
                       target:
                         url: %s
                         method: POST
@@ -244,13 +245,13 @@ public class HttpActionTest {
                       fields:
                         - name: table
                           type: string
-                sinks:
+                actions:
                   - name: job
-                    module: action.http
+                    module: http
+                    trigger: perElement
                     inputs: [input]
                     failFast: false
                     parameters:
-                      trigger: perElement
                       target:
                         url: %s
                       body: { format: json }
@@ -260,11 +261,11 @@ public class HttpActionTest {
                         failWhen: { key: payload.state, op: "=", value: FAILED }
                         interval: 20ms
                   - name: bad
-                    module: action.http
+                    module: http
+                    trigger: once
                     inputs: [input]
                     failFast: false
                     parameters:
-                      trigger: once
                       target:
                         url: %s
                 """.formatted(url("/jobs"), url("/bad"));
@@ -282,26 +283,26 @@ public class HttpActionTest {
     @Test
     public void testValidate() {
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: a
-                    module: action.http
+                    module: http
                     inputs: [input]
                     parameters:
                       body: { format: json }
                 """)));
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: a
-                    module: action.http
+                    module: http
                     inputs: [input]
                     parameters:
                       target: { url: https://api.example.com/ }
                       poll: { interval: 1s }
                 """)));
         Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
-                sinks:
+                actions:
                   - name: a
-                    module: action.http
+                    module: http
                     inputs: [input]
                     parameters:
                       target: { url: https://api.example.com/ }

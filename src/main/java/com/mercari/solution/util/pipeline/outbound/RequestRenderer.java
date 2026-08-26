@@ -22,7 +22,7 @@ import java.util.regex.Pattern;
 /**
  * Turns one element (or one batch of elements, or nothing for signal-only firings) into an
  * {@link OutboundRequest}: pure, unit-testable request building shared by the http sink and
- * action.http.
+ * the http action.
  *
  * <p>Templates are compiled once per instance; templates that reference neither element fields nor
  * per-element variables are rendered once at {@link #setup()} (secret-bearing headers must not hit

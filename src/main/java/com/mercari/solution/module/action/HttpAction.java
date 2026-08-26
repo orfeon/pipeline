@@ -1,5 +1,8 @@
 package com.mercari.solution.module.action;
 
+import com.mercari.solution.module.Action;
+import com.mercari.solution.module.Action.Trigger;
+
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -36,7 +39,7 @@ import java.util.*;
  * (PUT, or an {@code Idempotency-Key} header built from {@code utils.string.sha256}).
  */
 @Action.Service(name = "http")
-public class HttpAction implements Action {
+public class HttpAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(HttpAction.class);
 
@@ -63,7 +66,7 @@ public class HttpAction implements Action {
             if(response != null) {
                 errorMessages.addAll(response.validate(prefix + ".response"));
                 if(response.partialFailure != null) {
-                    errorMessages.add(prefix + ".response.partialFailure is not supported by action.http (use the http sink with batch)");
+                    errorMessages.add(prefix + ".response.partialFailure is not supported by the http action (use the http sink with batch)");
                 }
             }
             if(timeout != null) {
@@ -188,14 +191,9 @@ public class HttpAction implements Action {
     private transient Filter.ConditionNode failWhenCondition;
 
     @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options) {
-        configure(name, parametersJson, options, null);
-    }
-
-    @Override
-    public void configure(final String name, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
+    public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
         this.name = name;
-        this.trigger = Trigger.of(parametersJson);
+        this.trigger = trigger;
         this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");

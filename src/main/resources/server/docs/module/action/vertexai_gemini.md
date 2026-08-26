@@ -8,16 +8,20 @@ timestamp: 2026-08-19T00:00:00Z
 
 # Vertex AI Gemini Action Module
 
-Action module (`action.vertexai_gemini`) that launches a Vertex AI batch prediction job (the `batchPredictionJobs` REST API) for a Gemini model and, by default, waits for its completion. Placeable in sources/transforms/sinks; see [action modules](README.md) for placement, trigger semantics and the output envelope.
+Action module (`actions` section, `module: vertexai_gemini`) that launches a Vertex AI batch prediction job (the `batchPredictionJobs` REST API) for a Gemini model and, by default, waits for its completion. See [action modules](README.md) for the `actions` section, trigger semantics and the output envelope.
 
 Submission is **not idempotent** — the API has no client-supplied job id, so a retried Beam bundle may submit a duplicate job. Prefer `trigger: once` unless duplicates are acceptable. `${field}` parameter templating is not supported by this service (elements only control firing).
+
+## Operations
+
+| operation                   | effect |
+|-----------------------------|--------|
+| `batchPredictionJobs.create` | Submit a batch prediction job (`batchPredictionJobsRequest`) and, with `wait`, poll it to completion. |
 
 ## Parameters
 
 | parameter                 | optional | type                                              | description                                                              |
 |---------------------------|----------|---------------------------------------------------|--------------------------------------------------------------------------|
-| trigger                   | optional | Enum                                              | `once` (default), `perElement`, `collect`. See [action modules](README.md#trigger). |
-| op                        | required | Enum                                              | Operation. Value: `batchPrediction`.                                     |
 | project                   | optional | String                                            | GCP project ID. Defaults to the pipeline's project.                      |
 | region                    | required | String                                            | Vertex AI region (e.g. `us-central1`).                                   |
 | batchPredictionJobsRequest | required | [BatchPredictionJobsRequest](#batchpredictionjobsrequest-parameters) | The batch prediction job request body.                |
@@ -62,13 +66,13 @@ One envelope record per execution (see [action modules](README.md#output-envelop
 Submit a batch prediction job reading JSONL instances from GCS after they are written, waiting for job completion.
 
 ```yaml
-sinks:
+actions:
   - name: gemini_batch
-    module: action.vertexai_gemini
+    module: vertexai_gemini
+    operation: batchPredictionJobs.create
     waits:
       - write_instances
     parameters:
-      op: batchPrediction
       region: us-central1
       batchPredictionJobsRequest:
         displayName: my-batch-prediction

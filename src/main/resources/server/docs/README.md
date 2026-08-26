@@ -8,8 +8,8 @@ Define the pipeline contents in YAML/JSON format and specify using the config pa
 
 ## Config file contents
 
-In the Config file, six modules, `system`, `options`, `sources`, `transforms`, `sinks` and `failures`, are combined to define the processing contents.
-`sources` is for input data acquisition, `transforms` is for data processing, and `sinks` is for data output.
+In the Config file, seven blocks, `system`, `options`, `sources`, `transforms`, `sinks`, `actions` and `failures`, are combined to define the processing contents.
+`sources` is for input data acquisition, `transforms` is for data processing, `sinks` is for data output, and `actions` is for workflow steps against external services.
 `options` defines pipeline options.
 
 | parameter  | type                         | description                                |
@@ -19,6 +19,7 @@ In the Config file, six modules, `system`, `options`, `sources`, `transforms`, `
 | sources    | Array<Source\>               | Pipeline data source definitions.          |
 | transforms | Array<Transform\>            | Pipeline data processing definitions.      |
 | sinks      | Array<Sink\>                 | Pipeline data sink definitions.            |
+| actions    | Array<Action\>               | Workflow steps against external services (run a job, notify, …). |
 | failures   | Array<Failure\>              | Pipeline-wide dead-letter sink definition. |
 
 
@@ -38,6 +39,10 @@ In the Config file, six modules, `system`, `options`, `sources`, `transforms`, `
     {...},
     ...
   ],
+  "actions": [
+    {...},
+    ...
+  ],
   "failures": [
     {...},
     ...
@@ -49,11 +54,11 @@ You can define and run a pipeline by combining these types of various build-in m
 
 The list of build-in modules can be found on [Modules Page](module/README.md).
 
-Besides the data modules, [action modules](module/action/README.md) (`action.<service>`) execute
-operations against external services (run a BigQuery job, write a result-history file) as
-lightweight workflow steps. They are placeable in any of the `sources` / `transforms` / `sinks`
-sections — put one where it sits in the flow: no upstream → `sources`, consumed downstream →
-`transforms`, terminal → `sinks`.
+Besides the data modules, [action modules](module/action/README.md) execute operations against
+external services (run a BigQuery job, call an HTTP endpoint, write a result-history file) as
+lightweight workflow steps. They are declared in the `actions` section; `module:` names the
+service and `trigger:` (`once` / `perElement` / `collect`) the firing semantics. Their position
+in the flow comes from `inputs` / `waits` alone.
 
 Examples of configuration files are listed in the [Examples Page](../../../../../examples/README.md), so try to find and arrange a configuration file that is close to the data processing you want to perform.
 
