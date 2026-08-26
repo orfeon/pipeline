@@ -48,6 +48,7 @@ public class ChangeDdlTest {
     @Test
     public void testToBigQueryType() {
         Assertions.assertEquals("FLOAT64", ChangeDdl.toBigQueryType(ChangeSchema.TYPE_FLOAT32));
+        Assertions.assertEquals("STRING", ChangeDdl.toBigQueryType(ChangeSchema.TYPE_UUID));
         Assertions.assertEquals("ARRAY<INT64>", ChangeDdl.toBigQueryType("ARRAY<INT64>"));
         Assertions.assertEquals("JSON", ChangeDdl.toBigQueryType("STRUCT<a INT64>"));
         Assertions.assertEquals("STRING", ChangeDdl.toBigQueryType("WHATEVER"));

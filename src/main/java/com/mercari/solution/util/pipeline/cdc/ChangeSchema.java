@@ -37,6 +37,7 @@ public class ChangeSchema {
     public static final String TYPE_DATETIME = "DATETIME";
     public static final String TYPE_TIMESTAMP = "TIMESTAMP";
     public static final String TYPE_JSON = "JSON";
+    public static final String TYPE_UUID = "UUID";
 
     /** One column of the row schema. */
     public record Column(String name, String type, boolean key) implements Serializable {
@@ -188,6 +189,7 @@ public class ChangeSchema {
             case "DATE" -> TYPE_DATE;
             case "TIMESTAMP" -> TYPE_TIMESTAMP;
             case "JSON", "PG_JSONB" -> TYPE_JSON;
+            case "UUID" -> TYPE_UUID;
             case "STRING" -> TYPE_STRING;
             default -> trimmed.toUpperCase(Locale.ROOT); // ARRAY<...> / STRUCT<...> already normalized, or unknown
         };

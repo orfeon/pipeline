@@ -23,6 +23,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * Converts change record envelopes into Spanner {@link Mutation}s against a destination table
@@ -127,6 +128,9 @@ public class ChangeRecordMutationConverter implements Serializable {
         }
         return switch (field.getType().getTypeName()) {
             case BOOLEAN -> element.getAsBoolean();
+            case STRING -> RowSchemaUtil.hasSpannerType(field.getOptions(), "UUID")
+                    ? UUID.fromString(element.getAsString())
+                    : element.getAsString();
             case INT64, INT32, INT16, BYTE -> element.getAsLong();
             case FLOAT -> element.getAsFloat();
             case DOUBLE -> element.getAsDouble();

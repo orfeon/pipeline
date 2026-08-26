@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.cdc;
 
 import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Value;
+import com.mercari.solution.util.schema.RowSchemaUtil;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.logicaltypes.SqlTypes;
 import org.junit.jupiter.api.Assertions;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class ChangeRecordMutationConverterTest {
 
@@ -115,6 +117,31 @@ public class ChangeRecordMutationConverterTest {
         Assertions.assertEquals("x", ChangeRecordMutationConverter.toKeyPart(SCHEMA.getField("id"), com.google.gson.JsonParser.parseString("\"x\"")));
         Assertions.assertEquals("2020-01-02", ChangeRecordMutationConverter.toKeyPart(SCHEMA.getField("birthday"), com.google.gson.JsonParser.parseString("\"2020-01-02\"")).toString());
         Assertions.assertNull(ChangeRecordMutationConverter.toKeyPart(SCHEMA.getField("id"), null));
+    }
+
+    /** Native Spanner UUID columns (spannerType=UUID on a STRING field) bind as UUID keys and values. */
+    @Test
+    public void testUuidColumns() {
+        final String uuid = "550e8400-e29b-41d4-a716-446655440000";
+        final Schema schema = Schema.builder()
+                .addField(Schema.Field.of("id", Schema.FieldType.STRING).withOptions(RowSchemaUtil.createSpannerTypeOptions("UUID")))
+                .addField(Schema.Field.of("refs", Schema.FieldType.array(Schema.FieldType.STRING).withNullable(true)).withOptions(RowSchemaUtil.createSpannerTypeOptions("UUID")))
+                .addNullableField("name", Schema.FieldType.STRING)
+                .build();
+        final ChangeRecordMutationConverter.TableSchema table = new ChangeRecordMutationConverter.TableSchema("Docs", schema, List.of("id"));
+        final ChangeRecordMutationConverter converter = new ChangeRecordMutationConverter();
+
+        Assertions.assertEquals(UUID.fromString(uuid), ChangeRecordMutationConverter.toKeyPart(schema.getField("id"), com.google.gson.JsonParser.parseString("\"" + uuid + "\"")));
+
+        final Mutation upsert = converter.convert(table, envelope(ChangeRecord.Op.UPDATE,
+                "{\"id\":\"" + uuid + "\"}", "{\"name\":\"a\",\"refs\":[\"" + uuid + "\"]}", "ff/1"));
+        final Map<String, Value> values = upsert.asMap();
+        Assertions.assertEquals(Value.uuid(UUID.fromString(uuid)), values.get("id"));
+        Assertions.assertEquals(Value.uuidArray(List.of(UUID.fromString(uuid))), values.get("refs"));
+        Assertions.assertEquals(Value.string("a"), values.get("name"));
+
+        final Mutation delete = converter.convert(table, envelope(ChangeRecord.Op.DELETE, "{\"id\":\"" + uuid + "\"}", null, "ff/2"));
+        Assertions.assertEquals(List.of(UUID.fromString(uuid)), delete.getKeySet().getKeys().iterator().next().getParts());
     }
 
 }

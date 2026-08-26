@@ -129,7 +129,7 @@ public class ChangeDdl {
             case ChangeSchema.TYPE_DATETIME -> "DATETIME";
             case ChangeSchema.TYPE_TIMESTAMP -> "TIMESTAMP";
             case ChangeSchema.TYPE_JSON -> "JSON";
-            case ChangeSchema.TYPE_STRING -> "STRING";
+            case ChangeSchema.TYPE_STRING, ChangeSchema.TYPE_UUID -> "STRING"; // BigQuery has no UUID type
             default -> upper.startsWith("STRUCT<") ? "JSON" : "STRING"; // unknown / nested: keep the value as text
         };
     }
