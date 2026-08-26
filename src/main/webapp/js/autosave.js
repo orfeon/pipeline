@@ -1,32 +1,24 @@
 /**
- * autosave.js - Persist the workspace (pipeline config + node positions) to
- * localStorage and restore it on page load, so an accidental reload does not
- * lose work.
+ * autosave.js - Persist the workspace store (pipeline config, node positions
+ * and the agent chat) to localStorage and restore it on page load, so an
+ * accidental reload does not lose work.
  */
 'use strict';
 
 import { setStatus } from './util.js';
-import { generateConfig, importConfigToCanvas,
-         exportNodePositions, applyNodePositions, setChangeListener } from './canvas.js';
+import * as workspace from './workspace.js';
 
 const STORAGE_KEY = 'mercari-pipeline-workspace';
 const SAVE_DELAY_MS = 1000;
 
 let saveTimer = null;
 
-function hasModules(config) {
-    return !!(config && (
-        (config.sources && config.sources.length) ||
-        (config.transforms && config.transforms.length) ||
-        (config.sinks && config.sinks.length)));
-}
-
 function saveWorkspace() {
     try {
-        const config = generateConfig();
         const payload = {
-            config: config,
-            positions: exportNodePositions(),
+            config: workspace.getConfig(),
+            positions: workspace.getPositions(),
+            agent: workspace.getAgentState(),
             savedAt: new Date().toISOString()
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -50,11 +42,15 @@ function restoreWorkspace() {
         console.error('Failed to read saved workspace:', e);
         return;
     }
-    if (!saved || !hasModules(saved.config)) return;
+    if (!saved) return;
+    const hasChat = saved.agent && Array.isArray(saved.agent.history) && saved.agent.history.length > 0;
+    if (!workspace.hasModules(saved.config) && !hasChat) return;
 
     try {
-        importConfigToCanvas(saved.config);
-        applyNodePositions(saved.positions);
+        if (hasChat) workspace.setAgentState(saved.agent, 'restore');
+        if (workspace.hasModules(saved.config)) {
+            workspace.setConfig(saved.config, 'restore', saved.positions || {});
+        }
         setStatus('Restored previous session');
     } catch (e) {
         console.error('Failed to restore workspace:', e);
@@ -76,10 +72,10 @@ export function clearWorkspace() {
 }
 
 /**
- * Restore any saved workspace, then start auto-saving on canvas changes.
+ * Restore any saved workspace, then start auto-saving on every store change.
  * Call after the canvas and module list are initialized.
  */
 export function initAutoSave() {
     restoreWorkspace();
-    setChangeListener(scheduleSave);
+    workspace.subscribe(scheduleSave);
 }
