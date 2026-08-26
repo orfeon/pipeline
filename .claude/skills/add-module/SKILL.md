@@ -103,7 +103,9 @@ User-facing docs are read by the bundled AI agent from the classpath — this is
 2. Register in `src/main/resources/server/docs/module/index.yaml`: add `title` / `description` / `tags`
    under the matching `sources:` / `transforms:` / `sinks:` / `actions:` key (the `title` is the
    registered name, for actions the service name). Write a real description (1–3 sentences, capabilities + supported
-   options), not a placeholder.
+   options), not a placeholder. Double-quote the `description` scalar: an unquoted value containing
+   `: ` or `#` breaks YAML parsing and takes the whole `/api/*` servlet down at init
+   (`ModuleIndexYamlTest` guards this on `mvn test`).
 
 ## Step 5 — Verify
 
