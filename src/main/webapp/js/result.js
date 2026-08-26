@@ -5,8 +5,8 @@
 
 import { $id, on, show, hide, showModal, escapeHtml, setStatus, postJson,
          renderSchemaPanel, renderRecordsTable, initSchemaPanelEvents } from './util.js';
-import { generateConfig, getValidationErrors,
-         updateNodeSchemaIndicator, updateNodeOutputIndicator } from './canvas.js';
+import { updateNodeSchemaIndicator, updateNodeOutputIndicator } from './canvas.js';
+import { getConfig, getValidationErrors } from './workspace.js';
 
 // =============================
 // Result modal
@@ -224,7 +224,7 @@ function showModuleDetail(title, iconClass, bodyHtml, millisText) {
 // =============================
 
 export function runPipeline(type) {
-    const config = generateConfig();
+    const config = getConfig();
 
     const errors = getValidationErrors(config);
     if (errors.length > 0) {
@@ -254,7 +254,7 @@ export function runPipeline(type) {
 }
 
 export function runPipelineWithLaunch(launchConfig) {
-    const config = generateConfig();
+    const config = getConfig();
     const button = $id('btn-launch');
     const originalHtml = button.innerHTML;
 

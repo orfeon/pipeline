@@ -53,7 +53,8 @@ public interface PipelineAgent {
                 )
                 .afterToolExecution(interactionLog::toolExecution)
                 .build()
-                .chat(lastUserMessage.singleText(), createCanvasConfigContext(canvasConfig));
+                .chat(lastUserMessage.singleText(),
+                        createCanvasConfigContext(canvasConfig) + createSelectionContext(body));
 
         final List<ChatMessage> newResponseMessages = historyMemory
                 .messages()
@@ -83,6 +84,22 @@ public interface PipelineAgent {
             return "";
         }
         return "\nCurrent pipeline config on the user's canvas:\n```yaml\n" + canvasConfig + "\n```";
+    }
+
+    /**
+     * The module the user has selected in the builder (canvas node / editor cursor),
+     * sent by the UI as {@code selection}; lets "fix this module" style requests resolve.
+     */
+    private static String createSelectionContext(final JsonObject body) {
+        if (!body.has("selection") || !body.get("selection").isJsonPrimitive()) {
+            return "";
+        }
+        final String selection = body.get("selection").getAsString().trim();
+        if (selection.isEmpty()) {
+            return "";
+        }
+        return "\nThe user currently has the module `" + selection + "` selected in the builder; "
+                + "\"this module\" refers to it.";
     }
 
     private static List<ChatMessage> createHistoryMessages(final JsonArray historyJson) {

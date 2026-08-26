@@ -1,20 +1,37 @@
 /**
- * agent.js - AI agent chat modal.
+ * agent.js - AI agent pane: the pipeline's co-author, a peer of the canvas
+ * and the config editor (not a modal).
+ *
+ * Proposals: a config returned by the agent is never applied directly. It
+ * becomes the workspace's pending proposal, which the canvas and the editor
+ * show as a diff; the pane's Accept / Reject bar commits or discards it.
+ * Context: the workspace selection (clicked node / editor cursor) is shown as a
+ * chip and sent with each message; `@module` in the input completes module names.
+ * The chat state lives in the store (`agent`) so auto-save restores it.
  */
 'use strict';
 
-import { $id, on, showModal, hideModal, escapeHtml, setStatus, postJson, dumpYaml } from './util.js';
-import { importConfigToCanvas, generateConfig, highlightNodeByName } from './canvas.js';
+import { $id, on, escapeHtml, setStatus, postJson, dumpYaml } from './util.js';
+import { highlightNodeByName } from './canvas.js';
+import { flushEditor } from './editor.js';
+import * as workspace from './workspace.js';
+import { showView } from './views.js';
+
+const SOURCE = 'agent';
 
 let agentChatHistory = [];
 let agentConversationId = null; // correlates server-side agent logs across turns of one chat
 let agentIsComposing = false;
 let agentIsSending = false;
-let agentUndoSnapshot = null;   // canvas YAML captured before the last agent config apply
+let agentUndoSnapshot = null;   // config before the last accepted proposal
 
-function openAgentModal() {
-    showModal('agentModal');
+function persistChat() {
+    workspace.setAgentState({ history: agentChatHistory, conversationId: agentConversationId }, SOURCE);
 }
+
+// =============================
+// Assistant response contract
+// =============================
 
 /**
  * Parse an assistant message content into the structured response contract:
@@ -220,6 +237,10 @@ function agentCreateDiffEl(ops) {
     return pre;
 }
 
+// =============================
+// Message rendering
+// =============================
+
 function agentRenderMessages() {
     const container = $id('agent-chat-messages');
     container.innerHTML = '';
@@ -229,7 +250,8 @@ function agentRenderMessages() {
             '<div class="agent-welcome text-center text-muted py-5">' +
                 '<i class="bi bi-robot" style="font-size: 3rem;"></i>' +
                 '<p class="mt-3">How can I help you build your pipeline?</p>' +
-                '<p class="small">Describe what data you want to process and I\'ll generate the configuration.</p>' +
+                '<p class="small">Describe what data you want to process and I\'ll propose the configuration. ' +
+                'Select a module on the canvas (or type <code>@module</code>) to talk about it.</p>' +
             '</div>';
         return;
     }
@@ -300,13 +322,14 @@ function agentCreateAssistantMessageEl(parsed) {
     if (parsed.config) {
         const badge = document.createElement('div');
         badge.className = 'agent-config-badge';
-        badge.innerHTML = '<i class="bi bi-check-lg me-1"></i>Apply config to canvas';
+        badge.innerHTML = '<i class="bi bi-file-diff me-1"></i>Propose this config';
+        badge.title = 'Show this config as a pending proposal (Accept / Reject below)';
         badge.addEventListener('click', function() {
-            agentApplyConfig(parsed.config);
+            agentPropose(parsed.config);
         });
         bubble.appendChild(badge);
 
-        // Diff of this config against the current canvas, computed on demand
+        // Diff of this config against the current pipeline, computed on demand
         const diffBadge = document.createElement('div');
         diffBadge.className = 'agent-config-badge agent-diff-badge';
         diffBadge.innerHTML = '<i class="bi bi-file-diff me-1"></i>View diff';
@@ -327,7 +350,7 @@ function agentCreateAssistantMessageEl(parsed) {
                 : (function() {
                     const el = document.createElement('div');
                     el.className = 'agent-diff-empty';
-                    el.textContent = 'No differences from the current canvas.';
+                    el.textContent = 'No differences from the current pipeline.';
                     return el;
                 })();
             diffBadge.insertAdjacentElement('afterend', diffEl);
@@ -362,6 +385,14 @@ function agentCreateValidationEl(validation) {
     return el;
 }
 
+/** Bring the canvas forward and flash the named node. */
+function agentShowModule(name) {
+    showView('canvas');
+    if (!highlightNodeByName(name)) {
+        setStatus('Module "' + name + '" is not on the canvas', 'warning');
+    }
+}
+
 function agentCreateSnippetEl(snippet) {
     const card = document.createElement('div');
     card.className = 'agent-snippet-card';
@@ -381,13 +412,7 @@ function agentCreateSnippetEl(snippet) {
         moduleChip.title = 'Show this module on the canvas';
         moduleChip.innerHTML = '<i class="bi bi-diagram-3 me-1"></i>' + escapeHtml(snippet.relatedModule);
         moduleChip.addEventListener('click', function() {
-            hideModal('agentModal');
-            // Wait for the modal close animation so the canvas is visible
-            setTimeout(function() {
-                if (!highlightNodeByName(snippet.relatedModule)) {
-                    setStatus('Module "' + snippet.relatedModule + '" is not on the canvas', 'warning');
-                }
-            }, 300);
+            agentShowModule(snippet.relatedModule);
         });
         header.appendChild(moduleChip);
     }
@@ -544,14 +569,18 @@ function agentCreateToolGroupEl(toolCalls) {
     return group;
 }
 
+// =============================
+// Pipeline context
+// =============================
+
 /**
- * Export the current canvas config as YAML so the agent can see the user's
- * latest (possibly hand-edited) pipeline. Returns '' when the canvas is empty.
+ * Export the current pipeline config as YAML so the agent can see the user's
+ * latest (possibly hand-edited) pipeline. Returns '' when the pipeline is empty.
  */
 function agentGetCanvasConfigYaml() {
     let config;
     try {
-        config = generateConfig();
+        config = workspace.getConfig();
     } catch (e) {
         return '';
     }
@@ -563,9 +592,13 @@ function agentGetCanvasConfigYaml() {
             cleaned[key] = value;
         }
     });
-    if (!cleaned.sources && !cleaned.transforms && !cleaned.sinks) return '';
+    if (!workspace.hasModules(cleaned)) return ''; // a pipeline may consist of actions alone
     return dumpYaml(cleaned);
 }
+
+// =============================
+// Sending
+// =============================
 
 function agentSendFromInput() {
     const inputEl = $id('agent-chat-input');
@@ -573,11 +606,18 @@ function agentSendFromInput() {
     if (!input) return;
     if (agentIsSending) return;
     inputEl.value = '';
+    hideMention();
     agentSend(input);
 }
 
 function agentSend(input) {
     if (agentIsSending) return;
+    // The agent must see the config on screen: push a pending editor edit
+    // first, and refuse while the text is not a valid config.
+    if (!flushEditor()) {
+        setStatus('Fix the config text before asking the agent — the store keeps the previous config', 'warning');
+        return;
+    }
 
     // Add user message to history
     agentChatHistory.push({ role: 'user', content: input });
@@ -594,16 +634,22 @@ function agentSend(input) {
         '</div>');
     container.scrollTop = container.scrollHeight;
 
-    // Send to server together with the current canvas config
+    // Send to server together with the current pipeline config and selection
     if (!agentConversationId) {
         agentConversationId = (window.crypto && crypto.randomUUID)
             ? crypto.randomUUID()
             : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     }
+    persistChat();
     const body = { history: agentChatHistory, conversationId: agentConversationId };
     const canvasYaml = agentGetCanvasConfigYaml();
     if (canvasYaml) {
         body.config = canvasYaml;
+    }
+    // only a module is a "selected module" for the agent (not system / options)
+    const selection = workspace.getSelection();
+    if (selection && workspace.getModuleNames().indexOf(selection) >= 0) {
+        body.selection = selection;
     }
     postJson('/api/agent', body, 120000).then(function(newMessages) {
         // Append new messages to history
@@ -614,7 +660,7 @@ function agentSend(input) {
         }
         agentRenderMessages();
 
-        // Auto-apply config if the last assistant message has one
+        // A config in the last assistant message becomes the pending proposal
         let lastAssistant = null;
         for (let j = agentChatHistory.length - 1; j >= 0; j--) {
             if (agentChatHistory[j].role === 'assistant' && !agentChatHistory[j].toolCall) {
@@ -625,7 +671,7 @@ function agentSend(input) {
         if (lastAssistant) {
             const parsed = agentParseAssistantContent(lastAssistant.content);
             if (parsed.config) {
-                agentApplyConfig(parsed.config);
+                agentPropose(parsed.config);
             }
         }
     }).catch(function(err) {
@@ -639,6 +685,7 @@ function agentSend(input) {
         $id('btn-agent-send').disabled = false;
         const loading = $id('agent-loading');
         if (loading) loading.remove();
+        persistChat();
     });
 }
 
@@ -646,9 +693,15 @@ function agentClearHistory() {
     agentChatHistory = [];
     agentConversationId = null;
     agentRenderMessages();
+    workspace.rejectPending(SOURCE);
+    persistChat();
 }
 
-function agentApplyConfig(configText) {
+// =============================
+// Proposals: pending -> Accept / Reject
+// =============================
+
+function agentPropose(configText) {
     let config;
     try {
         config = jsyaml.load(configText);
@@ -666,34 +719,185 @@ function agentApplyConfig(configText) {
         return;
     }
 
-    agentUndoSnapshot = agentGetCanvasConfigYaml();
-    importConfigToCanvas(config);
-    $id('btn-agent-undo').classList.remove('d-none');
-    setStatus('Agent config applied to canvas', 'success');
+    workspace.setPending(config, SOURCE);
+    setStatus('Agent proposed a config — review the diff, then Accept or Reject');
 }
 
-function agentUndoApply() {
+function agentAccept() {
+    if (!workspace.getPending()) return;
+    agentUndoSnapshot = JSON.parse(JSON.stringify(workspace.getConfig()));
+    workspace.acceptPending(SOURCE);
+    $id('btn-agent-undo').classList.remove('d-none');
+    setStatus('Proposal accepted', 'success');
+}
+
+function agentReject() {
+    workspace.rejectPending(SOURCE);
+    setStatus('Proposal rejected');
+}
+
+function agentUndoAccept() {
     if (agentUndoSnapshot === null) return;
-    let config = {};
-    if (agentUndoSnapshot) {
-        try {
-            config = jsyaml.load(agentUndoSnapshot) || {};
-        } catch (e) {
-            setStatus('Failed to restore previous canvas', 'error');
+    workspace.setConfig(agentUndoSnapshot, SOURCE);
+    agentUndoSnapshot = null;
+    $id('btn-agent-undo').classList.add('d-none');
+    setStatus('Pipeline restored to the state before the last accept', 'success');
+}
+
+function renderPendingBar() {
+    const bar = $id('agent-pending');
+    const diff = workspace.getPendingDiff();
+    if (!diff) {
+        bar.classList.add('d-none');
+        return;
+    }
+    const parts = [];
+    if (diff.added.length) parts.push('+' + diff.added.length + ' added');
+    if (diff.modified.length) parts.push('~' + diff.modified.length + ' modified');
+    if (diff.removed.length) parts.push('−' + diff.removed.length + ' removed');
+    if (diff.settingsChanged) parts.push('system/options');
+    $id('agent-pending-summary').textContent = 'Proposed change: ' + (parts.length ? parts.join(' · ') : 'no differences');
+
+    const chips = $id('agent-pending-modules');
+    chips.innerHTML = '';
+    const addChip = function(name, kind) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'agent-pending-chip ' + kind;
+        chip.textContent = name;
+        chip.title = kind === 'added' ? 'New module (not on the canvas until accepted)' : 'Show on the canvas';
+        chip.addEventListener('click', function() {
+            if (kind !== 'added') agentShowModule(name);
+        });
+        chips.appendChild(chip);
+    };
+    diff.added.forEach(function(n) { addChip(n, 'added'); });
+    diff.modified.forEach(function(n) { addChip(n, 'modified'); });
+    diff.removed.forEach(function(n) { addChip(n, 'removed'); });
+    if (diff.settingsChanged) addChip('system / options', 'settings');
+    bar.classList.remove('d-none');
+}
+
+// =============================
+// Selection context + @mentions
+// =============================
+
+function renderContextChip() {
+    const selection = workspace.getSelection();
+    $id('agent-context').classList.toggle('d-none', !selection);
+    $id('agent-context-name').textContent = selection ? 'Context: ' + selection : '';
+}
+
+let mentionItems = [];
+let mentionIndex = 0;
+let mentionRange = null; // { start, end } of the "@word" being completed
+
+function hideMention() {
+    $id('agent-mention').classList.add('d-none');
+    mentionItems = [];
+    mentionRange = null;
+}
+
+function updateMention() {
+    const input = $id('agent-chat-input');
+    const caret = input.selectionStart;
+    const before = input.value.slice(0, caret);
+    const m = before.match(/(^|\s)@([A-Za-z0-9_]*)$/);
+    if (!m) {
+        hideMention();
+        return;
+    }
+    const prefix = m[2].toLowerCase();
+    mentionItems = workspace.getModuleNames().filter(function(name) {
+        return name.toLowerCase().indexOf(prefix) === 0;
+    });
+    if (mentionItems.length === 0) {
+        hideMention();
+        return;
+    }
+    mentionRange = { start: caret - m[2].length - 1, end: caret };
+    mentionIndex = Math.min(mentionIndex, mentionItems.length - 1);
+    const list = $id('agent-mention');
+    list.innerHTML = '';
+    mentionItems.forEach(function(name, index) {
+        const item = document.createElement('div');
+        item.className = 'agent-mention-item' + (index === mentionIndex ? ' active' : '');
+        item.textContent = '@' + name;
+        item.addEventListener('mousedown', function(e) {
+            e.preventDefault(); // keep the textarea focused
+            pickMention(index);
+        });
+        list.appendChild(item);
+    });
+    list.classList.remove('d-none');
+}
+
+function pickMention(index) {
+    if (!mentionRange || !mentionItems[index]) return;
+    const input = $id('agent-chat-input');
+    const name = mentionItems[index];
+    input.value = input.value.slice(0, mentionRange.start) + '@' + name + ' ' + input.value.slice(mentionRange.end);
+    const pos = mentionRange.start + name.length + 2;
+    input.setSelectionRange(pos, pos);
+    hideMention();
+    // Mentioning a module also makes it the selection context
+    workspace.setSelection(name, SOURCE);
+}
+
+function onInputKeydown(e) {
+    if (mentionItems.length > 0) {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            mentionIndex = (mentionIndex + 1) % mentionItems.length;
+            updateMention();
+            return;
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            mentionIndex = (mentionIndex - 1 + mentionItems.length) % mentionItems.length;
+            updateMention();
+            return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            pickMention(mentionIndex);
+            return;
+        }
+        if (e.key === 'Escape') {
+            hideMention();
             return;
         }
     }
-    importConfigToCanvas(config);
-    agentUndoSnapshot = null;
-    $id('btn-agent-undo').classList.add('d-none');
-    setStatus('Canvas restored to the state before the last apply', 'success');
+    if (e.key === 'Enter' && !e.shiftKey && !agentIsComposing) {
+        e.preventDefault();
+        agentSendFromInput();
+    }
+}
+
+// =============================
+// Init
+// =============================
+
+function onWorkspaceChange(event) {
+    if (event.type === 'pending') {
+        renderPendingBar();
+    } else if (event.type === 'selection') {
+        renderContextChip();
+    } else if (event.type === 'agent' && event.source === 'restore') {
+        const state = workspace.getAgentState() || {};
+        agentChatHistory = Array.isArray(state.history) ? state.history : [];
+        agentConversationId = state.conversationId || null;
+        agentRenderMessages();
+    }
 }
 
 export function initAgent() {
-    on('btn-agent', 'click', openAgentModal);
     on('btn-agent-send', 'click', agentSendFromInput);
     on('btn-agent-clear', 'click', agentClearHistory);
-    on('btn-agent-undo', 'click', agentUndoApply);
+    on('btn-agent-undo', 'click', agentUndoAccept);
+    on('btn-agent-accept', 'click', agentAccept);
+    on('btn-agent-reject', 'click', agentReject);
+    on('btn-agent-context-clear', 'click', function() { workspace.setSelection(null, SOURCE); });
 
     // IME composition handling for agent input
     on('agent-chat-input', 'compositionstart', function() {
@@ -702,10 +906,12 @@ export function initAgent() {
     on('agent-chat-input', 'compositionend', function() {
         agentIsComposing = false;
     });
-    on('agent-chat-input', 'keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey && !agentIsComposing) {
-            e.preventDefault();
-            agentSendFromInput();
-        }
-    });
+    on('agent-chat-input', 'keydown', onInputKeydown);
+    on('agent-chat-input', 'input', function() { mentionIndex = 0; updateMention(); });
+    on('agent-chat-input', 'blur', function() { setTimeout(hideMention, 150); });
+
+    workspace.subscribe(onWorkspaceChange);
+    agentRenderMessages();
+    renderPendingBar();
+    renderContextChip();
 }

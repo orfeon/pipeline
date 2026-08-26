@@ -8,51 +8,100 @@
 'use strict';
 
 import { $id, setStatus, escapeHtml } from './util.js';
+import * as workspace from './workspace.js';
 
 let editor = null;
 
 // Node types map 1:1 to config sections: source/transform/sink/action ->
 // sources/transforms/sinks/actions. Action nodes carry the service name as
 // their module name (actions[].module) and a module-level `trigger`.
-let systemConfig = {};
-let optionsConfig = {};
 const moduleSchemas = {};   // dryrun result cache (module name -> schema)
 const moduleOutputs = {};   // run result cache (module name -> output)
 
 // Wired by initDrawflow: { onEditNode(nodeId), onShowSchema(name, schema), onShowRecords(name, output) }
 let callbacks = {};
 
-// Notified (post-hoc) whenever the pipeline on the canvas changes; used for auto-save.
-let changeListener = null;
-
-export function setChangeListener(listener) {
-    changeListener = listener;
-}
-
-function notifyChanged() {
-    if (changeListener) changeListener();
-}
-
 // =============================
-// System / Options config state
+// Store synchronization
 // =============================
+//
+// The canvas is a view of the workspace store. Edits made on the canvas are
+// pushed to the store (source 'canvas'); config changes from anyone else are
+// rendered by re-importing. `importing` suppresses the push-back that
+// Drawflow's own events would otherwise trigger while a config is rendered.
 
-export function getSystemConfig() {
-    return systemConfig;
+const SOURCE = 'canvas';
+let importing = false;
+let visible = true;           // the canvas tab is shown
+let staleWhileHidden = false; // a config change arrived while hidden
+
+function pushModules() {
+    if (importing || !editor) return;
+    workspace.setModules(exportModules(), SOURCE, exportNodePositions());
 }
 
-export function setSystemConfig(config) {
-    systemConfig = config || {};
-    notifyChanged();
+function pushPositions() {
+    if (importing || !editor) return;
+    workspace.setPositions(exportNodePositions(), SOURCE);
 }
 
-export function getOptionsConfig() {
-    return optionsConfig;
+function onWorkspaceChange(event) {
+    if (event.type === 'pending') {
+        applyPendingHighlight();
+        return;
+    }
+    if (event.type === 'selection') {
+        applySelectionHighlight();
+        return;
+    }
+    if (event.source === SOURCE) return;
+    if (event.type !== 'config' && event.type !== 'positions') return;
+    // Drawflow measures DOM geometry when wiring connections, which fails
+    // while the container is display:none — defer until shown.
+    if (!visible) {
+        staleWhileHidden = true;
+        return;
+    }
+    if (event.type === 'config') {
+        importConfigToCanvas(workspace.getConfig());
+    } else {
+        applyNodePositions(workspace.getPositions());
+    }
 }
 
-export function setOptionsConfig(config) {
-    optionsConfig = config || {};
-    notifyChanged();
+/**
+ * Mark nodes the pending proposal would modify or remove (added modules are
+ * not on the canvas yet; the agent pane lists them).
+ */
+function applyPendingHighlight() {
+    const diff = workspace.getPendingDiff();
+    const nodes = editor.export().drawflow.Home.data;
+    for (const id in nodes) {
+        const el = $id('node-' + id);
+        if (!el) continue;
+        const name = nodes[id].data.name;
+        el.classList.toggle('node-pending-modified', !!diff && diff.modified.indexOf(name) >= 0);
+        el.classList.toggle('node-pending-removed', !!diff && diff.removed.indexOf(name) >= 0);
+    }
+}
+
+/** Reflect a selection made elsewhere (outline / editor) on the canvas. */
+function applySelectionHighlight() {
+    const selected = workspace.getSelection();
+    const nodes = editor.export().drawflow.Home.data;
+    for (const id in nodes) {
+        const el = $id('node-' + id);
+        if (el) el.classList.toggle('node-selected-external', !!selected && nodes[id].data.name === selected);
+    }
+}
+
+/** Called by the view switcher; re-renders anything that changed while hidden. */
+export function setCanvasVisible(isVisible) {
+    visible = isVisible;
+    if (visible && staleWhileHidden) {
+        staleWhileHidden = false;
+        importConfigToCanvas(workspace.getConfig());
+    }
 }
 
 // =============================
@@ -85,12 +134,6 @@ export function initDrawflow(cb) {
         setStatus('Module removed');
     });
 
-    // Auto-save notifications for every structural change
-    ['nodeCreated', 'nodeRemoved', 'nodeMoved', 'connectionCreated', 'connectionRemoved']
-        .forEach(function(eventName) {
-            editor.on(eventName, notifyChanged);
-        });
-
     editor.on('connectionCreated', function(connection) {
         // Prevent input_1 connections on source nodes
         const targetNode = editor.getNodeFromId(connection.input_id);
@@ -102,6 +145,25 @@ export function initDrawflow(cb) {
         const connType = connection.input_class === 'input_1' ? 'input' : connection.input_class === 'input_2' ? 'wait' : 'sideInput';
         setStatus(connType + ' connection created');
     });
+
+    // Push every structural change to the store (registered after the
+    // source-input guard above so a rejected connection is never pushed).
+    ['nodeCreated', 'nodeRemoved', 'connectionCreated', 'connectionRemoved']
+        .forEach(function(eventName) {
+            editor.on(eventName, pushModules);
+        });
+    editor.on('nodeMoved', pushPositions);
+
+    // Selection: a clicked node becomes the workspace selection (agent context)
+    editor.on('nodeSelected', function(id) {
+        const node = editor.getNodeFromId(id);
+        if (node) workspace.setSelection(node.data.name, SOURCE);
+    });
+    editor.on('nodeUnselected', function() {
+        workspace.setSelection(null, SOURCE);
+    });
+
+    workspace.subscribe(onWorkspaceChange);
 
     // Double click to edit node
     container.addEventListener('dblclick', function(e) {
@@ -182,7 +244,13 @@ function fixTopInputPaths(nodeId) {
 // Module list (left pane)
 // =============================
 
-export function initModuleList(moduleDefs) {
+/**
+ * Render the module catalog. `onPick(moduleName, type)` decides what a click
+ * does (the explorer: add a node in the Canvas view, insert a snippet in the
+ * Config view); defaults to adding a node.
+ */
+export function initModuleList(moduleDefs, onPick) {
+    catalogPick = onPick || function(name, type) { addModuleToCanvas(name, type); };
     const lists = {
         source: $id('source-modules'),
         transform: $id('transform-modules'),
@@ -196,6 +264,8 @@ export function initModuleList(moduleDefs) {
     });
 }
 
+let catalogPick = null;
+
 function createModuleItem(module, type) {
     const item = document.createElement('div');
     item.className = 'module-item ' + type;
@@ -205,9 +275,23 @@ function createModuleItem(module, type) {
         + (module.tags && module.tags.length ? '\n\nTags: ' + module.tags.join(', ') : '');
     item.innerHTML = '<i class="bi bi-plus-circle"></i> ' + escapeHtml(module.name);
     item.addEventListener('click', function() {
-        addModuleToCanvas(module.name, type);
+        catalogPick(module.name, type);
     });
     return item;
+}
+
+/**
+ * Select the node with the given module name from outside the canvas
+ * (outline click): scroll to it, flash it and make it the workspace selection.
+ */
+export function selectNodeByName(name) {
+    if (!highlightNodeByName(name)) {
+        setStatus('Module "' + name + '" is not on the canvas', 'warning');
+        return false;
+    }
+    workspace.setSelection(name, SOURCE);
+    applySelectionHighlight();
+    return true;
 }
 
 // =============================
@@ -259,6 +343,28 @@ function ensureOutputPort(nodeId, tag) {
     return 'output_' + (index + 1);
 }
 
+/** Module config fields the canvas models as node data (besides name / module / parameters). */
+export const NODE_CONFIG_PROPS = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty',
+    'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
+
+// Fields derived from canvas state, never stored as extras
+const CANVAS_MANAGED_PROPS = ['name', 'module', 'parameters', 'inputs', 'waits', 'sideInputs'];
+
+/**
+ * The fields of a module config the canvas has no representation for
+ * (e.g. description, args, outputType, outputFailure, failureSinks). They are
+ * carried through node data untouched and written back by exportModules.
+ */
+export function extractExtraProps(config) {
+    const extra = {};
+    Object.keys(config || {}).forEach(function(key) {
+        if (CANVAS_MANAGED_PROPS.indexOf(key) < 0 && NODE_CONFIG_PROPS.indexOf(key) < 0) {
+            extra[key] = config[key];
+        }
+    });
+    return extra;
+}
+
 export function addModuleToCanvas(moduleName, moduleType, config) {
     config = config || null;
     const defaultName = (config && config.name) ? config.name : nextDefaultName(moduleName);
@@ -286,14 +392,16 @@ export function addModuleToCanvas(moduleName, moduleType, config) {
         parameters: (config && config.parameters) ? config.parameters : {}
     };
 
-    // Store all config properties in nodeData
+    // Store all config properties in nodeData. Fields the canvas does not
+    // model (description, args, outputType, failureSinks, ...) are kept in
+    // `extra` so a canvas edit never drops what was written in the Config view.
     if (config) {
-        const configProps = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
-        configProps.forEach(function(prop) {
+        NODE_CONFIG_PROPS.forEach(function(prop) {
             if (config[prop] !== undefined && config[prop] !== null) {
                 nodeData[prop] = config[prop];
             }
         });
+        nodeData.extra = extractExtraProps(config);
     }
 
     const nodeId = editor.addNode(
@@ -350,7 +458,7 @@ export function updateNodeData(nodeId, data) {
         nodeElement.innerHTML = newHtml;
     }
     applyOutputLabels(nodeId);
-    notifyChanged();
+    pushModules();
 }
 
 /**
@@ -538,7 +646,7 @@ export function updateNodeOutputIndicator(outputName, output) {
 }
 
 // =============================
-// Pipeline config generation
+// Canvas -> module sections
 // =============================
 
 function extractConnectionNames(nodeInputs, portName, nodeMap) {
@@ -564,7 +672,12 @@ function getOutputTagByClass(node, outputClass) {
     return typeof tag === 'string' ? tag : '';
 }
 
-export function generateConfig() {
+/**
+ * Read the module sections (sources / transforms / sinks / actions) off the
+ * canvas. system / options live in the workspace store, not here — use
+ * workspace.getConfig() for the full pipeline config.
+ */
+function exportModules() {
     const nodes = editor.export().drawflow.Home.data;
 
     const config = {
@@ -614,6 +727,11 @@ export function generateConfig() {
             }
         });
 
+        // Fields the canvas does not model, carried through untouched
+        Object.keys(data.extra || {}).forEach(function(prop) {
+            moduleConfig[prop] = data.extra[prop];
+        });
+
         // Extract connections per port
         if (node.inputs) {
             if (!isSource) {
@@ -639,59 +757,34 @@ export function generateConfig() {
         }
     }
 
-    // keep configs without actions identical to before the section existed
-    if (config.actions.length === 0) {
-        delete config.actions;
-    }
-
-    // Add system settings
-    if (Object.keys(systemConfig).length > 0) {
-        config.system = systemConfig;
-    }
-
-    // Add options
-    if (Object.keys(optionsConfig).length > 0) {
-        config.options = optionsConfig;
-    }
-
     return config;
 }
 
-export function getValidationErrors(config) {
-    const errors = [];
-
-    // a pipeline may consist of actions alone (e.g. a queue operation gated by nothing)
-    if (config.sources.length === 0 && !(config.actions && config.actions.length > 0)) {
-        errors.push('At least one source or action module is required');
-    }
-
-    config.transforms.forEach(function(t) {
-        if (!t.inputs || t.inputs.length === 0) {
-            errors.push('Transform "' + t.name + '" has no inputs');
-        }
-    });
-
-    config.sinks.forEach(function(s) {
-        if (!s.inputs || s.inputs.length === 0) {
-            errors.push('Sink "' + s.name + '" has no inputs');
-        }
-    });
-
-    // actions may run on waits alone or standalone (trigger once); perElement/collect need inputs
-    (config.actions || []).forEach(function(a) {
-        if (a.trigger && a.trigger !== 'once' && (!a.inputs || a.inputs.length === 0)) {
-            errors.push('Action "' + a.name + '" with trigger ' + a.trigger + ' has no inputs');
-        }
-    });
-
-    return errors;
-}
+// =============================
+// Store -> canvas
+// =============================
 
 /**
- * Rebuild the canvas from a parsed pipeline config
- * (shared by the config editor's Apply and the agent's apply-config).
+ * Rebuild the canvas from a pipeline config (the store's, after any change
+ * not made on the canvas: editor apply, agent apply, restore, clear).
+ * Modules are laid out in columns, then any positions the store remembers
+ * for them (by name) are applied; the resulting layout is pushed back so the
+ * store's sidecar covers every node.
  */
-export function importConfigToCanvas(config) {
+function importConfigToCanvas(config) {
+    importing = true;
+    try {
+        renderConfig(config || {});
+    } finally {
+        importing = false;
+    }
+    applyNodePositions(workspace.getPositions());
+    pushPositions();
+    applyPendingHighlight();
+    applySelectionHighlight();
+}
+
+function renderConfig(config) {
     editor.clear();
 
     const nodeIdMap = {};
@@ -763,9 +856,6 @@ export function importConfigToCanvas(config) {
         editor.updateConnectionNodes('node-' + nodeId);
     });
 
-    systemConfig = config.system || {};
-    optionsConfig = config.options || {};
-
     editor.zoom_reset();
 }
 
@@ -780,10 +870,10 @@ function positionNode(nodeId, x, y) {
 }
 
 // =============================
-// Node positions (for workspace auto-save)
+// Node positions (the store's layout sidecar)
 // =============================
 
-export function exportNodePositions() {
+function exportNodePositions() {
     const nodes = editor.export().drawflow.Home.data;
     const positions = {};
     for (const id in nodes) {
@@ -792,7 +882,7 @@ export function exportNodePositions() {
     return positions;
 }
 
-export function applyNodePositions(positions) {
+function applyNodePositions(positions) {
     if (!positions) return;
     const nodes = editor.export().drawflow.Home.data;
     for (const id in nodes) {
