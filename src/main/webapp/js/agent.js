@@ -13,8 +13,9 @@
 
 import { $id, on, escapeHtml, setStatus, postJson, dumpYaml } from './util.js';
 import { highlightNodeByName } from './canvas.js';
+import { flushEditor } from './editor.js';
 import * as workspace from './workspace.js';
-import { showView, setAgentPaneOpen } from './views.js';
+import { showView } from './views.js';
 
 const SOURCE = 'agent';
 
@@ -591,7 +592,7 @@ function agentGetCanvasConfigYaml() {
             cleaned[key] = value;
         }
     });
-    if (!cleaned.sources && !cleaned.transforms && !cleaned.sinks) return '';
+    if (!workspace.hasModules(cleaned)) return ''; // a pipeline may consist of actions alone
     return dumpYaml(cleaned);
 }
 
@@ -611,6 +612,12 @@ function agentSendFromInput() {
 
 function agentSend(input) {
     if (agentIsSending) return;
+    // The agent must see the config on screen: push a pending editor edit
+    // first, and refuse while the text is not a valid config.
+    if (!flushEditor()) {
+        setStatus('Fix the config text before asking the agent — the store keeps the previous config', 'warning');
+        return;
+    }
 
     // Add user message to history
     agentChatHistory.push({ role: 'user', content: input });
@@ -639,8 +646,9 @@ function agentSend(input) {
     if (canvasYaml) {
         body.config = canvasYaml;
     }
+    // only a module is a "selected module" for the agent (not system / options)
     const selection = workspace.getSelection();
-    if (selection) {
+    if (selection && workspace.getModuleNames().indexOf(selection) >= 0) {
         body.selection = selection;
     }
     postJson('/api/agent', body, 120000).then(function(newMessages) {
@@ -906,9 +914,4 @@ export function initAgent() {
     agentRenderMessages();
     renderPendingBar();
     renderContextChip();
-}
-
-/** Open the pane (used by callers that want to hand the user to the agent). */
-export function openAgent() {
-    setAgentPaneOpen(true);
 }

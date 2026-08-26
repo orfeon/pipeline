@@ -77,5 +77,8 @@ export function clearWorkspace() {
  */
 export function initAutoSave() {
     restoreWorkspace();
-    workspace.subscribe(scheduleSave);
+    workspace.subscribe(function(event) {
+        // persisted state only; selection / pending are transient
+        if (['config', 'settings', 'positions', 'agent'].indexOf(event.type) >= 0) scheduleSave();
+    });
 }

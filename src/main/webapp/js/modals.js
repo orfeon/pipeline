@@ -6,7 +6,8 @@
 import { $id, on, show, hide, showModal, hideModal, getJson, setStatus, dumpYaml } from './util.js';
 import { loadMonaco, setEditorValue, getEditorValue, ensureSchema, getCachedSchema,
          applyYamlSchemas, buildSchemaHelpTooltip } from './monaco.js';
-import { getNodeData, updateNodeData, isNodeNameTaken, removeNode } from './canvas.js';
+import { getNodeData, updateNodeData, isNodeNameTaken, removeNode,
+         NODE_CONFIG_PROPS, extractExtraProps } from './canvas.js';
 import { getConfig, getValidationErrors,
          getSystem, setSystem, getOptions, setOptions } from './workspace.js';
 import { showResult, runPipelineWithLaunch } from './result.js';
@@ -40,14 +41,18 @@ export function openModuleConfig(nodeId) {
     // Set name input
     $id('module-name-input').value = data.name;
 
-    // Build config object excluding internal properties
+    // Build config object excluding internal properties; fields the canvas
+    // does not model (`extra`) are shown inline so they can be edited too
     const configObj = {};
-    const internalProps = ['moduleName', 'moduleType', 'name', 'outputSchema', 'output', 'waits', 'sideInputs'];
+    const internalProps = ['moduleName', 'moduleType', 'name', 'outputSchema', 'output', 'outputNames', 'waits', 'sideInputs', 'extra'];
     for (const key in data) {
         if (Object.prototype.hasOwnProperty.call(data, key) && internalProps.indexOf(key) === -1) {
             configObj[key] = data[key];
         }
     }
+    Object.keys(data.extra || {}).forEach(function(key) {
+        configObj[key] = data.extra[key];
+    });
 
     // Set YAML editor content (applied in the shown.bs.modal handler)
     pending.moduleYaml = dumpYaml(configObj);
@@ -98,14 +103,15 @@ function saveModuleConfig() {
     data.parameters = parsed.parameters || data.parameters || {};
 
     // Update additional properties from parsed YAML (waits/sideInputs are managed via canvas connections)
-    const configProps = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
-    configProps.forEach(function(prop) {
+    NODE_CONFIG_PROPS.forEach(function(prop) {
         if (parsed[prop] !== undefined) {
             data[prop] = parsed[prop];
         } else {
             delete data[prop];
         }
     });
+    // anything else typed here is a field the canvas does not model: keep it
+    data.extra = extractExtraProps(parsed);
 
     updateNodeData(currentEditingNodeId, data);
 

@@ -17,7 +17,7 @@
 import { $id, escapeHtml, setStatus, getJson } from './util.js';
 import * as workspace from './workspace.js';
 import { addModuleToCanvas, selectNodeByName } from './canvas.js';
-import { insertModuleSnippet, jumpToModule, jumpToSection } from './editor.js';
+import { insertModuleSnippet, jumpToModule, jumpToSection, flushEditor } from './editor.js';
 import { openSystemModal, openOptionsModal } from './modals.js';
 import { getView } from './views.js';
 
@@ -84,6 +84,12 @@ function buildModuleSkeleton(moduleName, type) {
 function pickModule(moduleName, type) {
     if (getView() !== 'editor') {
         addModuleToCanvas(moduleName, type);
+        return;
+    }
+    // a previous insertion may still be waiting for its debounced push: push
+    // it so the next default name does not collide with it
+    if (!flushEditor()) {
+        setStatus('Fix the config text before inserting a module', 'warning');
         return;
     }
     buildModuleSkeleton(moduleName, type).then(function(module) {

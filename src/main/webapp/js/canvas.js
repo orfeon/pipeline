@@ -343,6 +343,28 @@ function ensureOutputPort(nodeId, tag) {
     return 'output_' + (index + 1);
 }
 
+/** Module config fields the canvas models as node data (besides name / module / parameters). */
+export const NODE_CONFIG_PROPS = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty',
+    'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
+
+// Fields derived from canvas state, never stored as extras
+const CANVAS_MANAGED_PROPS = ['name', 'module', 'parameters', 'inputs', 'waits', 'sideInputs'];
+
+/**
+ * The fields of a module config the canvas has no representation for
+ * (e.g. description, args, outputType, outputFailure, failureSinks). They are
+ * carried through node data untouched and written back by exportModules.
+ */
+export function extractExtraProps(config) {
+    const extra = {};
+    Object.keys(config || {}).forEach(function(key) {
+        if (CANVAS_MANAGED_PROPS.indexOf(key) < 0 && NODE_CONFIG_PROPS.indexOf(key) < 0) {
+            extra[key] = config[key];
+        }
+    });
+    return extra;
+}
+
 export function addModuleToCanvas(moduleName, moduleType, config) {
     config = config || null;
     const defaultName = (config && config.name) ? config.name : nextDefaultName(moduleName);
@@ -370,14 +392,16 @@ export function addModuleToCanvas(moduleName, moduleType, config) {
         parameters: (config && config.parameters) ? config.parameters : {}
     };
 
-    // Store all config properties in nodeData
+    // Store all config properties in nodeData. Fields the canvas does not
+    // model (description, args, outputType, failureSinks, ...) are kept in
+    // `extra` so a canvas edit never drops what was written in the Config view.
     if (config) {
-        const configProps = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty', 'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
-        configProps.forEach(function(prop) {
+        NODE_CONFIG_PROPS.forEach(function(prop) {
             if (config[prop] !== undefined && config[prop] !== null) {
                 nodeData[prop] = config[prop];
             }
         });
+        nodeData.extra = extractExtraProps(config);
     }
 
     const nodeId = editor.addNode(
@@ -701,6 +725,11 @@ function exportModules() {
             if (data[prop] !== undefined && data[prop] !== null) {
                 moduleConfig[prop] = data[prop];
             }
+        });
+
+        // Fields the canvas does not model, carried through untouched
+        Object.keys(data.extra || {}).forEach(function(prop) {
+            moduleConfig[prop] = data.extra[prop];
         });
 
         // Extract connections per port

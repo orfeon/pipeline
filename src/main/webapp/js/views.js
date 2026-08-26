@@ -6,7 +6,7 @@
  */
 'use strict';
 
-import { $id, on } from './util.js';
+import { $id, on, setStatus } from './util.js';
 import { setCanvasVisible } from './canvas.js';
 import { setEditorVisible, flushEditor } from './editor.js';
 
@@ -25,6 +25,12 @@ export function getView() {
 
 export function showView(view) {
     const isEditor = view === 'editor';
+    // Leaving the Config view with text that is not a valid config would hide
+    // the problem while the canvas shows the previous config: stay.
+    if (!isEditor && currentView === 'editor' && !flushEditor()) {
+        setStatus('Fix the config text before switching to the canvas', 'warning');
+        return;
+    }
     currentView = isEditor ? 'editor' : 'canvas';
     $id('view-canvas').classList.toggle('d-none', isEditor);
     $id('view-editor').classList.toggle('d-none', !isEditor);
@@ -79,9 +85,16 @@ export function toggleAgentPane() {
 export function initViews() {
     on('tab-canvas', 'click', function() { showView('canvas'); });
     on('tab-editor', 'click', function() { showView('editor'); });
-    // Run / Launch read the store: make sure a half-typed edit is pushed first
+    // Run / Launch read the store: push a half-typed edit first, and refuse to
+    // run a config other than the one on screen when the text has a problem.
     ['btn-dryrun', 'btn-run', 'btn-launch'].forEach(function(id) {
-        $id(id).addEventListener('click', flushEditor, true);
+        $id(id).addEventListener('click', function(e) {
+            if (!flushEditor()) {
+                e.stopImmediatePropagation();
+                e.preventDefault();
+                setStatus('Fix the config text before running — the store keeps the previous config', 'error');
+            }
+        }, true);
     });
 
     on('btn-agent', 'click', toggleAgentPane);

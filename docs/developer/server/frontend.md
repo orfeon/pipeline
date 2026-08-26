@@ -77,6 +77,11 @@ Three deliberate boundaries:
   editor instance; they call exported functions (`getNodeData`, `updateNodeData`,
   `isNodeNameTaken`, `removeNode`, `highlightNodeByName`, …). The canvas keeps no
   pipeline state of its own beyond Drawflow's node data — the config lives in the store.
+  Module fields the canvas does not model (`description`, `args`, `outputType`,
+  `outputFailure`, `failureSinks`, …) ride along in node data as `extra`
+  (`extractExtraProps` / `NODE_CONFIG_PROPS`) and are written back by `exportModules`, so a
+  canvas edit never drops what was written in the Config view; the module config modal
+  shows them inline.
   Replacing the node-editor library should touch this file only.
 - **canvas → UI callbacks are injected.** `initDrawflow({ onEditNode, onShowSchema,
   onShowRecords })` receives the modal-opening functions from `main.js`, so
@@ -104,7 +109,7 @@ init()
 ## Center Pane Views: Canvas | Config
 
 The center pane holds two views of the same store, switched by the tab bar
-(`#tab-canvas` / `#tab-editor`, `showView()` in `main.js`; the choice is remembered in
+(`#tab-canvas` / `#tab-editor`, `showView()` in `views.js`; the choice is remembered in
 `localStorage` key `mercari-pipeline-view`). Only one is visible; `setCanvasVisible` /
 `setEditorVisible` tell each view whether to render.
 
@@ -114,9 +119,15 @@ The center pane holds two views of the same store, switched by the tab bar
 - **Config** (`editor.js`): a Monaco YAML/JSON editor (`#config-editor`, model URI
   `internal://server/config-editor.yaml`) with Import / Copy / Download and a format switch
   in the tab bar. Text edits are parsed after a 500 ms pause and pushed to the store with
-  `source: 'editor'`; unparseable text is never pushed (the message shows in
-  `#editor-status`, the store keeps the last good config). `flushEditor()` pushes a pending
-  edit immediately — called on tab switch and (capture-phase) before Dry Run / Run / Launch.
+  `source: 'editor'` (skipped when identical to the store); unparseable or empty text is
+  never pushed (the message shows in `#editor-status`, the store keeps the last good config —
+  the header's Clear button is the way to empty a pipeline). `flushEditor()` pushes a pending
+  edit immediately and returns whether the store now matches the text; it is called before
+  Dry Run / Run / Launch (which are refused on `false`), before sending to the agent, before a
+  catalog snippet insertion, and on the switch to the canvas tab (refused on `false`, so a
+  broken text is never hidden behind a canvas showing the previous config). A config change
+  from elsewhere while a push is pending discards those keystrokes (at most 500 ms) in favour
+  of the change, with a status-bar note.
   **Round-trip protection:** the text is regenerated from the store only when someone else
   changed it (`stale`); while the store is unchanged since the editor's last push the text is
   kept verbatim, so comments and key order survive a visit to the canvas tab. A regeneration
@@ -338,7 +349,6 @@ Examples:
 | `agentSend(input)` | Sends a user message (+ config YAML + selection) to `/api/agent` |
 | `agentPropose(configText)` | Parses an agent config and sets it as the store's pending proposal |
 | `agentAccept()` / `agentReject()` / `agentUndoAccept()` | Pending bar actions |
-| `openAgent()` | Opens the pane |
 | `showView(view)` / `toggleAgentPane()` (views.js) | Center view switch / pane toggle |
 
 ## Event Handlers

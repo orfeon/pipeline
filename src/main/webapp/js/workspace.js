@@ -161,6 +161,11 @@ export function setOptions(options, source) {
     notify('settings', source || 'options');
 }
 
+/** True when `cfg`, once normalized, is identical to the current config. */
+export function isSameConfig(cfg) {
+    return JSON.stringify(normalize(cfg)) === JSON.stringify(config);
+}
+
 /** True when the config declares at least one module of any kind. */
 export function hasModules(cfg) {
     const c = cfg || config;

@@ -9,8 +9,10 @@
  * canvas cannot represent survive a round trip through the canvas tab.
  *
  * Editor -> store: text edits are parsed after a short pause and pushed with
- * source 'editor'. Unparseable text is never pushed; the parse error is shown
- * in the editor's status line and the store keeps the last good config.
+ * source 'editor'. Unparseable or empty text is never pushed; the problem is
+ * shown in the editor's status line, the store keeps the last good config, and
+ * `flushEditor()` reports it so Run / Launch / tab switches can refuse to
+ * proceed with a config that is not the one on screen.
  *
  * Pending proposal: while the store holds a proposal (from the agent), the
  * view shows a read-only side-by-side diff (current -> proposed) instead of the
@@ -33,8 +35,10 @@ const PUSH_DELAY_MS = 500;
 
 let format = 'yaml';          // 'yaml' | 'json'
 let visible = false;
+let created = false;          // the Monaco editor exists (see ensureEditor)
 let stale = true;             // store changed since the text was last generated/pushed
 let suppress = false;         // ignore Monaco change events caused by our own setValue
+let problem = '';             // current parse problem ('' when the text is a valid config)
 let pushTimer = null;
 let ready = null;             // promise: Monaco editor created
 
@@ -58,9 +62,10 @@ function parse(text) {
 }
 
 function setProblem(message) {
+    problem = message || '';
     const el = $id('editor-status');
-    el.textContent = message || '';
-    el.classList.toggle('d-none', !message);
+    el.textContent = problem;
+    el.classList.toggle('d-none', !problem);
 }
 
 // =============================
@@ -71,9 +76,9 @@ function hasComments(text) {
     return format === 'yaml' && /^\s*#/m.test(text || '');
 }
 
-/** Regenerate the text from the store (only when stale). */
+/** Regenerate the text from the store (only when stale and the editor exists). */
 function refreshFromStore() {
-    if (!stale) return;
+    if (!stale || !created) return;
     const previous = getEditorValue(CONTAINER);
     const config = workspace.getConfig();
     const text = workspace.hasModules(config) || config.system || config.options ? serialize(config) : '';
@@ -81,6 +86,7 @@ function refreshFromStore() {
     setEditorValue(CONTAINER, text, format).then(function() {
         suppress = false;
         stale = false;
+        setProblem('');
         applyValidationMarkers();
         if (hasComments(previous)) {
             setStatus('Config regenerated from the canvas — comments in the editor were dropped', 'warning');
@@ -94,6 +100,14 @@ function onWorkspaceChange(event) {
         return;
     }
     if (event.source === SOURCE || event.type === 'positions' || event.type === 'selection' || event.type === 'agent') return;
+    // Someone else replaced the config. A push still pending here was typed
+    // against the old config: drop it (at most 500 ms of keystrokes) rather
+    // than let it overwrite the change that just happened, and say so.
+    if (pushTimer) {
+        clearTimeout(pushTimer);
+        pushTimer = null;
+        setStatus('Config replaced by ' + event.source + ' — your last keystrokes in the editor were discarded', 'warning');
+    }
     stale = true;
     if (visible) refreshFromStore();
 }
@@ -118,23 +132,51 @@ function renderPending() {
 }
 
 // =============================
-// Cursor -> selection
+// Text structure helpers (YAML)
 // =============================
 
+const NAME_VALUE = '\\s*["\']?([^"\'\\s#]+)["\']?\\s*(#.*)?$';
+
 /**
- * The module whose block contains `lineNumber`: walk up to the nearest
- * `- name:` list item (YAML) / `"name":` (JSON) and read its value.
+ * 0-based index of the line that declares module `name` (the `name:` key of
+ * a top-level list item in YAML, `"name": "..."` in JSON), or -1.
+ */
+function moduleLineIndex(lines, name) {
+    const re = format === 'yaml'
+        ? new RegExp('^\\s*-?\\s*name:\\s*["\']?' + escapeRegExp(name) + '["\']?\\s*(#.*)?$')
+        : new RegExp('"name"\\s*:\\s*"' + escapeRegExp(name) + '"');
+    return lines.findIndex(function(l) { return re.test(l); });
+}
+
+/**
+ * The module whose block contains `lineNumber` (1-based), or null.
+ * YAML: modules are the list items directly under a top-level section
+ * (`  - ` at indent 2); the item's `name:` key may follow other keys. Deeper
+ * `- name:` items (e.g. schema fields) belong to the enclosing module.
  */
 function moduleAtLine(lineNumber) {
     const lines = getEditorValue(CONTAINER).split('\n');
-    const re = format === 'yaml'
-        ? /^\s*-\s+name:\s*["']?([A-Za-z0-9_]+)["']?\s*$/
-        : /"name"\s*:\s*"([A-Za-z0-9_]+)"/;
-    for (let i = Math.min(lineNumber, lines.length) - 1; i >= 0; i--) {
-        const m = lines[i].match(re);
+    const last = Math.min(lineNumber, lines.length) - 1;
+    if (format !== 'yaml') {
+        for (let i = last; i >= 0; i--) {
+            const m = lines[i].match(/"name"\s*:\s*"([^"]+)"/);
+            if (m) return m[1];
+        }
+        return null;
+    }
+    // find the enclosing top-level list item
+    let itemStart = -1;
+    for (let i = last; i >= 0; i--) {
+        if (/^[A-Za-z_]/.test(lines[i])) return null;   // reached the section key: cursor is above every item
+        if (/^  - /.test(lines[i])) { itemStart = i; break; }
+    }
+    if (itemStart < 0) return null;
+    // the item's own keys: the dash line plus lines indented by 4 (deeper = nested)
+    const keyRe = new RegExp('^(?:  - |    )name:' + NAME_VALUE);
+    for (let i = itemStart; i < lines.length; i++) {
+        if (i > itemStart && !/^    /.test(lines[i]) && lines[i].trim() !== '') break;
+        const m = lines[i].match(keyRe);
         if (m) return m[1];
-        // a new top-level section starts: the cursor is above every module of it
-        if (format === 'yaml' && /^[A-Za-z]/.test(lines[i])) return null;
     }
     return null;
 }
@@ -151,37 +193,66 @@ function onCursorMoved(lineNumber) {
 // Editor -> store
 // =============================
 
+/**
+ * Parse the text and push it to the store. Returns true when the store now
+ * matches the text (pushed, or already identical); false when the text is
+ * not a config (parse error / empty) — the store is left untouched.
+ */
 function pushToStore() {
     const text = getEditorValue(CONTAINER);
+    if (!text.trim()) {
+        // Never wipe the pipeline because the text is (momentarily) empty;
+        // the header's Clear button is the explicit way to start over.
+        setProblem('The config text is empty — the previous config is kept. Use Clear to start over.');
+        return false;
+    }
     let config;
     try {
-        config = text.trim() ? parse(text) : {};
+        config = parse(text);
     } catch (e) {
         setProblem('Parse error: ' + e.message);
-        return;
+        return false;
     }
     if (config === null || typeof config !== 'object' || Array.isArray(config)) {
         setProblem('The config must be a mapping (system / options / sources / transforms / sinks / actions)');
-        return;
+        return false;
     }
     setProblem('');
-    workspace.setConfig(config, SOURCE);
+    if (!workspace.isSameConfig(config)) {
+        workspace.setConfig(config, SOURCE);
+    }
     stale = false; // our own push: the text is authoritative, keep it verbatim
     applyValidationMarkers();
+    return true;
 }
 
 function onTextChanged() {
     if (suppress) return;
     clearTimeout(pushTimer);
-    pushTimer = setTimeout(pushToStore, PUSH_DELAY_MS);
+    pushTimer = setTimeout(function() {
+        pushTimer = null;
+        pushToStore();
+    }, PUSH_DELAY_MS);
 }
 
-/** Push immediately (before run/launch or a tab switch) so the store is current. */
+/**
+ * Push a pending edit immediately (before run/launch, sending to the agent,
+ * or a tab switch). Returns true when the store reflects the editor text,
+ * false when the text has a problem (the store keeps the last good config).
+ */
 export function flushEditor() {
-    if (!pushTimer) return;
-    clearTimeout(pushTimer);
-    pushTimer = null;
-    pushToStore();
+    if (!created) return true;
+    if (pushTimer) {
+        clearTimeout(pushTimer);
+        pushTimer = null;
+        return pushToStore();
+    }
+    return !problem;
+}
+
+/** The current parse problem of the editor text, or '' when it is a valid config. */
+export function getEditorProblem() {
+    return problem;
 }
 
 // =============================
@@ -193,15 +264,11 @@ export function flushEditor() {
  * module they concern (pipeline-level issues go on line 1).
  */
 function applyValidationMarkers() {
-    const text = getEditorValue(CONTAINER);
-    const lines = text.split('\n');
+    const lines = getEditorValue(CONTAINER).split('\n');
     const markers = workspace.getValidationIssues().map(function(issue) {
         let line = 1;
         if (issue.module) {
-            const re = format === 'yaml'
-                ? new RegExp('^\\s*-?\\s*name:\\s*["\']?' + escapeRegExp(issue.module) + '["\']?\\s*$')
-                : new RegExp('"name"\\s*:\\s*"' + escapeRegExp(issue.module) + '"');
-            const index = lines.findIndex(function(l) { return re.test(l); });
+            const index = moduleLineIndex(lines, issue.module);
             if (index >= 0) line = index + 1;
         }
         return { line: line, message: issue.message };
@@ -225,7 +292,6 @@ function sectionRange(lines, key) {
     if (start < 0) return null;
     // an inline empty section (`sources: []`) becomes a block so items can be appended
     if (/^\w+:\s*\[\s*\]/.test(lines[start])) {
-        lines[start] = key + ':';
         return [start, start + 1, true];
     }
     let end = start + 1;
@@ -241,6 +307,24 @@ function indentBlock(text, spaces) {
 }
 
 /**
+ * Insert `snippet` (ending with a newline) so that it starts on 1-based
+ * `line`. When `line` is past the last line the text is appended, terminating
+ * the last line first if needed — Monaco would otherwise clamp the position
+ * and glue the snippet onto the last line.
+ */
+function insertLines(lines, line, snippet) {
+    if (line > lines.length) {
+        const lastLine = lines.length;
+        const lastText = lines[lastLine - 1];
+        insertText(CONTAINER, lastLine, lastText.length + 1, (lastText ? '\n' : '') + snippet);
+        revealLine(CONTAINER, lastText ? lastLine + 1 : lastLine);
+        return;
+    }
+    insertText(CONTAINER, line, 1, snippet);
+    revealLine(CONTAINER, line);
+}
+
+/**
  * Insert a module skeleton at the end of its section (creating the section
  * when missing). YAML only — JSON editing has no stable insertion point.
  * Returns a promise of true when inserted.
@@ -250,56 +334,39 @@ export function insertModuleSnippet(sectionKey, moduleObj) {
         setStatus('Switch the format to YAML to insert module snippets', 'warning');
         return Promise.resolve(false);
     }
-    return ready.then(function() {
+    return ensureEditor().then(function() {
         const text = getEditorValue(CONTAINER);
         const lines = text.split('\n');
         const item = '- ' + indentBlock(jsyaml.dump(moduleObj).trimEnd(), 2).slice(2);
         const range = sectionRange(lines, sectionKey);
-        let line, snippet;
         if (range && range[2]) {
             // `sources: []` -> `sources:\n  - ...` (replace the inline empty array)
-            const original = text.split('\n')[range[0]];
+            const original = lines[range[0]];
             replaceRange(CONTAINER, range[0] + 1, 1, range[0] + 1, original.length + 1,
                 sectionKey + ':\n' + indentBlock(item, 2));
             revealLine(CONTAINER, range[0] + 2);
             return true;
         }
         if (range) {
-            line = range[1] + 1; // 1-based line after the section's last line
-            snippet = indentBlock(item, 2) + '\n';
-        } else {
-            // append the whole section after the last existing top-level key that precedes it
-            const order = TOP_LEVEL_ORDER.indexOf(sectionKey);
-            let after = lines.length;
-            for (let i = order - 1; i >= 0; i--) {
-                const r = sectionRange(lines, TOP_LEVEL_ORDER[i]);
-                if (r) { after = r[1]; break; }
-            }
-            line = after + 1;
-            const needsGap = after > 0 && lines[after - 1].trim() !== '';
-            snippet = (needsGap ? '\n' : '') + sectionKey + ':\n' + indentBlock(item, 2) + '\n';
-            if (line > lines.length) {
-                // past the end: make sure the previous line is terminated
-                line = lines.length;
-                const lastCol = lines[lines.length - 1].length + 1;
-                insertText(CONTAINER, line, lastCol, (lines[lines.length - 1] ? '\n' : '') + snippet);
-                revealLine(CONTAINER, line + 1);
-                return true;
-            }
+            insertLines(lines, range[1] + 1, indentBlock(item, 2) + '\n');
+            return true;
         }
-        insertText(CONTAINER, line, 1, snippet);
-        revealLine(CONTAINER, line + 1);
+        // append the whole section after the last existing top-level key that precedes it
+        const order = TOP_LEVEL_ORDER.indexOf(sectionKey);
+        let after = lines.length;
+        for (let i = order - 1; i >= 0; i--) {
+            const r = sectionRange(lines, TOP_LEVEL_ORDER[i]);
+            if (r) { after = r[1]; break; }
+        }
+        const needsGap = after > 0 && lines[after - 1].trim() !== '';
+        insertLines(lines, after + 1, (needsGap ? '\n' : '') + sectionKey + ':\n' + indentBlock(item, 2) + '\n');
         return true;
     });
 }
 
-/** Move the cursor to a module's `- name:` line (Config view). */
+/** Move the cursor to a module's `name:` line (Config view). */
 export function jumpToModule(name) {
-    const lines = getEditorValue(CONTAINER).split('\n');
-    const re = format === 'yaml'
-        ? new RegExp('^\\s*-?\\s*name:\\s*["\']?' + escapeRegExp(name) + '["\']?\\s*$')
-        : new RegExp('"name"\\s*:\\s*"' + escapeRegExp(name) + '"');
-    const index = lines.findIndex(function(l) { return re.test(l); });
+    const index = moduleLineIndex(getEditorValue(CONTAINER).split('\n'), name);
     if (index < 0) {
         setStatus('Module "' + name + '" not found in the config text', 'warning');
         return false;
@@ -334,7 +401,7 @@ export function jumpToSection(key) {
     }
     const template = key === 'system' ? 'system:\n  args: {}\n' : 'options:\n  runner: direct\n';
     const needsGap = line <= lines.length && lines[line - 1] && lines[line - 1].trim() !== '';
-    insertText(CONTAINER, line, 1, template + (needsGap ? '\n' : ''));
+    insertLines(lines, line, template + (needsGap ? '\n' : ''));
     revealLine(CONTAINER, line + 1, 3);
     workspace.setSelection(key, SOURCE);
     return true;
@@ -345,10 +412,15 @@ export function jumpToSection(key) {
 // =============================
 
 function onFormatChanged() {
-    flushEditor();
-    format = $id('editor-format').value === 'json' ? 'json' : 'yaml';
+    const next = $id('editor-format').value === 'json' ? 'json' : 'yaml';
+    if (!flushEditor()) {
+        $id('editor-format').value = format;
+        setStatus('Fix the config text before switching the format', 'warning');
+        return;
+    }
+    format = next;
     stale = true;
-    refreshFromStore();
+    ensureEditor().then(refreshFromStore);
 }
 
 function copyToClipboard() {
@@ -380,11 +452,12 @@ function onImportFileSelected(e) {
         format = isJson ? 'json' : 'yaml';
         $id('editor-format').value = format;
         suppress = true;
-        return setEditorValue(CONTAINER, text, format);
+        return ensureEditor().then(function() { return setEditorValue(CONTAINER, text, format); });
     }).then(function() {
         suppress = false;
-        pushToStore();
-        setStatus('Imported ' + file.name);
+        clearTimeout(pushTimer);
+        pushTimer = null;
+        setStatus(pushToStore() ? 'Imported ' + file.name : 'Imported ' + file.name + ' — fix the problems shown before it is applied', 'warning');
     }).catch(function(err) {
         suppress = false;
         setStatus('Failed to read ' + file.name + ': ' + err.message, 'error');
@@ -410,9 +483,10 @@ export function setEditorVisible(isVisible) {
 }
 
 /**
- * Create the Monaco editor on first display. It must not be created while
- * its container is display:none: Monaco 0.53's EditContext input then never
- * receives paste events (typing works, Ctrl+V does nothing).
+ * Create the Monaco editor on first display (creating it while its container
+ * is display:none breaks paste). The editor is created empty and marked
+ * stale; the text is generated from the store by the caller's refresh, never
+ * by this chain, so a refresh that raced ahead is not blanked afterwards.
  */
 function ensureEditor() {
     if (ready) return ready;
@@ -429,6 +503,8 @@ function ensureEditor() {
     }).then(function() {
         onEditorChange(CONTAINER, onTextChanged);
         onEditorCursorChange(CONTAINER, onCursorMoved);
+        created = true;
+        stale = true;
     });
     return ready;
 }
