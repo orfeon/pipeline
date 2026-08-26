@@ -97,6 +97,7 @@ actions:
       timeoutSeconds: 7200
   - name: load
     module: bigquery
+    operation: jobs.query
     waits: [drained]                    # all sub-runs have finished
     parameters:
       query: CALL `myproject.app.merge_subrun_results`()
@@ -105,7 +106,7 @@ actions:
 ### Pause during a backfill, resume afterwards
 
 ```yaml
-transforms:
+sinks:
   - name: backfill
     module: tasks
     inputs: [events]
@@ -114,11 +115,13 @@ transforms:
 actions:
   - name: pause
     module: tasks
-    parameters: { op: pause, queue: projects/myproject/locations/asia-northeast1/queues/notify }
+    operation: queues.pause
+    parameters: { queue: projects/myproject/locations/asia-northeast1/queues/notify }
   - name: resume
     module: tasks
+    operation: queues.resume
     inputs: [backfill]
-    parameters: { op: resume, queue: projects/myproject/locations/asia-northeast1/queues/notify }
+    parameters: { queue: projects/myproject/locations/asia-northeast1/queues/notify }
 ```
 
 ### Delete tasks named in input records (perElement)

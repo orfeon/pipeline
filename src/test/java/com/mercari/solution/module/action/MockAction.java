@@ -28,6 +28,8 @@ public class MockAction implements ActionService {
     public static class Parameters implements Serializable {
         public String message;
         public Boolean fail;
+        /** Throw NonRetryableException instead of a retryable failure. */
+        public Boolean nonRetryable;
         /** Fail the first N executions of this step (counted in-process), then succeed — for retry tests. */
         public Integer failTimes;
     }
@@ -51,6 +53,9 @@ public class MockAction implements ActionService {
         if(this.parameters.fail == null) {
             this.parameters.fail = false;
         }
+        if(this.parameters.nonRetryable == null) {
+            this.parameters.nonRetryable = false;
+        }
         if(this.parameters.failTimes == null) {
             this.parameters.failTimes = 0;
         }
@@ -65,6 +70,9 @@ public class MockAction implements ActionService {
     public ActionResult execute(final List<MElement> elements) {
         final int execution = EXECUTIONS.computeIfAbsent(name, n -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
         if(parameters.fail || execution <= parameters.failTimes) {
+            if(parameters.nonRetryable) {
+                throw new NonRetryableException("mock action failed permanently (execution " + execution + ")");
+            }
             throw new IllegalStateException("mock action failed (execution " + execution + ")");
         }
         final String message;

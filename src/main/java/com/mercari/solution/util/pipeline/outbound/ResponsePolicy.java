@@ -346,8 +346,7 @@ public class ResponsePolicy implements Serializable {
             delay = parseRetryAfter(response.header("Retry-After"));
         }
         if(delay == null) {
-            final long base = initialBackoff.toMillis() * (1L << Math.min(attemptsMade - 1, 20));
-            final long capped = Math.min(base, maxBackoff.toMillis());
+            final long capped = Durations.exponentialBackoff(initialBackoff, maxBackoff, attemptsMade).toMillis();
             delay = Duration.ofMillis(capped <= 0 ? 0 : ThreadLocalRandom.current().nextLong(capped / 2, capped + 1));
         }
         if(delay.compareTo(maxBackoff) > 0) {

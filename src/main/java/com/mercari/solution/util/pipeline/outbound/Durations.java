@@ -34,6 +34,15 @@ public final class Durations {
         }
     }
 
+    /**
+     * Exponential backoff before the retry that follows the given (1-based) failed attempt:
+     * {@code initial * 2^(attempt-1)}, capped at {@code max} (shift capped at 20 to avoid overflow).
+     */
+    public static Duration exponentialBackoff(final Duration initial, final Duration max, final int attempt) {
+        final long base = initial.toMillis() * (1L << Math.min(Math.max(attempt, 1) - 1, 20));
+        return Duration.ofMillis(Math.min(base, max.toMillis()));
+    }
+
     /** Parses byte sizes: plain number, or with KB / MB / GB suffix (binary). */
     public static long parseBytes(final String text) {
         if(text == null || text.isBlank()) {

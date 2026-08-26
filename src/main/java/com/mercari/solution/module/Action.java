@@ -6,6 +6,7 @@ import com.mercari.solution.config.ActionConfig;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.action.ActionResult;
 import com.mercari.solution.module.action.ActionService;
+import com.mercari.solution.module.action.NonRetryableException;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.outbound.Durations;
@@ -139,18 +140,21 @@ public class Action extends Module<MCollectionTuple> {
             return retry;
         }
 
-        /** Backoff before the retry following the given (1-based) failed attempt: initial * 2^(attempt-1), capped at max. */
+        /** Backoff before the retry following the given (1-based) failed attempt (shared formula, see {@link Durations#exponentialBackoff}). */
         long backoffMillis(final int attempt) {
-            final long initial = Durations.parse(initialBackoff).toMillis();
-            final long max = Durations.parse(maxBackoff).toMillis();
-            final double backoff = initial * Math.pow(2, Math.max(0, attempt - 1));
-            return (long) Math.min(backoff, max);
+            return Durations.exponentialBackoff(Durations.parse(initialBackoff), Durations.parse(maxBackoff), attempt).toMillis();
         }
 
     }
 
-    private static final Map<String, Class<ActionService>> services =
-            findServicesInPackage("com.mercari.solution.module.action");
+    /**
+     * Lazy holder: the classpath scan runs only when a service is resolved at assembly time, never
+     * on workers (the DoFns below use static helpers of this class but never touch the registry).
+     */
+    private static final class Registry {
+        static final Map<String, Class<ActionService>> SERVICES =
+                findServicesInPackage("com.mercari.solution.module.action");
+    }
 
     private Trigger trigger;
     private String operation;
@@ -211,6 +215,11 @@ public class Action extends Module<MCollectionTuple> {
             throw new IllegalModuleException(
                     "action module[" + config.getName() + "] fireOnEmpty applies to trigger: collect only");
         }
+        if(this.fireOnEmpty && !this.strategy.isDefault()) {
+            // Combine.globally's default value (the empty firing) exists only in the global window
+            throw new IllegalModuleException(
+                    "action module[" + config.getName() + "] fireOnEmpty requires the default strategy (global window): remove strategy");
+        }
     }
 
     public static @NonNull Action create(
@@ -219,7 +228,7 @@ public class Action extends Module<MCollectionTuple> {
             final @NonNull List<MCollection> waits,
             final @NonNull MErrorHandler errorHandler) {
 
-        if(!services.containsKey(config.getModule())) {
+        if(!Registry.SERVICES.containsKey(config.getModule())) {
             throw new IllegalModuleException("", "pipeline",
                     "Not supported action module: " + config.getModule() + ". supported modules: " + serviceNames());
         }
@@ -229,12 +238,12 @@ public class Action extends Module<MCollectionTuple> {
     }
 
     public static Set<String> serviceNames() {
-        return new TreeSet<>(services.keySet());
+        return new TreeSet<>(Registry.SERVICES.keySet());
     }
 
     /** Operations declared by the service (empty for single-operation services). */
     public static List<String> operations(final String module) {
-        final Class<ActionService> clazz = services.get(module);
+        final Class<ActionService> clazz = Registry.SERVICES.get(module);
         if(clazz == null) {
             return List.of();
         }
@@ -369,7 +378,7 @@ public class Action extends Module<MCollectionTuple> {
             final PipelineOptions options,
             final Schema inputSchema) {
 
-        final Class<ActionService> clazz = services.get(module);
+        final Class<ActionService> clazz = Registry.SERVICES.get(module);
         if(clazz == null) {
             throw new IllegalModuleException(name, "action",
                     "Not supported action module: " + module + ". supported modules: " + serviceNames());
@@ -395,7 +404,11 @@ public class Action extends Module<MCollectionTuple> {
         return Map.of("elements", maps, "size", maps.size());
     }
 
-    /** Runs the service, retrying with backoff per the module's {@link Retry} before giving up. */
+    /**
+     * Runs the service, retrying with backoff per the module's {@link Retry} before giving up.
+     * Failures that re-execution cannot fix — {@link NonRetryableException}, configuration/template
+     * errors, interruption — are not retried.
+     */
     private static ActionResult executeWithRetry(
             final String serviceName,
             final ActionService service,
@@ -406,17 +419,40 @@ public class Action extends Module<MCollectionTuple> {
         while(true) {
             try {
                 return service.execute(elements);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
             } catch (final Exception e) {
-                if(attempt >= retry.maxAttempts) {
+                if(attempt >= retry.maxAttempts || !isRetryable(e)) {
                     throw e;
                 }
                 final long backoff = retry.backoffMillis(attempt);
                 LOG.warn("action service: {} attempt {}/{} failed: {}. retrying in {} ms",
                         serviceName, attempt, retry.maxAttempts, e.getMessage(), backoff);
-                Thread.sleep(backoff);
+                try {
+                    Thread.sleep(backoff);
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw ie;
+                }
                 attempt++;
             }
         }
+    }
+
+    static boolean isRetryable(final Throwable e) {
+        Throwable t = e;
+        while(t != null) {
+            if(t instanceof NonRetryableException
+                    || t instanceof IllegalModuleException
+                    || t instanceof IllegalArgumentException
+                    || t instanceof InterruptedException
+                    || t instanceof freemarker.template.TemplateException) {
+                return false;
+            }
+            t = t.getCause() == t ? null : t.getCause();
+        }
+        return true;
     }
 
     private static class CollectFn extends Combine.CombineFn<MElement, List<MElement>, Iterable<MElement>> {

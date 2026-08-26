@@ -102,14 +102,23 @@ public class GeminiAction implements ActionService {
 
     }
 
+    /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
-        batchPrediction;
+        batchPrediction("batchPredictionJobs.create");
+
+        public final String operation;
+
+        Op(final String operation) {
+            this.operation = operation;
+        }
 
         static Op of(final String operation) {
-            return switch (operation) {
-                case "batchPredictionJobs.create" -> batchPrediction;
-                default -> throw new IllegalModuleException("Not supported operation: " + operation);
-            };
+            for(final Op op : values()) {
+                if(op.operation.equals(operation)) {
+                    return op;
+                }
+            }
+            throw new IllegalModuleException("Not supported operation: " + operation);
         }
     }
 

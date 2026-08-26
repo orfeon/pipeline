@@ -86,7 +86,7 @@ Every execution emits exactly one record with the same schema regardless of serv
 
 ## Failure handling and execution guarantees
 
-- If the action throws (including job failure and wait timeout), the firing is first retried on the same worker per `retry` (exponential backoff `initialBackoff × 2^n`, capped at `maxBackoff`; a single attempt when `retry` is absent), then the trigger element is routed to failure handling as a `BadRecord`, honoring `failFast` / `failureSinks`. Use `retry` for transient API errors (429/503, network); it does not help a job that fails deterministically.
+- If the action throws (including job failure and wait timeout), the firing is first retried on the same worker per `retry` (exponential backoff `initialBackoff × 2^n`, capped at `maxBackoff`; a single attempt when `retry` is absent), then the trigger element is routed to failure handling as a `BadRecord`, honoring `failFast` / `failureSinks`. Use `retry` for transient API errors (429/503, network). Failures that re-execution cannot fix are not retried: a service's `NonRetryableException` (e.g. the http action on a 4xx response or a `poll.failWhen` match), configuration/template errors, and interruption.
 - Execution is **at-least-once**: Beam may retry a bundle and re-invoke the action, and `retry` re-invokes it as well. The bigquery service submits jobs idempotently (deterministic job ids); services without a client-supplied id (vertexai_gemini) may duplicate on retry.
 - There is **no try/finally**: if the pipeline fails mid-way, cleanup actions gated on later steps never run (e.g. a scale-down action after a failed read). Plan recovery accordingly (e.g. `system.failure.alterConfig`).
 
@@ -102,7 +102,7 @@ Every execution emits exactly one record with the same schema regardless of serv
 | waits        | optional | Array<String\>  | Steps that must complete before this action fires. |
 | strategy     | optional | [Strategy](../common/strategy.md) | Windowing strategy applied when flattening the inputs (`perElement` / `collect`). |
 | retry        | optional | Retry           | Re-execute a failed firing with exponential backoff before routing it to failure handling. `maxAttempts` (default `3` when the block is present; `1` = no retry without it), `initialBackoff` (default `1s`), `maxBackoff` (default `30s`); durations as `500ms` / `10s` / `PT1M`. See [Failure handling](#failure-handling-and-execution-guarantees). |
-| fireOnEmpty  | optional | Boolean         | `collect` only: fire once with an empty element list when no input element arrives (e.g. report "0 files written", still create a marker). Requires the global window (the batch default). Default: `false` — no firing on empty input. |
+| fireOnEmpty  | optional | Boolean         | `collect` only: fire once with an empty element list when no input element arrives (e.g. report "0 files written", still create a marker). Requires the default strategy (global window; declaring `strategy` with it is an assembly-time error) and a bounded input — on an unbounded input the global window never closes, so the empty firing never happens. Default: `false`. |
 | parameters   | required | Object          | The service's own parameters (see each service page). |
 | failFast, failureSinks, tags, logs, ignore, description, args | optional | | The standard module fields. |
 

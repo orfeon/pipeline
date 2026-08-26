@@ -237,12 +237,25 @@ public class HttpAction implements ActionService {
         LOG.info("action[{}] {} {}", name, request.method(), request.url());
         final SyncCaller.Result result = SyncCaller.call(name, transport, policy, request);
         if(!result.succeeded()) {
-            throw new IllegalStateException("action[" + name + "] request " + request.method() + " " + request.url() + " failed: " + result.error());
+            throw failure("action[" + name + "] request " + request.method() + " " + request.url() + " failed: " + result.error(), result);
         }
         if(parameters.poll == null) {
             return ActionResult.of(request.method(), request.url(), "SUCCEEDED", payloadJson(result));
         }
         return poll(values, result);
+    }
+
+    /**
+     * A request the endpoint rejected as a client error (4xx other than the transient 408/425/429)
+     * is not worth re-sending by the module-level retry; other failures (5xx, transport errors,
+     * exhausted policy retries) may be transient.
+     */
+    private static RuntimeException failure(final String message, final SyncCaller.Result result) {
+        final int status = result.response() == null ? -1 : result.response().statusCode();
+        if(status >= 400 && status < 500 && status != 408 && status != 425 && status != 429) {
+            return new NonRetryableException(message);
+        }
+        return new IllegalStateException(message);
     }
 
     private ActionResult poll(final Map<String, Object> values, final SyncCaller.Result first) throws Exception {
@@ -261,11 +274,12 @@ public class HttpAction implements ActionService {
             polls++;
             final SyncCaller.Result result = SyncCaller.call(name, transport, policy, pollRequest);
             if(!result.succeeded()) {
-                throw new IllegalStateException("action[" + name + "] poll " + url + " failed: " + result.error());
+                throw failure("action[" + name + "] poll " + url + " failed: " + result.error(), result);
             }
             final Map<String, Object> conditionValues = result.parsed().values();
             if(failWhenCondition != null && Filter.filter(failWhenCondition, conditionValues)) {
-                throw new IllegalStateException("action[" + name + "] poll " + url + " reported failure: " + SyncCaller.abbreviate(result.parsed().text()));
+                // the endpoint itself reported a terminal failure: re-sending the request cannot fix it
+                throw new NonRetryableException("action[" + name + "] poll " + url + " reported failure: " + SyncCaller.abbreviate(result.parsed().text()));
             }
             if(Filter.filter(untilCondition, conditionValues)) {
                 LOG.info("action[{}] poll {} completed after {} poll(s)", name, url, polls);

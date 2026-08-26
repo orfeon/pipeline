@@ -157,15 +157,13 @@ export function showPipelineResult(type, result) {
             const moduleType = result.error.module || '';
             const badge = $id('error-module-type');
             badge.textContent = moduleType;
-            badge.classList.remove('bg-success', 'bg-primary', 'bg-warning', 'bg-secondary');
+            badge.classList.remove('bg-success', 'bg-primary', 'bg-warning');
             if (moduleType === 'source') {
                 badge.classList.add('bg-success');
             } else if (moduleType === 'transform') {
                 badge.classList.add('bg-primary');
             } else if (moduleType === 'sink') {
                 badge.classList.add('bg-warning');
-            } else if (moduleType === 'action') {
-                badge.classList.add('bg-secondary');
             }
 
             const messages = $id('error-messages');

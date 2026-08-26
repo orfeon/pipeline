@@ -135,16 +135,24 @@ public class BigQueryAction implements ActionService {
 
     }
 
+    /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
-        query,
-        load;
+        query("jobs.query"),
+        load("jobs.load");
+
+        public final String operation;
+
+        Op(final String operation) {
+            this.operation = operation;
+        }
 
         static Op of(final String operation) {
-            return switch (operation) {
-                case "jobs.query" -> query;
-                case "jobs.load" -> load;
-                default -> throw new IllegalModuleException("Not supported operation: " + operation);
-            };
+            for(final Op op : values()) {
+                if(op.operation.equals(operation)) {
+                    return op;
+                }
+            }
+            throw new IllegalModuleException("Not supported operation: " + operation);
         }
     }
 

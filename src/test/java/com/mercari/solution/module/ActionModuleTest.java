@@ -400,6 +400,51 @@ public class ActionModuleTest {
     }
 
     @Test
+    public void testRetrySkipsNonRetryableFailure() throws Exception {
+        // a NonRetryableException goes straight to failure handling: no further attempts
+        MockAction.EXECUTIONS.remove("rejected");
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: rejected
+                    module: mock
+                    failFast: false
+                    inputs:
+                      - input
+                    retry:
+                      maxAttempts: 3
+                      initialBackoff: 10ms
+                    parameters:
+                      message: never
+                      failTimes: 5
+                      nonRetryable: true
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("rejected");
+
+        PAssert.that(output.getCollection()).empty();
+
+        pipeline.run().waitUntilFinish();
+        Assertions.assertEquals(1, MockAction.EXECUTIONS.get("rejected").get());
+    }
+
+    @Test
+    public void testOperationsDeclaredAndEnumsStayInSync() {
+        // the @Action.Service(operations) list (validated at assembly) and each service's Op enum
+        // (used to branch in configure/execute) must describe the same set of config values
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.BigQueryAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("bigquery")));
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.TasksAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("tasks")));
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.vertexai.GeminiAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("vertexai_gemini")));
+        Assertions.assertTrue(Action.operations("storage").isEmpty());
+        Assertions.assertTrue(Action.operations("http").isEmpty());
+    }
+
+    @Test
     public void testCollectFireOnEmpty() throws Exception {
         // every input record is filtered out; without fireOnEmpty the collect action does not fire,
         // with it the action fires once with zero elements
@@ -552,6 +597,24 @@ public class ActionModuleTest {
                     fireOnEmpty: true
                     inputs:
                       - input
+                    parameters:
+                      message: msg
+                """)));
+
+        // fireOnEmpty needs the global window: a windowing strategy is rejected at assembly
+        Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(SOURCE_YAML + """
+                actions:
+                  - name: action
+                    module: mock
+                    trigger: collect
+                    fireOnEmpty: true
+                    inputs:
+                      - input
+                    strategy:
+                      window:
+                        type: fixed
+                        unit: minute
+                        size: 1
                     parameters:
                       message: msg
                 """)));

@@ -660,8 +660,9 @@ export function generateConfig() {
 export function getValidationErrors(config) {
     const errors = [];
 
-    if (config.sources.length === 0) {
-        errors.push('At least one source module is required');
+    // a pipeline may consist of actions alone (e.g. a queue operation gated by nothing)
+    if (config.sources.length === 0 && !(config.actions && config.actions.length > 0)) {
+        errors.push('At least one source or action module is required');
     }
 
     config.transforms.forEach(function(t) {

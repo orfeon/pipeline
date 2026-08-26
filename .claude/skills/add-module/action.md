@@ -76,7 +76,12 @@ Key differences from data modules:
 - **Output**: return an `ActionResult` — the framework wraps it into the common envelope
   `(service, operation, jobId, state, startedAt, finishedAt, payload)`. Never return null.
 - **Failures**: just throw from `execute` — the framework routes the firing to `BadRecord` /
-  `failureSinks` honoring `failFast`. Throw on job failure and wait timeout too.
+  `failureSinks` honoring `failFast`. Throw on job failure and wait timeout too. Throw
+  `NonRetryableException` for failures re-execution cannot fix (rejected request, failed terminal
+  state) so the module-level `retry` skips them; other exceptions are retried when `retry` is set.
+- **Operations**: keep the config values in the `Op` enum (`Op.of(operation)` resolves by the enum's
+  `operation` field) and list the same values in `@Action.Service(operations=…)`; `ActionModuleTest`
+  checks the two stay in sync.
 
 ## Trigger handling in the service
 

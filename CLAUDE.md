@@ -81,7 +81,7 @@ module class (trigger topologies, envelope output, failure routing); services im
 `ActionService` SPI (`configure` / `setup` / `execute`) and are discovered by scanning `module/action`.
 Triggers: `once` (fire after all inputs/waits complete; inputs are pure signals) / `perElement` /
 `collect` (gather all elements into one firing). Every firing emits a common envelope record
-(`service, op, jobId, state, startedAt, finishedAt, payload`). Two-plane rule: sink outputs and action
+(`service, operation, jobId, state, startedAt, finishedAt, payload`). Two-plane rule: sink outputs and action
 envelopes are control records — consumable by action `inputs` and anyone's `waits`; a data
 transform/sink consuming them via `inputs` gets an assembly-time warning (see
 `docs → module/action/README.md`).
@@ -114,7 +114,7 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   - `domain/sql/calcite/` is **deprecated** (pending deletion): only the old `util/pipeline/Query.java`
     still depends on it. New per-element SQL work uses `Query2`; do not add new dependencies on it.
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
-  `action.http`, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
+  http action, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
   (declarative success/retry/partial-failure classification, Retry-After backoff), `RequestSpec`/`RequestRenderer`
   (target/body config + template rendering), `SyncCaller` (blocking send-with-retry), `GrpcSupport` (descriptor-set linking, dynamic
@@ -139,12 +139,15 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 ## Adding a New Module
 
 Use the **`add-module` skill** (`.claude/skills/add-module/`) — it walks through implementation, tests,
-and agent-readable docs, with type-specific guides for source/transform/sink. Summary:
+and agent-readable docs, with type-specific guides for source/transform/sink/action. Summary:
 
-1. Create a class in `module/source/`, `module/transform/`, or `module/sink/`.
-2. Extend `Source`, `Transform`, or `Sink`.
-3. Annotate with the matching nested annotation, e.g. `@Transform.Module(name="mymodule")`.
-4. Implement `expand()` returning an `MCollectionTuple` (source/transform) or handling the sink.
+1. Create a class in `module/source/`, `module/transform/`, `module/sink/`, or `module/action/`.
+2. Extend `Source`, `Transform`, or `Sink` — or, for an action service, implement `ActionService`
+   (the `Action` module itself already exists).
+3. Annotate with the matching nested annotation, e.g. `@Transform.Module(name="mymodule")` or
+   `@Action.Service(name="myservice", operations={…})`.
+4. Implement `expand()` returning an `MCollectionTuple` (source/transform) or handling the sink;
+   an action service implements `configure` / `setup` / `execute` instead.
 5. It is auto-discovered via package scanning — no manual registration.
 6. Write user-facing config docs at `src/main/resources/server/docs/module/<type>/<name>.md`
    (YAML front-matter with `title:` — the agent's `listModules` uses it) and add an entry

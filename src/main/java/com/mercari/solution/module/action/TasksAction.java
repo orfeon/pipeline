@@ -62,32 +62,32 @@ public class TasksAction implements ActionService {
 
     public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
 
+    /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
-        create,
-        update,
-        delete,
-        pause,
-        resume,
-        purge,
-        get,
-        waitForEmpty,
-        runTask,
-        deleteTask;
+        create("queues.create"),
+        update("queues.update"),
+        delete("queues.delete"),
+        pause("queues.pause"),
+        resume("queues.resume"),
+        purge("queues.purge"),
+        get("queues.get"),
+        waitForEmpty("queues.waitForEmpty"),
+        runTask("tasks.run"),
+        deleteTask("tasks.delete");
+
+        public final String operation;
+
+        Op(final String operation) {
+            this.operation = operation;
+        }
 
         static Op of(final String operation) {
-            return switch (operation) {
-                case "queues.create" -> create;
-                case "queues.update" -> update;
-                case "queues.delete" -> delete;
-                case "queues.pause" -> pause;
-                case "queues.resume" -> resume;
-                case "queues.purge" -> purge;
-                case "queues.get" -> get;
-                case "queues.waitForEmpty" -> waitForEmpty;
-                case "tasks.run" -> runTask;
-                case "tasks.delete" -> deleteTask;
-                default -> throw new IllegalModuleException("Not supported operation: " + operation);
-            };
+            for(final Op op : values()) {
+                if(op.operation.equals(operation)) {
+                    return op;
+                }
+            }
+            throw new IllegalModuleException("Not supported operation: " + operation);
         }
     }
 
