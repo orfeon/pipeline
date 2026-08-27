@@ -24,7 +24,7 @@ Failures are classified by the BigQuery error reason so that `retry` is spent on
 |---|---|
 | Job finished with a transient reason (`rateLimitExceeded`, `quotaExceeded`, `backendError`, `internalError`, `jobBackendError`, `jobInternalError`, `jobRateLimitExceeded`) | Retryable. A retry finds the failed job under the deterministic id and resubmits it as `<jobId>-r1`, `-r2`, … (at most 10). |
 | Job finished with any other reason (`invalidQuery`, `invalid`, `notFound`, `accessDenied`, `duplicate`, `resourcesExceeded`, `stopped`, …) | Non-retryable: routed to failure handling immediately. |
-| Submission rejected with HTTP 4xx (other than 408/429) | Non-retryable. |
+| Request rejected with HTTP 4xx (other than 408/429) | Non-retryable — unless the error body carries a transient reason (`rateLimitExceeded` / `quotaExceeded` arrive as HTTP 403), which stays retryable. |
 | Submission failed with HTTP 5xx / 429 / network error | Retryable. |
 | Job not `DONE` within `timeoutSeconds` | Non-retryable; with `cancelOnTimeout: true` (default) the job is cancelled first. Prefer `jobTimeoutMs` to have BigQuery itself stop a runaway job. (Earlier releases retried the timeout and re-adopted the still-running job; set `cancelOnTimeout: false` and a `retry` block to get close to that behaviour.) |
 
@@ -99,7 +99,7 @@ The `jobs.<type>` operations correspond to `jobs.insert` with the matching `conf
 | maximumBytesBilled | optional | Integer       | Cost guard: the job fails (`bytesBilledLimitExceeded`, non-retryable) when it would bill more than this many bytes. |
 | useQueryCache     | optional | Boolean        | Whether to look for the result in the query cache. Default: BigQuery's default (`true`). |
 | connectionProperties | optional | Map<String,String\> | [Connection properties](https://cloud.google.com/bigquery/docs/reference/rest/v2/ConnectionProperty) such as `time_zone`, `session_id`, `query_label`. |
-| resultRows        | optional | Integer        | After completion, fetch up to this many result rows (`jobs.getQueryResults`) into the payload: `resultRows` (list of column→value maps), `firstRow` (the first row) and `totalRows`. Meant for small control results — a count, a max timestamp — to drive `failWhen` / `skipWhen` (`payload.firstRow.cnt = 0`), not for moving data. (The keys avoid the SQL reserved words `row` / `rows`.) Requires `wait: true` and no `dryRun`. |
+| resultRows        | optional | Integer        | After completion, fetch up to this many result rows (`jobs.getQueryResults`) into the payload: `resultRows` (list of column→value maps), `firstRow` (the first row) and `totalRows`. Meant for small control results — a count, a max timestamp — to drive `failWhen` / `skipWhen` (`payload.firstRow.cnt = 0`), not for moving data. (The keys avoid the SQL reserved words `row` / `rows`.) Requires `wait: true` and no `dryRun`. Values: INTEGER/FLOAT/BOOLEAN as numbers/booleans, NUMERIC/BIGNUMERIC as decimals, DATE as epoch days, TIME as micros of day, TIMESTAMP as epoch micros, DATETIME/GEOGRAPHY/INTERVAL/RANGE/JSON as text, RECORD as a nested map. |
 
 ### jobs.load parameters
 
@@ -148,11 +148,11 @@ The payload's `statistics.extract.destinationUriFileCounts` lists the number of 
 
 | parameter         | optional | type           | description |
 |-------------------|----------|----------------|-------------|
-| jobId             | conditionally required | String | The job to wait for (template-able, e.g. `${jobId}` from an upstream envelope with `trigger: perElement`). |
-| jobIdField        | optional | String         | With `trigger: collect`: gathers this field from every collected element and waits for all of them — e.g. fan-out many `jobs.query` steps with `wait: false, priority: BATCH`, then fan-in with one wait. The envelope's `jobId` is the comma-joined list and `payload.jobs` the list of `Job` resources. |
+| jobId             | conditionally required | String | The job to wait for (template-able, e.g. `${jobId!}` from an upstream envelope with `trigger: perElement` — the `!` default makes a `SKIPPED` upstream envelope with a null `jobId` render empty, which this step reports as `SKIPPED` instead of failing on the missing variable). |
+| jobIdField        | optional | String         | With `trigger: collect`: gathers this field from every collected element and waits for all of them — e.g. fan-out many `jobs.query` steps with `wait: false, priority: BATCH`, then fan-in with one wait. With two or more ids the envelope's `jobId` is the comma-joined list and `payload.jobs` the list of `Job` resources (so per-job paths such as `payload.statistics.load.outputRows` do not apply to the collected result); a single id yields the plain `Job` payload. |
 | location, timeoutSeconds, cancelOnTimeout | optional | | As for job submission. |
 
-All gathered jobs are polled in one loop with a shared backoff and a single `timeoutSeconds` window (on timeout the still-pending jobs are cancelled when `cancelOnTimeout` is set). A job that finished with an error fails the firing as non-retryable regardless of the reason (this action cannot resubmit a job it did not create). An empty / missing id (`state: SKIPPED`) is not an error.
+All gathered jobs are polled in one loop with a shared backoff and a single `timeoutSeconds` window (on timeout the still-pending jobs are cancelled when `cancelOnTimeout` is set); a transient error while polling one job is retried within that window, an unknown job id (404) fails the firing. A job that finished with an error fails the firing as non-retryable regardless of the reason (this action cannot resubmit a job it did not create). An empty / missing id (`state: SKIPPED`) is not an error.
 
 ### tables.* parameters
 

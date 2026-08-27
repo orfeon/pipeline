@@ -3,6 +3,7 @@ package com.mercari.solution.module.action;
 import com.mercari.solution.module.Schema;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 
 import java.io.Serializable;
 import java.util.Map;
@@ -14,6 +15,9 @@ import java.util.Map;
  * so every action service produces records with the same schema.
  */
 public class ActionResult implements Serializable {
+
+    /** Payload serializer: a query result may legitimately hold NaN / Infinity (e.g. IEEE_DIVIDE). */
+    private static final Gson GSON = new GsonBuilder().serializeSpecialFloatingPointValues().create();
 
     private final String operation;
     private final String jobId;
@@ -40,7 +44,7 @@ public class ActionResult implements Serializable {
      * (so numeric fields compare as numbers).
      */
     public static ActionResult ofValues(final String operation, final String jobId, final String state, final Map<String, Object> payloadValues) {
-        final String payload = payloadValues == null ? null : new Gson().toJson(payloadValues);
+        final String payload = payloadValues == null ? null : GSON.toJson(payloadValues);
         return new ActionResult(operation, jobId, state, payload, payloadValues);
     }
 

@@ -948,6 +948,87 @@ public class BigQueryActionTest {
     }
 
     @Test
+    public void testQuotaErrorsStayRetryableAndRawConfigurationDefaults() throws Exception {
+        {
+            // HTTP 403 with a transient reason is retryable (not a rejected request)
+            final ScriptedTransport transport = new ScriptedTransport().respond(403, error(403, "rateLimitExceeded"));
+            final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
+            final Exception e = Assertions.assertThrows(Exception.class, () -> action.execute(List.of()));
+            Assertions.assertFalse(e instanceof NonRetryableException, e.toString());
+        }
+        {
+            final ScriptedTransport transport = new ScriptedTransport().respond(403, error(403, "accessDenied"));
+            final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
+            Assertions.assertThrows(NonRetryableException.class, () -> action.execute(List.of()));
+        }
+        {
+            // priority / useLegacySql given only in the raw configuration are honoured; absent ones get the module defaults
+            final BigQueryAction action = createAction(new ScriptedTransport(), """
+                    query: SELECT 1
+                    configuration:
+                      query:
+                        priority: BATCH
+                    """);
+            final JobConfiguration merged = action.finishJobConfiguration(action.getParameters(),
+                    new JobConfiguration().setJobType("QUERY").setQuery(new JobConfigurationQuery().setQuery("SELECT 1")));
+            Assertions.assertEquals("BATCH", merged.getQuery().getPriority());
+            Assertions.assertFalse(merged.getQuery().getUseLegacySql());
+            final BigQueryAction plain = createAction(new ScriptedTransport(), "query: SELECT 1\n");
+            final JobConfiguration defaults = plain.finishJobConfiguration(plain.getParameters(),
+                    new JobConfiguration().setJobType("QUERY").setQuery(new JobConfigurationQuery().setQuery("SELECT 1")));
+            Assertions.assertEquals("INTERACTIVE", defaults.getQuery().getPriority());
+            Assertions.assertFalse(defaults.getQuery().getUseLegacySql());
+        }
+    }
+
+    @Test
+    public void testWaitToleratesTransientPollErrors() throws Exception {
+        final ScriptedTransport transport = new ScriptedTransport()
+                .respond(503, error(503, "backendError"))
+                .respond(200, job("a", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
+        final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.once, "jobId: a\n");
+        final ActionResult result = action.execute(List.of());
+        Assertions.assertEquals("DONE", result.getState());
+        Assertions.assertEquals(2, transport.calls.size());
+
+        final ScriptedTransport notFound = new ScriptedTransport().respond(404, error(404, "notFound"));
+        final BigQueryAction missing = createAction(notFound, "jobs.wait", Action.Trigger.once, "jobId: nope\n");
+        Assertions.assertThrows(NonRetryableException.class, () -> missing.execute(List.of()));
+    }
+
+    @Test
+    public void testResultRowsNumericAndSpecialFloats() throws Exception {
+        final ScriptedTransport transport = new ScriptedTransport()
+                .respond(200, job("fixed", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
+                .respond(200, "{\"jobComplete\":true,\"totalRows\":\"1\","
+                        + "\"schema\":{\"fields\":[{\"name\":\"amount\",\"type\":\"NUMERIC\"},{\"name\":\"ratio\",\"type\":\"FLOAT\"},"
+                        + "{\"name\":\"dt\",\"type\":\"DATETIME\"},{\"name\":\"ts\",\"type\":\"TIMESTAMP\"}]},"
+                        + "\"rows\":[{\"f\":[{\"v\":\"12.50\"},{\"v\":\"NaN\"},{\"v\":\"2026-08-27T01:02:03\"},{\"v\":\"1.7562528001E9\"}]}]}");
+        final BigQueryAction action = createAction(transport, QUERY_PARAMETERS + "resultRows: 1\n");
+        final ActionResult result = action.execute(List.of());
+        final Map<?, ?> row = (Map<?, ?>) result.getPayloadValues().get("firstRow");
+        Assertions.assertEquals(new java.math.BigDecimal("12.50"), row.get("amount"));
+        Assertions.assertTrue(Double.isNaN((Double) row.get("ratio")));
+        Assertions.assertEquals("2026-08-27T01:02:03", row.get("dt"));
+        Assertions.assertEquals(1756252800100000L, ((Number) row.get("ts")).longValue());
+        Assertions.assertTrue(result.getPayload().contains("NaN"), result.getPayload());
+    }
+
+    @Test
+    public void testTemplatedExpirationParseErrorIsNotRetryable() {
+        final ScriptedTransport transport = new ScriptedTransport();
+        final BigQueryAction action = createAction(transport, "jobs.copy", Action.Trigger.perElement, """
+                sourceTables: [ds.a]
+                destinationTable: ds.b
+                destinationExpirationTime: "${when}"
+                """);
+        final com.mercari.solution.module.MElement element = com.mercari.solution.module.MElement.builder()
+                .withString("when", "next week").withEventTime(org.joda.time.Instant.now()).build();
+        final Exception e = Assertions.assertThrows(Exception.class, () -> action.execute(List.of(element)));
+        Assertions.assertFalse(Action.isRetryable(e), e.toString());
+    }
+
+    @Test
     public void testDeepMerge() {
         final JsonObject base = new Gson().fromJson("{\"query\":{\"a\":1,\"nested\":{\"x\":1}},\"keep\":true}", JsonObject.class);
         final JsonObject overlay = new Gson().fromJson("{\"query\":{\"a\":2,\"nested\":{\"y\":2}},\"labels\":{\"k\":\"v\"}}", JsonObject.class);

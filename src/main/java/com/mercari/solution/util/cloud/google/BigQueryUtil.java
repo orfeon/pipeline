@@ -571,14 +571,16 @@ public class BigQueryUtil {
             case "BYTES" -> Base64.getDecoder().decode(value.toString());
             case "INTEGER" -> Long.valueOf((String)value);
             case "FLOAT" -> Double.valueOf((String)value);
+            case "NUMERIC", "BIGNUMERIC" -> new java.math.BigDecimal(value.toString());
             case "DATE" -> DateTimeUtil.toEpochDay(value.toString());
             case "TIME" -> DateTimeUtil.toMicroOfDay(value.toString());
             case "TIMESTAMP" -> {
-                final Double doubleValue = Double.parseDouble(value.toString());
-                yield doubleValue.longValue() * 1000L * 1000L;
+                // epoch seconds with a fractional part ("1.7E9" / "1756252800.123456"): keep the microseconds
+                yield new java.math.BigDecimal(value.toString()).movePointRight(6).longValue();
             }
             case "RECORD" -> parseAsPrimitiveValues(fieldSchema.getFields(), (Map<String,Object>)value);
-            default -> throw new IllegalArgumentException();
+            // DATETIME, GEOGRAPHY, INTERVAL, RANGE and anything newer: the API's canonical text form
+            default -> value.toString();
         };
     }
 

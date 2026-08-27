@@ -284,12 +284,14 @@ public class Action extends Module<MCollectionTuple> {
      * A text payload is exposed as a map when it is a JSON object (so {@code payload.<path>} works),
      * otherwise as the text itself (comparable as a whole; a dotted path into it never matches).
      */
+    private static final com.google.gson.Gson GSON = new com.google.gson.Gson();
+
     private static Object parsePayloadText(final String payload) {
         if(payload == null) {
             return null;
         }
         try {
-            final JsonElement json = new com.google.gson.Gson().fromJson(payload, JsonElement.class);
+            final JsonElement json = GSON.fromJson(payload, JsonElement.class);
             if(json != null && json.isJsonObject()) {
                 return com.mercari.solution.util.schema.converter.JsonToMapConverter.convert(json);
             }
@@ -302,8 +304,9 @@ public class Action extends Module<MCollectionTuple> {
     private static boolean matches(final Filter.ConditionNode condition, final Map<String, Object> values) {
         try {
             return Filter.filter(condition, values);
-        } catch (final IllegalArgumentException e) {
-            // e.g. a dotted path into a non-JSON text payload: treat as "does not match" rather than failing the firing
+        } catch (final RuntimeException e) {
+            // e.g. a dotted path into a non-JSON text payload, or a literal the value cannot be compared with:
+            // treat as "does not match" rather than losing the envelope of a successful execution
             LOG.warn("action condition could not be evaluated against the result ({}); treating it as not matched", e.getMessage());
             return false;
         }
@@ -563,7 +566,7 @@ public class Action extends Module<MCollectionTuple> {
         }
     }
 
-    static boolean isRetryable(final Throwable e) {
+    public static boolean isRetryable(final Throwable e) {
         Throwable t = e;
         while(t != null) {
             if(t instanceof NonRetryableException

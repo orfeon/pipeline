@@ -409,12 +409,8 @@ public class BigQueryAction implements ActionService {
             }
             switch (this.op) {
                 case query -> {
-                    if(this.useLegacySql == null) {
-                        this.useLegacySql = false;
-                    }
-                    if(this.priority == null) {
-                        this.priority = Priority.INTERACTIVE;
-                    }
+                    // useLegacySql / priority defaults are applied after the configuration merge (finishJobConfiguration)
+                    // so that values given only in the raw configuration are honoured
                 }
                 case load -> {}
                 case extract -> {
@@ -787,7 +783,20 @@ public class BigQueryAction implements ActionService {
                 if(completed.containsKey(jobId)) {
                     continue;
                 }
-                final Job job = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
+                final Job job;
+                try {
+                    job = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
+                } catch (final IOException e) {
+                    if(e instanceof GoogleJsonResponseException g) {
+                        final NonRetryableException rejected = rejectedRequest(g);
+                        if(rejected != null) {
+                            throw rejected;   // e.g. unknown job id (404)
+                        }
+                    }
+                    // transient poll error: keep the completed set and the shared timeout window, retry after the backoff
+                    LOG.info("action module[{}] failed to poll bigquery job: {} ({}), retrying", name, jobId, e.getMessage());
+                    continue;
+                }
                 final String state = Optional.ofNullable(job.getStatus()).map(st -> st.getState()).orElse(null);
                 if("DONE".equals(state)) {
                     if(!BigQueryUtil.isJobResultSucceeded(job)) {
@@ -1231,8 +1240,12 @@ public class BigQueryAction implements ActionService {
     private JobConfiguration createQueryJobConfiguration(final Parameters p) throws IOException {
         final JobConfigurationQuery query = new JobConfigurationQuery();
         query.setQuery(p.query);
-        query.setPriority(p.priority.name());
-        query.setUseLegacySql(p.useLegacySql);
+        if(p.priority != null) {
+            query.setPriority(p.priority.name());
+        }
+        if(p.useLegacySql != null) {
+            query.setUseLegacySql(p.useLegacySql);
+        }
         if(p.destinationTable != null) {
             query.setDestinationTable(BigQueryUtil.getTableReference(p.destinationTable, p.projectId));
         }
@@ -1376,7 +1389,12 @@ public class BigQueryAction implements ActionService {
             return now.plus(Durations.parse(t));
         } catch (final IllegalArgumentException e) {
             // not a duration: must be a timestamp
-            return java.time.OffsetDateTime.parse(t).toInstant();
+            try {
+                return java.time.OffsetDateTime.parse(t).toInstant();
+            } catch (final java.time.format.DateTimeParseException pe) {
+                throw new IllegalArgumentException(
+                        "expiration time must be an RFC 3339 timestamp or a duration (7d, PT168H) but: " + text, pe);
+            }
         }
     }
 
@@ -1397,12 +1415,24 @@ public class BigQueryAction implements ActionService {
         if(p.dryRun) {
             built.setDryRun(true);
         }
+        final JobConfiguration merged;
         if(configurationBase == null) {
-            return built;
+            merged = built;
+        } else {
+            final JsonObject base = configurationBase.deepCopy();
+            deepMerge(base, GSON.fromJson(JSON_FACTORY.toString(built), JsonObject.class));
+            merged = JSON_FACTORY.fromString(base.toString(), JobConfiguration.class);
         }
-        final JsonObject base = configurationBase.deepCopy();
-        deepMerge(base, GSON.fromJson(JSON_FACTORY.toString(built), JsonObject.class));
-        return JSON_FACTORY.fromString(base.toString(), JobConfiguration.class);
+        if(merged.getQuery() != null) {
+            // the API defaults useLegacySql to true; the module's default is standard SQL
+            if(merged.getQuery().getUseLegacySql() == null) {
+                merged.getQuery().setUseLegacySql(false);
+            }
+            if(merged.getQuery().getPriority() == null) {
+                merged.getQuery().setPriority(Priority.INTERACTIVE.name());
+            }
+        }
+        return merged;
     }
 
     /** Merges {@code overlay} into {@code base} in place: objects recurse, everything else in overlay wins. */
@@ -1459,7 +1489,12 @@ public class BigQueryAction implements ActionService {
                 }
             }
             // Retried bundle or retried firing: the job was already submitted by a previous attempt.
-            final Job existing = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
+            final Job existing;
+            try {
+                existing = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
+            } catch (final GoogleJsonResponseException e) {
+                throw rejectedOr(e);
+            }
             final String state = Optional.ofNullable(existing.getStatus()).map(s -> s.getState()).orElse(null);
             if(!"DONE".equals(state) || BigQueryUtil.isJobResultSucceeded(existing)) {
                 LOG.info("action module[{}] bigquery job: {} already exists (state: {}), adopting the existing job", name, jobId, state);
@@ -1527,13 +1562,24 @@ public class BigQueryAction implements ActionService {
         return RETRYABLE_REASONS.contains(error.getReason());
     }
 
-    /** HTTP errors of a request: 4xx (other than 408/429) are rejected requests, not transient; null otherwise. */
+    /**
+     * HTTP errors of a request: 4xx (other than 408/429) are rejected requests, not transient — unless the
+     * error body's reason is a transient one (BigQuery reports {@code rateLimitExceeded} / {@code quotaExceeded}
+     * as HTTP 403). Returns null for retryable errors.
+     */
     static NonRetryableException rejectedRequest(final GoogleJsonResponseException e) {
         final int status = e.getStatusCode();
-        if(status >= 400 && status < 500 && status != 408 && status != 429) {
-            return new NonRetryableException("bigquery request was rejected: " + e.getMessage(), e);
+        if(status < 400 || status >= 500 || status == 408 || status == 429) {
+            return null;
         }
-        return null;
+        if(e.getDetails() != null && e.getDetails().getErrors() != null) {
+            for(final com.google.api.client.googleapis.json.GoogleJsonError.ErrorInfo info : e.getDetails().getErrors()) {
+                if(info.getReason() != null && RETRYABLE_REASONS.contains(info.getReason())) {
+                    return null;
+                }
+            }
+        }
+        return new NonRetryableException("bigquery request was rejected: " + e.getMessage(), e);
     }
 
     /** Throws the non-retryable form of a rejected request, otherwise returns the (retryable) exception for the caller to throw. */
