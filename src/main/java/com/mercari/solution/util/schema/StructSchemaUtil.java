@@ -1414,6 +1414,7 @@ public class StructSchemaUtil {
                 }
                 final String stringValue = switch (value.getType().getCode()) {
                     case STRING -> value.getString();
+                    case UUID -> value.getUuid().toString();
                     case JSON -> value.getJson();
                     case BYTES -> Base64.getEncoder().encodeToString(value.getBytes().toByteArray());
                     case BOOL -> Boolean.toString(value.getBool());
@@ -1500,6 +1501,17 @@ public class StructSchemaUtil {
                     default -> throw new IllegalArgumentException();
                 };
                 yield Value.date(dateValue);
+            }
+            case UUID -> {
+                if(value.isNull()) {
+                    yield Value.uuid(null);
+                }
+                final UUID uuidValue = switch (value.getType().getCode()) {
+                    case UUID -> value.getUuid();
+                    case STRING -> UUID.fromString(value.getString());
+                    default -> throw new IllegalArgumentException("Can not adjust value type: " + value.getType() + " to UUID");
+                };
+                yield Value.uuid(uuidValue);
             }
             case TIMESTAMP -> {
                 if(value.isNull()) {

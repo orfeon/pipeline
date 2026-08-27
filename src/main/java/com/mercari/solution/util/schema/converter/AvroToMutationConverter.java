@@ -330,8 +330,8 @@ public class AvroToMutationConverter {
                                         .map(Object::toString)
                                         .collect(Collectors.toList());
                         if(LogicalTypes.uuid().equals(elementSchema.getLogicalType())) {
-                            final List<UUID> uuidList = hide || isNullField ? list : ((List<Object>) value).stream()
-                                    .map(v -> v == null ? null : UUID.fromString(v.toString()))
+                            final List<UUID> uuidList = hide || isNullField ? list : stringList.stream()
+                                    .map(UUID::fromString)
                                     .toList();
                             builder.set(fieldName).toUuidArray(uuidList);
                         } else if(AvroSchemaUtil.isSqlTypeJson(elementSchema)) {

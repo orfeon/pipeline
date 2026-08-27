@@ -98,7 +98,9 @@ public class StructToDocumentConverter {
                             .build();
                     case UUID -> Value.newBuilder().setArrayValue(ArrayValue.newBuilder()
                                     .addAllValues((struct.getUuidList(field.getName()).stream()
-                                            .map(o -> Value.newBuilder().setStringValue(o.toString()).build())
+                                            .map(o -> o == null
+                                                    ? Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build()
+                                                    : Value.newBuilder().setStringValue(o.toString()).build())
                                             .collect(Collectors.toList())))
                                     .build())
                             .build();

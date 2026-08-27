@@ -1063,6 +1063,23 @@ public class StructSchemaUtilTest {
                 .build();
         final Mutation adjusted = StructSchemaUtil.adjust(type, insert);
         Assertions.assertEquals(Mutation.Op.INSERT, adjusted.getOperation());
+
+        // UUID <-> STRING in both directions
+        final java.util.UUID uuid = java.util.UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
+        final Type uuidType = Type.struct(
+                Type.StructField.of("u", Type.uuid()),
+                Type.StructField.of("s", Type.string()),
+                Type.StructField.of("n", Type.uuid()));
+        final Mutation uuidInsert = Mutation.newInsertBuilder("t")
+                .set("u").to(uuid.toString())
+                .set("s").to(uuid)
+                .set("n").to((String) null)
+                .build();
+        Assertions.assertFalse(StructSchemaUtil.validate(uuidType, uuidInsert));
+        final Map<String, Value> uuidValues = StructSchemaUtil.adjust(uuidType, uuidInsert).asMap();
+        Assertions.assertEquals(Value.uuid(uuid), uuidValues.get("u"));
+        Assertions.assertEquals(Value.string(uuid.toString()), uuidValues.get("s"));
+        Assertions.assertEquals(Value.uuid(null), uuidValues.get("n"));
         final Map<String, Value> values = adjusted.asMap();
         Assertions.assertEquals(Value.string("123"), values.get("str"));
         Assertions.assertEquals(Value.bool(true), values.get("bool"));
