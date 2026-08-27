@@ -73,9 +73,9 @@ import java.util.Set;
  * deterministically from the pipeline job name, the step name and the effective parameters,
  * so a retried submission gets 409 ALREADY_EXISTS and adopts the already-running (or
  * succeeded) job instead of starting a duplicate one. When the adopted job has already
- * failed with a transient reason, the job is resubmitted under the same id with a
- * {@code -r<n>} suffix (so a retry can recover) — a permanent failure reason is reported as
- * {@link NonRetryableException} instead.
+ * failed with a transient reason, that retry resubmits the job under the same id with a
+ * {@code -r<n>} suffix — a permanent failure reason is reported as
+ * {@link NonRetryableException} instead (no resubmission without a retry).
  *
  * The result payload is the {@code Job} resource of the Jobs API as a typed structure
  * (int64 fields as numbers), so module-level {@code failWhen} / {@code skipWhen} conditions can
@@ -103,6 +103,9 @@ public class BigQueryAction implements ActionService {
 
     /** Max {@code -r<n>} resubmissions of a job whose earlier attempt failed transiently. */
     static final int MAX_RESUBMITS = 10;
+
+    /** Upper bound of {@code resultRows}: the rows travel in the envelope payload, meant for control results only. */
+    static final int MAX_RESULT_ROWS = 1000;
 
     /**
      * Job error reasons that a resubmission may fix (BigQuery error table). Anything else
@@ -286,8 +289,8 @@ public class BigQueryAction implements ActionService {
                 }
             }
             if(Op.query.equals(this.op) && this.resultRows != null) {
-                if(this.resultRows <= 0) {
-                    errorMessages.add("action module[" + name + "].parameters.resultRows must be positive");
+                if(this.resultRows <= 0 || this.resultRows > MAX_RESULT_ROWS) {
+                    errorMessages.add("action module[" + name + "].parameters.resultRows must be between 1 and " + MAX_RESULT_ROWS);
                 }
                 if(Boolean.FALSE.equals(this.wait) || Boolean.TRUE.equals(this.dryRun)) {
                     errorMessages.add("action module[" + name + "].parameters.resultRows requires wait: true and no dryRun");
@@ -380,7 +383,8 @@ public class BigQueryAction implements ActionService {
                 this.timeoutSeconds = 86400L;
             }
             if(this.cancelOnTimeout == null) {
-                this.cancelOnTimeout = true;
+                // a job launched elsewhere is not ours to cancel
+                this.cancelOnTimeout = !Op.wait.equals(this.op);
             }
             if(this.dryRun == null) {
                 this.dryRun = false;
@@ -640,6 +644,7 @@ public class BigQueryAction implements ActionService {
     // parsed once per worker: the raw JSON escape hatches are static (never templated)
     private transient JsonObject configurationBase;
     private transient JsonObject resourceBase;
+    private transient TableSchema tableSchema;
 
 
     @Override
@@ -653,6 +658,11 @@ public class BigQueryAction implements ActionService {
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");
         }
+        // derived at setDefaults from the validated public parameters: never taken from the config
+        this.parameters.queryParametersJson = null;
+        this.parameters.tableSchemaJson = null;
+        this.parameters.configurationJson = null;
+        this.parameters.resourceJson = null;
         this.parameters.op = Op.of(operation);
         final List<String> errorMessages = this.parameters.validate(name, trigger);
         if(!errorMessages.isEmpty()) {
@@ -671,6 +681,11 @@ public class BigQueryAction implements ActionService {
         }
         this.configurationBase = parameters.configurationJson == null ? null : GSON.fromJson(parameters.configurationJson, JsonObject.class);
         this.resourceBase = parameters.resourceJson == null ? null : GSON.fromJson(parameters.resourceJson, JsonObject.class);
+        try {
+            this.tableSchema = parameters.tableSchemaJson == null ? null : JSON_FACTORY.fromString(parameters.tableSchemaJson, TableSchema.class);
+        } catch (final IOException e) {
+            throw new IllegalStateException("failed to parse the table schema: " + parameters.tableSchemaJson, e);
+        }
     }
 
     /** Test hook: use a prepared client (e.g. over a mock transport) instead of the default one. */
@@ -726,24 +741,21 @@ public class BigQueryAction implements ActionService {
             case copy -> executeJob(p, createCopyJobConfiguration(p));
             default -> throw new IllegalStateException();
         };
-        final String state = Optional.ofNullable(job.getStatus()).map(s -> s.getState()).orElse(null);
+        final String state = jobState(job);
         final Map<String, Object> payload = toPayload(job);
         if(Op.query.equals(p.op) && p.resultRows != null && "DONE".equals(state)) {
             payload.putAll(fetchResultRows(p, job));
         }
-        return ActionResult.ofValues(operation, job.getJobReference().getJobId(), state, payload);
+        // a dry run allocates no job: the response carries no job id
+        final String jobId = Optional.ofNullable(job.getJobReference()).map(JobReference::getJobId).orElse(null);
+        return ActionResult.ofValues(operation, jobId, state, payload);
     }
 
     /** Waits for jobs launched elsewhere: {@code jobId} (one) or, with collect, {@code jobIdField} (all gathered ids). */
     private ActionResult executeWait(final Parameters p, final List<MElement> elements) throws Exception {
         final List<String> jobIds = new ArrayList<>();
         if(Trigger.collect.equals(trigger) && p.jobIdField != null) {
-            for(final MElement element : elements) {
-                final Object value = element.getPrimitiveValue(p.jobIdField);
-                if(value != null && !value.toString().isBlank()) {
-                    jobIds.add(value.toString());
-                }
-            }
+            jobIds.addAll(collectField(elements, p.jobIdField));
             if(jobIds.isEmpty()) {
                 LOG.info("bigquery action[{}] found no job id in field: {}", name, p.jobIdField);
                 return ActionResult.of(operation, null, "SKIPPED", null);
@@ -773,11 +785,7 @@ public class BigQueryAction implements ActionService {
      */
     private List<Job> waitForAll(final Parameters p, final List<String> jobIds) throws IOException {
         final Map<String, Job> completed = new LinkedHashMap<>();
-        final ExponentialBackOff backOff = new ExponentialBackOff.Builder()
-                .setInitialIntervalMillis(2000)
-                .setMaxIntervalMillis(30000)
-                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
-                .build();
+        final ExponentialBackOff backOff = createPollBackOff(p);
         while(true) {
             for(final String jobId : jobIds) {
                 if(completed.containsKey(jobId)) {
@@ -785,7 +793,12 @@ public class BigQueryAction implements ActionService {
                 }
                 final Job job;
                 try {
-                    job = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
+                    // poll the status only; the full resource (statistics can be large) is fetched once when DONE
+                    final Job status = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location)
+                            .setFields("jobReference,status").execute();
+                    job = "DONE".equals(jobState(status))
+                            ? bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute()
+                            : status;
                 } catch (final IOException e) {
                     if(e instanceof GoogleJsonResponseException g) {
                         final NonRetryableException rejected = rejectedRequest(g);
@@ -797,8 +810,7 @@ public class BigQueryAction implements ActionService {
                     LOG.info("action module[{}] failed to poll bigquery job: {} ({}), retrying", name, jobId, e.getMessage());
                     continue;
                 }
-                final String state = Optional.ofNullable(job.getStatus()).map(st -> st.getState()).orElse(null);
-                if("DONE".equals(state)) {
+                if("DONE".equals(jobState(job))) {
                     if(!BigQueryUtil.isJobResultSucceeded(job)) {
                         throw new NonRetryableException(
                                 "bigquery job: " + jobId + " failed with error: " + job.getStatus().getErrorResult());
@@ -816,19 +828,7 @@ public class BigQueryAction implements ActionService {
                 throw new IllegalStateException(e);
             }
             if(next == com.google.api.client.util.BackOff.STOP) {
-                final List<String> pending = jobIds.stream().filter(id -> !completed.containsKey(id)).toList();
-                if(p.cancelOnTimeout) {
-                    for(final String jobId : pending) {
-                        try {
-                            bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute();
-                        } catch (final IOException e) {
-                            LOG.warn("action module[{}] failed to cancel bigquery job: {}: {}", name, jobId, e.getMessage());
-                        }
-                    }
-                }
-                throw new NonRetryableException(
-                        "bigquery jobs: " + pending + " did not complete within timeoutSeconds: " + p.timeoutSeconds
-                                + (p.cancelOnTimeout ? " (cancel requested)" : ""));
+                throw timedOut(p, jobIds.stream().filter(id -> !completed.containsKey(id)).toList());
             }
             LOG.info("action module[{}] waiting for bigquery jobs: {}/{} done", name, completed.size(), jobIds.size());
             try {
@@ -880,8 +880,8 @@ public class BigQueryAction implements ActionService {
     /** Builds the Table resource from the explicit parameters over the raw {@code resource} base. */
     Table createTable(final Parameters p, final TableReference ref) throws IOException {
         final Table built = new Table().setTableReference(ref);
-        if(p.tableSchemaJson != null) {
-            built.setSchema(JSON_FACTORY.fromString(p.tableSchemaJson, TableSchema.class));
+        if(tableSchema != null) {
+            built.setSchema(tableSchema.clone());
         }
         if(p.description != null) {
             built.setDescription(p.description);
@@ -1072,13 +1072,7 @@ public class BigQueryAction implements ActionService {
             p.sourceTables = p.sourceTables.stream().map(t -> template(t, data)).toList();
         }
         if(Trigger.collect.equals(trigger) && p.sourceTablesField != null) {
-            final List<String> tables = new ArrayList<>();
-            for(final MElement element : elements) {
-                final Object value = element.getPrimitiveValue(p.sourceTablesField);
-                if(value != null) {
-                    tables.add(value.toString());
-                }
-            }
+            final List<String> tables = collectField(elements, p.sourceTablesField);
             if(tables.isEmpty()) {
                 throw new IllegalStateException(
                         "action module[" + name + "] sourceTablesField: " + p.sourceTablesField + " matched no value in collected elements");
@@ -1094,13 +1088,7 @@ public class BigQueryAction implements ActionService {
             p.labels = labels;
         }
         if(Trigger.collect.equals(trigger) && p.sourceUrisField != null) {
-            final List<String> uris = new ArrayList<>();
-            for(final MElement element : elements) {
-                final Object value = element.getPrimitiveValue(p.sourceUrisField);
-                if(value != null) {
-                    uris.add(value.toString());
-                }
-            }
+            final List<String> uris = collectField(elements, p.sourceUrisField);
             if(uris.isEmpty()) {
                 throw new IllegalStateException(
                         "action module[" + name + "] sourceUrisField: " + p.sourceUrisField + " matched no value in collected elements");
@@ -1108,6 +1096,47 @@ public class BigQueryAction implements ActionService {
             p.sourceUris = uris;
         }
         return p;
+    }
+
+    /** The distinct, non-blank values of a field over the collected elements, in first-seen order. */
+    static List<String> collectField(final List<MElement> elements, final String field) {
+        final java.util.LinkedHashSet<String> values = new java.util.LinkedHashSet<>();
+        for(final MElement element : elements) {
+            final Object value = element.getPrimitiveValue(field);
+            if(value != null && !value.toString().isBlank()) {
+                values.add(value.toString());
+            }
+        }
+        return new ArrayList<>(values);
+    }
+
+    private static String jobState(final Job job) {
+        return Optional.ofNullable(job.getStatus()).map(st -> st.getState()).orElse(null);
+    }
+
+    private ExponentialBackOff createPollBackOff(final Parameters p) {
+        return new ExponentialBackOff.Builder()
+                .setInitialIntervalMillis(2000)
+                .setMaxIntervalMillis(30000)
+                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
+                .build();
+    }
+
+    /** Timeout handling shared by the poll loops: cancel the pending jobs when configured, then fail permanently. */
+    private NonRetryableException timedOut(final Parameters p, final List<String> pendingJobIds) {
+        if(p.cancelOnTimeout) {
+            for(final String jobId : pendingJobIds) {
+                try {
+                    bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute();
+                    LOG.warn("action module[{}] cancelled bigquery job: {} after timeoutSeconds: {}", name, jobId, p.timeoutSeconds);
+                } catch (final IOException e) {
+                    LOG.warn("action module[{}] failed to cancel bigquery job: {}: {}", name, jobId, e.getMessage());
+                }
+            }
+        }
+        return new NonRetryableException(
+                "bigquery jobs: " + pendingJobIds + " did not complete within timeoutSeconds: " + p.timeoutSeconds
+                        + (p.cancelOnTimeout ? " (cancel requested)" : ""));
     }
 
     private static String template(final String text, final Map<String, Object> data) {
@@ -1297,8 +1326,8 @@ public class BigQueryAction implements ActionService {
         if(p.writeDisposition != null) {
             load.setWriteDisposition(p.writeDisposition.name());
         }
-        if(p.tableSchemaJson != null) {
-            load.setSchema(JSON_FACTORY.fromString(p.tableSchemaJson, TableSchema.class));
+        if(tableSchema != null) {
+            load.setSchema(tableSchema.clone());
         }
         if(p.autodetect != null) {
             load.setAutodetect(p.autodetect);
@@ -1388,12 +1417,12 @@ public class BigQueryAction implements ActionService {
         try {
             return now.plus(Durations.parse(t));
         } catch (final IllegalArgumentException e) {
-            // not a duration: must be a timestamp
+            // not a duration: must be a timestamp (RFC 3339, or the date / date-time forms DateTimeUtil accepts)
             try {
-                return java.time.OffsetDateTime.parse(t).toInstant();
-            } catch (final java.time.format.DateTimeParseException pe) {
+                return com.mercari.solution.util.DateTimeUtil.toInstant(t);
+            } catch (final RuntimeException pe) {
                 throw new IllegalArgumentException(
-                        "expiration time must be an RFC 3339 timestamp or a duration (7d, PT168H) but: " + text, pe);
+                        "expiration time must be a timestamp (2030-01-01T00:00:00Z) or a duration (7d, PT168H) but: " + text, pe);
             }
         }
     }
@@ -1455,7 +1484,7 @@ public class BigQueryAction implements ActionService {
         if(!p.wait || p.dryRun) {
             return job;
         }
-        return waitForCompletion(p, job, true);
+        return waitForCompletion(p, job);
     }
 
     /**
@@ -1512,41 +1541,25 @@ public class BigQueryAction implements ActionService {
     }
 
     /**
-     * Polls until DONE. {@code resubmittable}: a transient job error is reported as retryable (the
-     * retry resubmits under the next {@code -r<n>} id); for a job this action did not submit
-     * ({@code jobs.wait}) every failure is final.
+     * Polls the job this action submitted until DONE. A transient job error is reported as
+     * retryable (a retry resubmits under the next {@code -r<n>} id), a permanent one as non-retryable.
      */
-    private Job waitForCompletion(final Parameters p, final Job job, final boolean resubmittable) {
+    private Job waitForCompletion(final Parameters p, final Job job) {
         final String jobId = job.getJobReference().getJobId();
         final Job completed;
-        if("DONE".equals(Optional.ofNullable(job.getStatus()).map(st -> st.getState()).orElse(null))) {
+        if("DONE".equals(jobState(job))) {
             // already terminal (e.g. adopted or fetched job): no polling
             completed = job;
         } else {
-            final ExponentialBackOff backOff = new ExponentialBackOff.Builder()
-                    .setInitialIntervalMillis(2000)
-                    .setMaxIntervalMillis(30000)
-                    .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
-                    .build();
-            completed = BigQueryUtil.pollJob(bigquery, job.getJobReference(), sleeper, backOff);
+            completed = BigQueryUtil.pollJob(bigquery, job.getJobReference(), sleeper, createPollBackOff(p));
         }
         if(completed == null) {
-            if(p.cancelOnTimeout) {
-                try {
-                    bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute();
-                    LOG.warn("action module[{}] cancelled bigquery job: {} after timeoutSeconds: {}", name, jobId, p.timeoutSeconds);
-                } catch (final IOException e) {
-                    LOG.warn("action module[{}] failed to cancel bigquery job: {}: {}", name, jobId, e.getMessage());
-                }
-            }
-            throw new NonRetryableException(
-                    "bigquery job: " + jobId + " did not complete within timeoutSeconds: " + p.timeoutSeconds
-                            + (p.cancelOnTimeout ? " (cancel requested)" : ""));
+            throw timedOut(p, List.of(jobId));
         }
         if(!BigQueryUtil.isJobResultSucceeded(completed)) {
             final ErrorProto error = completed.getStatus().getErrorResult();
             final String message = "bigquery job: " + jobId + " failed with error: " + error;
-            if(resubmittable && isRetryableReason(error)) {
+            if(isRetryableReason(error)) {
                 // a retry resubmits the job under the next -r<n> id
                 throw new IllegalStateException(message);
             }
@@ -1569,7 +1582,7 @@ public class BigQueryAction implements ActionService {
      */
     static NonRetryableException rejectedRequest(final GoogleJsonResponseException e) {
         final int status = e.getStatusCode();
-        if(status < 400 || status >= 500 || status == 408 || status == 429) {
+        if(status < 400 || status >= 500 || status == 408 || status == 425 || status == 429) {
             return null;
         }
         if(e.getDetails() != null && e.getDetails().getErrors() != null) {

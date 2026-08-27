@@ -107,7 +107,9 @@ The condition is a [filter](../common/filter.md) — usually the SQL-like text f
 
 Conditions are post-execution only: a pre-check (e.g. "does the table have rows") is a separate action step gated by `waits`. A missing key compares as null (`payload.x > 0` is false when `x` is absent), and a dotted path into a payload that is not a JSON object (e.g. the storage service's text payload) never matches. Names that are SQL reserved words (`count`, `table`, `order`, …) must be back-quoted: ``payload.`count` = 0``. Dotted paths work in the SQL-like and `key:` forms only, not inside a JSON `expression:`.
 
-`state` is whatever the service reported, so a guard like `state <> 'DONE'` also fires on legitimate non-job outcomes: a service may report `SKIPPED` (nothing to do, e.g. an empty templated query), and the bigquery table/dataset operations report `CREATED` / `EXISTS` / `DELETED` / `NOT_FOUND`; with `wait: false` a job is reported as `PENDING` / `RUNNING`. Prefer conditions on the specific outcome you want to catch.
+`state` is whatever the service reported, so a guard like `state <> 'DONE'` also fires on legitimate non-job outcomes: the http service reports `SUCCEEDED`, a service may report `SKIPPED` (nothing to do, e.g. an empty templated query — the same value `skipWhen` uses), and the bigquery table/dataset operations report `CREATED` / `EXISTS` / `DELETED` / `NOT_FOUND`; with `wait: false` a job is reported as `PENDING` / `RUNNING`. Prefer conditions on the specific outcome you want to catch.
+
+Evaluation is fail-open: a condition that cannot be evaluated against the result (a path into a non-object payload, a literal that does not compare with the value's type, an `expression:` variable that is not a top-level key) is logged at WARN and counts as not matched — for `failWhen` this means the flow continues, so keep guards to keys the service documents.
 
 ```yaml
 actions:

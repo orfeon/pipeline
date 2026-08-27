@@ -546,7 +546,11 @@ public class BigQueryUtil {
                 case "NULLABLE", "REQUIRED" -> parseAsPrimitiveValue(fieldSchema, listValue);
                 case "REPEATED" -> {
                     final List<Object> primitiveValueList = new ArrayList<>();
-                    final List<Map<String,Object>> repeatedValues = (List<Map<String,Object>>)listValue.get("v");
+                    final Object repeated = listValue == null ? null : listValue.get("v");
+                    if(repeated == null || com.google.api.client.util.Data.isNull(repeated)) {
+                        yield primitiveValueList;
+                    }
+                    final List<Map<String,Object>> repeatedValues = (List<Map<String,Object>>) repeated;
                     for(final Map<String,Object> repeatedValue : repeatedValues) {
                         final Object repeatedPrimitiveValue = parseAsPrimitiveValue(fieldSchema, repeatedValue);
                         primitiveValueList.add(repeatedPrimitiveValue);
@@ -565,6 +569,10 @@ public class BigQueryUtil {
             return null;
         }
         final Object value = listValue.get("v");
+        if(value == null || com.google.api.client.util.Data.isNull(value)) {
+            // a NULL cell is decoded as the client's null placeholder object, not as Java null
+            return null;
+        }
         return switch (fieldSchema.getType().toUpperCase()) {
             case "BOOLEAN" -> Boolean.valueOf((String)value);
             case "STRING", "JSON" -> value.toString();
@@ -763,15 +771,20 @@ public class BigQueryUtil {
         }
     }
 
+    /**
+     * {@code status.errorResult} is the sole failure indicator of a job: {@code status.errors} may list
+     * non-fatal problems of a successful job (e.g. rows skipped within {@code maxBadRecords}).
+     */
     public static boolean isJobResultSucceeded(final Job job) {
-        if(job == null) {
+        if(job == null || job.getStatus() == null) {
             return false;
         }
         if(job.getStatus().getErrorResult() != null) {
             return false;
         }
         if(job.getStatus().getErrors() != null && !job.getStatus().getErrors().isEmpty()) {
-            return false;
+            LOG.warn("BigQuery job: {} succeeded with non-fatal errors: {}",
+                    job.getJobReference() == null ? null : job.getJobReference().getJobId(), job.getStatus().getErrors());
         }
         return true;
     }

@@ -1,7 +1,7 @@
 ---
 type: Action Module
 title: BigQuery Action Module
-description: Runs a BigQuery job (query, load, extract or copy/snapshot/clone) via the Jobs API from inside the pipeline and waits for its completion; also waits for jobs launched elsewhere (jobs.wait) and manages tables and datasets (tables.get as a guard, tables.insert / tables.patch for tables and views, tables.delete, datasets.get / insert / delete). Submission is idempotent via deterministic job ids (a retried bundle adopts the running job instead of duplicating it; a transiently failed job is resubmitted, a permanent error such as invalidQuery is not retried). Common job settings (jobTimeoutMs, reservation, dryRun, labels, cancelOnTimeout) plus a raw configuration escape hatch for any JobConfiguration field. The result payload is the Job resource with typed statistics, usable in module-level failWhen / skipWhen conditions. Supports trigger once (run after steps complete), perElement (one job per record with ${field} templates) and collect (one job over all records, e.g. sourceUrisField gathering every written file into a single load job).
+description: Runs a BigQuery job (query, load, extract or copy/snapshot/clone) via the Jobs API from inside the pipeline and waits for its completion; also waits for jobs launched elsewhere (jobs.wait) and manages tables and datasets (tables.get as a guard, tables.insert / tables.patch for tables and views, tables.delete, datasets.get / insert / delete). Submission is idempotent via deterministic job ids (a retried bundle adopts the running job instead of duplicating it; on retry a transiently failed job is resubmitted, a permanent error such as invalidQuery is not retried). Common job settings (jobTimeoutMs, reservation, dryRun, labels, cancelOnTimeout) plus a raw configuration escape hatch for any JobConfiguration field. The result payload is the Job resource with typed statistics, usable in module-level failWhen / skipWhen conditions. Supports trigger once (run after steps complete), perElement (one job per record with ${field} templates) and collect (one job over all records, e.g. sourceUrisField gathering every written file into a single load job).
 tags: [action, bigquery, job, query, load, extract, copy, snapshot, wait, table, dataset, view, guard, trigger, batch, workflow]
 timestamp: 2026-08-27T00:00:00Z
 ---
@@ -40,7 +40,9 @@ skipWhen: payload.statistics.load.outputRows = 0
 failWhen: payload.statistics.totalBytesProcessed > 1073741824   # with dryRun: true — cost guard
 ```
 
-With `wait: false` the payload is the job as submitted (`status.state` `PENDING` / `RUNNING`, no completion statistics).
+With `wait: false` the payload is the job as submitted (`status.state` `PENDING` / `RUNNING`, no completion statistics); with `dryRun: true` no job is allocated, so `jobId` is null. A job whose `status.errors` lists non-fatal problems (e.g. rows skipped within `maxBadRecords`) counts as succeeded — only `status.errorResult` fails it.
+
+Note for users of the earlier release: the payload used to be the job *statistics* object only (`totalBytesProcessed`, `query.numDmlAffectedRows` as strings at its top level); those paths now live under `statistics.*` with numeric types.
 
 ## Templates
 
@@ -75,11 +77,11 @@ The `jobs.<type>` operations correspond to `jobs.insert` with the matching `conf
 | writeDisposition  | optional | Enum           | `WRITE_TRUNCATE`, `WRITE_APPEND`, `WRITE_EMPTY`.                                                                         |
 | createDisposition | optional | Enum           | `CREATE_IF_NEEDED`, `CREATE_NEVER`.                                                                                      |
 | location          | optional | String         | Job location (e.g. `US`, `asia-northeast1`). Usually inferred by BigQuery.                                               |
-| jobId             | optional | String         | Explicit job id (template-able). Default: deterministic generated id.                                                    |
+| jobId             | optional | String         | Explicit job id (template-able). Must be unique per run — an existing job under that id is adopted (a succeeded job from an earlier run is returned as the result without running again), so include a run-specific part (e.g. a date or `${args.version}`). Default: a deterministic generated id that includes the pipeline job name. |
 | jobIdPrefix       | optional | String         | Prefix of the generated job id. Default: `mp-action`.                                                                    |
 | wait              | optional | Boolean        | Whether to wait until the job reaches `DONE` (polled with exponential backoff). A failed job raises an error. Default: `true`. |
 | timeoutSeconds    | optional | Integer        | Max seconds to wait for job completion; exceeding it raises a non-retryable error. Default: `86400` (24h).               |
-| cancelOnTimeout   | optional | Boolean        | Cancel the job when `timeoutSeconds` is exceeded, so it does not keep running (and billing) after the action failed. Default: `true`. |
+| cancelOnTimeout   | optional | Boolean        | Cancel the job when `timeoutSeconds` is exceeded, so it does not keep running (and billing) after the action failed. Default: `true` for jobs this action submits, `false` for `jobs.wait` (a job launched elsewhere is not cancelled unless asked). |
 | jobTimeoutMs      | optional | Integer        | `JobConfiguration.jobTimeoutMs`: BigQuery itself aborts the job after this many milliseconds — effective even with `wait: false` or after the worker died. |
 | reservation       | optional | String         | `JobConfiguration.reservation`: run the job in this reservation (`projects/{p}/locations/{l}/reservations/{r}`). Template-able. |
 | dryRun            | optional | Boolean        | `JobConfiguration.dryRun`: validate the job and estimate `statistics.totalBytesProcessed` without running it; no waiting. Default: `false`. |
@@ -92,14 +94,14 @@ The `jobs.<type>` operations correspond to `jobs.insert` with the matching `conf
 | parameter         | optional | type           | description |
 |-------------------|----------|----------------|-------------|
 | query             | required | String         | SQL to execute (SELECT/DML/DDL/script). A template that resolves to an empty string (e.g. a cdc `SCHEMA` record without a generated `statement`) submits no job: the firing is reported with `state: SKIPPED` and a null `jobId`. |
-| queryParameters   | optional | Object or Array | Query parameters — the recommended way to inject per-element values (no quoting / injection issues, unlike `${field}` inside `query`). Object form is `name: value` for `@name` references: a primitive infers its type (`true` → BOOL, `1` → INT64, `0.5` → FLOAT64, text → STRING), an array of primitives is an ARRAY of the inferred element type, and `{type, value}` sets an explicit type (`{type: DATE, value: "2026-08-27"}`, `{type: TIMESTAMP, value: "…"}`, `{type: STRING, value: [a, b]}` for a typed array). Array form takes raw API [`QueryParameter`](https://cloud.google.com/bigquery/docs/reference/rest/v2/QueryParameter) objects (named, or positional for `?` placeholders). String values are template-able. |
+| queryParameters   | optional | Object or Array | Query parameters — the recommended way to inject per-element values (no quoting / injection issues, unlike `${field}` inside `query`). Object form is `name: value` for `@name` references: a primitive infers its type (`true` → BOOL, `1` → INT64, `0.5` → FLOAT64, text → STRING), an array of primitives is an ARRAY of the inferred element type, and `{type, value}` sets an explicit type (`{type: DATE, value: "2026-08-27"}`, `{type: TIMESTAMP, value: "…"}`, `{type: STRING, value: [a, b]}` for a typed array). Array form takes raw API [`QueryParameter`](https://cloud.google.com/bigquery/docs/reference/rest/v2/QueryParameter) objects (named, or positional for `?` placeholders). String values are template-able — a templated value is a string, so a non-STRING per-element parameter needs the explicit form: `minId: {type: INT64, value: "${id}"}`. |
 | useLegacySql      | optional | Boolean        | Whether the query uses legacy SQL. Default: `false` (standard SQL). |
 | priority          | optional | Enum           | Query priority: `INTERACTIVE` or `BATCH`. Default: `INTERACTIVE`. |
 | defaultDataset    | optional | String         | Dataset (`dataset` or `project.dataset`) that resolves unqualified table names in the query. Template-able. |
 | maximumBytesBilled | optional | Integer       | Cost guard: the job fails (`bytesBilledLimitExceeded`, non-retryable) when it would bill more than this many bytes. |
 | useQueryCache     | optional | Boolean        | Whether to look for the result in the query cache. Default: BigQuery's default (`true`). |
 | connectionProperties | optional | Map<String,String\> | [Connection properties](https://cloud.google.com/bigquery/docs/reference/rest/v2/ConnectionProperty) such as `time_zone`, `session_id`, `query_label`. |
-| resultRows        | optional | Integer        | After completion, fetch up to this many result rows (`jobs.getQueryResults`) into the payload: `resultRows` (list of column→value maps), `firstRow` (the first row) and `totalRows`. Meant for small control results — a count, a max timestamp — to drive `failWhen` / `skipWhen` (`payload.firstRow.cnt = 0`), not for moving data. (The keys avoid the SQL reserved words `row` / `rows`.) Requires `wait: true` and no `dryRun`. Values: INTEGER/FLOAT/BOOLEAN as numbers/booleans, NUMERIC/BIGNUMERIC as decimals, DATE as epoch days, TIME as micros of day, TIMESTAMP as epoch micros, DATETIME/GEOGRAPHY/INTERVAL/RANGE/JSON as text, RECORD as a nested map. |
+| resultRows        | optional | Integer        | After completion, fetch up to this many result rows (`jobs.getQueryResults`) into the payload: `resultRows` (list of column→value maps), `firstRow` (the first row) and `totalRows`. Meant for small control results — a count, a max timestamp — to drive `failWhen` / `skipWhen` (`payload.firstRow.cnt = 0`), not for moving data. (The keys avoid the SQL reserved words `row` / `rows`.) Requires `wait: true` and no `dryRun`; at most 1000. Values: INTEGER/FLOAT/BOOLEAN as numbers/booleans, NUMERIC/BIGNUMERIC as decimals, DATE as epoch days, TIME as micros of day, TIMESTAMP as epoch micros, DATETIME/GEOGRAPHY/INTERVAL/RANGE/JSON as text, RECORD as a nested map. |
 
 ### jobs.load parameters
 
@@ -141,7 +143,7 @@ The payload's `statistics.extract.destinationUriFileCounts` lists the number of 
 | sourceTables      | conditionally required | Array<String\> | Source tables (`project.dataset.table`). Several sources are appended into the destination (`COPY` only). Template-able. |
 | sourceTablesField | optional | String         | With `trigger: collect`: gathers this field's value from every collected element into `sourceTables`. |
 | operationType     | optional | Enum           | `COPY` (default), `SNAPSHOT` (create a table snapshot), `CLONE` (create a writable clone), `RESTORE` (restore a snapshot into a table). |
-| destinationExpirationTime | optional | String | Expiration of the destination — for snapshots typically — as an RFC 3339 timestamp (`2030-01-01T00:00:00Z`) or a duration relative to the execution time (`7d`, `PT168H`). Template-able. |
+| destinationExpirationTime | optional | String | Expiration of the destination — for snapshots typically — as a timestamp (`2030-01-01T00:00:00Z`, `2030-01-01 00:00:00`, `2030-01-01`) or a duration relative to the execution time (`7d`, `PT168H`). Template-able. |
 | writeDisposition / createDisposition | optional | Enum | As for load. `WRITE_TRUNCATE` replaces the destination atomically. |
 
 ### jobs.wait parameters
@@ -150,7 +152,7 @@ The payload's `statistics.extract.destinationUriFileCounts` lists the number of 
 |-------------------|----------|----------------|-------------|
 | jobId             | conditionally required | String | The job to wait for (template-able, e.g. `${jobId!}` from an upstream envelope with `trigger: perElement` — the `!` default makes a `SKIPPED` upstream envelope with a null `jobId` render empty, which this step reports as `SKIPPED` instead of failing on the missing variable). |
 | jobIdField        | optional | String         | With `trigger: collect`: gathers this field from every collected element and waits for all of them — e.g. fan-out many `jobs.query` steps with `wait: false, priority: BATCH`, then fan-in with one wait. With two or more ids the envelope's `jobId` is the comma-joined list and `payload.jobs` the list of `Job` resources (so per-job paths such as `payload.statistics.load.outputRows` do not apply to the collected result); a single id yields the plain `Job` payload. |
-| location, timeoutSeconds, cancelOnTimeout | optional | | As for job submission. |
+| location, timeoutSeconds, cancelOnTimeout | optional | | As for job submission, except that `cancelOnTimeout` defaults to `false` here. |
 
 All gathered jobs are polled in one loop with a shared backoff and a single `timeoutSeconds` window (on timeout the still-pending jobs are cancelled when `cancelOnTimeout` is set); a transient error while polling one job is retried within that window, an unknown job id (404) fails the firing. A job that finished with an error fails the firing as non-retryable regardless of the reason (this action cannot resubmit a job it did not create). An empty / missing id (`state: SKIPPED`) is not an error.
 
@@ -165,7 +167,7 @@ All gathered jobs are polled in one loop with a shared backoff and a single `tim
 | view              | optional | String         | `tables.insert` / `tables.patch`: create the table as a view with this SQL (standard SQL unless `useLegacySql: true`). Patching `view` on an existing view swaps its definition atomically — the `CREATE OR REPLACE VIEW` equivalent without SQL string assembly. Template-able. |
 | description       | optional | String         | Table description. Template-able. |
 | labels            | optional | Map<String,String\> | Table labels. |
-| expirationTime    | optional | String         | Table expiration as an RFC 3339 timestamp or a duration relative to the execution time (`1d`, `PT36H`). Template-able. |
+| expirationTime    | optional | String         | Table expiration as a timestamp (`2030-01-01T00:00:00Z`, `2030-01-01`) or a duration relative to the execution time (`1d`, `PT36H`). Template-able. |
 | requirePartitionFilter | optional | Boolean   | Require a partition filter in queries. |
 | timePartitioning / rangePartitioning / clustering | optional | | `tables.insert`: the [destination options](#destination-options) (table definition). |
 | resource          | optional | Object         | Raw [`Table` resource](https://cloud.google.com/bigquery/docs/reference/rest/v2/tables#Table) JSON for fields not listed (`friendlyName`, `materializedView`, `externalDataConfiguration`, `encryptionConfiguration`, …). Base of the merge; explicit parameters win. |

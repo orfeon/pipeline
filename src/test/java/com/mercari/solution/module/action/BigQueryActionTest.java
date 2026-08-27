@@ -658,8 +658,10 @@ public class BigQueryActionTest {
 
     @Test
     public void testWaitForExternalJob() throws Exception {
+        // status-only polls until DONE, then one full fetch
         final ScriptedTransport transport = new ScriptedTransport()
                 .respond(200, job("ext", "RUNNING", null, null))
+                .respond(200, job("ext", "DONE", null, null))
                 .respond(200, job("ext", "DONE", null, "{\"totalBytesProcessed\":\"5\"}"));
         final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.perElement, "jobId: ${id}\n");
         final com.mercari.solution.module.MElement element = com.mercari.solution.module.MElement.builder()
@@ -671,42 +673,50 @@ public class BigQueryActionTest {
         Assertions.assertEquals("DONE", result.getState());
         Assertions.assertEquals(5L, ((Number) ((Map<?, ?>) result.getPayloadValues().get("statistics")).get("totalBytesProcessed")).longValue());
         Assertions.assertTrue(transport.calls.stream().allMatch(c -> "GET".equals(c.method())));
+        Assertions.assertTrue(transport.calls.get(0).url().contains("fields=jobReference"), transport.calls.get(0).url());
+        Assertions.assertFalse(transport.calls.get(2).url().contains("fields="), transport.calls.get(2).url());
+        Assertions.assertFalse(action.getParameters().cancelOnTimeout, "jobs.wait must not cancel foreign jobs by default");
     }
 
     @Test
     public void testWaitCollectsJobIdsAndFailsPermanentlyOnJobError() throws Exception {
         {
-            final ScriptedTransport transport = new ScriptedTransport()
-                    .respond(200, job("a", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
-                    .respond(200, job("b", "DONE", null, "{\"totalBytesProcessed\":\"2\"}"));
+            // duplicated ids are waited for once; each job: status poll + full fetch
+            final ScriptedTransport transport = new ScriptedTransport();
+            transport.defaultGetResponse = () -> ScriptedTransport.response(200, job("x", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
             final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.collect, "jobIdField: jobId\n");
             final List<com.mercari.solution.module.MElement> elements = List.of(
                     com.mercari.solution.module.MElement.builder().withString("jobId", "a").withEventTime(org.joda.time.Instant.now()).build(),
-                    com.mercari.solution.module.MElement.builder().withString("jobId", "b").withEventTime(org.joda.time.Instant.now()).build());
+                    com.mercari.solution.module.MElement.builder().withString("jobId", "b").withEventTime(org.joda.time.Instant.now()).build(),
+                    com.mercari.solution.module.MElement.builder().withString("jobId", "a").withEventTime(org.joda.time.Instant.now()).build(),
+                    com.mercari.solution.module.MElement.builder().withString("jobId", " ").withEventTime(org.joda.time.Instant.now()).build());
             final ActionResult result = action.execute(elements);
             Assertions.assertEquals("a,b", result.getJobId());
             Assertions.assertEquals(2, ((List<?>) result.getPayloadValues().get("jobs")).size());
-            Assertions.assertEquals(2, transport.calls.size());
+            Assertions.assertEquals(4, transport.calls.size());
         }
         {
             // one shared poll loop: a still-running job is re-polled while finished ones are not fetched again
             final ScriptedTransport transport = new ScriptedTransport()
                     .respond(200, job("a", "RUNNING", null, null))
+                    .respond(200, job("b", "DONE", null, null))
                     .respond(200, job("b", "DONE", null, "{\"totalBytesProcessed\":\"2\"}"))
+                    .respond(200, job("a", "DONE", null, null))
                     .respond(200, job("a", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
             final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.collect, "jobIdField: jobId\n");
             final List<com.mercari.solution.module.MElement> elements = List.of(
                     com.mercari.solution.module.MElement.builder().withString("jobId", "a").withEventTime(org.joda.time.Instant.now()).build(),
                     com.mercari.solution.module.MElement.builder().withString("jobId", "b").withEventTime(org.joda.time.Instant.now()).build());
             final ActionResult result = action.execute(elements);
-            Assertions.assertEquals(3, transport.calls.size());
-            Assertions.assertTrue(transport.calls.get(2).url().endsWith("/jobs/a"), transport.calls.get(2).url());
+            Assertions.assertEquals(5, transport.calls.size());
+            Assertions.assertTrue(transport.calls.get(3).url().contains("/jobs/a"), transport.calls.get(3).url());
             final List<?> jobs = (List<?>) result.getPayloadValues().get("jobs");
             Assertions.assertEquals(1L, ((Number) ((Map<?, ?>) ((Map<?, ?>) jobs.get(0)).get("statistics")).get("totalBytesProcessed")).longValue());
         }
         {
             // a job this action did not submit cannot be resubmitted: even a transient reason is final
             final ScriptedTransport transport = new ScriptedTransport()
+                    .respond(200, job("ext", "DONE", "backendError", null))
                     .respond(200, job("ext", "DONE", "backendError", null));
             final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.once, "jobId: ext\n");
             Assertions.assertThrows(NonRetryableException.class, () -> action.execute(List.of()));
@@ -985,11 +995,12 @@ public class BigQueryActionTest {
     public void testWaitToleratesTransientPollErrors() throws Exception {
         final ScriptedTransport transport = new ScriptedTransport()
                 .respond(503, error(503, "backendError"))
+                .respond(200, job("a", "DONE", null, null))
                 .respond(200, job("a", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
         final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.once, "jobId: a\n");
         final ActionResult result = action.execute(List.of());
         Assertions.assertEquals("DONE", result.getState());
-        Assertions.assertEquals(2, transport.calls.size());
+        Assertions.assertEquals(3, transport.calls.size());
 
         final ScriptedTransport notFound = new ScriptedTransport().respond(404, error(404, "notFound"));
         final BigQueryAction missing = createAction(notFound, "jobs.wait", Action.Trigger.once, "jobId: nope\n");
@@ -1026,6 +1037,71 @@ public class BigQueryActionTest {
                 .withString("when", "next week").withEventTime(org.joda.time.Instant.now()).build();
         final Exception e = Assertions.assertThrows(Exception.class, () -> action.execute(List.of(element)));
         Assertions.assertFalse(Action.isRetryable(e), e.toString());
+    }
+
+    @Test
+    public void testNonFatalErrorsDoNotFailTheJob() throws Exception {
+        // status.errors without errorResult (e.g. rows skipped within maxBadRecords) is a success
+        final ScriptedTransport transport = new ScriptedTransport()
+                .respond(200, "{\"jobReference\":{\"projectId\":\"p\",\"jobId\":\"fixed\"},"
+                        + "\"status\":{\"state\":\"DONE\",\"errors\":[{\"reason\":\"invalid\",\"message\":\"bad row skipped\"}]},"
+                        + "\"statistics\":{\"load\":{\"outputRows\":\"9\",\"badRecords\":\"1\"}}}");
+        final BigQueryAction action = createAction(transport, "jobs.load", Action.Trigger.once, """
+                jobId: fixed
+                sourceUris: [gs://b/*.csv]
+                destinationTable: ds.t
+                maxBadRecords: 5
+                """);
+        final ActionResult result = action.execute(List.of());
+        Assertions.assertEquals("DONE", result.getState());
+        Assertions.assertEquals(1L, ((Number) ((Map<?, ?>) ((Map<?, ?>) result.getPayloadValues().get("statistics")).get("load")).get("badRecords")).longValue());
+    }
+
+    @Test
+    public void testResultRowsNullCells() throws Exception {
+        final ScriptedTransport transport = new ScriptedTransport()
+                .respond(200, job("fixed", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
+                .respond(200, "{\"jobComplete\":true,\"totalRows\":\"1\","
+                        + "\"schema\":{\"fields\":[{\"name\":\"n\",\"type\":\"INTEGER\"},{\"name\":\"s\",\"type\":\"STRING\"},{\"name\":\"arr\",\"type\":\"INTEGER\",\"mode\":\"REPEATED\"}]},"
+                        + "\"rows\":[{\"f\":[{\"v\":null},{\"v\":null},{\"v\":[]}]}]}");
+        final BigQueryAction action = createAction(transport, QUERY_PARAMETERS + "resultRows: 1\n");
+        final ActionResult result = action.execute(List.of());
+        final Map<?, ?> row = (Map<?, ?>) result.getPayloadValues().get("firstRow");
+        Assertions.assertTrue(row.containsKey("n"));
+        Assertions.assertNull(row.get("n"));
+        Assertions.assertNull(row.get("s"));
+        Assertions.assertEquals(List.of(), row.get("arr"));
+    }
+
+    @Test
+    public void testDryRunHasNoJobId() throws Exception {
+        final ScriptedTransport transport = new ScriptedTransport()
+                .respond(200, "{\"jobReference\":{\"projectId\":\"p\",\"location\":\"US\"},\"status\":{\"state\":\"DONE\"},\"statistics\":{\"totalBytesProcessed\":\"4096\"}}");
+        final BigQueryAction action = createAction(transport, "query: SELECT 1\ndryRun: true\n");
+        final ActionResult result = action.execute(List.of());
+        Assertions.assertNull(result.getJobId());
+        Assertions.assertEquals("DONE", result.getState());
+    }
+
+    @Test
+    public void testInternalJsonFieldsCannotBeSetFromConfig() {
+        final BigQueryAction action = createAction(new ScriptedTransport(), """
+                query: SELECT 1
+                configurationJson: "not json"
+                tableSchemaJson: "garbage"
+                """);
+        Assertions.assertNull(action.getParameters().configurationJson);
+        Assertions.assertNull(action.getParameters().tableSchemaJson);
+        Assertions.assertThrows(IllegalModuleException.class, () -> createAction(new ScriptedTransport(), QUERY_PARAMETERS + "resultRows: 5000\n"));
+    }
+
+    @Test
+    public void testExpirationAcceptsDateForms() {
+        final java.time.Instant now = java.time.Instant.parse("2026-08-27T00:00:00Z");
+        Assertions.assertEquals(java.time.Instant.parse("2026-09-03T00:00:00Z"), BigQueryAction.resolveExpirationTime("7d", now));
+        Assertions.assertEquals(java.time.Instant.parse("2030-01-01T00:00:00Z"), BigQueryAction.resolveExpirationTime("2030-01-01T00:00:00Z", now));
+        Assertions.assertEquals(java.time.Instant.parse("2030-01-01T00:00:00Z"), BigQueryAction.resolveExpirationTime("2030-01-01", now));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> BigQueryAction.resolveExpirationTime("next week", now));
     }
 
     @Test
