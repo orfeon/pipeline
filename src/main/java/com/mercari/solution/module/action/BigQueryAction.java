@@ -1508,9 +1508,17 @@ public class BigQueryAction implements ActionService {
     /**
      * The {@code Job} resource as nested maps/lists with the API's declared types
      * (int64 fields as numbers, not the JSON wire strings), so conditions compare numerically.
+     * {@code statistics.query.queryPlan} / {@code timeline} are dropped to keep the envelope small.
      */
     static Map<String, Object> toPayload(final Job job) {
-        return toMap(job);
+        final Map<String, Object> payload = toMap(job);
+        // per-stage plan and timeline can run to hundreds of KB per job and are never condition inputs
+        final Object statistics = payload.get("statistics");
+        if(statistics instanceof Map<?, ?> st && st.get("query") instanceof Map<?, ?> query) {
+            query.remove("queryPlan");
+            query.remove("timeline");
+        }
+        return payload;
     }
 
     private static Map<String, Object> toMap(final GenericData data) {

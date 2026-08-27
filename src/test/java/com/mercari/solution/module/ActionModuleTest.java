@@ -513,6 +513,13 @@ public class ActionModuleTest {
     }
 
     @Test
+    public void testFailWhenMessageIsBounded() {
+        Assertions.assertEquals("abc", Action.abbreviate("abc", 5));
+        Assertions.assertEquals("abcde...(10 chars)", Action.abbreviate("abcdefghij", 5));
+        Assertions.assertNull(Action.abbreviate(null, 5));
+    }
+
+    @Test
     public void testIllegalConditionIsAssemblyError() throws Exception {
         final String configYaml = SOURCE_YAML + """
                 actions:

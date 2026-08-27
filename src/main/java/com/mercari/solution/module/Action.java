@@ -280,6 +280,13 @@ public class Action extends Module<MCollectionTuple> {
         return values;
     }
 
+    static String abbreviate(final String text, final int max) {
+        if(text == null || text.length() <= max) {
+            return text;
+        }
+        return text.substring(0, max) + "...(" + text.length() + " chars)";
+    }
+
     /**
      * Applies the post-execution conditions: a matching {@code failWhen} fails the firing
      * ({@link ConditionFailedException}); otherwise a matching {@code skipWhen} turns the result
@@ -297,9 +304,11 @@ public class Action extends Module<MCollectionTuple> {
         }
         final Map<String, Object> values = createConditionValues(service, result);
         if(failWhen != null && Filter.filter(failWhen, values)) {
+            // the payload can be large (e.g. a Job resource with every source uri): keep the message bounded
             throw new ConditionFailedException(
                     "action service: " + service + " result matched failWhen: " + failWhenJson
-                            + ". jobId: " + result.getJobId() + ", state: " + result.getState() + ", payload: " + result.getPayload());
+                            + ". jobId: " + result.getJobId() + ", state: " + result.getState()
+                            + ", payload: " + abbreviate(result.getPayload(), 1024));
         }
         if(skipWhen != null && Filter.filter(skipWhen, values)) {
             return result.withState("SKIPPED");

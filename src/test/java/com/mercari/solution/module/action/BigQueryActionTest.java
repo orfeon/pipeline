@@ -918,6 +918,19 @@ public class BigQueryActionTest {
     }
 
     @Test
+    public void testPayloadDropsQueryPlanAndTimeline() throws Exception {
+        final ScriptedTransport transport = new ScriptedTransport()
+                .respond(200, job("fixed", "DONE", null,
+                        "{\"totalBytesProcessed\":\"1\",\"query\":{\"numDmlAffectedRows\":\"2\",\"queryPlan\":[{\"name\":\"S00\"}],\"timeline\":[{\"elapsedMs\":\"1\"}]}}"));
+        final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
+        final ActionResult result = action.execute(List.of());
+        final Map<?, ?> query = (Map<?, ?>) ((Map<?, ?>) result.getPayloadValues().get("statistics")).get("query");
+        Assertions.assertFalse(query.containsKey("queryPlan"));
+        Assertions.assertFalse(query.containsKey("timeline"));
+        Assertions.assertEquals(2L, ((Number) query.get("numDmlAffectedRows")).longValue());
+    }
+
+    @Test
     public void testDeepMerge() {
         final JsonObject base = new Gson().fromJson("{\"query\":{\"a\":1,\"nested\":{\"x\":1}},\"keep\":true}", JsonObject.class);
         final JsonObject overlay = new Gson().fromJson("{\"query\":{\"a\":2,\"nested\":{\"y\":2}},\"labels\":{\"k\":\"v\"}}", JsonObject.class);

@@ -30,7 +30,7 @@ Failures are classified by the BigQuery error reason so that `retry` is spent on
 
 ## Result payload and conditions
 
-`payload` carries the [Jobs API `Job` resource](https://cloud.google.com/bigquery/docs/reference/rest/v2/Job) as returned after completion (`jobReference`, `configuration`, `status`, `statistics`) — with the API's declared types, i.e. int64 fields such as `statistics.totalBytesProcessed` or `statistics.query.numDmlAffectedRows` as numbers, not strings. The module-level `failWhen` / `skipWhen` conditions (see [action modules](README.md#result-conditions-failwhen--skipwhen)) reference it as `payload.<path>`, e.g.:
+`payload` carries the [Jobs API `Job` resource](https://cloud.google.com/bigquery/docs/reference/rest/v2/Job) as returned after completion (`jobReference`, `configuration`, `status`, `statistics`) — with the API's declared types, i.e. int64 fields such as `statistics.totalBytesProcessed` or `statistics.query.numDmlAffectedRows` as numbers, not strings. `statistics.query.queryPlan` and `statistics.query.timeline` (per-stage execution details, potentially hundreds of KB) are omitted; note that `configuration` echoes the submitted job, including the SQL text and every source URI. The module-level `failWhen` / `skipWhen` conditions (see [action modules](README.md#result-conditions-failwhen--skipwhen)) reference it as `payload.<path>`, e.g.:
 
 ```yaml
 failWhen: payload.statistics.query.numDmlAffectedRows = 0
