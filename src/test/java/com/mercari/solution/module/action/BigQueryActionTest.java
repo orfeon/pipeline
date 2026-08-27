@@ -686,6 +686,23 @@ public class BigQueryActionTest {
             final ActionResult result = action.execute(elements);
             Assertions.assertEquals("a,b", result.getJobId());
             Assertions.assertEquals(2, ((List<?>) result.getPayloadValues().get("jobs")).size());
+            Assertions.assertEquals(2, transport.calls.size());
+        }
+        {
+            // one shared poll loop: a still-running job is re-polled while finished ones are not fetched again
+            final ScriptedTransport transport = new ScriptedTransport()
+                    .respond(200, job("a", "RUNNING", null, null))
+                    .respond(200, job("b", "DONE", null, "{\"totalBytesProcessed\":\"2\"}"))
+                    .respond(200, job("a", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
+            final BigQueryAction action = createAction(transport, "jobs.wait", Action.Trigger.collect, "jobIdField: jobId\n");
+            final List<com.mercari.solution.module.MElement> elements = List.of(
+                    com.mercari.solution.module.MElement.builder().withString("jobId", "a").withEventTime(org.joda.time.Instant.now()).build(),
+                    com.mercari.solution.module.MElement.builder().withString("jobId", "b").withEventTime(org.joda.time.Instant.now()).build());
+            final ActionResult result = action.execute(elements);
+            Assertions.assertEquals(3, transport.calls.size());
+            Assertions.assertTrue(transport.calls.get(2).url().endsWith("/jobs/a"), transport.calls.get(2).url());
+            final List<?> jobs = (List<?>) result.getPayloadValues().get("jobs");
+            Assertions.assertEquals(1L, ((Number) ((Map<?, ?>) ((Map<?, ?>) jobs.get(0)).get("statistics")).get("totalBytesProcessed")).longValue());
         }
         {
             // a job this action did not submit cannot be resubmitted: even a transient reason is final

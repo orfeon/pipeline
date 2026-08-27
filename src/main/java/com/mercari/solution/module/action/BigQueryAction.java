@@ -99,6 +99,7 @@ public class BigQueryAction implements ActionService {
     private static final Logger LOG = LoggerFactory.getLogger(BigQueryAction.class);
 
     private static final JsonFactory JSON_FACTORY = GsonFactory.getDefaultInstance();
+    private static final Gson GSON = new Gson();
 
     /** Max {@code -r<n>} resubmissions of a job whose earlier attempt failed transiently. */
     static final int MAX_RESUBMITS = 10;
@@ -640,6 +641,9 @@ public class BigQueryAction implements ActionService {
 
     private transient Bigquery bigquery;
     private transient Sleeper sleeper;
+    // parsed once per worker: the raw JSON escape hatches are static (never templated)
+    private transient JsonObject configurationBase;
+    private transient JsonObject resourceBase;
 
 
     @Override
@@ -649,7 +653,7 @@ public class BigQueryAction implements ActionService {
         this.defaultProjectId = DataflowOptions.getProject(options);
         this.trigger = trigger;
         this.operation = operation;
-        this.parameters = new Gson().fromJson(parametersJson, Parameters.class);
+        this.parameters = GSON.fromJson(parametersJson, Parameters.class);
         if(this.parameters == null) {
             throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");
         }
@@ -669,6 +673,8 @@ public class BigQueryAction implements ActionService {
         if(this.sleeper == null) {
             this.sleeper = Sleeper.DEFAULT;
         }
+        this.configurationBase = parameters.configurationJson == null ? null : GSON.fromJson(parameters.configurationJson, JsonObject.class);
+        this.resourceBase = parameters.resourceJson == null ? null : GSON.fromJson(parameters.resourceJson, JsonObject.class);
     }
 
     /** Test hook: use a prepared client (e.g. over a mock transport) instead of the default one. */
@@ -753,9 +759,7 @@ public class BigQueryAction implements ActionService {
             jobIds.add(p.jobId);
         }
         final List<Map<String, Object>> jobs = new ArrayList<>();
-        for(final String jobId : jobIds) {
-            final Job job = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
-            final Job completed = waitForCompletion(p, job, false);
+        for(final Job completed : waitForAll(p, jobIds)) {
             jobs.add(toPayload(completed));
         }
         if(jobs.size() == 1) {
@@ -764,6 +768,67 @@ public class BigQueryAction implements ActionService {
         final Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("jobs", jobs);
         return ActionResult.ofValues(operation, String.join(",", jobIds), "DONE", payload);
+    }
+
+    /**
+     * Waits for several jobs at once: one poll loop over the still-pending set with a shared
+     * backoff and a single {@code timeoutSeconds} window (not one full wait per job). A job that
+     * finished with an error fails the firing as non-retryable (these jobs cannot be resubmitted).
+     */
+    private List<Job> waitForAll(final Parameters p, final List<String> jobIds) throws IOException {
+        final Map<String, Job> completed = new LinkedHashMap<>();
+        final ExponentialBackOff backOff = new ExponentialBackOff.Builder()
+                .setInitialIntervalMillis(2000)
+                .setMaxIntervalMillis(30000)
+                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
+                .build();
+        while(true) {
+            for(final String jobId : jobIds) {
+                if(completed.containsKey(jobId)) {
+                    continue;
+                }
+                final Job job = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
+                final String state = Optional.ofNullable(job.getStatus()).map(st -> st.getState()).orElse(null);
+                if("DONE".equals(state)) {
+                    if(!BigQueryUtil.isJobResultSucceeded(job)) {
+                        throw new NonRetryableException(
+                                "bigquery job: " + jobId + " failed with error: " + job.getStatus().getErrorResult());
+                    }
+                    completed.put(jobId, job);
+                }
+            }
+            if(completed.size() == jobIds.size()) {
+                return jobIds.stream().map(completed::get).toList();
+            }
+            final long next;
+            try {
+                next = backOff.nextBackOffMillis();
+            } catch (final IOException e) {
+                throw new IllegalStateException(e);
+            }
+            if(next == com.google.api.client.util.BackOff.STOP) {
+                final List<String> pending = jobIds.stream().filter(id -> !completed.containsKey(id)).toList();
+                if(p.cancelOnTimeout) {
+                    for(final String jobId : pending) {
+                        try {
+                            bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute();
+                        } catch (final IOException e) {
+                            LOG.warn("action module[{}] failed to cancel bigquery job: {}: {}", name, jobId, e.getMessage());
+                        }
+                    }
+                }
+                throw new NonRetryableException(
+                        "bigquery jobs: " + pending + " did not complete within timeoutSeconds: " + p.timeoutSeconds
+                                + (p.cancelOnTimeout ? " (cancel requested)" : ""));
+            }
+            LOG.info("action module[{}] waiting for bigquery jobs: {}/{} done", name, completed.size(), jobIds.size());
+            try {
+                sleeper.sleep(next);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
     }
 
     private ActionResult executeTableGet(final Parameters p) throws IOException {
@@ -776,11 +841,7 @@ public class BigQueryAction implements ActionService {
             if(e.getStatusCode() == 404 && p.ignoreNotFound) {
                 return ActionResult.of(operation, id, "NOT_FOUND", null);
             }
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -795,11 +856,7 @@ public class BigQueryAction implements ActionService {
             if(e.getStatusCode() == 404 && p.ignoreNotFound) {
                 return ActionResult.of(operation, id, "NOT_FOUND", null);
             }
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -824,7 +881,7 @@ public class BigQueryAction implements ActionService {
             built.setLabels(p.labels);
         }
         if(p.expirationTime != null) {
-            built.setExpirationTime(java.time.Instant.parse(resolveExpirationTime(p.expirationTime, java.time.Instant.now())).toEpochMilli());
+            built.setExpirationTime(resolveExpirationTime(p.expirationTime, java.time.Instant.now()).toEpochMilli());
         }
         if(p.view != null) {
             built.setView(new ViewDefinition().setQuery(p.view).setUseLegacySql(Optional.ofNullable(p.useLegacySql).orElse(false)));
@@ -833,11 +890,11 @@ public class BigQueryAction implements ActionService {
             built.setRequirePartitionFilter(p.requirePartitionFilter);
         }
         applyDestinationOptions(p, built::setTimePartitioning, built::setRangePartitioning, built::setClustering, options -> {});
-        if(p.resourceJson == null) {
+        if(resourceBase == null) {
             return built;
         }
-        final JsonObject base = new Gson().fromJson(p.resourceJson, JsonObject.class);
-        deepMerge(base, new Gson().fromJson(JSON_FACTORY.toString(built), JsonObject.class));
+        final JsonObject base = resourceBase.deepCopy();
+        deepMerge(base, GSON.fromJson(JSON_FACTORY.toString(built), JsonObject.class));
         return JSON_FACTORY.fromString(base.toString(), Table.class);
     }
 
@@ -854,11 +911,7 @@ public class BigQueryAction implements ActionService {
                 final Table existing = bigquery.tables().get(ref.getProjectId(), ref.getDatasetId(), ref.getTableId()).execute();
                 return ActionResult.ofValues(operation, id, "EXISTS", toMap(existing));
             }
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -872,11 +925,7 @@ public class BigQueryAction implements ActionService {
             LOG.info("action module[{}] patched bigquery table: {}", name, id);
             return ActionResult.ofValues(operation, id, "DONE", toMap(patched));
         } catch (final GoogleJsonResponseException e) {
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -894,11 +943,11 @@ public class BigQueryAction implements ActionService {
         if(p.defaultTableExpirationMs != null) {
             built.setDefaultTableExpirationMs(p.defaultTableExpirationMs);
         }
-        if(p.resourceJson == null) {
+        if(resourceBase == null) {
             return built;
         }
-        final JsonObject base = new Gson().fromJson(p.resourceJson, JsonObject.class);
-        deepMerge(base, new Gson().fromJson(JSON_FACTORY.toString(built), JsonObject.class));
+        final JsonObject base = resourceBase.deepCopy();
+        deepMerge(base, GSON.fromJson(JSON_FACTORY.toString(built), JsonObject.class));
         return JSON_FACTORY.fromString(base.toString(), Dataset.class);
     }
 
@@ -912,11 +961,7 @@ public class BigQueryAction implements ActionService {
             if(e.getStatusCode() == 404 && p.ignoreNotFound) {
                 return ActionResult.of(operation, id, "NOT_FOUND", null);
             }
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -933,11 +978,7 @@ public class BigQueryAction implements ActionService {
                 final Dataset existing = bigquery.datasets().get(ref.getProjectId(), ref.getDatasetId()).execute();
                 return ActionResult.ofValues(operation, id, "EXISTS", toMap(existing));
             }
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -952,11 +993,7 @@ public class BigQueryAction implements ActionService {
             if(e.getStatusCode() == 404 && p.ignoreNotFound) {
                 return ActionResult.of(operation, id, "NOT_FOUND", null);
             }
-            final NonRetryableException rejected = rejectedRequest(e);
-            if(rejected != null) {
-                throw rejected;
-            }
-            throw e;
+            throw rejectedOr(e);
         }
     }
 
@@ -998,14 +1035,15 @@ public class BigQueryAction implements ActionService {
             case collect -> Action.createCollectTemplateData(elements);
             default -> throw new IllegalStateException();
         };
-        final Parameters p = new Gson().fromJson(new Gson().toJson(parameters), Parameters.class);
+        final Parameters p = GSON.fromJson(GSON.toJson(parameters), Parameters.class);
         p.query = template(p.query, data);
         p.destinationTable = template(p.destinationTable, data);
         p.jobId = template(p.jobId, data);
         p.reservation = template(p.reservation, data);
         p.defaultDataset = template(p.defaultDataset, data);
         if(p.queryParametersJson != null) {
-            p.queryParametersJson = templateJson(new Gson().fromJson(p.queryParametersJson, JsonElement.class), data).toString();
+            // the per-firing copy is used in-process only: keep the templated tree instead of re-serializing it
+            p.queryParameters = templateJson(GSON.fromJson(p.queryParametersJson, JsonElement.class), data);
         }
         if(p.hivePartitioningOptions != null) {
             p.hivePartitioningOptions.sourceUriPrefix = template(p.hivePartitioningOptions.sourceUriPrefix, data);
@@ -1064,10 +1102,7 @@ public class BigQueryAction implements ActionService {
     }
 
     private static String template(final String text, final Map<String, Object> data) {
-        if(!TemplateUtil.isTemplateText(text)) {
-            return text;
-        }
-        return TemplateUtil.executeStrictTemplate(text, data);
+        return TemplateUtil.executeStrictTemplateIfNeeded(text, data);
     }
 
     /** Expands templates in every string primitive of a JSON tree (query parameter values). */
@@ -1207,8 +1242,9 @@ public class BigQueryAction implements ActionService {
         if(p.writeDisposition != null) {
             query.setWriteDisposition(p.writeDisposition.name());
         }
-        if(p.queryParametersJson != null) {
-            final List<QueryParameter> queryParameters = createQueryParameters(new Gson().fromJson(p.queryParametersJson, JsonElement.class));
+        if(p.queryParameters != null || p.queryParametersJson != null) {
+            final List<QueryParameter> queryParameters = createQueryParameters(
+                    p.queryParameters != null ? p.queryParameters : GSON.fromJson(p.queryParametersJson, JsonElement.class));
             if(!queryParameters.isEmpty()) {
                 query.setQueryParameters(queryParameters);
                 final boolean named = queryParameters.stream().allMatch(q -> q.getName() != null && !q.getName().isEmpty());
@@ -1326,7 +1362,7 @@ public class BigQueryAction implements ActionService {
             copy.setWriteDisposition(p.writeDisposition.name());
         }
         if(p.destinationExpirationTime != null) {
-            copy.setDestinationExpirationTime(resolveExpirationTime(p.destinationExpirationTime, java.time.Instant.now()));
+            copy.setDestinationExpirationTime(resolveExpirationTime(p.destinationExpirationTime, java.time.Instant.now()).toString());
         }
         return new JobConfiguration()
                 .setCopy(copy)
@@ -1334,13 +1370,13 @@ public class BigQueryAction implements ActionService {
     }
 
     /** An RFC 3339 timestamp as given, or {@code now + duration} for a duration text ({@code 7d}, {@code PT168H}). */
-    static String resolveExpirationTime(final String text, final java.time.Instant now) {
+    static java.time.Instant resolveExpirationTime(final String text, final java.time.Instant now) {
         final String t = text.trim();
         try {
-            return now.plus(Durations.parse(t)).toString();
+            return now.plus(Durations.parse(t));
         } catch (final IllegalArgumentException e) {
             // not a duration: must be a timestamp
-            return java.time.OffsetDateTime.parse(t).toInstant().toString();
+            return java.time.OffsetDateTime.parse(t).toInstant();
         }
     }
 
@@ -1361,12 +1397,11 @@ public class BigQueryAction implements ActionService {
         if(p.dryRun) {
             built.setDryRun(true);
         }
-        if(p.configurationJson == null) {
+        if(configurationBase == null) {
             return built;
         }
-        final JsonObject base = new Gson().fromJson(p.configurationJson, JsonObject.class);
-        final JsonObject overlay = new Gson().fromJson(JSON_FACTORY.toString(built), JsonObject.class);
-        deepMerge(base, overlay);
+        final JsonObject base = configurationBase.deepCopy();
+        deepMerge(base, GSON.fromJson(JSON_FACTORY.toString(built), JsonObject.class));
         return JSON_FACTORY.fromString(base.toString(), JobConfiguration.class);
     }
 
@@ -1420,11 +1455,7 @@ public class BigQueryAction implements ActionService {
                 return job;
             } catch (final GoogleJsonResponseException e) {
                 if(e.getStatusCode() != 409) {
-                    final NonRetryableException rejected = rejectedRequest(e);
-                    if(rejected != null) {
-                        throw rejected;
-                    }
-                    throw e;
+                    throw rejectedOr(e);
                 }
             }
             // Retried bundle or retried firing: the job was already submitted by a previous attempt.
@@ -1496,13 +1527,22 @@ public class BigQueryAction implements ActionService {
         return RETRYABLE_REASONS.contains(error.getReason());
     }
 
-    /** HTTP errors of the insert request: 4xx (other than 408/429) are rejected requests, not transient; null otherwise. */
+    /** HTTP errors of a request: 4xx (other than 408/429) are rejected requests, not transient; null otherwise. */
     static NonRetryableException rejectedRequest(final GoogleJsonResponseException e) {
         final int status = e.getStatusCode();
         if(status >= 400 && status < 500 && status != 408 && status != 429) {
-            return new NonRetryableException("bigquery job submission was rejected: " + e.getMessage(), e);
+            return new NonRetryableException("bigquery request was rejected: " + e.getMessage(), e);
         }
         return null;
+    }
+
+    /** Throws the non-retryable form of a rejected request, otherwise returns the (retryable) exception for the caller to throw. */
+    private static IOException rejectedOr(final GoogleJsonResponseException e) {
+        final NonRetryableException rejected = rejectedRequest(e);
+        if(rejected != null) {
+            throw rejected;
+        }
+        return e;
     }
 
     /**
@@ -1564,7 +1604,7 @@ public class BigQueryAction implements ActionService {
      */
     private String createDeterministicJobId(final Parameters p) {
         final String prefix = Optional.ofNullable(p.jobIdPrefix).orElse("mp-action");
-        final String seed = String.join("\n", jobName, name, new Gson().toJson(p));
+        final String seed = String.join("\n", jobName, name, GSON.toJson(p));
         return prefix + "-" + sanitize(name) + "-" + sha256Hex(seed).substring(0, 32);
     }
 

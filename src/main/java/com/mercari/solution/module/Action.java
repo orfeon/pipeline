@@ -276,8 +276,37 @@ public class Action extends Module<MCollectionTuple> {
         values.put("operation", result.getOperation());
         values.put("jobId", result.getJobId());
         values.put("state", result.getState());
-        values.put("payload", result.getPayloadValues() != null ? result.getPayloadValues() : result.getPayload());
+        values.put("payload", result.getPayloadValues() != null ? result.getPayloadValues() : parsePayloadText(result.getPayload()));
         return values;
+    }
+
+    /**
+     * A text payload is exposed as a map when it is a JSON object (so {@code payload.<path>} works),
+     * otherwise as the text itself (comparable as a whole; a dotted path into it never matches).
+     */
+    private static Object parsePayloadText(final String payload) {
+        if(payload == null) {
+            return null;
+        }
+        try {
+            final JsonElement json = new com.google.gson.Gson().fromJson(payload, JsonElement.class);
+            if(json != null && json.isJsonObject()) {
+                return com.mercari.solution.util.schema.converter.JsonToMapConverter.convert(json);
+            }
+        } catch (final RuntimeException ignored) {
+            // not JSON
+        }
+        return payload;
+    }
+
+    private static boolean matches(final Filter.ConditionNode condition, final Map<String, Object> values) {
+        try {
+            return Filter.filter(condition, values);
+        } catch (final IllegalArgumentException e) {
+            // e.g. a dotted path into a non-JSON text payload: treat as "does not match" rather than failing the firing
+            LOG.warn("action condition could not be evaluated against the result ({}); treating it as not matched", e.getMessage());
+            return false;
+        }
     }
 
     static String abbreviate(final String text, final int max) {
@@ -303,14 +332,14 @@ public class Action extends Module<MCollectionTuple> {
             return result;
         }
         final Map<String, Object> values = createConditionValues(service, result);
-        if(failWhen != null && Filter.filter(failWhen, values)) {
+        if(failWhen != null && matches(failWhen, values)) {
             // the payload can be large (e.g. a Job resource with every source uri): keep the message bounded
             throw new ConditionFailedException(
                     "action service: " + service + " result matched failWhen: " + failWhenJson
                             + ". jobId: " + result.getJobId() + ", state: " + result.getState()
                             + ", payload: " + abbreviate(result.getPayload(), 1024));
         }
-        if(skipWhen != null && Filter.filter(skipWhen, values)) {
+        if(skipWhen != null && matches(skipWhen, values)) {
             return result.withState("SKIPPED");
         }
         return result;

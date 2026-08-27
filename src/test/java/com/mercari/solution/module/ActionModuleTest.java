@@ -520,6 +520,34 @@ public class ActionModuleTest {
     }
 
     @Test
+    public void testConditionOnNonJsonPayloadDoesNotFail() throws Exception {
+        // a dotted path into a plain-text payload cannot match; it must not fail the firing
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: plain
+                    module: mock
+                    inputs:
+                      - input
+                    failWhen: payload.cnt = 0
+                    skipWhen: "payload = 'bytes: 3'"
+                    parameters:
+                      message: "bytes: 3"
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("plain");
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                count++;
+                Assertions.assertEquals("SKIPPED", element.getPrimitiveValue("state"));
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testIllegalConditionIsAssemblyError() throws Exception {
         final String configYaml = SOURCE_YAML + """
                 actions:

@@ -70,6 +70,14 @@ public class TemplateUtil {
         }
     }
 
+    /** Expands the text as a strict template when it contains template syntax; null and plain text are returned as they are. */
+    public static String executeStrictTemplateIfNeeded(final String text, final Map<?, ?> data) {
+        if(text == null || !isTemplateText(text)) {
+            return text;
+        }
+        return executeStrictTemplate(text, data);
+    }
+
     public static boolean isTemplateText(final String text) {
         if(text == null) {
             return false;

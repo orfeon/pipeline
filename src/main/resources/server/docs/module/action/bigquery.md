@@ -26,7 +26,9 @@ Failures are classified by the BigQuery error reason so that `retry` is spent on
 | Job finished with any other reason (`invalidQuery`, `invalid`, `notFound`, `accessDenied`, `duplicate`, `resourcesExceeded`, `stopped`, …) | Non-retryable: routed to failure handling immediately. |
 | Submission rejected with HTTP 4xx (other than 408/429) | Non-retryable. |
 | Submission failed with HTTP 5xx / 429 / network error | Retryable. |
-| Job not `DONE` within `timeoutSeconds` | Non-retryable; with `cancelOnTimeout: true` (default) the job is cancelled first. Prefer `jobTimeoutMs` to have BigQuery itself stop a runaway job. |
+| Job not `DONE` within `timeoutSeconds` | Non-retryable; with `cancelOnTimeout: true` (default) the job is cancelled first. Prefer `jobTimeoutMs` to have BigQuery itself stop a runaway job. (Earlier releases retried the timeout and re-adopted the still-running job; set `cancelOnTimeout: false` and a `retry` block to get close to that behaviour.) |
+
+The existing-job check runs on every submission, also with `wait: false`: a `wait: false` firing whose deterministic id already belongs to a permanently failed job fails immediately, and one whose id belongs to a transiently failed job resubmits it. The deterministic id contains the pipeline job name, so two runs that reuse the same `jobName` (an explicit `--jobName`, `options.jobName` in a fixed serve-mode config) with identical effective parameters adopt each other's job instead of running again — let the runner generate the job name, or make a parameter (e.g. a `labels` value or `jobIdPrefix`) run-specific.
 
 ## Result payload and conditions
 
@@ -42,7 +44,7 @@ With `wait: false` the payload is the job as submitted (`status.state` `PENDING`
 
 ## Templates
 
-- `trigger: perElement` — `${field}` expressions in `query`, `sourceUris`, `destinationTable`, `jobId`, `reservation` and label values are expanded with the element's values (primitive representation, e.g. timestamps as epoch micros).
+- `trigger: perElement` — `${field}` expressions in the parameters marked "template-able" below (`query`, `queryParameters` values, `sourceUris`, `destinationTable`, `defaultDataset`, `jobId`, `reservation`, label values, `sourceTable` / `sourceModel` / `destinationUris`, `sourceTables` / `destinationExpirationTime`, `table` / `dataset` / `view` / `description` / `expirationTime`, `hivePartitioningOptions.sourceUriPrefix`) are expanded with the element's values (primitive representation, e.g. timestamps as epoch micros). The raw `configuration` / `resource` JSON is not templated.
 - `trigger: collect` — the same parameters can use `elements` (list of field maps) and `size`, including FreeMarker list directives; `sourceUrisField` gathers one field's value from every element into `sourceUris`.
 
 ## Operations
@@ -150,7 +152,7 @@ The payload's `statistics.extract.destinationUriFileCounts` lists the number of 
 | jobIdField        | optional | String         | With `trigger: collect`: gathers this field from every collected element and waits for all of them — e.g. fan-out many `jobs.query` steps with `wait: false, priority: BATCH`, then fan-in with one wait. The envelope's `jobId` is the comma-joined list and `payload.jobs` the list of `Job` resources. |
 | location, timeoutSeconds, cancelOnTimeout | optional | | As for job submission. |
 
-A job that finished with an error fails the firing as non-retryable regardless of the reason (this action cannot resubmit a job it did not create). An empty / missing id (`state: SKIPPED`) is not an error.
+All gathered jobs are polled in one loop with a shared backoff and a single `timeoutSeconds` window (on timeout the still-pending jobs are cancelled when `cancelOnTimeout` is set). A job that finished with an error fails the firing as non-retryable regardless of the reason (this action cannot resubmit a job it did not create). An empty / missing id (`state: SKIPPED`) is not an error.
 
 ### tables.* parameters
 
