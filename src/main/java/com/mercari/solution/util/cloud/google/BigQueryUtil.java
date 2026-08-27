@@ -540,7 +540,9 @@ public class BigQueryUtil {
         for(int index=0; index<fields.size(); index++) {
             final TableFieldSchema fieldSchema = fields.get(index);
             final Map<String,Object> listValue = list.get(index);
-            final Object primitiveValue = switch (fieldSchema.getMode()) {
+            // the API omits mode for NULLABLE fields (e.g. jobs.getQueryResults schemas)
+            final String mode = Optional.ofNullable(fieldSchema.getMode()).orElse("NULLABLE");
+            final Object primitiveValue = switch (mode) {
                 case "NULLABLE", "REQUIRED" -> parseAsPrimitiveValue(fieldSchema, listValue);
                 case "REPEATED" -> {
                     final List<Object> primitiveValueList = new ArrayList<>();

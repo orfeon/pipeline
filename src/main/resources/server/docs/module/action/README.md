@@ -51,7 +51,7 @@ An action step is "which service" (`module`), "which operation" (`operation`) an
 
 | service | operations |
 |---|---|
-| bigquery | `jobs.query`, `jobs.load` |
+| bigquery | `jobs.query`, `jobs.load`, `jobs.extract`, `jobs.copy`, `jobs.wait`, `tables.get`, `tables.insert`, `tables.patch`, `tables.delete`, `datasets.get`, `datasets.insert`, `datasets.delete` |
 | tasks | `queues.create`, `queues.update`, `queues.delete`, `queues.pause`, `queues.resume`, `queues.purge`, `queues.get`, `queues.waitForEmpty`, `tasks.run`, `tasks.delete` |
 | vertexai_gemini | `batchPredictionJobs.create` |
 | storage, http | none — single-operation services; `operation` must be omitted |
@@ -86,8 +86,43 @@ Every execution emits exactly one record with the same schema regardless of serv
 
 ## Failure handling and execution guarantees
 
-- If the action throws (including job failure and wait timeout), the firing is first retried on the same worker per `retry` (exponential backoff `initialBackoff × 2^n`, capped at `maxBackoff`; a single attempt when `retry` is absent), then the trigger element is routed to failure handling as a `BadRecord`, honoring `failFast` / `failureSinks`. Use `retry` for transient API errors (429/503, network). Failures that re-execution cannot fix are not retried: a service's `NonRetryableException` (e.g. the http action on a 4xx response or a `poll.failWhen` match), configuration/template errors, and interruption.
-- Execution is **at-least-once**: Beam may retry a bundle and re-invoke the action, and `retry` re-invokes it as well. The bigquery service submits jobs idempotently (deterministic job ids); services without a client-supplied id (vertexai_gemini) may duplicate on retry.
+- If the action throws (including job failure and wait timeout), the firing is first retried on the same worker per `retry` (exponential backoff `initialBackoff × 2^n`, capped at `maxBackoff`; a single attempt when `retry` is absent), then the trigger element is routed to failure handling as a `BadRecord`, honoring `failFast` / `failureSinks`. Use `retry` for transient API errors (429/503, network). Failures that re-execution cannot fix are not retried: a service's `NonRetryableException` (e.g. the http action on a 4xx response or a `poll.failWhen` match, the bigquery action on a rejected job or a permanent job error such as `invalidQuery` / `notFound` / `accessDenied`), a module-level `failWhen` match, configuration/template errors, and interruption.
+- Execution is **at-least-once**: Beam may retry a bundle and re-invoke the action, and `retry` re-invokes it as well. The bigquery service submits jobs idempotently (deterministic job ids, resubmitting under a `-r<n>` suffix only when the earlier attempt failed transiently); services without a client-supplied id (vertexai_gemini) may duplicate on retry.
+
+## Result conditions: failWhen / skipWhen
+
+Two optional module-level conditions are evaluated **after** a successful execution, against the result envelope — so a step can act as a guard (stop the flow when a result is not what it should be) or a no-op (skip when there is nothing to do) without a separate check step:
+
+| field | when it matches |
+|---|---|
+| `failWhen` | The firing fails with a non-retryable error (no `retry` re-execution; routed to failure handling per `failFast` / `failureSinks`). The error message carries the condition and the result. |
+| `skipWhen` | The envelope is emitted with `state: SKIPPED` (`jobId` and `payload` kept); steps that `waits` on it proceed. Evaluated only when `failWhen` did not match. |
+
+The condition is a [filter](../common/filter.md) — usually the SQL-like text form — over these values:
+
+| key | value |
+|---|---|
+| `service`, `operation`, `jobId`, `state` | The envelope fields. |
+| `payload.<path>` | A dotted path into the service's result payload (the `payload` JSON of the envelope). Each service page documents its payload structure; bigquery returns the Jobs API `Job` resource with numeric fields as numbers, e.g. `payload.statistics.query.numDmlAffectedRows`. |
+
+Conditions are post-execution only: a pre-check (e.g. "does the table have rows") is a separate action step gated by `waits`. A missing key compares as null (`payload.x > 0` is false when `x` is absent). Names that are SQL reserved words (`count`, `table`, `order`, …) must be back-quoted: ``payload.`count` = 0``.
+
+```yaml
+actions:
+  - name: merge
+    module: bigquery
+    operation: jobs.query
+    waits: [load]
+    failWhen: payload.statistics.query.numDmlAffectedRows = 0    # nothing merged: stop before the swap
+    parameters:
+      query: MERGE `myproject.mydataset.target` t USING `myproject.mydataset.staging` s ON t.id = s.id WHEN NOT MATCHED THEN INSERT ROW
+  - name: swap_view
+    module: bigquery
+    operation: jobs.query
+    waits: [merge]
+    parameters:
+      query: CREATE OR REPLACE VIEW `myproject.mydataset.current` AS SELECT * FROM `myproject.mydataset.target`
+```
 - There is **no try/finally**: if the pipeline fails mid-way, cleanup actions gated on later steps never run (e.g. a scale-down action after a failed read). Plan recovery accordingly (e.g. `system.failure.alterConfig`).
 
 ## Common fields
@@ -102,6 +137,8 @@ Every execution emits exactly one record with the same schema regardless of serv
 | waits        | optional | Array<String\>  | Steps that must complete before this action fires. |
 | strategy     | optional | [Strategy](../common/strategy.md) | Windowing strategy applied when flattening the inputs (`perElement` / `collect`). |
 | retry        | optional | Retry           | Re-execute a failed firing with exponential backoff before routing it to failure handling. `maxAttempts` (default `3` when the block is present; `1` = no retry without it), `initialBackoff` (default `1s`), `maxBackoff` (default `30s`); durations as `500ms` / `10s` / `PT1M`. See [Failure handling](#failure-handling-and-execution-guarantees). |
+| failWhen     | optional | [Filter](../common/filter.md) | Post-execution condition on the result envelope; when it matches, the firing fails (non-retryable). See [Result conditions](#result-conditions-failwhen--skipwhen). |
+| skipWhen     | optional | [Filter](../common/filter.md) | Post-execution condition; when it matches, the envelope is emitted with `state: SKIPPED`. See [Result conditions](#result-conditions-failwhen--skipwhen). |
 | fireOnEmpty  | optional | Boolean         | `collect` only: fire once with an empty element list when no input element arrives (e.g. report "0 files written", still create a marker). Requires the default strategy (global window; declaring `strategy` with it is an assembly-time error) and a bounded input — on an unbounded input the global window never closes, so the empty firing never happens. Default: `false`. |
 | parameters   | required | Object          | The service's own parameters (see each service page). |
 | failFast, failureSinks, tags, logs, ignore, description, args | optional | | The standard module fields. |

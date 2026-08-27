@@ -3,6 +3,7 @@ package com.mercari.solution.config;
 import com.mercari.solution.module.Action;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.Strategy;
+import com.google.gson.JsonElement;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +23,9 @@ public class ActionConfig extends ModuleConfig {
     private Strategy strategy;
     private Action.Retry retry;
     private Boolean fireOnEmpty;
+    // condition text (SQL-like) or JSON condition object; kept as JsonElement and translated by the module
+    private JsonElement failWhen;
+    private JsonElement skipWhen;
 
     public List<String> getInputs() {
         if(inputs == null) {
@@ -57,6 +61,14 @@ public class ActionConfig extends ModuleConfig {
 
     public Boolean getFireOnEmpty() {
         return fireOnEmpty;
+    }
+
+    public JsonElement getFailWhen() {
+        return failWhen;
+    }
+
+    public JsonElement getSkipWhen() {
+        return skipWhen;
     }
 
 }

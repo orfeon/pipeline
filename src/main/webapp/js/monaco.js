@@ -291,6 +291,8 @@ function buildPipelineSchema() {
     actionModule.properties.trigger = { type: 'string', enum: ['once', 'perElement', 'collect'] };
     actionModule.properties.retry = { type: 'object' };
     actionModule.properties.fireOnEmpty = { type: 'boolean' };
+    actionModule.properties.failWhen = { type: ['string', 'object'], description: 'Post-execution condition: fail the firing when it matches (SQL-like text over payload.*, state, jobId)' };
+    actionModule.properties.skipWhen = { type: ['string', 'object'], description: 'Post-execution condition: emit state SKIPPED when it matches' };
     return {
         type: 'object',
         properties: {

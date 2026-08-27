@@ -141,7 +141,7 @@ sinks:
 actions:
   - title: bigquery
     description: Runs a BigQuery job (operation jobs.query or jobs.load) via the Jobs API and waits for its completion, with idempotent deterministic job ids (a retried bundle adopts the running job). trigger once fires after upstream steps complete; perElement runs one job per record with ${field} templates; collect runs one job over all records (e.g. sourceUrisField gathers every written file into a single load job). Emits the common action envelope (service, operation, jobId, state, startedAt, finishedAt, payload).
-    tags: [action, bigquery, job, query, load, trigger, batch, workflow]
+    tags: [action, bigquery, job, query, load, extract, copy, snapshot, wait, table, dataset, view, guard, trigger, batch, workflow]
   - title: vertexai_gemini
     description: Launches a Vertex AI batch prediction job (batchPredictionJobs REST API) for a Gemini model and waits for its completion by polling the job state. Submission is not idempotent (no client-supplied job id), so prefer trigger once. Emits the common action envelope.
     tags: [action, vertexai, gemini, batch, prediction, job, trigger, workflow]
