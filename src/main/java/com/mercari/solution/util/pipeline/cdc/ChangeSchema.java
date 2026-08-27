@@ -188,7 +188,7 @@ public class ChangeSchema {
             case "DATE" -> TYPE_DATE;
             case "TIMESTAMP" -> TYPE_TIMESTAMP;
             case "JSON", "PG_JSONB" -> TYPE_JSON;
-            case "STRING" -> TYPE_STRING;
+            case "STRING", "UUID" -> TYPE_STRING; // UUID travels as its canonical string in the envelope
             default -> trimmed.toUpperCase(Locale.ROOT); // ARRAY<...> / STRUCT<...> already normalized, or unknown
         };
     }

@@ -33,9 +33,21 @@ import java.util.stream.Stream;
 public class RowSchemaUtil {
 
     public static final String OPTION_NAME_DEFAULT_VALUE = "default";
+    public static final String OPTION_NAME_SPANNER_TYPE = "spannerType";
 
     private static final Schema.FieldType REQUIRED_LOGICAL_DATETIME = Schema.FieldType.logicalType(SqlTypes.DATETIME).withNullable(false);
     private static final Schema.FieldType NULLABLE_LOGICAL_DATETIME = Schema.FieldType.logicalType(SqlTypes.DATETIME).withNullable(true);
+
+    public static Schema.Options createSpannerTypeOptions(final String spannerType) {
+        return Schema.Options.builder()
+                .setOption(OPTION_NAME_SPANNER_TYPE, Schema.FieldType.STRING, spannerType)
+                .build();
+    }
+
+    public static boolean hasSpannerType(final Schema.Options options, final String spannerType) {
+        return options.hasOption(OPTION_NAME_SPANNER_TYPE)
+                && spannerType.equalsIgnoreCase(options.getValue(OPTION_NAME_SPANNER_TYPE));
+    }
 
     public static Schema.Builder toBuilder(final Schema schema) {
         return toBuilder(schema, null, false);

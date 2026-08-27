@@ -84,7 +84,7 @@ public class StructSchemaUtil {
                 case BOOL -> struct.getBooleanList(fieldName);
                 case BYTES -> struct.getBytesList(fieldName).stream().map(ByteArray::toByteArray).toList();
                 case STRING -> struct.getStringList(fieldName);
-                case UUID -> struct.getUuidList(fieldName).stream().map(java.util.UUID::toString).toList();
+                case UUID -> struct.getUuidList(fieldName).stream().map(v -> v == null ? null : v.toString()).toList();
                 case JSON -> struct.getJsonList(fieldName);
                 case INT64 -> struct.getLongList(fieldName);
                 case FLOAT32 -> struct.getFloatList(fieldName);
@@ -263,7 +263,9 @@ public class StructSchemaUtil {
                 case BOOL -> Arrays.toString(struct.getBooleanArray(field));
                 case BYTES -> struct.getBytesList(field).stream().map(ByteArray::toBase64).collect(Collectors.joining(","));
                 case STRING, PG_JSONB, PG_NUMERIC -> String.join(",", struct.getStringList(field));
-                case UUID -> struct.getUuidList(field).stream().map(java.util.UUID::toString).collect(Collectors.joining(","));
+                case UUID -> struct.getUuidList(field).stream()
+                        .map(v -> v == null ? "null" : v.toString())
+                        .collect(Collectors.joining(","));
                 case JSON -> String.join(",", struct.getJsonList(field));
                 case INT64 -> struct.getLongList(field).stream().map(l -> Long.toString(l)).collect(Collectors.joining(","));
                 case FLOAT32 -> struct.getFloatList(field).stream().map(l -> Float.toString(l)).collect(Collectors.joining(","));
@@ -358,6 +360,7 @@ public class StructSchemaUtil {
         return switch (field.getType().getCode()) {
             case BOOL -> BigtableSchemaUtil.toByteString(struct.getBoolean(fieldName));
             case STRING -> BigtableSchemaUtil.toByteString(struct.getString(fieldName));
+            case UUID -> BigtableSchemaUtil.toByteString(struct.getUuid(fieldName).toString());
             case JSON -> BigtableSchemaUtil.toByteString(struct.getJson(fieldName));
             case BYTES -> BigtableSchemaUtil.toByteString(struct.getBytes(fieldName).toByteArray());
             case INT64 -> BigtableSchemaUtil.toByteString(struct.getLong(fieldName));
@@ -695,7 +698,7 @@ public class StructSchemaUtil {
             case ARRAY ->
                 switch (value.getType().getArrayElementType().getCode()) {
                     case STRING -> value.getAsStringList();
-                    case UUID -> value.getUuidArray().stream().map(java.util.UUID::toString).collect(Collectors.toList());
+                    case UUID -> value.getUuidArray().stream().map(v -> v == null ? null : v.toString()).toList();
                     case BOOL -> value.getBoolArray();
                     case JSON -> value.getJsonArray();
                     case INT64 -> value.getInt64Array();
@@ -734,7 +737,7 @@ public class StructSchemaUtil {
             case ARRAY ->
                     switch (value.getType().getArrayElementType().getCode()) {
                         case STRING -> value.getAsStringList();
-                        case UUID -> value.getUuidArray().stream().map(java.util.UUID::toString).collect(Collectors.toList());
+                        case UUID -> value.getUuidArray().stream().map(v -> v == null ? null : v.toString()).toList();
                         case BOOL -> value.getBoolArray();
                         case JSON -> value.getJsonArray();
                         case INT64 -> value.getInt64Array();
@@ -1155,6 +1158,9 @@ public class StructSchemaUtil {
             switch (field.getType().getCode()) {
                 case BOOL -> builder.set(field.getName()).to((Boolean) value);
                 case JSON, STRING -> builder.set(field.getName()).to((String) value);
+                case UUID -> builder.set(field.getName()).to(value == null ? null : value instanceof UUID
+                        ? (UUID) value
+                        : UUID.fromString(value.toString()));
                 case BYTES -> builder.set(field.getName()).to((ByteArray) value);
                 case INT64 -> {
                     if(value instanceof Integer) {
@@ -1241,10 +1247,15 @@ public class StructSchemaUtil {
                 LOG.info("skipField: " + struct.getString("COLUMN_NAME"));
                 continue;
             }
-            builder.addField(Schema.Field.of(
+            Schema.Field field = Schema.Field.of(
                     struct.getString("COLUMN_NAME"),
                     convertFieldType(struct.getString("SPANNER_TYPE")))
-                    .withNullable("YES".equals(struct.getString("IS_NULLABLE"))));
+                    .withNullable("YES".equals(struct.getString("IS_NULLABLE")));
+            final String spannerType = struct.getString("SPANNER_TYPE").trim().toUpperCase();
+            if("UUID".equals(spannerType) || "ARRAY<UUID>".equals(spannerType)) {
+                field = field.withOptions(RowSchemaUtil.createSpannerTypeOptions("UUID"));
+            }
+            builder.addField(field);
         }
         return builder.build();
     }
@@ -1272,6 +1283,7 @@ public class StructSchemaUtil {
             case "NUMERIC" -> Schema.FieldType.DECIMAL;
             case "BOOL" -> Schema.FieldType.BOOLEAN;
             case "JSON" -> Schema.FieldType.STRING;
+            case "UUID" -> Schema.FieldType.STRING;
             case "DATE" -> CalciteUtils.DATE;
             case "TIMESTAMP" -> Schema.FieldType.DATETIME;
             case "BYTES" -> Schema.FieldType.BYTES;
@@ -1402,6 +1414,7 @@ public class StructSchemaUtil {
                 }
                 final String stringValue = switch (value.getType().getCode()) {
                     case STRING -> value.getString();
+                    case UUID -> value.getUuid().toString();
                     case JSON -> value.getJson();
                     case BYTES -> Base64.getEncoder().encodeToString(value.getBytes().toByteArray());
                     case BOOL -> Boolean.toString(value.getBool());
@@ -1489,6 +1502,17 @@ public class StructSchemaUtil {
                 };
                 yield Value.date(dateValue);
             }
+            case UUID -> {
+                if(value.isNull()) {
+                    yield Value.uuid(null);
+                }
+                final UUID uuidValue = switch (value.getType().getCode()) {
+                    case UUID -> value.getUuid();
+                    case STRING -> UUID.fromString(value.getString());
+                    default -> throw new IllegalArgumentException("Can not adjust value type: " + value.getType() + " to UUID");
+                };
+                yield Value.uuid(uuidValue);
+            }
             case TIMESTAMP -> {
                 if(value.isNull()) {
                     yield Value.timestamp(null);
@@ -1556,6 +1580,7 @@ public class StructSchemaUtil {
                         case "NUMERIC" -> keyBuilder = keyBuilder.append(isNull ? null : fieldValue.getAsBigDecimal());
                         case "DATE" -> keyBuilder = keyBuilder.append(isNull ? null : Date.parseDate(fieldValue.getAsString()));
                         case "TIMESTAMP" -> keyBuilder = keyBuilder.append(isNull ? null : Timestamp.parseTimestamp(fieldValue.getAsString()));
+                        case "UUID" -> keyBuilder = keyBuilder.append(isNull ? null : UUID.fromString(fieldValue.getAsString()));
                         case "JSON", "STRING" -> keyBuilder = keyBuilder.append(isNull ? null : fieldValue.getAsString());
                         case "BYTES" -> {
                             if(isNull) {
@@ -1588,7 +1613,9 @@ public class StructSchemaUtil {
                                 }
                             }
                         }
-                        case ENUM, STRING -> keyBuilder = keyBuilder.append(isNull ? null : fieldValue.getAsString());
+                        case ENUM, STRING -> keyBuilder = LogicalTypes.uuid().equals(fieldSchema.getLogicalType())
+                                ? keyBuilder.append(isNull ? null : UUID.fromString(fieldValue.getAsString()))
+                                : keyBuilder.append(isNull ? null : fieldValue.getAsString());
                         case INT -> {
                             if (LogicalTypes.date().equals(fieldSchema.getLogicalType())) {
                                 keyBuilder = keyBuilder.append(isNull ? null : Date.parseDate(fieldValue.getAsString()));
@@ -1635,6 +1662,7 @@ public class StructSchemaUtil {
             case "NUMERIC" -> Type.numeric();
             case "BOOL" -> Type.bool();
             case "JSON" -> Type.json();
+            case "UUID" -> Type.uuid();
             case "DATE" -> Type.date();
             case "TIMESTAMP" -> Type.timestamp();
             default -> {
@@ -1731,6 +1759,7 @@ public class StructSchemaUtil {
         return switch (type.getCode()) {
             case BOOL -> Value.bool((Boolean) value);
             case STRING -> Value.string((String) value);
+            case UUID -> Value.uuid(value == null ? null : value instanceof UUID ? (UUID) value : UUID.fromString(value.toString()));
             case BYTES -> Value.bytes((ByteArray) value);
             case JSON -> Value.json((String) value);
             case INT64 -> {
@@ -1768,6 +1797,18 @@ public class StructSchemaUtil {
             case ARRAY -> switch (type.getArrayElementType().getCode()) {
                     case BOOL -> Value.boolArray((Iterable<Boolean>) value);
                     case STRING -> Value.stringArray((Iterable<String>) value);
+                    case UUID -> {
+                        if(value == null) {
+                            yield Value.uuidArray((Iterable<UUID>) null);
+                        }
+                        final List<UUID> uuids = new ArrayList<>();
+                        for(final Object element : (Iterable<?>) value) {
+                            uuids.add(element == null ? null : element instanceof UUID
+                                    ? (UUID) element
+                                    : UUID.fromString(element.toString()));
+                        }
+                        yield Value.uuidArray(uuids);
+                    }
                     case BYTES -> Value.bytesArray((Iterable<ByteArray>) value);
                     case JSON -> Value.jsonArray((Iterable<String>) value);
                     case INT64 -> Value.int64Array((Iterable<Long>) value);
@@ -1795,6 +1836,7 @@ public class StructSchemaUtil {
         switch (field.getType().getCode()) {
             case BOOL -> builder.set(field.getName()).to((Boolean)null);
             case JSON, STRING -> builder.set(field.getName()).to((String)null);
+            case UUID -> builder.set(field.getName()).to((UUID)null);
             case BYTES -> builder.set(field.getName()).to((ByteArray) null);
             case INT64 -> builder.set(field.getName()).to((Long)null);
             case FLOAT32 -> builder.set(field.getName()).to((Float) null);
@@ -1808,6 +1850,7 @@ public class StructSchemaUtil {
                     case BOOL -> builder.set(field.getName()).toBoolArray((Iterable<Boolean>)null);
                     case BYTES -> builder.set(field.getName()).toBytesArray(null);
                     case STRING -> builder.set(field.getName()).toStringArray(null);
+                    case UUID -> builder.set(field.getName()).toUuidArray(null);
                     case JSON -> builder.set(field.getName()).toJsonArray(null);
                     case INT64 -> builder.set(field.getName()).toInt64Array((Iterable<Long>)null);
                     case FLOAT32 -> builder.set(field.getName()).toFloat32Array((Iterable<Float>)null);

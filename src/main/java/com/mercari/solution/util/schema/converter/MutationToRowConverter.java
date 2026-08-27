@@ -36,11 +36,12 @@ public class MutationToRowConverter {
     }
 
     private static Object convertRowValue(final Value value) {
-        if(value == null) {
+        if(value == null || value.isNull()) {
             return null;
         }
         return switch (value.getType().getCode()) {
             case STRING -> value.getString();
+            case UUID -> value.getUuid().toString();
             case BOOL -> value.getBool();
             case INT64 -> value.getInt64();
             case FLOAT64 -> value.getFloat64();

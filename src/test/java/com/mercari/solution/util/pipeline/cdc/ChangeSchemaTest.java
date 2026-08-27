@@ -81,6 +81,8 @@ public class ChangeSchemaTest {
 
         Assertions.assertEquals("ARRAY<INT64>", ChangeSchema.fromSpannerTypeCode("ARRAY<INT64>"));
         Assertions.assertEquals(ChangeSchema.TYPE_NUMERIC, ChangeSchema.fromSpannerTypeCode("PG_NUMERIC"));
+        Assertions.assertEquals(ChangeSchema.TYPE_STRING, ChangeSchema.fromSpannerTypeCode("UUID"));
+        Assertions.assertEquals("ARRAY<STRING>", ChangeSchema.fromSpannerTypeCode("{\"code\":\"ARRAY\",\"array_element_type\":{\"code\":\"UUID\"}}"));
         Assertions.assertEquals(ChangeSchema.TYPE_STRING, ChangeSchema.fromSpannerTypeCode(null));
     }
 

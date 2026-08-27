@@ -141,6 +141,15 @@ sinks:
       transactional: true
 ```
 
+## Column types
+
+Input field types map to Spanner column types one-to-one; the sink does not consult the destination
+table schema, so the input type must match the column type (Spanner mutations do not coerce types).
+In particular, a `uuid` input field is written as a native Spanner `UUID` value (an `array` of `uuid` as
+`ARRAY<UUID>`), and UUID primary keys are bound as `UUID` key parts. To write a `uuid` field into a
+`STRING` column, cast it first (e.g. a `select` transform with `type: string`); conversely, cast a
+`string` field to `uuid` to target a `UUID` column.
+
 ## Mutation operations
 
 ### INSERT_OR_UPDATE (default)
