@@ -80,8 +80,7 @@ public class DataflowFlexTemplateLauncher implements Launcher {
                 .location(job.getLocation())
                 .createTime(Instant.ofEpochSecond(job.getCreateTime().getSeconds(), job.getCreateTime().getNanos()).toString())
                 .state(job.getCurrentState().name())
-                .consoleUrl("https://console.cloud.google.com/dataflow/jobs/" + job.getLocation() + "/" + job.getId()
-                        + "?project=" + job.getProjectId())
+                .consoleUrl(DataflowUtil.consoleUrl(job))
                 .build();
     }
 
