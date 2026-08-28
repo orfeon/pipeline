@@ -91,11 +91,35 @@ public class SchemaMetadataTest {
 
         // copy() keeps it, but a schema derived through builder(schema) does not claim to be the source table
         Assertions.assertEquals("members table", schema.copy().getDescription());
-        Assertions.assertNull(Schema.builder(schema).build().getDescription());
+        Assertions.assertEquals("members table", schema.copy().getAvroSchema().getDoc());
+        final Schema derived = Schema.builder(schema).withField("extra", Schema.FieldType.STRING).build();
+        Assertions.assertNull(derived.getDescription());
+        Assertions.assertNull(derived.getAvroSchema().getDoc());
+        Assertions.assertFalse(derived.toJsonObject().has("description"));
 
-        // avro record doc round trip
+        // avro record doc round trip, in both directions, also for a schema created from an avro schema
         final Schema fromAvro = Schema.of(schema.getAvroSchema());
         Assertions.assertEquals("members table", fromAvro.getDescription());
+        Assertions.assertEquals("members table", fromAvro.getAvroSchema().getDoc());
+        final Schema derivedFromAvro = Schema.builder(fromAvro).withField("extra", Schema.FieldType.STRING).build();
+        Assertions.assertNull(derivedFromAvro.getDescription());
+        Assertions.assertNull(derivedFromAvro.getAvroSchema().getDoc());
+    }
+
+    @Test
+    public void testNestedElementDescriptionReachesAvro() {
+        final Schema schema = Schema.parse("""
+                { "fields": [
+                  { "name": "id", "type": "long" },
+                  { "name": "address", "type": "element", "description": "address field", "fields": [
+                    { "name": "zip", "type": "string", "description": "zip code" }
+                  ] }
+                ] }
+                """);
+        final org.apache.avro.Schema avro = schema.getAvroSchema();
+        Assertions.assertEquals("address field", avro.getField("address").doc());
+        final org.apache.avro.Schema address = com.mercari.solution.util.schema.AvroSchemaUtil.unnestUnion(avro.getField("address").schema());
+        Assertions.assertEquals("zip code", address.getField("zip").doc());
     }
 
     @Test

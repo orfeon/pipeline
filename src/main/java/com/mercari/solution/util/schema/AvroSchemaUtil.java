@@ -225,19 +225,40 @@ public class AvroSchemaUtil {
         if(recordSchema == null || doc == null || doc.isEmpty() || !Schema.Type.RECORD.equals(recordSchema.getType())) {
             return recordSchema;
         }
-        final List<Schema.Field> fields = new ArrayList<>();
-        for(final Schema.Field field : recordSchema.getFields()) {
-            final Schema.Field newField = new Schema.Field(field.name(), field.schema(), field.doc(), field.defaultVal(), field.order());
-            for(final Map.Entry<String, Object> prop : field.getObjectProps().entrySet()) {
-                newField.addProp(prop.getKey(), prop.getValue());
-            }
-            fields.add(newField);
+        return copyRecord(recordSchema, doc, copyFields(recordSchema.getFields()));
+    }
+
+    /** Returns a copy of the record schema without its doc (a no-op when there is none or for non-record schemas). */
+    public static Schema stripDoc(final Schema recordSchema) {
+        if(recordSchema == null || recordSchema.getDoc() == null || !Schema.Type.RECORD.equals(recordSchema.getType())) {
+            return recordSchema;
         }
+        return copyRecord(recordSchema, null, copyFields(recordSchema.getFields()));
+    }
+
+    /** New record with the same name / namespace / props as {@code recordSchema}, the given doc and (fresh) fields. */
+    private static Schema copyRecord(final Schema recordSchema, final String doc, final List<Schema.Field> fields) {
         final Schema record = Schema.createRecord(recordSchema.getName(), doc, recordSchema.getNamespace(), recordSchema.isError(), fields);
         for(final Map.Entry<String, Object> prop : recordSchema.getObjectProps().entrySet()) {
             record.addProp(prop.getKey(), prop.getValue());
         }
         return record;
+    }
+
+    private static List<Schema.Field> copyFields(final List<Schema.Field> fields) {
+        final List<Schema.Field> copied = new ArrayList<>();
+        for(final Schema.Field field : fields) {
+            copied.add(copyField(field, field.schema(), field.doc()));
+        }
+        return copied;
+    }
+
+    private static Schema.Field copyField(final Schema.Field field, final Schema schema, final String doc) {
+        final Schema.Field newField = new Schema.Field(field.name(), schema, doc, field.defaultVal(), field.order());
+        for(final Map.Entry<String, Object> prop : field.getObjectProps().entrySet()) {
+            newField.addProp(prop.getKey(), prop.getValue());
+        }
+        return newField;
     }
 
     private static Schema mergeDescriptions(final Schema schema, final List<TableFieldSchema> tableFields) {
@@ -260,17 +281,9 @@ public class AvroSchemaUtil {
                             doc = tableField.getDescription();
                         }
                     }
-                    final Schema.Field newField = new Schema.Field(field.name(), fieldSchema, doc, field.defaultVal(), field.order());
-                    for(final Map.Entry<String, Object> prop : field.getObjectProps().entrySet()) {
-                        newField.addProp(prop.getKey(), prop.getValue());
-                    }
-                    fields.add(newField);
+                    fields.add(copyField(field, fieldSchema, doc));
                 }
-                final Schema record = Schema.createRecord(schema.getName(), schema.getDoc(), schema.getNamespace(), schema.isError(), fields);
-                for(final Map.Entry<String, Object> prop : schema.getObjectProps().entrySet()) {
-                    record.addProp(prop.getKey(), prop.getValue());
-                }
-                return record;
+                return copyRecord(schema, schema.getDoc(), fields);
             }
             case UNION -> {
                 final List<Schema> types = new ArrayList<>();

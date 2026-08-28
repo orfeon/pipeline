@@ -114,7 +114,7 @@ public class Schema implements Serializable {
     public AvroSchema getAvro() {
         if((avro == null || avro.json == null)) {
             if(fields != null && !fields.isEmpty()) {
-                avro = new AvroSchema(AvroSchemaUtil.withDoc(ElementToAvroConverter.convertSchema(fields), description));
+                avro = new AvroSchema(ElementToAvroConverter.convertSchema("root", fields, description));
             }
         } else if(avro.schema == null) {
             avro.setup();
@@ -137,7 +137,7 @@ public class Schema implements Serializable {
         return Optional
                 .ofNullable(getAvro())
                 .map(AvroSchema::getSchema)
-                .orElseGet(() -> AvroSchemaUtil.withDoc(ElementToAvroConverter.convertSchema(fields), description));
+                .orElseGet(() -> ElementToAvroConverter.convertSchema("root", fields, description));
     }
 
     public Descriptors.Descriptor getProtobufDescriptor() {
@@ -226,7 +226,7 @@ public class Schema implements Serializable {
             case AVRO -> {
                 if(avro == null || avro.schema == null) {
                     if(fields != null && !fields.isEmpty()) {
-                        avro = new AvroSchema(AvroSchemaUtil.withDoc(ElementToAvroConverter.convertSchema(this.fields), description));
+                        avro = new AvroSchema(ElementToAvroConverter.convertSchema("root", this.fields, description));
                     }
                 }
                 avro.setup();
@@ -526,9 +526,7 @@ public class Schema implements Serializable {
     }
 
     public Schema copy() {
-        final Schema copied = Schema.builder(this).build();
-        copied.description = this.description;
-        return copied;
+        return new Builder(this, true).build();
     }
 
     public JsonObject toJsonObject() {
@@ -1423,6 +1421,16 @@ public class Schema implements Serializable {
         }
 
         private Builder(Schema schema) {
+            this(schema, false);
+        }
+
+        /**
+         * @param keepDescription true for {@link Schema#copy()}; false for {@link Schema#builder(Schema)},
+         *                        where the schema-level description (and the record doc of the cached
+         *                        Avro schema) is dropped so that a derived schema does not claim to be
+         *                        the source table.
+         */
+        private Builder(Schema schema, boolean keepDescription) {
             if(schema == null) {
                 this.name = "";
                 this.fields = new ArrayList<>();
@@ -1434,11 +1442,22 @@ public class Schema implements Serializable {
             this.fields = schema.fields.stream()
                     .map(Field::copy)
                     .collect(Collectors.toList());
+            if(keepDescription) {
+                this.description = schema.description;
+            }
             if(schema.avro != null) {
                 this.avro = new AvroSchema();
                 this.avro.file = schema.avro.file;
-                this.avro.json = schema.avro.json;
-                this.avro.schema = schema.avro.schema;
+                if(keepDescription) {
+                    this.avro.json = schema.avro.json;
+                    this.avro.schema = schema.avro.schema;
+                } else {
+                    // materialize first so that a json-only holder is stripped as well
+                    schema.avro.setup();
+                    final org.apache.avro.Schema stripped = AvroSchemaUtil.stripDoc(schema.avro.schema);
+                    this.avro.schema = stripped;
+                    this.avro.json = schema.avro.json != null && stripped != null ? stripped.toString() : schema.avro.json;
+                }
             }
             if(schema.protobuf != null) {
                 this.protobuf = new ProtobufSchema();

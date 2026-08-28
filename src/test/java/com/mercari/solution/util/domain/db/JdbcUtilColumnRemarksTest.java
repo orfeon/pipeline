@@ -24,7 +24,26 @@ public class JdbcUtilColumnRemarksTest {
                 statement.execute("COMMENT ON COLUMN members.id IS 'member id'");
                 statement.execute("COMMENT ON COLUMN members.score IS 'latest score'");
                 statement.execute("COMMENT ON TABLE members IS 'members table'");
+                // LIKE-wildcard neighbours: `_` must not match `X`, and same-named tables in other
+                // schemas must not contribute
+                statement.execute("CREATE TABLE order_items (id BIGINT PRIMARY KEY)");
+                statement.execute("CREATE TABLE orderXitems (id BIGINT PRIMARY KEY)");
+                statement.execute("COMMENT ON COLUMN orderXitems.id IS 'wrong table'");
+                statement.execute("COMMENT ON TABLE orderXitems IS 'wrong table'");
+                statement.execute("CREATE SCHEMA archive");
+                statement.execute("CREATE TABLE archive.members (id BIGINT PRIMARY KEY)");
+                statement.execute("COMMENT ON COLUMN archive.members.id IS 'archived member id'");
+                statement.execute("COMMENT ON TABLE archive.members IS 'archived members'");
             }
+
+            // unqualified name is scoped to the current schema; `_` is escaped
+            Assertions.assertTrue(JdbcUtil.getColumnRemarks(connection, "order_items").isEmpty());
+            Assertions.assertNull(JdbcUtil.getTableRemark(connection, "order_items"));
+            Assertions.assertEquals("wrong table", JdbcUtil.getColumnRemarks(connection, "orderXitems").get("ID"));
+            // qualified name selects the other schema
+            Assertions.assertEquals("archived member id", JdbcUtil.getColumnRemarks(connection, "archive.members").get("ID"));
+            Assertions.assertEquals("archived members", JdbcUtil.getTableRemark(connection, "archive.members"));
+            Assertions.assertEquals("\\_a\\_b\\%c", JdbcUtil.escapeLikePattern("_a_b%c", "\\"));
 
             final Map<String, String> remarks = JdbcUtil.getColumnRemarks(connection, "members");
             Assertions.assertEquals("member id", remarks.get("ID"));

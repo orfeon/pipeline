@@ -486,32 +486,14 @@ public class JdbcUtil {
      */
     public static Map<String, String> getColumnRemarks(final Connection connection, final String table) {
         final Map<String, String> remarks = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        if(table == null || table.isEmpty()) {
-            return remarks;
-        }
-        final String[] parts = table.split("\\.");
-        final String tableName = parts[parts.length - 1];
-        final String schemaName = parts.length > 1 ? parts[parts.length - 2] : null;
-        try {
-            final DatabaseMetaData metaData = connection.getMetaData();
-            for(final String candidate : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
-                try(final ResultSet resultSet = metaData.getColumns(null, schemaName, candidate, null)) {
-                    while(resultSet.next()) {
-                        final String remark = resultSet.getString("REMARKS");
-                        if(remark != null && !remark.isEmpty()) {
-                            remarks.put(resultSet.getString("COLUMN_NAME"), remark);
-                        }
+        lookupTableMetadata(connection, table, "column remarks",
+                (metaData, catalog, schema, tableName) -> metaData.getColumns(catalog, schema, tableName, null),
+                resultSet -> {
+                    final String remark = resultSet.getString("REMARKS");
+                    if(remark != null && !remark.isEmpty()) {
+                        remarks.put(resultSet.getString("COLUMN_NAME"), remark);
                     }
-                } catch (final SQLException e) {
-                    // try the next name candidate
-                }
-                if(!remarks.isEmpty()) {
-                    break;
-                }
-            }
-        } catch (final Exception e) {
-            LOG.warn("Failed to get column remarks of table: {}, cause: {}", table, e.getMessage());
-        }
+                });
         return remarks;
     }
 
@@ -520,30 +502,115 @@ public class JdbcUtil {
      * has none or the metadata cannot be read (informational only, never throws).
      */
     public static String getTableRemark(final Connection connection, final String table) {
+        final String[] holder = new String[1];
+        lookupTableMetadata(connection, table, "table remark",
+                (metaData, catalog, schema, tableName) -> metaData.getTables(catalog, schema, tableName, null),
+                resultSet -> {
+                    final String remark = resultSet.getString("REMARKS");
+                    if(holder[0] == null && remark != null && !remark.isEmpty()) {
+                        holder[0] = remark;
+                    }
+                });
+        return holder[0];
+    }
+
+    @FunctionalInterface
+    private interface MetadataQuery {
+        ResultSet query(DatabaseMetaData metaData, String catalog, String schema, String tableName) throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface MetadataRowConsumer {
+        void accept(ResultSet resultSet) throws SQLException;
+    }
+
+    /**
+     * Runs a {@link DatabaseMetaData} lookup for exactly one table, resolving the driver's
+     * catalog / schema convention and identifier case:
+     * <ul>
+     *   <li>{@code qualifier.table}: the qualifier is tried as schema and then as catalog
+     *       (MySQL / TiDB expose databases as catalogs and ignore the schema pattern), in the
+     *       given, upper and lower case;</li>
+     *   <li>unqualified: scoped to the connection's current catalog and schema so that a
+     *       same-named table elsewhere does not contribute;</li>
+     *   <li>the name is tried as given, upper- and lower-cased (deduplicated), stopping at the
+     *       first candidate that returns any row; LIKE wildcards in the name are escaped.</li>
+     * </ul>
+     * Never throws; failures are logged and leave the consumer untouched.
+     */
+    private static void lookupTableMetadata(
+            final Connection connection,
+            final String table,
+            final String what,
+            final MetadataQuery query,
+            final MetadataRowConsumer consumer) {
+
         if(table == null || table.isEmpty()) {
-            return null;
+            return;
         }
         final String[] parts = table.split("\\.");
         final String tableName = parts[parts.length - 1];
-        final String schemaName = parts.length > 1 ? parts[parts.length - 2] : null;
+        final String qualifier = parts.length > 1 ? parts[parts.length - 2] : null;
         try {
             final DatabaseMetaData metaData = connection.getMetaData();
-            for(final String candidate : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
-                try(final ResultSet resultSet = metaData.getTables(null, schemaName, candidate, null)) {
-                    while(resultSet.next()) {
-                        final String remark = resultSet.getString("REMARKS");
-                        if(remark != null && !remark.isEmpty()) {
-                            return remark;
+            final String escape = metaData.getSearchStringEscape();
+
+            final List<String[]> scopes = new ArrayList<>();
+            if(qualifier != null) {
+                // identifier case of the qualifier is resolved the same way as the table name
+                for(final String q : new LinkedHashSet<>(List.of(qualifier, qualifier.toUpperCase(), qualifier.toLowerCase()))) {
+                    scopes.add(new String[]{ null, q });
+                    scopes.add(new String[]{ q, null });
+                }
+            } else {
+                String catalog = null;
+                String schema = null;
+                try {
+                    catalog = connection.getCatalog();
+                } catch (final Exception e) {
+                    LOG.debug("connection.getCatalog is not supported: {}", e.getMessage());
+                }
+                try {
+                    schema = connection.getSchema();
+                } catch (final Throwable e) {
+                    LOG.debug("connection.getSchema is not supported: {}", e.getMessage());
+                }
+                scopes.add(new String[]{ catalog, schema });
+            }
+
+            final Set<String> candidates = new LinkedHashSet<>(List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase()));
+            for(final String[] scope : scopes) {
+                for(final String candidate : candidates) {
+                    final String pattern = escapeLikePattern(candidate, escape);
+                    try(final ResultSet resultSet = query.query(metaData, scope[0], scope[1], pattern)) {
+                        boolean found = false;
+                        while(resultSet.next()) {
+                            found = true;
+                            consumer.accept(resultSet);
                         }
+                        if(found) {
+                            return;
+                        }
+                    } catch (final SQLException e) {
+                        LOG.debug("Failed to look up {} of table: {} (catalog: {}, schema: {}, name: {}), cause: {}",
+                                what, table, scope[0], scope[1], candidate, e.getMessage());
                     }
-                } catch (final SQLException e) {
-                    // try the next name candidate
                 }
             }
         } catch (final Exception e) {
-            LOG.warn("Failed to get table remark of table: {}, cause: {}", table, e.getMessage());
+            LOG.warn("Failed to get {} of table: {}, cause: {}", what, table, e.getMessage());
         }
-        return null;
+    }
+
+    /** Escapes the LIKE wildcards ({@code %}, {@code _}) of an identifier used as a metadata search pattern. */
+    static String escapeLikePattern(final String identifier, final String escape) {
+        if(escape == null || escape.isEmpty()) {
+            return identifier;
+        }
+        return identifier
+                .replace(escape, escape + escape)
+                .replace("%", escape + "%")
+                .replace("_", escape + "_");
     }
 
     public static List<String> getPrimaryKeyNames(

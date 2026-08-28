@@ -35,7 +35,15 @@ public class ElementToAvroConverter {
     }
 
     public static org.apache.avro.Schema convertSchema(final String name, final List<Schema.Field> fields) {
-        SchemaBuilder.FieldAssembler<org.apache.avro.Schema> schemaFields = SchemaBuilder.record(name).fields();
+        return convertSchema(name, fields, null);
+    }
+
+    public static org.apache.avro.Schema convertSchema(final String name, final List<Schema.Field> fields, final String doc) {
+        final SchemaBuilder.RecordBuilder<org.apache.avro.Schema> recordBuilder = SchemaBuilder.record(name);
+        if(doc != null && !doc.isEmpty()) {
+            recordBuilder.doc(doc);
+        }
+        SchemaBuilder.FieldAssembler<org.apache.avro.Schema> schemaFields = recordBuilder.fields();
         for(final Schema.Field field : fields) {
             SchemaBuilder.FieldBuilder<org.apache.avro.Schema> fieldBuilder = schemaFields
                     .name(field.getName())
@@ -138,7 +146,7 @@ public class ElementToAvroConverter {
                 yield jsonSchema;
             }
             case enumeration -> org.apache.avro.Schema.createEnum(fieldName, null, parentNamespace, fieldType.getSymbols());
-            case element -> convertSchema(fieldName, fieldType.getElementSchema().getFields());
+            case element -> convertSchema(fieldName, fieldType.getElementSchema().getFields(), fieldType.getElementSchema().getDescription());
             case map -> {
                 org.apache.avro.Schema mapValueSchema = convertFieldSchema(fieldType.getMapValueType(), fieldName, parentNamespace);
                 yield org.apache.avro.Schema.createMap(mapValueSchema);

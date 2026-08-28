@@ -61,10 +61,6 @@ The output schema is automatically inferred from the query or table metadata; no
 | parameter | optional | type | description |
 | --- | --- | --- | --- |
 | table | selective required | String | Table name to read. Either `query` or `table` must be specified (not both). |
-
-For `table` reads the column comments of the table (JDBC `REMARKS`: PostgreSQL `COMMENT ON COLUMN`,
-MySQL / TiDB column `COMMENT`) are attached to the output schema as field `description`s (see
-[schema](../common/schema.md#field-descriptions)). Reading the comments never fails the pipeline.
 | select | optional | String | The text to be inserted into the SELECT clause to specify the columns to be retrieved. The default is `*`. |
 | seekFields | optional | Array<String\> | Fields used for seek-based (keyset) pagination and range splitting. If not specified, the table's primary key columns are used. |
 | fetchSize | optional | Integer | Number of records fetched per page while seeking through the table. The default is `50000`. |
@@ -72,6 +68,11 @@ MySQL / TiDB column `COMMENT`) are attached to the output schema as field `descr
 | enableInitialSplit | optional | Boolean | If `true`, the key range is split into `initialSplitSize` parts before reading starts. The default is `false`. |
 | initialSplitSize | optional | Integer | Number of initial splits when `enableInitialSplit` is `true`. The default is `10`. |
 | collations | optional | Map<String,String\> | Overrides the character collation assumed for string seek fields when computing split boundaries. Key is the field name (`*` applies to all fields), value is the collation name. By default the collation is detected from the table metadata. |
+
+For `table` reads the column comments of the table (JDBC `REMARKS`: PostgreSQL `COMMENT ON COLUMN`,
+MySQL / TiDB column `COMMENT`) and the table comment are attached to the output schema as field /
+schema `description`s (see [schema](../common/schema.md#field-descriptions)). Reading the comments
+never fails the pipeline.
 
 In table read mode the module emits an additional tagged output named `restriction` containing the processed key-range records (useful for monitoring split progress), and read failures can be routed with the common `failFast` / `outputFailure` / `failureSinks` settings.
 
