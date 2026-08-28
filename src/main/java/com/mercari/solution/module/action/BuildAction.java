@@ -39,7 +39,7 @@ import java.util.*;
  *
  * <p>The envelope payload is the {@code Build} resource JSON as returned by the API (int64 fields such as
  * {@code options.diskSizeGb} stay strings, as the REST JSON types them), plus {@code outputs[]}: the decoded {@code results.buildStepOutputs} (what a
- * step wrote to {@code $BUILDER_OUTPUT/output}; parsed when it is JSON).
+ * step wrote to {@code $BUILDER_OUTPUT/output}; parsed when it is JSON) and {@code output}, the first of them.
  */
 @Action.Service(name = "build", operations = {
         "builds.create", "builds.get", "builds.list", "builds.wait", "builds.cancel", "triggers.run"})
@@ -48,8 +48,10 @@ public class BuildAction implements ActionService {
     private static final Logger LOG = LoggerFactory.getLogger(BuildAction.class);
 
     public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
+    /** {@code ${root...}} - group 1 is the root identifier (after optional whitespace / a leading paren). */
+    private static final java.util.regex.Pattern PATTERN_TEMPLATE_EXPRESSION =
+            java.util.regex.Pattern.compile("\\$\\{\\s*\\(?\\s*([A-Za-z_][A-Za-z0-9_]*)[^}]*}");
     private static final String DEFAULT_LOCATION = "global";
-    private static final int DEDUPE_SEARCH_LIMIT = 20;
     /** Statuses of a same-tagged build that a retried create adopts instead of starting another one. */
     private static final Set<String> REUSABLE_STATUSES = Set.of("PENDING", "QUEUED", "WORKING", "SUCCESS");
     /** {@code Build} resource fields accepted at the top level of {@code parameters} for builds.create. */
@@ -396,14 +398,11 @@ public class BuildAction implements ActionService {
                 } else if(p.buildId != null) {
                     buildIds.add(template(p.buildId, data));
                 } else {
-                    final String filter = template(p.filter, data);
-                    final List<JsonObject> builds = client.listBuilds(project, location, filter, 1);
-                    if(builds.isEmpty()) {
-                        throw new NonRetryableException("action module[" + name + "] found no cloud build matching filter: " + filter + " in " + project + "/" + location);
-                    }
-                    buildIds.add(CloudBuildUtil.id(builds.getFirst()));
+                    buildIds.add(waitForFilter(p, project, location, template(p.filter, data)));
                 }
-                final List<JsonObject> completed = waitForAll(p, project, location, buildIds, p.waitUntil, false);
+                final List<JsonObject> completed = WaitUntil.none.equals(p.waitUntil)
+                        ? buildIds.stream().map(id -> client.getBuild(project, location, id)).toList()
+                        : waitForAll(p, project, location, buildIds, p.waitUntil, false, false);
                 if(!collected) {
                     // a single explicit build: the payload is the Build itself (same shape as builds.get)
                     yield result(operation, completed.getFirst());
@@ -415,7 +414,7 @@ public class BuildAction implements ActionService {
                 JsonObject build = client.cancelBuild(project, location, buildId);
                 LOG.info("action module[{}] cancelled cloud build: {}", name, buildId);
                 if(p.wait && !WaitUntil.none.equals(p.waitUntil)) {
-                    build = waitForAll(p, project, location, List.of(buildId), WaitUntil.terminal, true).getFirst();
+                    build = waitForAll(p, project, location, List.of(buildId), WaitUntil.terminal, true, false).getFirst();
                 }
                 yield result(operation, build);
             }
@@ -471,7 +470,7 @@ public class BuildAction implements ActionService {
         final String state;
         if(p.wait && !WaitUntil.none.equals(p.waitUntil)) {
             if(!CloudBuildUtil.isTerminal(CloudBuildUtil.status(build))) {
-                build = waitForAll(p, project, location, List.of(CloudBuildUtil.id(build)), p.waitUntil, false).getFirst();
+                build = waitForAll(p, project, location, List.of(CloudBuildUtil.id(build)), p.waitUntil, false, !adopted).getFirst();
             }
             state = CloudBuildUtil.status(build);
         } else {
@@ -484,7 +483,11 @@ public class BuildAction implements ActionService {
         return ActionResult.ofValues(operation, CloudBuildUtil.id(build), state, payload);
     }
 
-    /** The newest build carrying every tag that is queued, working or succeeded — the one a retry adopts. */
+    /**
+     * The newest build carrying every tag, when it is queued, working or succeeded — the one a retry
+     * adopts. A newest build that failed (or was cancelled / expired) means the work has to run again,
+     * so an older success behind it is deliberately not considered.
+     */
     private JsonObject findReusableBuild(final String project, final String location, final List<String> tags) {
         final StringBuilder filter = new StringBuilder();
         for(final String tag : tags) {
@@ -493,33 +496,71 @@ public class BuildAction implements ActionService {
             }
             filter.append("tags=\"").append(tag.replace("\"", "\\\"")).append("\"");
         }
-        for(final JsonObject build : client.listBuilds(project, location, filter.toString(), DEDUPE_SEARCH_LIMIT)) {
-            if(REUSABLE_STATUSES.contains(CloudBuildUtil.status(build))) {
-                return build;
-            }
+        final List<JsonObject> builds = client.listBuilds(project, location, filter.toString(), 1);
+        if(!builds.isEmpty() && REUSABLE_STATUSES.contains(CloudBuildUtil.status(builds.getFirst()))) {
+            return builds.getFirst();
         }
         return null;
+    }
+
+    /**
+     * {@code builds.wait} by {@code filter}: poll the list until a matching build exists (a build
+     * started elsewhere may not have been created yet), then return its id. Filters that could match
+     * an older build should bound it with {@code create_time>=...}.
+     */
+    private String waitForFilter(final Parameters p, final String project, final String location, final String filter) throws IOException, InterruptedException {
+        final ExponentialBackOff backOff = createPollBackOff(p);
+        while(true) {
+            List<JsonObject> builds = null;
+            try {
+                builds = client.listBuilds(project, location, filter, 1);
+            } catch (final RuntimeException e) {
+                if(!isTransient(e)) {
+                    throw e;
+                }
+                LOG.info("action module[{}] failed to list cloud builds ({}), retrying", name, e.getMessage());
+            }
+            if(builds != null && !builds.isEmpty()) {
+                return CloudBuildUtil.id(builds.getFirst());
+            }
+            final long next = backOff.nextBackOffMillis();
+            if(next == ExponentialBackOff.STOP) {
+                throw new NonRetryableException("action module[" + name + "] found no cloud build matching filter: " + filter
+                        + " in " + project + "/" + location + " within timeoutSeconds: " + p.timeoutSeconds);
+            }
+            LOG.info("action module[{}] waiting for a cloud build matching filter: {}", name, filter);
+            Thread.sleep(next);
+        }
     }
 
     /**
      * Poll all builds until each reaches the target ({@code terminal}, or {@code working} which also
      * accepts a terminal state), sharing one backoff and one {@code timeoutSeconds} window.
      * A build that ended other than SUCCESS (or CANCELLED when no cancel was requested) fails the
-     * firing as non-retryable with its status detail / failure info / log url attached.
+     * firing as non-retryable with its status detail / failure info / log url attached. Transient
+     * poll errors (429 / 5xx / I/O) are retried inside the loop so the module-level {@code retry}
+     * does not re-run the whole firing (which could start a second build). Pending builds are
+     * cancelled on timeout only when {@code cancelOnTimeout} is set and the builds are ours
+     * ({@code own}: started by this step, not adopted or merely waited for).
      */
-    private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> buildIds, final WaitUntil until, final boolean cancelRequested) throws IOException, InterruptedException {
+    private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> buildIds, final WaitUntil until, final boolean cancelRequested, final boolean own) throws IOException, InterruptedException {
         final Map<String, JsonObject> completed = new LinkedHashMap<>();
-        final ExponentialBackOff backOff = new ExponentialBackOff.Builder()
-                .setInitialIntervalMillis(2000)
-                .setMaxIntervalMillis(30000)
-                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
-                .build();
+        final ExponentialBackOff backOff = createPollBackOff(p);
         while(true) {
             for(final String buildId : buildIds) {
                 if(completed.containsKey(buildId)) {
                     continue;
                 }
-                final JsonObject build = client.getBuild(project, location, buildId);
+                final JsonObject build;
+                try {
+                    build = client.getBuild(project, location, buildId);
+                } catch (final RuntimeException e) {
+                    if(!isTransient(e)) {
+                        throw e;
+                    }
+                    LOG.info("action module[{}] failed to poll cloud build: {} ({}), retrying", name, buildId, e.getMessage());
+                    continue;
+                }
                 final String status = CloudBuildUtil.status(build);
                 if(CloudBuildUtil.isTerminal(status)) {
                     if("CANCELLED".equals(status) && !cancelRequested) {
@@ -539,7 +580,7 @@ public class BuildAction implements ActionService {
             final long next = backOff.nextBackOffMillis();
             if(next == ExponentialBackOff.STOP) {
                 final List<String> pending = buildIds.stream().filter(id -> !completed.containsKey(id)).toList();
-                if(p.cancelOnTimeout) {
+                if(p.cancelOnTimeout && own) {
                     for(final String buildId : pending) {
                         try {
                             client.cancelBuild(project, location, buildId);
@@ -551,11 +592,27 @@ public class BuildAction implements ActionService {
                 }
                 throw new NonRetryableException("action module[" + name + "] cloud builds: " + pending
                         + " did not reach " + until.name() + " within timeoutSeconds: " + p.timeoutSeconds
-                        + (p.cancelOnTimeout ? " (cancel requested)" : ""));
+                        + (p.cancelOnTimeout && own ? " (cancel requested)" : ""));
             }
             LOG.info("action module[{}] waiting for cloud builds: {}/{} done", name, completed.size(), buildIds.size());
             Thread.sleep(next);
         }
+    }
+
+    private static ExponentialBackOff createPollBackOff(final Parameters p) {
+        return new ExponentialBackOff.Builder()
+                .setInitialIntervalMillis(2000)
+                .setMaxIntervalMillis(30000)
+                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
+                .build();
+    }
+
+    /** 429 / 5xx from the API, or a transport failure (wrapped I/O error) - worth another poll. */
+    private static boolean isTransient(final RuntimeException e) {
+        if(e instanceof CloudBuildException cbe) {
+            return cbe.isRetryable();
+        }
+        return e instanceof IllegalStateException && e.getCause() instanceof IOException;
     }
 
     private static ActionResult result(final String operation, final JsonObject build) {
@@ -580,6 +637,8 @@ public class BuildAction implements ActionService {
         final List<Object> outputs = decodeOutputs(build);
         if(!outputs.isEmpty()) {
             payload.put("outputs", outputs);
+            // the first output as `output`: conditions (failWhen / skipWhen) have no array index syntax
+            outputs.stream().filter(Objects::nonNull).findFirst().ifPresent(o -> payload.put("output", o));
         }
         return payload;
     }
@@ -652,8 +711,27 @@ public class BuildAction implements ActionService {
         return element;
     }
 
-    private static String template(final String text, final Map<String, Object> data) {
-        return TemplateUtil.executeStrictTemplateIfNeeded(text, data);
+    /**
+     * Template expansion that leaves foreign {@code ${...}} alone: Cloud Build substitutions
+     * ({@code ${PROJECT_ID}}, {@code ${_TAG}}) and shell parameter expansions ({@code ${VAR}}) share the
+     * syntax with FreeMarker, so only expressions whose root identifier is a key of the template data
+     * (an element field, {@code args}, {@code size}, ...) are evaluated; every other {@code ${...}} is
+     * passed through to Cloud Build verbatim.
+     */
+    static String template(final String text, final Map<String, Object> data) {
+        if(text == null || !TemplateUtil.isTemplateText(text)) {
+            return text;
+        }
+        final java.util.regex.Matcher matcher = PATTERN_TEMPLATE_EXPRESSION.matcher(text);
+        final StringBuilder sb = new StringBuilder();
+        while(matcher.find()) {
+            final String expression = matcher.group();
+            final String root = matcher.group(1);
+            final String replacement = data.containsKey(root) ? TemplateUtil.executeStrictTemplate(expression, data) : expression;
+            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
     }
 
 }

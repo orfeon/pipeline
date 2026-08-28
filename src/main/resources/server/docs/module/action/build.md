@@ -34,15 +34,15 @@ Typical uses:
 
 ### Idempotency and failure handling
 
-Cloud Build has no unique build name and no client-supplied request id, so a retried bundle would start a second build. `builds.create` therefore dedupes on **tags**: with `reuseExisting` (default `true`) and non-empty `tags`, it first lists builds carrying every tag (`tags="a" AND tags="b"`) and adopts the newest one that is `PENDING` / `QUEUED` / `WORKING` / `SUCCESS` (`payload.adopted = true`; a failed build with the same tags is not adopted, so a rerun after a failure builds again). Make the tags deterministic (`report-${args.run_id}-${tenant}`) — the check is best-effort (a list → create race can still duplicate). Without `tags` the step logs a WARN and is not idempotent.
+Cloud Build has no unique build name and no client-supplied request id, so a retried bundle would start a second build. `builds.create` therefore dedupes on **tags**: with `reuseExisting` (default `true`) and non-empty `tags`, it first looks up the **newest** build carrying every tag (`tags="a" AND tags="b"`) and adopts it when it is `PENDING` / `QUEUED` / `WORKING` / `SUCCESS` (`payload.adopted = true`). If the newest one failed, was cancelled or expired, a new build runs (an older success behind it does not count). An adopted build is not cancelled on timeout (it is not ours). Make the tags deterministic (`report-${args.run_id}-${tenant}`) — the check is best-effort (a list → create race can still duplicate). Without `tags` the step logs a WARN and is not idempotent.
 
 | situation | behaviour |
 |---|---|
 | Build ends `FAILURE` / `INTERNAL_ERROR` / `TIMEOUT` / `EXPIRED` | Non-retryable failure; `statusDetail`, `failureInfo` and `logUrl` are attached to the failure description. |
 | Build is `CANCELLED` by someone else while waited for | Non-retryable failure (`builds.cancel` itself waits for `CANCELLED` successfully). |
-| `timeoutSeconds` exceeded | Non-retryable failure; the build is cancelled first when `cancelOnTimeout` is true (default for `builds.create` / `triggers.run`). |
+| `timeoutSeconds` exceeded | Non-retryable failure; a build this step started is cancelled first when `cancelOnTimeout` is true (default for `builds.create` / `triggers.run`); adopted or merely waited-for builds are never cancelled. |
 | Rejected request (400, 401, 403, 404, 409, 412) | Non-retryable — re-execution cannot fix it. |
-| Transient API errors (429, 5xx) | Retryable — use the module-level `retry`. |
+| Transient API errors (429, 5xx) on create / run / cancel | Retryable — use the module-level `retry`. While waiting, transient poll errors are retried inside the wait (the firing is not re-run, so no second build is started). |
 
 A build that requires [approval](https://cloud.google.com/build/docs/securing-builds/gate-builds-on-approval) stays `PENDING` (`payload.approval.state = PENDING`) until someone approves it; `waitUntil: terminal` waits through that, so set `timeoutSeconds` accordingly or use `wait: false` + `failWhen: payload.approval.state = 'PENDING'`.
 
@@ -57,18 +57,22 @@ Waiting happens inside the action's DoFn (the same model as the [dataflow](dataf
 | projectId | optional | String | Project of the build. Default: the pipeline's project. Template allowed. |
 | location | optional | String | Cloud Build location (`global`, `asia-northeast1`, …). Default `global`. A private pool (`options.pool`) requires its region. Template allowed. |
 | buildId | conditionally required | String | Target build for `builds.get` / `builds.wait` / `builds.cancel`. Template allowed, e.g. `${jobId}` from a create envelope. |
-| filter | conditionally required | String | `builds.list`: the [list filter](https://cloud.google.com/build/docs/view-build-results#filtering_build_results_using_queries) (`status="SUCCESS"`, `tags="nightly"`, `build_trigger_id="…"`, `create_time>="…"`, joined with `AND`); `builds.wait`: the newest build matching it is waited for. Template allowed. |
+| filter | conditionally required | String | `builds.list`: the [list filter](https://cloud.google.com/build/docs/view-build-results#filtering_build_results_using_queries) (`status="SUCCESS"`, `tags="nightly"`, `build_trigger_id="…"`, `create_time>="…"`, joined with `AND`); `builds.wait`: polls until a build matches (it may not exist yet), then waits for the newest match — bound it with `create_time>=` when older builds could match. Template allowed. |
 | pageSize | optional | Integer | `builds.list`: max builds returned. Default `100`. |
 | jobIdField | optional | String | `builds.wait` with `trigger: collect`: field of the collected elements holding build ids (`jobId` of create envelopes). |
 | wait | optional | Boolean | `builds.create` / `triggers.run` / `builds.cancel`: wait for the build. Default `true`. |
-| waitUntil | optional | Enum | `terminal` (default: SUCCESS / FAILURE / INTERNAL_ERROR / TIMEOUT / CANCELLED / EXPIRED), `working` (the build left the queue: WORKING, or terminal), `none`. |
+| waitUntil | optional | Enum | `terminal` (default: SUCCESS / FAILURE / INTERNAL_ERROR / TIMEOUT / CANCELLED / EXPIRED), `working` (the build left the queue: WORKING, or terminal), `none` (report the current status without waiting). |
 | timeoutSeconds | optional | Long | Wait deadline; exceeding it fails the step. Default `86400`. Distinct from the build's own `timeout` (Cloud Build's limit for the build, default 10 minutes). |
 | cancelOnTimeout | optional | Boolean | Cancel the build when the deadline passes. Default `true` for `builds.create` / `triggers.run`, `false` otherwise (a build started elsewhere is not ours to cancel). |
 | endpoint | optional | String | Custom REST endpoint for tests. |
 
 ### builds.create
 
-The `Build` resource fields are written at the top level of `parameters` with their REST names: `steps`, `source`, `images`, `artifacts`, `substitutions`, `options`, `timeout`, `queueTtl`, `serviceAccount`, `tags`, `logsBucket`, `availableSecrets`, `secrets`. Every string inside them is a template (with `trigger: perElement`, `${field}` of the element). On top, the one-step shorthand:
+The `Build` resource fields are written at the top level of `parameters` with their REST names: `steps`, `source`, `images`, `artifacts`, `substitutions`, `options`, `timeout`, `queueTtl`, `serviceAccount`, `tags`, `logsBucket`, `availableSecrets`, `secrets`. Every string inside them is a template (with `trigger: perElement`, `${field}` of the element).
+
+**Templates vs Cloud Build substitutions**: both use `${…}`. Only expressions whose first identifier is a template variable (an input field, `args`, `size`, …) are expanded by the pipeline; anything else — Cloud Build substitutions (`${PROJECT_ID}`, `${_TAG}`) and shell expansions (`${BUILDER_OUTPUT}`) — is passed to Cloud Build verbatim, so idiomatic `cloudbuild.yaml` content can be pasted as is. Do not name an input field like a Cloud Build substitution.
+
+On top, the one-step shorthand:
 
 | parameter | optional | type | description |
 |---|---|---|---|
@@ -98,7 +102,8 @@ The executing service account needs `roles/cloudbuild.builds.editor` (create / c
 
 The payload is the [`Build`](https://cloud.google.com/build/docs/api/reference/rest/v1/projects.builds#Build) resource as returned by the API: `id`, `status`, `statusDetail`, `createTime` / `startTime` / `finishTime`, `logUrl`, `results` (`images[]` with `digest`, `buildStepImages`, `numArtifacts`, `buildStepOutputs`), `failureInfo` (`type`, `detail`), `approval`, `substitutions`, `tags`, `buildTriggerId`, … — the API reference is the dictionary for `failWhen` / `skipWhen` paths, e.g. ``failWhen: payload.`results`.`numArtifacts` = '0'`` (int64 fields are strings in the REST JSON). Added by this module:
 
-- `outputs[]` — `results.buildStepOutputs` decoded from base64 (one entry per step, in step order); an entry that is a JSON object is parsed, so `failWhen: payload.outputs[0].rows = 0` works.
+- `outputs[]` — `results.buildStepOutputs` decoded from base64 (one entry per step, in step order); an entry that is a JSON object is parsed.
+- `output` — the first non-empty entry of `outputs[]`, for conditions (which have no array index syntax): ``failWhen: payload.`output`.`rows` = 0``.
 - `adopted` — `true` when `builds.create` adopted an existing build.
 
 `builds.list` and a collected `builds.wait` wrap the builds as `builds[]` / `count` / `firstBuild`.
@@ -125,7 +130,7 @@ actions:
     module: build
     operation: builds.create
     waits: [load]
-    failWhen: payload.outputs[0].failed > 0
+    failWhen: payload.`output`.`failed` > 0
     parameters:
       projectId: myproject
       location: asia-northeast1
@@ -208,7 +213,7 @@ actions:
     operation: builds.wait
     parameters:
       location: asia-northeast1
-      filter: build_trigger_id="0123abcd-…" AND tags="${args.commit}"
+        filter: build_trigger_id="0123abcd-…" AND create_time>="${args.pushed_at}"   # bound it: the previous build must not match
       timeoutSeconds: 1800
   - name: smoke
     module: build

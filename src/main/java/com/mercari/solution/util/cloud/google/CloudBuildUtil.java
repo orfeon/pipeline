@@ -176,11 +176,17 @@ public class CloudBuildUtil {
     }
 
     public static String status(final JsonObject build) {
-        return build != null && build.has("status") && !build.get("status").isJsonNull() ? build.get("status").getAsString() : "STATUS_UNKNOWN";
+        final String status = string(build, "status");
+        return status == null ? "STATUS_UNKNOWN" : status;
     }
 
     public static String id(final JsonObject build) {
-        return build != null && build.has("id") && !build.get("id").isJsonNull() ? build.get("id").getAsString() : null;
+        return string(build, "id");
+    }
+
+    /** A string field, or null when absent / JSON null. */
+    public static String string(final JsonObject object, final String field) {
+        return object != null && object.has(field) && object.get(field).isJsonPrimitive() ? object.get(field).getAsString() : null;
     }
 
     public static boolean isTerminal(final String status) {
@@ -190,19 +196,23 @@ public class CloudBuildUtil {
     /** {@code statusDetail} / {@code failureInfo} / {@code logUrl} of a build as one line, for failure messages. */
     public static String describeFailure(final JsonObject build) {
         final StringBuilder sb = new StringBuilder();
-        if(build.has("statusDetail")) {
-            sb.append(" ").append(build.get("statusDetail").getAsString());
+        final String statusDetail = string(build, "statusDetail");
+        if(statusDetail != null) {
+            sb.append(" ").append(statusDetail);
         }
         if(build.has("failureInfo") && build.get("failureInfo").isJsonObject()) {
             final JsonObject info = build.getAsJsonObject("failureInfo");
-            sb.append(" [").append(info.has("type") ? info.get("type").getAsString() : "?");
-            if(info.has("detail")) {
-                sb.append(": ").append(info.get("detail").getAsString());
+            final String type = string(info, "type");
+            final String detail = string(info, "detail");
+            sb.append(" [").append(type == null ? "?" : type);
+            if(detail != null) {
+                sb.append(": ").append(detail);
             }
             sb.append("]");
         }
-        if(build.has("logUrl")) {
-            sb.append(" log: ").append(build.get("logUrl").getAsString());
+        final String logUrl = string(build, "logUrl");
+        if(logUrl != null) {
+            sb.append(" log: ").append(logUrl);
         }
         return sb.toString();
     }

@@ -49,6 +49,10 @@ public class BuildActionTest {
         /** base64 step outputs attached to a build when it reaches a terminal status. */
         List<String> outputs = List.of();
         String failureDetail = "step exited with non-zero status";
+        /** getBuild calls that fail with 503 before succeeding (transient poll errors). */
+        final AtomicInteger transientGets = new AtomicInteger(0);
+        /** listBuilds calls that return nothing before the real result (a build that does not exist yet). */
+        final AtomicInteger emptyLists = new AtomicInteger(0);
 
         JsonObject put(final String id, final String status, final List<String> tags, final long createSeconds) {
             final JsonObject build = new JsonObject();
@@ -99,6 +103,9 @@ public class BuildActionTest {
         @Override
         public JsonObject getBuild(final String project, final String location, final String buildId) {
             ops.add("get:" + buildId);
+            if(transientGets.getAndDecrement() > 0) {
+                throw new CloudBuildUtil.CloudBuildException(503, "{}", "unavailable");
+            }
             final JsonObject build = builds.get(buildId);
             if(build == null) {
                 throw new CloudBuildUtil.CloudBuildException(404, "{}", "not found: " + buildId);
@@ -128,6 +135,9 @@ public class BuildActionTest {
         @Override
         public List<JsonObject> listBuilds(final String project, final String location, final String filter, final int limit) {
             ops.add("list:" + filter);
+            if(emptyLists.getAndDecrement() > 0) {
+                return List.of();
+            }
             // supports the subset the action emits: tags="x" [AND tags="y"], status="S", build_trigger_id="t"
             return builds.values().stream()
                     .filter(b -> matches(b, filter))
@@ -223,7 +233,7 @@ public class BuildActionTest {
                       tags: [report-r1]
                       image: python:3.12
                       script: |
-                        python render.py --run $_RUN
+                        python render.py --run $_RUN --project ${PROJECT_ID} --dir ${BUILDER_OUTPUT}
                         echo '{"rows": 42}' > $BUILDER_OUTPUT/output
                       env:
                         MODE: batch
@@ -235,6 +245,7 @@ public class BuildActionTest {
                       serviceAccount: projects/myproject/serviceAccounts/build@myproject.iam.gserviceaccount.com
                       timeout: 1800s
                 """;
+        client.transientGets.set(1);
         final TestPipeline p1 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         PAssert.that(run(p1, yaml, "create").getCollection()).satisfies(elements -> {
             int count = 0;
@@ -258,7 +269,10 @@ public class BuildActionTest {
         final JsonObject request = client.requests.get("build-1");
         final JsonObject step = request.getAsJsonArray("steps").get(0).getAsJsonObject();
         Assertions.assertEquals("python:3.12", step.get("name").getAsString());
-        Assertions.assertTrue(step.get("script").getAsString().contains("python render.py --run $_RUN"));
+        // Cloud Build / shell ${...} are not template variables: passed through verbatim
+        Assertions.assertTrue(step.get("script").getAsString().contains("python render.py --run $_RUN --project ${PROJECT_ID} --dir ${BUILDER_OUTPUT}"), step.get("script").getAsString());
+        // a transient 503 on one poll is retried inside the wait: exactly one build was created
+        Assertions.assertEquals(1, client.ops.stream().filter(o -> o.equals("create")).count(), client.ops.toString());
         Assertions.assertEquals("MODE=batch", step.getAsJsonArray("env").get(0).getAsString());
         Assertions.assertTrue(step.get("automapSubstitutions").getAsBoolean());
         Assertions.assertEquals("r1", request.getAsJsonObject("substitutions").get("_RUN").getAsString());
@@ -304,6 +318,31 @@ public class BuildActionTest {
             return null;
         });
         p4.run();
+
+        // the newest same-tagged build failed -> not adopted (an older success does not count), a new build runs
+        client.put("build-19", "FAILURE", List.of("report-r1"), 55);
+        final TestPipeline p5 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(run(p5, yaml + "      wait: false\n", "create").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("build-3", e.getPrimitiveValue("jobId"));
+                Assertions.assertEquals("QUEUED", e.getPrimitiveValue("state"));
+            }
+            return null;
+        });
+        p5.run();
+
+        // skipWhen on the first decoded output (payload.output)
+        client.builds.remove("build-19");
+        client.builds.remove("build-9");
+        final TestPipeline p6 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(run(p6, yaml.replace("operation: builds.create\n", "operation: builds.create\n    skipWhen: payload.`output`.`rows` > 40\n"), "create").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("SKIPPED", e.getPrimitiveValue("state"));
+                Assertions.assertEquals(42, payload(e).getAsJsonObject("output").get("rows").getAsInt());
+            }
+            return null;
+        });
+        p6.run();
         BuildAction.unregisterMemoryClient("create");
     }
 
@@ -453,8 +492,9 @@ public class BuildActionTest {
         });
         p1.run();
 
-        // builds.wait by filter: the newest matching build, waited until terminal
+        // builds.wait by filter: polls until a matching build exists, then waits for it until terminal
         client.transitions.put("b-other", new ArrayDeque<>(List.of("WORKING", "SUCCESS")));
+        client.emptyLists.set(2);
         final TestPipeline p2 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         PAssert.that(run(p2, """
                 actions:
@@ -473,6 +513,24 @@ public class BuildActionTest {
             return null;
         });
         p2.run();
+        Assertions.assertTrue(client.ops.stream().filter(o -> o.equals("list:tags=\"other\"")).count() >= 3, client.ops.toString());
+
+        // builds.wait with waitUntil: none reports the current status without waiting
+        client.put("b-working", "WORKING", List.of(), 42);
+        final TestPipeline p2b = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(run(p2b, """
+                actions:
+                  - name: wait
+                    module: build
+                    operation: builds.wait
+                    parameters: { projectId: myproject, endpoint: memory://ops, buildId: b-working, waitUntil: none }
+                """, "wait").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("WORKING", e.getPrimitiveValue("state"));
+            }
+            return null;
+        });
+        p2b.run();
 
         // builds.cancel waits until CANCELLED (not a failure when we asked for it)
         client.put("b-cancel", "WORKING", List.of(), 40);
@@ -579,6 +637,22 @@ public class BuildActionTest {
     }
 
     @Test
+    public void testTemplateLeavesForeignExpressions() {
+        final Map<String, Object> data = new HashMap<>();
+        data.put("tenant", "acme");
+        data.put("args", Map.of("run", "r1"));
+        Assertions.assertEquals("gcr.io/${PROJECT_ID}/acme:${_TAG} r1 ${BUILDER_OUTPUT} $_RUN",
+                BuildAction.template("gcr.io/${PROJECT_ID}/${tenant}:${_TAG} ${args.run} ${BUILDER_OUTPUT} $_RUN", data));
+        Assertions.assertEquals("ACME", BuildAction.template("${tenant?upper_case}", data));
+        Assertions.assertEquals("plain", BuildAction.template("plain", data));
+        Assertions.assertNull(BuildAction.template(null, data));
+
+        final JsonObject build = JsonParser.parseString("{\"status\":\"FAILURE\",\"statusDetail\":null,\"failureInfo\":{\"type\":null},\"logUrl\":null}").getAsJsonObject();
+        Assertions.assertEquals(" [?]", CloudBuildUtil.describeFailure(build));
+        Assertions.assertEquals("FAILURE", CloudBuildUtil.status(build));
+    }
+
+    @Test
     public void testPayloadAndOutputs() {
         final JsonObject build = JsonParser.parseString("""
                 {"id":"b","status":"SUCCESS","timeout":"600s",
@@ -593,6 +667,7 @@ public class BuildActionTest {
         final List<?> outputs = (List<?>) payload.get("outputs");
         Assertions.assertEquals(3, outputs.size());
         Assertions.assertEquals(1.5, ((Map<?, ?>) outputs.get(0)).get("n"));
+        Assertions.assertEquals(1.5, ((Map<?, ?>) payload.get("output")).get("n"));
         Assertions.assertEquals("[1,2]", outputs.get(1));
         Assertions.assertNull(outputs.get(2));
         Assertions.assertEquals("https://console.cloud.google.com/cloud-build/builds;region=global/b?project=p", CloudBuildUtil.consoleUrl("p", "global", "b"));
