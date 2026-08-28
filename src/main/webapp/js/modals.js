@@ -366,6 +366,7 @@ function openLaunchModal() {
         removeExtraOptions(runnerSelect);
 
         schema.oneOf.forEach(function(runnerSchema, index) {
+            if (runnerSchema['x-hidden'] === true) return;
             const runnerId = runnerSchema['$id'] || '';
             const runnerName = runnerId.split('/').pop() || runnerSchema.title || 'runner_' + index;
             const option = document.createElement('option');
@@ -421,18 +422,23 @@ function onRunnerChanged() {
 
     // Check if runner has nested oneOf (environments)
     if (runnerSchema.oneOf && Array.isArray(runnerSchema.oneOf) && runnerSchema.oneOf.length > 0) {
-        // Populate environment options
+        // Populate environment options (x-hidden environments are dev-only and not offered)
+        let visible = 0;
+        let firstVisible = -1;
         runnerSchema.oneOf.forEach(function(envSchema, index) {
+            if (envSchema['x-hidden'] === true) return;
             const option = document.createElement('option');
             option.value = index;
             option.textContent = envSchema.title || 'Environment ' + (index + 1);
             envSelect.appendChild(option);
+            visible++;
+            if (firstVisible < 0) firstVisible = index;
         });
         show($id('launch-environment-group'));
 
         // Auto-select if only one environment
-        if (runnerSchema.oneOf.length === 1) {
-            envSelect.value = '0';
+        if (visible === 1) {
+            envSelect.value = String(firstVisible);
             onEnvironmentChanged();
         }
     } else {
@@ -472,6 +478,7 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
     if (Object.keys(allProps).length === 0) {
         return;
     }
+    const requiredProps = new Set([].concat(runnerSchema.required || [], (envSchema && envSchema.required) || []));
 
     const fields = $id('launch-parameters-fields');
     fields.innerHTML = '';
@@ -486,9 +493,16 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
         const group = document.createElement('div');
         group.className = 'mb-2';
 
+        const isRequired = requiredProps.has(propName);
         const label = document.createElement('label');
         label.className = 'form-label small mb-1';
         label.textContent = prop.title || propName;
+        if (isRequired) {
+            const mark = document.createElement('span');
+            mark.className = 'text-danger';
+            mark.textContent = ' *';
+            label.appendChild(mark);
+        }
         group.appendChild(label);
 
         let input;
@@ -540,6 +554,21 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
         }
 
         group.appendChild(input);
+        const field = input.classList.contains('launch-param-field') ? input : input.querySelector('.launch-param-field');
+        if (field && isRequired) {
+            field.dataset.required = 'true';
+            // The project stylesheet forces .invalid-feedback to display:block, so the message is
+            // only added while the field is invalid (see validateLaunchParameters).
+            const feedback = document.createElement('div');
+            feedback.className = 'invalid-feedback launch-required-feedback';
+            feedback.textContent = (prop.title || propName) + ' is required';
+            feedback.style.display = 'none';
+            group.appendChild(feedback);
+            field.addEventListener('input', function() {
+                field.classList.remove('is-invalid');
+                feedback.style.display = 'none';
+            });
+        }
         if (desc) {
             const help = document.createElement('div');
             help.className = 'form-text small';
@@ -550,6 +579,23 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
     }
 
     show($id('launch-parameters-container'));
+}
+
+/** Mark empty required parameter fields invalid; returns true when all are filled. */
+function validateLaunchParameters() {
+    let firstInvalid = null;
+    document.querySelectorAll('#launch-parameters-fields .launch-param-field[data-required="true"]').forEach(function(el) {
+        const empty = el.type === 'checkbox' ? false : String(el.value).trim() === '';
+        el.classList.toggle('is-invalid', empty);
+        const feedback = el.closest('.mb-2') && el.closest('.mb-2').querySelector('.launch-required-feedback');
+        if (feedback) feedback.style.display = empty ? 'block' : 'none';
+        if (empty && !firstInvalid) firstInvalid = el;
+    });
+    if (firstInvalid) {
+        firstInvalid.focus();
+        return false;
+    }
+    return true;
 }
 
 function executeLaunch() {
@@ -575,7 +621,12 @@ function executeLaunch() {
         }
         envSelect.classList.remove('is-invalid');
         const envSchema = runnerSchema.oneOf[currentEnvironmentIndex];
-        envName = envSchema.title || 'env_' + currentEnvironmentIndex;
+        const envId = envSchema['$id'] || '';
+        envName = envId.split('/').pop() || envSchema.title || 'env_' + currentEnvironmentIndex;
+    }
+
+    if (!validateLaunchParameters()) {
+        return;
     }
 
     // Collect parameters from form fields

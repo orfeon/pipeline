@@ -68,6 +68,22 @@ public class DataflowOptions implements Serializable {
         return templateLocation;
     }
 
+    public String getServiceAccount() {
+        return serviceAccount;
+    }
+
+    public String getSubnetwork() {
+        return subnetwork;
+    }
+
+    public String getTempLocation() {
+        return tempLocation;
+    }
+
+    public String getStagingLocation() {
+        return stagingLocation;
+    }
+
     public static void setOptions(
             final PipelineOptions pipelineOptions,
             final DataflowOptions dataflow) {

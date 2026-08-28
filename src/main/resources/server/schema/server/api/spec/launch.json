@@ -3,10 +3,8 @@
   "$id": "https://mercari.com/server/api/spec/launch",
   "type": "object",
   "title": "Launch Configuration",
-  "description": "Pipeline launch configuration with runners and environments",
-  "properties": {
-
-  },
+  "description": "Pipeline launch configuration: a Beam runner (top-level oneOf) and an execution environment (nested oneOf). The Builder UI renders the launch modal from this schema; the server fills `default` values from its environment (x-launch-default names the LaunchDefaults key).",
+  "properties": {},
   "oneOf": [
     {
       "$id": "https://mercari.com/server/api/spec/launch/dataflow",
@@ -14,41 +12,201 @@
       "title": "Dataflow",
       "description": "Run pipeline on Google Cloud Dataflow",
       "properties": {
-      }
-    },
-    {
-      "$id": "https://mercari.com/server/api/spec/launch/spark",
-      "type": "object",
-      "title": "Spark",
-      "description": "Run pipeline on Spark Runner",
-      "properties": {
-        "jars": {
+        "project": {
           "type": "string",
-          "title": "Jar files",
-          "description": "GCS path to the pipeline jar file (gs://...)"
+          "title": "Project",
+          "description": "Google Cloud project to run the job in (default: config options.dataflow.project / options.gcp.project, then the server environment)",
+          "x-launch-default": "PROJECT"
+        },
+        "region": {
+          "type": "string",
+          "title": "Region",
+          "description": "Dataflow region (default: config options.dataflow.region / options.gcp.workerRegion, then the server environment)",
+          "x-launch-default": "REGION"
         }
       },
-      "required": ["jars"],
       "oneOf": [
         {
+          "$id": "https://mercari.com/server/api/spec/launch/dataflow/flexTemplate",
+          "required": ["templateLocation"],
           "type": "object",
-          "title": "Serverless version",
-          "description": "",
+          "title": "Flex Template",
+          "description": "Launch the deployed dataflow image as a Flex Template job",
           "properties": {
-            "version": {
+            "templateLocation": {
               "type": "string",
-              "title": "Version",
-              "description": "Serverless version",
-              "readonly": true,
-              "default": "3.0"
+              "title": "Template location",
+              "description": "GCS path of the Flex Template spec file (gs://...). Default: config options.dataflow.templateLocation, then MERCARI_PIPELINE_LAUNCH_DATAFLOW_TEMPLATE_LOCATION",
+              "x-launch-default": "TEMPLATE_LOCATION"
+            },
+            "serviceAccount": {
+              "type": "string",
+              "title": "Service account",
+              "description": "Worker service account email (default: config options.dataflow.serviceAccount, then the server environment)",
+              "x-launch-default": "SERVICE_ACCOUNT"
             }
           }
         },
         {
+          "$id": "https://mercari.com/server/api/spec/launch/dataflow/inProcess",
           "type": "object",
-          "title": "Spark Cluster",
-          "description": "",
+          "title": "In-process (development)",
+          "description": "Build the pipeline in the server JVM and submit it with DataflowRunner (stages the server classpath)",
+          "x-hidden": true,
+          "properties": {}
+        }
+      ]
+    },
+    {
+      "$id": "https://mercari.com/server/api/spec/launch/direct",
+      "type": "object",
+      "title": "Direct",
+      "description": "Run pipeline with DirectRunner in a serverless container (the image built with the direct profile)",
+      "properties": {
+        "project": {
+          "type": "string",
+          "title": "Project",
+          "description": "Google Cloud project of the Cloud Run resource (default: config options.gcp.project, then the server environment)",
+          "x-launch-default": "PROJECT"
+        },
+        "region": {
+          "type": "string",
+          "title": "Region",
+          "description": "Cloud Run region (default: config options.gcp.workerRegion, then the server environment)",
+          "x-launch-default": "REGION"
+        }
+      },
+      "oneOf": [
+        {
+          "$id": "https://mercari.com/server/api/spec/launch/direct/cloudRunJob",
+          "required": ["jobName"],
+          "type": "object",
+          "title": "Cloud Run Job",
+          "description": "Execute a pre-created Cloud Run Job (direct image) with this config as its container arguments. The job's image, service account, cpu and memory come from the job definition; see deploy/cloud-run-jobs.md",
           "properties": {
+            "jobName": {
+              "type": "string",
+              "title": "Job name",
+              "description": "Name of the pre-created Cloud Run Job (default: MERCARI_PIPELINE_LAUNCH_DIRECT_JOB)",
+              "x-launch-default": "JOB"
+            },
+            "taskTimeout": {
+              "type": "integer",
+              "title": "Task timeout (seconds)",
+              "description": "Overrides the job's task timeout for this execution (default: MERCARI_PIPELINE_LAUNCH_DIRECT_TASK_TIMEOUT, then the job's value)",
+              "x-launch-default": "TASK_TIMEOUT"
+            },
+            "taskCount": {
+              "type": "integer",
+              "title": "Task count",
+              "description": "Number of tasks (each runs the same pipeline; keep 1 unless the pipeline shards itself)",
+              "default": 1
+            },
+            "env": {
+              "type": "string",
+              "title": "Extra env vars",
+              "description": "Additional container environment variables for this execution, as K=V,K=V"
+            },
+            "wait": {
+              "type": "integer",
+              "title": "Wait (seconds)",
+              "description": "Wait up to this many seconds for the execution to complete before responding (0 = return immediately)"
+            }
+          }
+        },
+        {
+          "$id": "https://mercari.com/server/api/spec/launch/direct/cloudRunWorkerPool",
+          "required": ["image"],
+          "type": "object",
+          "title": "Cloud Run Worker Pool",
+          "description": "Deploy the direct image as a Cloud Run Worker Pool running this config (streaming / long-running pipelines). The pool keeps running until you delete it: gcloud run worker-pools delete <name>",
+          "properties": {
+            "name": {
+              "type": "string",
+              "title": "Worker pool name",
+              "description": "Name of the worker pool to create (default: mp-<config name>-<timestamp>)"
+            },
+            "image": {
+              "type": "string",
+              "title": "Image",
+              "description": "direct image URI (default: MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE)",
+              "x-launch-default": "IMAGE"
+            },
+            "serviceAccount": {
+              "type": "string",
+              "title": "Service account",
+              "description": "Service account the pool runs as (default: the server environment's service account)",
+              "x-launch-default": "SERVICE_ACCOUNT"
+            },
+            "cpu": {
+              "type": "string",
+              "title": "CPU",
+              "description": "CPU per instance (default: 4)",
+              "x-launch-default": "CPU"
+            },
+            "memory": {
+              "type": "string",
+              "title": "Memory",
+              "description": "Memory per instance, e.g. 6Gi (default: 6Gi; the JVM heap uses 75% of it)",
+              "x-launch-default": "MEMORY"
+            },
+            "instances": {
+              "type": "integer",
+              "title": "Instances",
+              "description": "Manual instance count. Each instance runs an independent copy of the pipeline: more than 1 only makes sense for Pub/Sub sources",
+              "default": 1,
+              "x-launch-default": "INSTANCES"
+            },
+            "replaceExisting": {
+              "type": "boolean",
+              "title": "Replace existing",
+              "description": "Deploy a new revision if a worker pool of this name already exists (otherwise the launch fails)",
+              "default": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "$id": "https://mercari.com/server/api/spec/launch/spark",
+          "required": ["jars"],
+      "type": "object",
+      "title": "Spark",
+      "description": "Run pipeline on Spark Runner",
+      "properties": {
+        "project": {
+          "type": "string",
+          "title": "Project",
+          "description": "Google Cloud project (default: config options.gcp.project, then the server environment)",
+          "x-launch-default": "PROJECT"
+        },
+        "region": {
+          "type": "string",
+          "title": "Region",
+          "description": "Dataproc region (default: config options.gcp.workerRegion, then the server environment)",
+          "x-launch-default": "REGION"
+        },
+        "jars": {
+          "type": "string",
+          "title": "Jar files",
+          "description": "GCS path of the bundled pipeline jar (gs://...; default: MERCARI_PIPELINE_LAUNCH_SPARK_JARS)",
+          "x-launch-default": "JARS"
+        }
+      },
+      "oneOf": [
+        {
+          "$id": "https://mercari.com/server/api/spec/launch/spark/dataprocServerless",
+          "type": "object",
+          "title": "Dataproc Serverless",
+          "description": "Submit as a Dataproc Serverless batch",
+          "properties": {
+            "version": {
+              "type": "string",
+              "title": "Runtime version",
+              "description": "Dataproc Serverless runtime version",
+              "default": "3.0",
+              "x-launch-default": "VERSION"
+            }
           }
         }
       ]
@@ -57,15 +215,15 @@
       "$id": "https://mercari.com/server/api/spec/launch/flink",
       "type": "object",
       "title": "Flink",
-      "description": "Run pipeline on Flink Runner",
+      "description": "Run pipeline on Flink Runner (not implemented yet)",
+      "x-hidden": true,
       "properties": {
         "jars": {
           "type": "string",
           "title": "Jar files",
           "description": "GCS path to the pipeline jar file (gs://...)"
         }
-      },
-      "required": ["jars"]
+      }
     }
   ]
 }

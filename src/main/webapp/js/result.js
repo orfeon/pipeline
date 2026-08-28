@@ -87,7 +87,10 @@ export function showPipelineResult(type, result) {
         });
 
         const outputs = result.outputs || [];
-        if (type === 'run' && outputs.length > 0) {
+        if (type === 'launch' && result.job) {
+            hideResultDescription();
+            accordion.innerHTML = renderLaunchJob(result.job);
+        } else if (type === 'run' && outputs.length > 0) {
             // Cache outputs for later access
             outputs.forEach(function(output) {
                 updateNodeOutputIndicator(output.name, output);
@@ -186,6 +189,34 @@ export function showPipelineResult(type, result) {
     }
 
     showModal('resultModal');
+}
+
+/**
+ * Launch result: the common job object every launcher returns
+ * ({ runner, environment, id, name, project, location, state, consoleUrl, ... }).
+ */
+function renderLaunchJob(job) {
+    const rows = [];
+    const label = {
+        runner: 'Runner', environment: 'Environment', id: 'Id', name: 'Resource', project: 'Project',
+        location: 'Location', state: 'State', createTime: 'Created', job: 'Job', config: 'Config',
+        launchId: 'Launch id'
+    };
+    Object.keys(label).forEach(function(key) {
+        if (job[key] === undefined || job[key] === null || job[key] === '') return;
+        rows.push('<tr><th class="text-nowrap pe-3">' + escapeHtml(label[key]) + '</th><td><code>' +
+            escapeHtml(String(job[key])) + '</code></td></tr>');
+    });
+    let html = '<table class="table table-sm mb-2"><tbody>' + rows.join('') + '</tbody></table>';
+    if (job.consoleUrl) {
+        html += '<p class="mb-2"><a href="' + escapeHtml(job.consoleUrl) + '" target="_blank" rel="noopener">' +
+            '<i class="bi bi-box-arrow-up-right me-1"></i>Open in Cloud Console</a></p>';
+    }
+    if (job.stopCommand) {
+        html += '<p class="small text-muted mb-1">This worker pool keeps running (and billing) until you delete it:</p>' +
+            '<pre class="small bg-light p-2 mb-0"><code>' + escapeHtml(job.stopCommand) + '</code></pre>';
+    }
+    return html;
 }
 
 export function showModuleSchema(moduleName, schema) {

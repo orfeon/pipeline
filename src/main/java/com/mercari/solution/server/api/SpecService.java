@@ -1,5 +1,7 @@
 package com.mercari.solution.server.api;
 
+import com.mercari.solution.server.launch.LaunchDefaults;
+import com.mercari.solution.server.launch.LaunchSchema;
 import com.google.gson.*;
 import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.networknt.schema.SchemaRegistry;
@@ -157,7 +159,10 @@ public class SpecService {
 
         try {
             final JsonElement schema = ConfigSchema.getLaunchJsonSchema();
-            response.getWriter().println(schema.toString());
+            final JsonElement withDefaults = schema.isJsonObject()
+                    ? LaunchSchema.withDefaults(schema.getAsJsonObject(), LaunchDefaults.get())
+                    : schema;
+            response.getWriter().println(withDefaults.toString());
         } catch (Exception e) {
             response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
             final JsonObject error = new JsonObject();
