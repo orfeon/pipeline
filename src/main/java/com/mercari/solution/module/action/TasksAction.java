@@ -467,10 +467,7 @@ public class TasksAction implements ActionService {
     }
 
     private static String template(final String text, final Map<String, Object> data) {
-        if(text == null || !TemplateUtil.isTemplateText(text)) {
-            return text;
-        }
-        return TemplateUtil.executeStrictTemplate(text, data);
+        return TemplateUtil.executeStrictTemplateIfNeeded(text, data);
     }
 
     private static Duration toProtoDuration(final String text) {

@@ -123,10 +123,7 @@ public class StorageAction implements ActionService {
     }
 
     private static String template(final String text, final Map<String, Object> data) {
-        if(!TemplateUtil.isTemplateText(text)) {
-            return text;
-        }
-        return TemplateUtil.executeStrictTemplate(text, data);
+        return TemplateUtil.executeStrictTemplateIfNeeded(text, data);
     }
 
 }

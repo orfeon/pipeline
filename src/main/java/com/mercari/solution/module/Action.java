@@ -8,6 +8,7 @@ import com.mercari.solution.module.action.ActionResult;
 import com.mercari.solution.module.action.ActionService;
 import com.mercari.solution.module.action.NonRetryableException;
 import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.outbound.Durations;
 import org.apache.beam.sdk.Pipeline;
@@ -31,6 +32,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.lang.reflect.InvocationTargetException;
 import java.time.Instant;
+import com.google.gson.JsonElement;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -162,6 +164,9 @@ public class Action extends Module<MCollectionTuple> {
     private List<String> inputNames;
     private Retry retry;
     private Boolean fireOnEmpty;
+    // condition JSON text (SQL-like text is kept as a JSON string primitive); null when absent
+    private String failWhenJson;
+    private String skipWhenJson;
 
     public Trigger getTrigger() {
         return trigger;
@@ -185,6 +190,14 @@ public class Action extends Module<MCollectionTuple> {
 
     public Boolean getFireOnEmpty() {
         return fireOnEmpty;
+    }
+
+    public String getFailWhenJson() {
+        return failWhenJson;
+    }
+
+    public String getSkipWhenJson() {
+        return skipWhenJson;
     }
 
     private void setup(
@@ -220,6 +233,119 @@ public class Action extends Module<MCollectionTuple> {
             throw new IllegalModuleException(
                     "action module[" + config.getName() + "] fireOnEmpty requires the default strategy (global window): remove strategy");
         }
+        this.failWhenJson = parseCondition(config.getName(), "failWhen", config.getFailWhen());
+        this.skipWhenJson = parseCondition(config.getName(), "skipWhen", config.getSkipWhen());
+    }
+
+    /** Validates a post-execution condition at assembly time and keeps it as JSON text (the DoFn re-parses it on the worker). */
+    private static String parseCondition(final String name, final String field, final JsonElement condition) {
+        if(condition == null || condition.isJsonNull()) {
+            return null;
+        }
+        if(condition.isJsonPrimitive() && condition.getAsJsonPrimitive().isString() && condition.getAsString().isBlank()) {
+            return null;
+        }
+        try {
+            Filter.parse(condition);
+        } catch (final RuntimeException e) {
+            throw new IllegalModuleException(
+                    "action module[" + name + "]." + field + " is an illegal condition: " + condition + ", cause: " + e.getMessage());
+        }
+        return condition.toString();
+    }
+
+    /**
+     * Thrown when a module-level {@code failWhen} condition matches an execution result; not
+     * retried (the result is already final).
+     */
+    public static class ConditionFailedException extends NonRetryableException {
+        public ConditionFailedException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Values visible to {@code failWhen} / {@code skipWhen}: the envelope fields ({@code service},
+     * {@code operation}, {@code jobId}, {@code state}) and {@code payload} — the typed payload map when
+     * the service supplied one, otherwise the payload text (JSON text is descended into by the
+     * dotted-path lookup, with numbers read as they are written).
+     */
+    public static Map<String, Object> createConditionValues(final String service, final ActionResult result) {
+        final Map<String, Object> values = new HashMap<>();
+        values.put("service", service);
+        values.put("operation", result.getOperation());
+        values.put("jobId", result.getJobId());
+        values.put("state", result.getState());
+        values.put("payload", result.getPayloadValues() != null ? result.getPayloadValues() : parsePayloadText(result.getPayload()));
+        return values;
+    }
+
+    /**
+     * A text payload is exposed as a map when it is a JSON object (so {@code payload.<path>} works),
+     * otherwise as the text itself (comparable as a whole; a dotted path into it never matches).
+     */
+    private static final com.google.gson.Gson GSON = new com.google.gson.Gson();
+
+    private static Object parsePayloadText(final String payload) {
+        if(payload == null) {
+            return null;
+        }
+        try {
+            final JsonElement json = GSON.fromJson(payload, JsonElement.class);
+            if(json != null && json.isJsonObject()) {
+                return com.mercari.solution.util.schema.converter.JsonToMapConverter.convert(json);
+            }
+        } catch (final RuntimeException ignored) {
+            // not JSON
+        }
+        return payload;
+    }
+
+    private static boolean matches(final Filter.ConditionNode condition, final Map<String, Object> values) {
+        try {
+            return Filter.filter(condition, values);
+        } catch (final RuntimeException e) {
+            // e.g. a dotted path into a non-JSON text payload, or a literal the value cannot be compared with:
+            // treat as "does not match" rather than losing the envelope of a successful execution
+            LOG.warn("action condition could not be evaluated against the result ({}); treating it as not matched", e.getMessage());
+            return false;
+        }
+    }
+
+    static String abbreviate(final String text, final int max) {
+        if(text == null || text.length() <= max) {
+            return text;
+        }
+        return text.substring(0, max) + "...(" + text.length() + " chars)";
+    }
+
+    /**
+     * Applies the post-execution conditions: a matching {@code failWhen} fails the firing
+     * ({@link ConditionFailedException}); otherwise a matching {@code skipWhen} turns the result
+     * into {@code state: SKIPPED} (jobId and payload kept).
+     */
+    static ActionResult applyConditions(
+            final String service,
+            final ActionResult result,
+            final Filter.ConditionNode failWhen,
+            final String failWhenJson,
+            final Filter.ConditionNode skipWhen) {
+
+        if(result == null || (failWhen == null && skipWhen == null)) {
+            return result;
+        }
+        final Map<String, Object> values = createConditionValues(service, result);
+        if(failWhen != null && matches(failWhen, values)) {
+            // the payload can be large (e.g. a Job resource with every source uri): keep the message bounded
+            throw new ConditionFailedException(
+                    "action service: " + service + " result matched failWhen: " + failWhenJson
+                            + ". jobId: " + result.getJobId() + ", state: " + result.getState()
+                            + ", payload: " + abbreviate(result.getPayload(), 1024));
+        }
+        if(skipWhen != null && matches(skipWhen, values)) {
+            return result.withState("SKIPPED");
+        }
+        return result;
     }
 
     public static @NonNull Action create(
@@ -320,12 +446,12 @@ public class Action extends Module<MCollectionTuple> {
                 }
                 yield seed
                         .apply("Action", ParDo
-                                .of(new ExecuteDoFn(getModule(), service, false, retry, getFailFast(), failureTag))
+                                .of(new ExecuteDoFn(getModule(), service, false, retry, failWhenJson, skipWhenJson, getFailFast(), failureTag))
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
             }
             case perElement -> union(inputs)
                     .apply("Action", ParDo
-                            .of(new ExecuteDoFn(getModule(), service, true, retry, getFailFast(), failureTag))
+                            .of(new ExecuteDoFn(getModule(), service, true, retry, failWhenJson, skipWhenJson, getFailFast(), failureTag))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
             case collect -> {
                 final PCollection<MElement> unioned = union(inputs);
@@ -347,7 +473,7 @@ public class Action extends Module<MCollectionTuple> {
                 }
                 yield collected
                         .apply("Action", ParDo
-                                .of(new CollectExecuteDoFn(getModule(), service, retry, getFailFast(), failureTag))
+                                .of(new CollectExecuteDoFn(getModule(), service, retry, failWhenJson, skipWhenJson, getFailFast(), failureTag))
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
             }
         };
@@ -440,7 +566,7 @@ public class Action extends Module<MCollectionTuple> {
         }
     }
 
-    static boolean isRetryable(final Throwable e) {
+    public static boolean isRetryable(final Throwable e) {
         Throwable t = e;
         while(t != null) {
             if(t instanceof NonRetryableException
@@ -521,9 +647,14 @@ public class Action extends Module<MCollectionTuple> {
         private final ActionService service;
         private final boolean perElement;
         private final Retry retry;
+        private final String failWhenJson;
+        private final String skipWhenJson;
 
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+
+        private transient Filter.ConditionNode failWhen;
+        private transient Filter.ConditionNode skipWhen;
 
 
         ExecuteDoFn(
@@ -531,6 +662,8 @@ public class Action extends Module<MCollectionTuple> {
                 final ActionService service,
                 final boolean perElement,
                 final Retry retry,
+                final String failWhenJson,
+                final String skipWhenJson,
                 final boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
 
@@ -538,6 +671,8 @@ public class Action extends Module<MCollectionTuple> {
             this.service = service;
             this.perElement = perElement;
             this.retry = retry;
+            this.failWhenJson = failWhenJson;
+            this.skipWhenJson = skipWhenJson;
             this.failFast = failFast;
             this.failureTag = failureTag;
         }
@@ -545,6 +680,8 @@ public class Action extends Module<MCollectionTuple> {
         @Setup
         public void setup() {
             this.service.setup();
+            this.failWhen = failWhenJson == null ? null : Filter.parse(failWhenJson);
+            this.skipWhen = skipWhenJson == null ? null : Filter.parse(skipWhenJson);
         }
 
         @ProcessElement
@@ -555,7 +692,9 @@ public class Action extends Module<MCollectionTuple> {
             }
             final Instant startedAt = Instant.now();
             try {
-                final ActionResult result = executeWithRetry(serviceName, service, retry, perElement ? List.of(input) : List.of());
+                final ActionResult result = applyConditions(serviceName,
+                        executeWithRetry(serviceName, service, retry, perElement ? List.of(input) : List.of()),
+                        failWhen, failWhenJson, skipWhen);
                 c.output(createEnvelope(serviceName, result, startedAt, c.timestamp()));
             } catch (final Throwable e) {
                 final BadRecord badRecord = Module.processError(
@@ -571,21 +710,30 @@ public class Action extends Module<MCollectionTuple> {
         private final String serviceName;
         private final ActionService service;
         private final Retry retry;
+        private final String failWhenJson;
+        private final String skipWhenJson;
 
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+
+        private transient Filter.ConditionNode failWhen;
+        private transient Filter.ConditionNode skipWhen;
 
 
         CollectExecuteDoFn(
                 final String serviceName,
                 final ActionService service,
                 final Retry retry,
+                final String failWhenJson,
+                final String skipWhenJson,
                 final boolean failFast,
                 final TupleTag<BadRecord> failureTag) {
 
             this.serviceName = serviceName;
             this.service = service;
             this.retry = retry;
+            this.failWhenJson = failWhenJson;
+            this.skipWhenJson = skipWhenJson;
             this.failFast = failFast;
             this.failureTag = failureTag;
         }
@@ -593,6 +741,8 @@ public class Action extends Module<MCollectionTuple> {
         @Setup
         public void setup() {
             this.service.setup();
+            this.failWhen = failWhenJson == null ? null : Filter.parse(failWhenJson);
+            this.skipWhen = skipWhenJson == null ? null : Filter.parse(skipWhenJson);
         }
 
         @ProcessElement
@@ -607,7 +757,9 @@ public class Action extends Module<MCollectionTuple> {
             }
             final Instant startedAt = Instant.now();
             try {
-                final ActionResult result = executeWithRetry(serviceName, service, retry, elements);
+                final ActionResult result = applyConditions(serviceName,
+                        executeWithRetry(serviceName, service, retry, elements),
+                        failWhen, failWhenJson, skipWhen);
                 c.output(createEnvelope(serviceName, result, startedAt, c.timestamp()));
             } catch (final Throwable e) {
                 final MElement first = elements.isEmpty() ? MElement.createDummyElement(c.timestamp()) : elements.getFirst();

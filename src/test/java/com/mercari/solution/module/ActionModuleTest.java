@@ -428,6 +428,143 @@ public class ActionModuleTest {
     }
 
     @Test
+    public void testFailWhenMatchRoutesToFailure() throws Exception {
+        // the mock echoes a JSON payload; a matching failWhen fails the firing without retry
+        MockAction.EXECUTIONS.remove("guarded");
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: guarded
+                    module: mock
+                    failFast: false
+                    inputs:
+                      - input
+                    retry:
+                      maxAttempts: 3
+                      initialBackoff: 10ms
+                    failWhen: "payload.cnt = 0 AND state = 'DONE'"
+                    parameters:
+                      message: '{"cnt": 0, "table": "t"}'
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("guarded");
+
+        PAssert.that(output.getCollection()).empty();
+
+        pipeline.run().waitUntilFinish();
+        Assertions.assertEquals(1, MockAction.EXECUTIONS.get("guarded").get());
+    }
+
+    @Test
+    public void testFailWhenNoMatchAndSkipWhenMatch() throws Exception {
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: passed
+                    module: mock
+                    inputs:
+                      - input
+                    failWhen: payload.cnt > 10
+                    parameters:
+                      message: '{"cnt": 3}'
+                  - name: skipped
+                    module: mock
+                    inputs:
+                      - input
+                    skipWhen: payload.cnt < 5
+                    parameters:
+                      message: '{"cnt": 3}'
+                  - name: after
+                    module: mock
+                    waits:
+                      - skipped
+                    parameters:
+                      message: ran
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("passed").getCollection()).satisfies(elements -> {
+            for(final MElement element : elements) {
+                Assertions.assertEquals("DONE", element.getPrimitiveValue("state"));
+            }
+            return null;
+        });
+        PAssert.that(outputs.get("skipped").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                count++;
+                Assertions.assertEquals("SKIPPED", element.getPrimitiveValue("state"));
+                Assertions.assertEquals("mock-job", element.getPrimitiveValue("jobId"));
+                Assertions.assertEquals("{\"cnt\": 3}", element.getPrimitiveValue("payload"));
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        // a skipped action still releases its waiters
+        PAssert.that(outputs.get("after").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement ignored : elements) {
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    @Test
+    public void testFailWhenMessageIsBounded() {
+        Assertions.assertEquals("abc", Action.abbreviate("abc", 5));
+        Assertions.assertEquals("abcde...(10 chars)", Action.abbreviate("abcdefghij", 5));
+        Assertions.assertNull(Action.abbreviate(null, 5));
+    }
+
+    @Test
+    public void testConditionOnNonJsonPayloadDoesNotFail() throws Exception {
+        // a dotted path into a plain-text payload cannot match; it must not fail the firing
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: plain
+                    module: mock
+                    inputs:
+                      - input
+                    failWhen: payload.cnt = 0
+                    skipWhen: "payload = 'bytes: 3'"
+                    parameters:
+                      message: "bytes: 3"
+                """;
+        final Config config = Config.load(configYaml);
+        final MCollection output = MPipeline.apply(pipeline, config).get("plain");
+        PAssert.that(output.getCollection()).satisfies(elements -> {
+            int count = 0;
+            for(final MElement element : elements) {
+                count++;
+                Assertions.assertEquals("SKIPPED", element.getPrimitiveValue("state"));
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testIllegalConditionIsAssemblyError() throws Exception {
+        final String configYaml = SOURCE_YAML + """
+                actions:
+                  - name: bad
+                    module: mock
+                    inputs:
+                      - input
+                    failWhen: "payload.cnt >"
+                    parameters:
+                      message: x
+                """;
+        final Config config = Config.load(configYaml);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, config));
+        Assertions.assertTrue(e.getMessage().contains("failWhen"), e.getMessage());
+    }
+
+    @Test
     public void testOperationsDeclaredAndEnumsStayInSync() {
         // the @Action.Service(operations) list (validated at assembly) and each service's Op enum
         // (used to branch in configure/execute) must describe the same set of config values

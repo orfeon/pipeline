@@ -344,7 +344,7 @@ function ensureOutputPort(nodeId, tag) {
 }
 
 /** Module config fields the canvas models as node data (besides name / module / parameters). */
-export const NODE_CONFIG_PROPS = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty',
+export const NODE_CONFIG_PROPS = ['schema', 'strategy', 'trigger', 'operation', 'retry', 'fireOnEmpty', 'failWhen', 'skipWhen',
     'tags', 'logs', 'timestampAttribute', 'failFast', 'ignore'];
 
 // Fields derived from canvas state, never stored as extras
@@ -712,7 +712,7 @@ function exportModules() {
         }
 
         if (data.moduleType === 'action') {
-            ['trigger', 'operation', 'retry', 'fireOnEmpty'].forEach(function(prop) {
+            ['trigger', 'operation', 'retry', 'fireOnEmpty', 'failWhen', 'skipWhen'].forEach(function(prop) {
                 if (data[prop] !== undefined && data[prop] !== null) {
                     moduleConfig[prop] = data[prop];
                 }
