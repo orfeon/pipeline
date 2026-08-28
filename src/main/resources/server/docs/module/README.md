@@ -75,7 +75,7 @@ Action modules execute an operation against an external service at a point in th
 | module                                                | description                                                                                       |
 |-------------------------------------------------------|----------------------------------------------------------------------------------------------------|
 | [bigquery](action/bigquery.md) | Run a BigQuery job (query or load) and wait for it, with idempotent deterministic job ids           |
-| [vertexai_gemini](action/vertexai_gemini.md) | Launch a Vertex AI Gemini batch prediction job and wait for it                                      |
+| [vertexai](action/vertexai.md) | Run a Gemini batch prediction job (GCS / BigQuery in and out) and wait for it, or one generateContent call from the control plane |
 | [storage](action/storage.md) | Write a small file from the triggering records (result histories, summary reports, marker files)    |
 | [http](action/http.md) | One HTTP request per firing: notify, trigger jobs, maintenance calls, start + poll async jobs |
 | [tasks](action/tasks.md) | Cloud Tasks queue operations (create/update/pause/resume/purge/delete, waitForEmpty, run/delete task) |

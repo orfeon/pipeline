@@ -74,7 +74,7 @@ Four module kinds are auto-discovered by scanning their packages (Guava `ClassPa
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
 `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
 
-**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai_gemini` `storage` `tasks` `http` `dataflow` `build`.
+**Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai` `storage` `tasks` `http` `dataflow` `build`.
 The fourth module kind, declared in the `actions` config section (`ActionConfig`: `module` = service
 name, `operation` (service-declared `resource.method` values, e.g. `jobs.load`, `queues.pause`), `trigger`, optional `inputs`, `waits`, `strategy`, `retry`, `fireOnEmpty`). `module/Action.java` is the single concrete
 module class (trigger topologies, envelope output, failure routing); services implement the

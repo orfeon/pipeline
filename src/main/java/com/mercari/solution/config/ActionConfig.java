@@ -10,7 +10,7 @@ import java.util.List;
 
 /**
  * Config of an {@code actions} section step. {@code module} names the action service
- * (bigquery, http, storage, tasks, vertexai_gemini, …). {@code inputs} is optional: with
+ * (bigquery, http, storage, tasks, vertexai, …). {@code inputs} is optional: with
  * {@code trigger: once} the step may be gated by {@code waits} alone, or by nothing at all
  * (a pipeline-start action).
  */

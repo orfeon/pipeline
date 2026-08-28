@@ -96,7 +96,7 @@ The framework decides *when* `execute` fires; the service decides *what the elem
   one field from every element into `sourceUris`).
 
 Use `TemplateUtil.isTemplateText` / `executeStrictTemplate`. If templating makes no sense for the
-service (e.g. `GeminiAction`), ignore `elements` and say so in the docs.
+service, ignore `elements` and say so in the docs.
 
 ## Execution guarantees (design these in)
 
@@ -121,7 +121,8 @@ and control records (chaining on results). See `docs/module/action/README.md` fo
 - `BigQueryAction.java` — the full pattern: trigger-aware templating, idempotent submission,
   polling with backoff/timeout, collect aggregation parameter.
 - `StorageAction.java` (~130 lines) — simplest complete service (file writing, template content).
-- `GeminiAction.java` — REST submission + state polling, non-idempotent (documented).
+- `VertexAiAction.java` — REST util + thin action (`VertexAiUtil`), displayName dedupe for an API without a
+  client-supplied id, request-body shorthands (`prompt` / `system` / `responseSchema`), payload extensions (`text` / `json`).
 - `HttpAction.java` — generic HTTP request per firing on the shared `outbound` core (`RequestRenderer`,
   `SyncCaller`, `ResponsePolicy`), schema-aware `configure` (uses `inputSchema`), `poll` loop.
 - `TasksAction.java` — custom client boundary (`QueueClient` interface, `endpoint: memory://…` for
