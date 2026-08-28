@@ -31,7 +31,6 @@ import java.io.Serializable;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -60,7 +59,6 @@ public class TasksAction implements ActionService {
             .compile("^(projects/[^/]+/locations/[^/]+)/queues/([^/]+)$");
     private static final Pattern PATTERN_SHORT_DURATION = Pattern.compile("^(\\d+)\\s*(ms|s|m|h|d)$");
 
-    public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
 
     /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
@@ -179,32 +177,19 @@ public class TasksAction implements ActionService {
         void close();
     }
 
-    private static final Map<String, QueueClient> MEMORY_CLIENTS = new HashMap<>();
+    private static final ActionSupport.MemoryClients<QueueClient> MEMORY_CLIENTS = new ActionSupport.MemoryClients<>("tasks queue");
 
     public static void registerMemoryClient(final String name, final QueueClient client) {
-        synchronized (MEMORY_CLIENTS) {
-            MEMORY_CLIENTS.put(name, client);
-        }
+        MEMORY_CLIENTS.register(name, client);
     }
 
     public static void unregisterMemoryClient(final String name) {
-        synchronized (MEMORY_CLIENTS) {
-            MEMORY_CLIENTS.remove(name);
-        }
+        MEMORY_CLIENTS.unregister(name);
     }
 
     static QueueClient createClient(final Parameters parameters) throws IOException {
-        if(parameters.endpoint != null && parameters.endpoint.startsWith(ENDPOINT_MEMORY_PREFIX)) {
-            final String name = parameters.endpoint.substring(ENDPOINT_MEMORY_PREFIX.length());
-            synchronized (MEMORY_CLIENTS) {
-                final QueueClient client = MEMORY_CLIENTS.get(name);
-                if(client == null) {
-                    throw new IllegalStateException("in-memory tasks queue client is not registered: " + name);
-                }
-                return client;
-            }
-        }
-        return new GrpcQueueClient(parameters);
+        final QueueClient memory = MEMORY_CLIENTS.resolve(parameters.endpoint);
+        return memory != null ? memory : new GrpcQueueClient(parameters);
     }
 
     static class GrpcQueueClient implements QueueClient {
@@ -389,7 +374,8 @@ public class TasksAction implements ActionService {
                         break;
                     }
                     if(Instant.now().isAfter(deadline)) {
-                        throw new IllegalStateException("action module[" + name + "] timed out waiting for queue to drain: "
+                        // a timeout is final: re-running the firing would only wait the same window again
+                        throw new NonRetryableException("action module[" + name + "] timed out waiting for queue to drain: "
                                 + queue + " (" + remaining + (remaining >= 1000 ? "+" : "") + " tasks remaining)");
                     }
                     LOG.info("action module[{}] waiting for queue {} to drain: {}{} tasks remaining",

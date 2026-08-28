@@ -1,6 +1,6 @@
 package com.mercari.solution.module.action;
 
-import com.google.api.client.util.ExponentialBackOff;
+import com.google.api.client.util.Sleeper;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
 import com.google.api.gax.rpc.AlreadyExistsException;
@@ -58,7 +58,9 @@ public class DataflowAction implements ActionService {
     private static final DateTimeFormatter JOB_NAME_SUFFIX = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneOffset.UTC);
     private static final int NAME_SEARCH_LIMIT = 200;
 
-    public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
+    /** Poll errors worth another poll inside the wait window; every other ApiException fails the firing at once. */
+    private static final Set<StatusCode.Code> TRANSIENT_POLL_CODES = Set.of(
+            StatusCode.Code.UNAVAILABLE, StatusCode.Code.DEADLINE_EXCEEDED, StatusCode.Code.RESOURCE_EXHAUSTED);
 
     private static final Set<JobState> TERMINAL_STATES = EnumSet.of(
             JobState.JOB_STATE_DONE, JobState.JOB_STATE_FAILED, JobState.JOB_STATE_CANCELLED,
@@ -278,32 +280,19 @@ public class DataflowAction implements ActionService {
         void close();
     }
 
-    private static final Map<String, DataflowClient> MEMORY_CLIENTS = new HashMap<>();
+    private static final ActionSupport.MemoryClients<DataflowClient> MEMORY_CLIENTS = new ActionSupport.MemoryClients<>("dataflow");
 
     public static void registerMemoryClient(final String name, final DataflowClient client) {
-        synchronized (MEMORY_CLIENTS) {
-            MEMORY_CLIENTS.put(name, client);
-        }
+        MEMORY_CLIENTS.register(name, client);
     }
 
     public static void unregisterMemoryClient(final String name) {
-        synchronized (MEMORY_CLIENTS) {
-            MEMORY_CLIENTS.remove(name);
-        }
+        MEMORY_CLIENTS.unregister(name);
     }
 
     static DataflowClient createClient(final Parameters parameters) throws IOException {
-        if(parameters.endpoint != null && parameters.endpoint.startsWith(ENDPOINT_MEMORY_PREFIX)) {
-            final String name = parameters.endpoint.substring(ENDPOINT_MEMORY_PREFIX.length());
-            synchronized (MEMORY_CLIENTS) {
-                final DataflowClient client = MEMORY_CLIENTS.get(name);
-                if(client == null) {
-                    throw new IllegalStateException("in-memory dataflow client is not registered: " + name);
-                }
-                return client;
-            }
-        }
-        return new GrpcDataflowClient(parameters);
+        final DataflowClient memory = MEMORY_CLIENTS.resolve(parameters.endpoint);
+        return memory != null ? memory : new GrpcDataflowClient(parameters);
     }
 
     static class GrpcDataflowClient implements DataflowClient {
@@ -425,6 +414,7 @@ public class DataflowAction implements ActionService {
     private String inheritedEnvironment;
 
     private transient DataflowClient client;
+    private transient Sleeper sleeper;
 
     @Override
     public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
@@ -464,6 +454,14 @@ public class DataflowAction implements ActionService {
         } catch (final IOException e) {
             throw new IllegalStateException("Failed to create Dataflow client", e);
         }
+        if(this.sleeper == null) {
+            this.sleeper = Sleeper.DEFAULT;
+        }
+    }
+
+    /** Test hook: replace the poll sleeper (call before {@link #setup()}). */
+    void setSleeper(final Sleeper sleeper) {
+        this.sleeper = sleeper;
     }
 
     @Override
@@ -518,7 +516,7 @@ public class DataflowAction implements ActionService {
                 final List<String> jobIds = new ArrayList<>();
                 final boolean collected = Trigger.collect.equals(trigger) && p.jobIdField != null;
                 if(collected) {
-                    jobIds.addAll(BigQueryAction.collectField(elements, p.jobIdField));
+                    jobIds.addAll(ActionSupport.collectField(elements, p.jobIdField));
                     if(jobIds.isEmpty()) {
                         LOG.info("action module[{}] found no job id in field: {}", name, p.jobIdField);
                         yield ActionResult.of(operation, null, "SKIPPED", null);
@@ -702,57 +700,30 @@ public class DataflowAction implements ActionService {
      * A job that ended FAILED (or was CANCELLED while a terminal/running state was awaited) fails the
      * firing as non-retryable with its error messages attached.
      */
-    private List<Job> waitForAll(final Parameters p, final String project, final String region, final List<String> jobIds, final WaitUntil until, final JobState requested) throws IOException, InterruptedException {
-        final Map<String, Job> completed = new LinkedHashMap<>();
-        final ExponentialBackOff backOff = new ExponentialBackOff.Builder()
-                .setInitialIntervalMillis(2000)
-                .setMaxIntervalMillis(30000)
-                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
-                .build();
+    private List<Job> waitForAll(final Parameters p, final String project, final String region, final List<String> jobIds, final WaitUntil until, final JobState requested) throws Exception {
         final boolean cancelRequested = JobState.JOB_STATE_CANCELLED.equals(requested);
-        while(true) {
-            for(final String jobId : jobIds) {
-                if(completed.containsKey(jobId)) {
-                    continue;
-                }
-                final Job job = client.getJob(project, region, jobId, JobView.JOB_VIEW_SUMMARY);
-                final JobState state = job.getCurrentState();
-                if(TERMINAL_STATES.contains(state)) {
-                    if(JobState.JOB_STATE_FAILED.equals(state)) {
-                        throw new NonRetryableException("action module[" + name + "] dataflow job failed: " + jobId + describeErrors(project, region, jobId));
-                    }
-                    if(JobState.JOB_STATE_CANCELLED.equals(state) && !cancelRequested) {
-                        throw new NonRetryableException("action module[" + name + "] dataflow job was cancelled: " + jobId);
-                    }
-                    completed.put(jobId, job);
-                } else if(WaitUntil.running.equals(targetOf(until, job)) && JobState.JOB_STATE_RUNNING.equals(state)) {
-                    completed.put(jobId, job);
-                }
-            }
-            if(completed.size() == jobIds.size()) {
-                return jobIds.stream().map(completed::get).toList();
-            }
-            final long next = backOff.nextBackOffMillis();
-            if(next == ExponentialBackOff.STOP) {
-                final List<String> pending = jobIds.stream().filter(id -> !completed.containsKey(id)).toList();
-                if(p.cancelOnTimeout) {
-                    for(final String jobId : pending) {
-                        try {
-                            client.updateJob(project, region, jobId, Job.newBuilder().setRequestedState(JobState.JOB_STATE_CANCELLED).build(), null);
-                            LOG.warn("action module[{}] cancelled dataflow job: {} after timeoutSeconds: {}", name, jobId, p.timeoutSeconds);
-                        } catch (final Exception e) {
-                            LOG.warn("action module[{}] failed to cancel dataflow job: {}: {}", name, jobId, e.getMessage());
+        return ActionSupport.waitForAll(name, "dataflow jobs", jobIds, p.timeoutSeconds, sleeper,
+                jobId -> {
+                    final Job job = client.getJob(project, region, jobId, JobView.JOB_VIEW_SUMMARY);
+                    final JobState state = job.getCurrentState();
+                    if(TERMINAL_STATES.contains(state)) {
+                        if(JobState.JOB_STATE_FAILED.equals(state)) {
+                            throw new NonRetryableException("action module[" + name + "] dataflow job failed: " + jobId + describeErrors(project, region, jobId));
                         }
+                        if(JobState.JOB_STATE_CANCELLED.equals(state) && !cancelRequested) {
+                            throw new NonRetryableException("action module[" + name + "] dataflow job was cancelled: " + jobId);
+                        }
+                        return job;
+                    } else if(WaitUntil.running.equals(targetOf(until, job)) && JobState.JOB_STATE_RUNNING.equals(state)) {
+                        return job;
                     }
-                }
-                throw new NonRetryableException("action module[" + name + "] dataflow jobs: " + pending
-                        + " did not reach " + (until == null ? "terminal (batch) / running (streaming)" : until.name())
-                        + " within timeoutSeconds: " + p.timeoutSeconds
-                        + (p.cancelOnTimeout ? " (cancel requested)" : ""));
-            }
-            LOG.info("action module[{}] waiting for dataflow jobs: {}/{} done", name, completed.size(), jobIds.size());
-            Thread.sleep(next);
-        }
+                    return null;
+                },
+                e -> e instanceof ApiException a && TRANSIENT_POLL_CODES.contains(a.getStatusCode().getCode()),
+                "reach " + (until == null ? "terminal (batch) / running (streaming)" : until.name()),
+                p.cancelOnTimeout
+                        ? jobId -> client.updateJob(project, region, jobId, Job.newBuilder().setRequestedState(JobState.JOB_STATE_CANCELLED).build(), null)
+                        : null);
     }
 
     private String describeErrors(final String project, final String region, final String jobId) {

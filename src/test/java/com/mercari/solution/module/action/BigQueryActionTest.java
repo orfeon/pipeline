@@ -120,6 +120,7 @@ public class BigQueryActionTest {
     public void testSubmitAndWaitPayloadIsTyped() throws Exception {
         final ScriptedTransport transport = new ScriptedTransport()
                 .respond(200, job("fixed", "RUNNING", null, null))
+                .respond(200, job("fixed", "DONE", null, null))
                 .respond(200, job("fixed", "DONE", null,
                         "{\"totalBytesProcessed\":\"12345\",\"query\":{\"numDmlAffectedRows\":\"7\",\"totalBytesBilled\":\"20971520\"}}"));
         final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
@@ -143,7 +144,8 @@ public class BigQueryActionTest {
 
         Assertions.assertEquals("POST", transport.calls.get(0).method());
         Assertions.assertTrue(transport.calls.get(0).url().endsWith("/projects/p/jobs"), transport.calls.get(0).url());
-        Assertions.assertEquals(2, transport.calls.size());
+        // insert, status-only poll, full resource once DONE
+        Assertions.assertEquals(3, transport.calls.size());
     }
 
     @Test
@@ -151,6 +153,7 @@ public class BigQueryActionTest {
         final ScriptedTransport transport = new ScriptedTransport()
                 .respond(409, error(409, "duplicate"))
                 .respond(200, job("fixed", "RUNNING", null, null))
+                .respond(200, job("fixed", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
                 .respond(200, job("fixed", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
         final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
 
@@ -168,6 +171,7 @@ public class BigQueryActionTest {
                 .respond(409, error(409, "duplicate"))
                 .respond(200, job("fixed", "DONE", "backendError", null))
                 .respond(200, job("fixed-r1", "RUNNING", null, null))
+                .respond(200, job("fixed-r1", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
                 .respond(200, job("fixed-r1", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"));
         final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
 
@@ -216,6 +220,7 @@ public class BigQueryActionTest {
         {
             final ScriptedTransport transport = new ScriptedTransport()
                     .respond(200, job("fixed", "RUNNING", null, null))
+                    .respond(200, job("fixed", "DONE", "notFound", null))
                     .respond(200, job("fixed", "DONE", "notFound", null));
             final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
             Assertions.assertThrows(NonRetryableException.class, () -> action.execute(List.of()));
@@ -223,6 +228,7 @@ public class BigQueryActionTest {
         {
             final ScriptedTransport transport = new ScriptedTransport()
                     .respond(200, job("fixed", "RUNNING", null, null))
+                    .respond(200, job("fixed", "DONE", "rateLimitExceeded", null))
                     .respond(200, job("fixed", "DONE", "rateLimitExceeded", null));
             final BigQueryAction action = createAction(transport, QUERY_PARAMETERS);
             final Exception e = Assertions.assertThrows(Exception.class, () -> action.execute(List.of()));
@@ -630,6 +636,7 @@ public class BigQueryActionTest {
         final ScriptedTransport transport = new ScriptedTransport()
                 .respond(200, job("fixed", "RUNNING", null, null))
                 .respond(200, job("fixed", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
+                .respond(200, job("fixed", "DONE", null, "{\"totalBytesProcessed\":\"1\"}"))
                 .respond(200, "{\"jobComplete\":true,\"totalRows\":\"2\","
                         + "\"schema\":{\"fields\":[{\"name\":\"cnt\",\"type\":\"INTEGER\"},{\"name\":\"name\",\"type\":\"STRING\"}]},"
                         + "\"rows\":[{\"f\":[{\"v\":\"42\"},{\"v\":\"a\"}]},{\"f\":[{\"v\":\"7\"},{\"v\":\"b\"}]}]}");
@@ -642,7 +649,7 @@ public class BigQueryActionTest {
         Assertions.assertEquals(2, ((List<?>) payload.get("resultRows")).size());
         Assertions.assertEquals(42L, ((Number) ((Map<?, ?>) payload.get("firstRow")).get("cnt")).longValue());
         Assertions.assertEquals("a", ((Map<?, ?>) payload.get("firstRow")).get("name"));
-        final ScriptedTransport.Call results = transport.calls.get(2);
+        final ScriptedTransport.Call results = transport.calls.get(3);
         Assertions.assertTrue(results.url().contains("/queries/fixed") && results.url().contains("maxResults=10"), results.url());
 
         final Map<String, Object> values = Action.createConditionValues("bigquery", result);
