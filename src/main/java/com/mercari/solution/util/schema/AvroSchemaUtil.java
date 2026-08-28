@@ -1,5 +1,6 @@
 package com.mercari.solution.util.schema;
 
+import com.google.api.services.bigquery.model.Table;
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
 import com.google.datastore.v1.Entity;
@@ -184,9 +185,120 @@ public class AvroSchemaUtil {
             if(includedFields != null && !includedFields.contains(fieldSchema.getName())) {
                 continue;
             }
-            schemaFields.name(fieldSchema.getName()).type(convertSchema(fieldSchema, namespace)).noDefault();
+            final SchemaBuilder.FieldBuilder<Schema> fieldBuilder = schemaFields.name(fieldSchema.getName());
+            if(fieldSchema.getDescription() != null && !fieldSchema.getDescription().isEmpty()) {
+                fieldBuilder.doc(fieldSchema.getDescription());
+            }
+            fieldBuilder.type(convertSchema(fieldSchema, namespace)).noDefault();
         }
         return schemaFields.endRecord();
+    }
+
+    private static String emptyToNull(final String text) {
+        return text == null || text.isEmpty() ? null : text;
+    }
+
+    /**
+     * Returns a copy of {@code avroSchema} whose fields carry the {@code description} of the
+     * same-named BigQuery table fields as Avro {@code doc} (recursively for records, nullable
+     * unions and arrays). Fields without a matching description keep their existing doc.
+     * Used when the Avro schema comes from a path that has no descriptions (the BigQuery
+     * Storage read session) while the table metadata does.
+     */
+    public static Schema mergeDescriptions(final Schema avroSchema, final TableSchema tableSchema) {
+        if(avroSchema == null || tableSchema == null || tableSchema.getFields() == null) {
+            return avroSchema;
+        }
+        return mergeDescriptions(avroSchema, tableSchema.getFields());
+    }
+
+    /** {@link #mergeDescriptions(Schema, TableSchema)} plus the table description as the record doc. */
+    public static Schema mergeDescriptions(final Schema avroSchema, final Table table) {
+        if(avroSchema == null || table == null) {
+            return avroSchema;
+        }
+        return withDoc(mergeDescriptions(avroSchema, table.getSchema()), table.getDescription());
+    }
+
+    /** Returns a copy of the record schema with {@code doc} (a no-op for null / empty doc or non-record schemas). */
+    public static Schema withDoc(final Schema recordSchema, final String doc) {
+        if(recordSchema == null || doc == null || doc.isEmpty() || !Schema.Type.RECORD.equals(recordSchema.getType())) {
+            return recordSchema;
+        }
+        return copyRecord(recordSchema, doc, copyFields(recordSchema.getFields()));
+    }
+
+    /** Returns a copy of the record schema without its doc (a no-op when there is none or for non-record schemas). */
+    public static Schema stripDoc(final Schema recordSchema) {
+        if(recordSchema == null || recordSchema.getDoc() == null || !Schema.Type.RECORD.equals(recordSchema.getType())) {
+            return recordSchema;
+        }
+        return copyRecord(recordSchema, null, copyFields(recordSchema.getFields()));
+    }
+
+    /** New record with the same name / namespace / props as {@code recordSchema}, the given doc and (fresh) fields. */
+    private static Schema copyRecord(final Schema recordSchema, final String doc, final List<Schema.Field> fields) {
+        final Schema record = Schema.createRecord(recordSchema.getName(), doc, recordSchema.getNamespace(), recordSchema.isError(), fields);
+        for(final Map.Entry<String, Object> prop : recordSchema.getObjectProps().entrySet()) {
+            record.addProp(prop.getKey(), prop.getValue());
+        }
+        return record;
+    }
+
+    private static List<Schema.Field> copyFields(final List<Schema.Field> fields) {
+        final List<Schema.Field> copied = new ArrayList<>();
+        for(final Schema.Field field : fields) {
+            copied.add(copyField(field, field.schema(), field.doc()));
+        }
+        return copied;
+    }
+
+    private static Schema.Field copyField(final Schema.Field field, final Schema schema, final String doc) {
+        final Schema.Field newField = new Schema.Field(field.name(), schema, doc, field.defaultVal(), field.order());
+        for(final Map.Entry<String, Object> prop : field.getObjectProps().entrySet()) {
+            newField.addProp(prop.getKey(), prop.getValue());
+        }
+        return newField;
+    }
+
+    private static Schema mergeDescriptions(final Schema schema, final List<TableFieldSchema> tableFields) {
+        switch (schema.getType()) {
+            case RECORD -> {
+                final Map<String, TableFieldSchema> tableFieldMap = new HashMap<>();
+                for(final TableFieldSchema tableField : tableFields) {
+                    tableFieldMap.put(tableField.getName(), tableField);
+                }
+                final List<Schema.Field> fields = new ArrayList<>();
+                for(final Schema.Field field : schema.getFields()) {
+                    final TableFieldSchema tableField = tableFieldMap.get(field.name());
+                    Schema fieldSchema = field.schema();
+                    String doc = field.doc();
+                    if(tableField != null) {
+                        if(tableField.getFields() != null && !tableField.getFields().isEmpty()) {
+                            fieldSchema = mergeDescriptions(fieldSchema, tableField.getFields());
+                        }
+                        if(tableField.getDescription() != null && !tableField.getDescription().isEmpty()) {
+                            doc = tableField.getDescription();
+                        }
+                    }
+                    fields.add(copyField(field, fieldSchema, doc));
+                }
+                return copyRecord(schema, schema.getDoc(), fields);
+            }
+            case UNION -> {
+                final List<Schema> types = new ArrayList<>();
+                for(final Schema type : schema.getTypes()) {
+                    types.add(mergeDescriptions(type, tableFields));
+                }
+                return Schema.createUnion(types);
+            }
+            case ARRAY -> {
+                return Schema.createArray(mergeDescriptions(schema.getElementType(), tableFields));
+            }
+            default -> {
+                return schema;
+            }
+        }
     }
 
     public static Schema convertSchema(Entity entity) {
@@ -2202,7 +2314,7 @@ public class AvroSchemaUtil {
             case STRUCT, RECORD -> {
                 final String namespace = parentNamespace == null ? "root" : parentNamespace + "." + fieldSchema.getName().toLowerCase();
                 final List<Schema.Field> fields = fieldSchema.getFields().stream()
-                        .map(f -> new Schema.Field(f.getName(), convertSchema(f, TableRowFieldMode.valueOf(f.getMode()), namespace, false), null, (Object) null))
+                        .map(f -> new Schema.Field(f.getName(), convertSchema(f, TableRowFieldMode.valueOf(f.getMode()), namespace, false), emptyToNull(f.getDescription()), (Object) null))
                         .collect(Collectors.toList());
                 final String capitalName = fieldSchema.getName().substring(0, 1).toUpperCase()
                         + fieldSchema.getName().substring(1).toLowerCase();

@@ -65,6 +65,14 @@ These parameters are effective only when `createDisposition` is `CREATE_IF_NEEDE
 | clusteringFields  | optional | Array<String\> | Field names to use for [clustering](https://cloud.google.com/bigquery/docs/clustered-tables). Up to 4 fields.                                            |
 | primaryKeyFields  | optional | Array<String\> | Field names to set as [primary key](https://cloud.google.com/bigquery/docs/information-schema-table-constraints) on the table.                           |
 
+The `description` of each input schema field (declared in a `schema.fields` entry or read from a
+source such as a `bigquery` table or a `jdbc` table with column comments — see
+[schema](../common/schema.md#field-descriptions)) is part of the table schema this sink submits to
+BigQuery. It therefore becomes the BigQuery field description whenever BigQuery applies that schema:
+when the table is auto-created (`CREATE_IF_NEEDED`), when a file load with `WRITE_TRUNCATE` replaces
+the schema of an existing table, and for fields added through `schemaUpdateOptions`. Appending to an
+existing table without schema updates leaves its descriptions untouched.
+
 ### Streaming mode parameters
 
 These parameters are applicable only in streaming mode.

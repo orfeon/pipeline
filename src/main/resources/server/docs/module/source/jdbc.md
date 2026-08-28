@@ -69,6 +69,11 @@ The output schema is automatically inferred from the query or table metadata; no
 | initialSplitSize | optional | Integer | Number of initial splits when `enableInitialSplit` is `true`. The default is `10`. |
 | collations | optional | Map<String,String\> | Overrides the character collation assumed for string seek fields when computing split boundaries. Key is the field name (`*` applies to all fields), value is the collation name. By default the collation is detected from the table metadata. |
 
+For `table` reads the column comments of the table (JDBC `REMARKS`: PostgreSQL `COMMENT ON COLUMN`,
+MySQL / TiDB column `COMMENT`) and the table comment are attached to the output schema as field /
+schema `description`s (see [schema](../common/schema.md#field-descriptions)). Reading the comments
+never fails the pipeline.
+
 In table read mode the module emits an additional tagged output named `restriction` containing the processed key-range records (useful for monitoring split progress), and read failures can be routed with the common `failFast` / `outputFailure` / `failureSinks` settings.
 
 ## Example config files

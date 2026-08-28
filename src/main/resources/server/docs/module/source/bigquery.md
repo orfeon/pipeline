@@ -53,6 +53,12 @@ Schema is automatically inferred from the query result or table definition; no `
 | rowRestriction | optional           | String         | SQL predicate to filter rows at the storage level before reading. Uses the same syntax as a `WHERE` clause (e.g. `age > 18 AND status = 'active'`). Only available for table direct read.                                                                  |
 | format         | optional           | Enum           | Data format for Storage Read API. Values: `AVRO`, `ARROW`. Only available for table direct read.                                                                                                                                                           |
 
+For table (and view) reads, the field descriptions of the table are attached to the output schema
+(`description` of each field, visible in the dry-run output schema and carried to sinks that store
+descriptions — see [schema](../common/schema.md#field-descriptions)). Query reads have no
+descriptions since the BigQuery dry-run result schema does not carry them. Fetching the descriptions
+never fails the pipeline: if the table metadata cannot be read, the schema is used without them.
+
 ### Common parameters
 
 | parameter | optional | type   | description                                                                                                                           |

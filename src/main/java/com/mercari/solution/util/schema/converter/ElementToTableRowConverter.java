@@ -25,7 +25,7 @@ public class ElementToTableRowConverter {
     public static TableSchema convertSchema(final Schema schema) {
         final List<TableFieldSchema> tableFieldSchemas = new ArrayList<>();
         for(final Schema.Field field : schema.getFields()) {
-            tableFieldSchemas.add(convertTableFieldSchema(field.getName(), field.getFieldType()));
+            tableFieldSchemas.add(convertTableFieldSchema(field));
         }
         return new TableSchema().setFields(tableFieldSchemas);
     }
@@ -158,7 +158,11 @@ public class ElementToTableRowConverter {
     }
 
     private static TableFieldSchema convertTableFieldSchema(final Schema.Field field) {
-        return convertTableFieldSchema(field.getName(), field.getFieldType());
+        final TableFieldSchema tableFieldSchema = convertTableFieldSchema(field.getName(), field.getFieldType());
+        if(field.getDescription() != null && !field.getDescription().isEmpty()) {
+            tableFieldSchema.setDescription(field.getDescription());
+        }
+        return tableFieldSchema;
     }
 
 

@@ -52,6 +52,9 @@ public class TableRowToElementConverter {
                 default -> throw new IllegalArgumentException();
             };
             final Schema.Field field = Schema.Field.of(fieldSchema.getName(), fieldType);
+            if(fieldSchema.getDescription() != null && !fieldSchema.getDescription().isEmpty()) {
+                field.withDescription(fieldSchema.getDescription());
+            }
             fields.add(field);
         }
         return fields;
