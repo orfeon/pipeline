@@ -60,6 +60,13 @@ public class VertexAiUtil {
         }
     }
 
+    /** The access token could not be obtained (missing / invalid credentials) - not a transport error. */
+    public static class CredentialsException extends RuntimeException {
+        public CredentialsException(final String message, final Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     /** A fixed endpoint (tests / private endpoints), or null to derive the regional endpoint from the location. */
     private final String endpoint;
     private final CloudRunUtil.TokenSupplier tokenSupplier;
@@ -151,16 +158,21 @@ public class VertexAiUtil {
         return send(location, "GET", batchPredictionJobName(project, location, jobId), null);
     }
 
+    /** Upper bound on the jobs fetched by {@link #listBatchPredictionJobs} before the client-side sort. */
+    public static final int LIST_FETCH_LIMIT = 1000;
+
     /**
-     * {@code GET locations/{location}/batchPredictionJobs?filter=&pageSize=} — the jobs, newest first
-     * (sorted by {@code createTime} client side), following pages up to {@code limit}.
+     * {@code GET locations/{location}/batchPredictionJobs?filter=&pageSize=} — the jobs matching the
+     * filter, newest first. The API documents no ordering and has no {@code orderBy}, so every page
+     * (up to {@link #LIST_FETCH_LIMIT} jobs) is fetched, sorted by {@code createTime} client side and
+     * then cut to {@code limit} — a {@code limit} of 1 really is the newest match.
      */
     public List<JsonObject> listBatchPredictionJobs(final String project, final String location, final String filter, final int limit) {
         final List<JsonObject> jobs = new ArrayList<>();
         String pageToken = null;
         while(true) {
             final StringBuilder path = new StringBuilder(parent(project, location))
-                    .append("/batchPredictionJobs?pageSize=").append(Math.min(Math.max(limit, 1), 100));
+                    .append("/batchPredictionJobs?pageSize=100");
             if(filter != null && !filter.isBlank()) {
                 path.append("&filter=").append(URLEncoder.encode(filter, StandardCharsets.UTF_8));
             }
@@ -171,7 +183,7 @@ public class VertexAiUtil {
             for(final JsonElement e : array(response, "batchPredictionJobs")) {
                 jobs.add(e.getAsJsonObject());
             }
-            if(jobs.size() >= limit || !response.has("nextPageToken") || response.get("nextPageToken").getAsString().isEmpty()) {
+            if(jobs.size() >= LIST_FETCH_LIMIT || !response.has("nextPageToken") || response.get("nextPageToken").getAsString().isEmpty()) {
                 break;
             }
             pageToken = response.get("nextPageToken").getAsString();
@@ -317,11 +329,17 @@ public class VertexAiUtil {
 
     private JsonObject send(final String location, final String method, final String path, final JsonObject body) {
         final String url = (endpoint != null ? endpoint : endpoint(location)) + path;
+        final String token;
+        try {
+            token = tokenSupplier.get();
+        } catch (final IOException e) {
+            throw new CredentialsException("Vertex AI API " + method + " " + path + ": failed to obtain an access token: " + e.getMessage(), e);
+        }
         try {
             final HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(300))
-                    .header("Authorization", "Bearer " + tokenSupplier.get())
+                    .header("Authorization", "Bearer " + token)
                     .header("Content-Type", "application/json");
             final HttpRequest.BodyPublisher publisher = body == null
                     ? HttpRequest.BodyPublishers.noBody()

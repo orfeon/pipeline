@@ -65,13 +65,21 @@ final class ActionSupport {
         }
     }
 
-    /** Distinct, non-blank values of {@code field} over the collected elements, in first-seen order. */
+    /**
+     * Distinct, non-blank values of {@code field} over the collected elements, in first-seen order.
+     * A comma-joined value (the {@code jobId} of a list / multi-job wait envelope) contributes each id.
+     */
     static List<String> collectField(final List<MElement> elements, final String field) {
         final LinkedHashSet<String> values = new LinkedHashSet<>();
         for(final MElement element : elements) {
             final Object value = element.getPrimitiveValue(field);
-            if(value != null && !value.toString().isBlank()) {
-                values.add(value.toString());
+            if(value == null) {
+                continue;
+            }
+            for(final String id : value.toString().split(",")) {
+                if(!id.isBlank()) {
+                    values.add(id.trim());
+                }
             }
         }
         return new ArrayList<>(values);

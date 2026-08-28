@@ -51,7 +51,7 @@ public class VertexAiAction implements ActionService {
     /** States of a same-named job that a retried create adopts instead of submitting another one. */
     private static final Set<String> REUSABLE_STATES = Set.of(
             "JOB_STATE_QUEUED", "JOB_STATE_PENDING", "JOB_STATE_RUNNING", "JOB_STATE_PAUSED", "JOB_STATE_UPDATING",
-            "JOB_STATE_SUCCEEDED", "JOB_STATE_PARTIALLY_SUCCEEDED");
+            "JOB_STATE_SUCCEEDED");
     /** {@code BatchPredictionJob} resource fields accepted at the top level of {@code parameters}. */
     static final List<String> JOB_FIELDS = List.of(
             "inputConfig", "outputConfig", "instanceConfig", "modelParameters", "dedicatedResources", "serviceAccount",
@@ -123,7 +123,9 @@ public class VertexAiAction implements ActionService {
 
         // wait
         public Boolean wait;
-        public WaitUntil waitUntil;
+        /** Kept as text: Gson maps an unknown enum constant to null, which would silently become {@code terminal}. */
+        public String waitUntil;
+        public WaitUntil until;
         public Long timeoutSeconds;
         public Boolean cancelOnTimeout;
 
@@ -145,6 +147,8 @@ public class VertexAiAction implements ActionService {
                 case create -> {
                     if(model == null) {
                         errorMessages.add(prefix + "model is required for batchPredictionJobs.create");
+                    } else if(model.startsWith("endpoints/") || model.contains("/endpoints/")) {
+                        errorMessages.add(prefix + "model must be a model resource for batchPredictionJobs.create (publishers/google/models/... or a tuned projects/.../models/...), not an endpoint");
                     }
                     final JsonObject inputConfig = VertexAiUtil.object(bodyJson, "inputConfig");
                     if(inputConfig == null) {
@@ -202,6 +206,9 @@ public class VertexAiAction implements ActionService {
             if(timeoutSeconds != null && timeoutSeconds <= 0) {
                 errorMessages.add(prefix + "timeoutSeconds must be positive");
             }
+            if(waitUntil != null && Arrays.stream(WaitUntil.values()).noneMatch(w -> w.name().equals(waitUntil))) {
+                errorMessages.add(prefix + "waitUntil must be one of " + Arrays.toString(WaitUntil.values()) + " but: " + waitUntil);
+            }
             return errorMessages;
         }
 
@@ -213,8 +220,9 @@ public class VertexAiAction implements ActionService {
                 wait = true;
             }
             if(waitUntil == null) {
-                waitUntil = WaitUntil.terminal;
+                waitUntil = WaitUntil.terminal.name();
             }
+            until = WaitUntil.valueOf(waitUntil);
             if(timeoutSeconds == null) {
                 timeoutSeconds = 86400L;
             }
@@ -314,6 +322,8 @@ public class VertexAiAction implements ActionService {
 
     private transient VertexAiClient client;
     private transient Sleeper sleeper;
+    /** Test hook: the poll sleeper every instance uses when set (the instance is deserialized into the DoFn, so an instance setter would be lost). */
+    static volatile Sleeper testSleeper;
 
     @Override
     public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
@@ -336,8 +346,9 @@ public class VertexAiAction implements ActionService {
         this.parameters.responseSchema = responseSchema == null || responseSchema.isJsonNull() ? null : responseSchema.toString();
         this.parameters.op = op;
 
-        if(this.parameters.projectId == null) {
-            this.parameters.projectId = DataflowOptions.getProject(options);
+        if(this.parameters.projectId == null || this.parameters.projectId.isBlank()) {
+            final String project = DataflowOptions.getProject(options);
+            this.parameters.projectId = project == null || project.isBlank() ? null : project;
         }
 
         final List<String> errorMessages = this.parameters.validate(name, trigger);
@@ -354,14 +365,7 @@ public class VertexAiAction implements ActionService {
     @Override
     public void setup() {
         this.client = createClient(parameters);
-        if(this.sleeper == null) {
-            this.sleeper = Sleeper.DEFAULT;
-        }
-    }
-
-    /** Test hook: replace the poll sleeper (call before {@link #setup()}). */
-    void setSleeper(final Sleeper sleeper) {
-        this.sleeper = sleeper;
+        this.sleeper = testSleeper != null ? testSleeper : Sleeper.DEFAULT;
     }
 
     @Override
@@ -408,12 +412,23 @@ public class VertexAiAction implements ActionService {
                     }
                 } else if(p.jobId != null) {
                     jobIds.add(template(p.jobId, data));
+                } else if(WaitUntil.none.equals(p.until)) {
+                    final String filter = template(p.filter, data);
+                    final List<JsonObject> jobs = client.listBatchPredictionJobs(project, location, filter, 1);
+                    if(jobs.isEmpty()) {
+                        throw new NonRetryableException("action module[" + name + "] no vertex ai batch prediction job matches filter: " + filter);
+                    }
+                    yield result(operation, jobs.getFirst());
                 } else {
+                    // the filter lookup and the job wait share one timeoutSeconds window
+                    final long started = System.currentTimeMillis();
                     jobIds.add(waitForFilter(p, project, location, template(p.filter, data)));
+                    final long remaining = Math.max(1L, p.timeoutSeconds - (System.currentTimeMillis() - started) / 1000L);
+                    yield result(operation, waitForAll(p, project, location, jobIds, p.until, false, false, remaining).getFirst());
                 }
-                final List<JsonObject> completed = WaitUntil.none.equals(p.waitUntil)
+                final List<JsonObject> completed = WaitUntil.none.equals(p.until)
                         ? jobIds.stream().map(id -> client.getBatchPredictionJob(project, location, id)).toList()
-                        : waitForAll(p, project, location, jobIds, p.waitUntil, false, false);
+                        : waitForAll(p, project, location, jobIds, p.until, false, false);
                 if(!collected) {
                     // a single explicit job: the payload is the job itself (same shape as batchPredictionJobs.get)
                     yield result(operation, completed.getFirst());
@@ -425,7 +440,7 @@ public class VertexAiAction implements ActionService {
                 client.cancelBatchPredictionJob(project, location, jobId);
                 LOG.info("action module[{}] cancelled vertex ai batch prediction job: {}", name, jobId);
                 JsonObject job = client.getBatchPredictionJob(project, location, jobId);
-                if(p.wait && !WaitUntil.none.equals(p.waitUntil) && !VertexAiUtil.isTerminal(VertexAiUtil.state(job))) {
+                if(p.wait && !WaitUntil.none.equals(p.until) && !VertexAiUtil.isTerminal(VertexAiUtil.state(job))) {
                     job = waitForAll(p, project, location, List.of(jobId), WaitUntil.terminal, true, false).getFirst();
                 }
                 yield result(operation, job);
@@ -484,9 +499,9 @@ public class VertexAiAction implements ActionService {
     private ActionResult afterStart(final Parameters p, final String project, final String location, JsonObject job, final boolean adopted) throws Exception {
         final String jobId = VertexAiUtil.id(VertexAiUtil.string(job, "name"));
         final String state;
-        if(p.wait && !WaitUntil.none.equals(p.waitUntil)) {
+        if(p.wait && !WaitUntil.none.equals(p.until)) {
             if(!VertexAiUtil.isTerminal(VertexAiUtil.state(job))) {
-                job = waitForAll(p, project, location, List.of(jobId), p.waitUntil, false, !adopted).getFirst();
+                job = waitForAll(p, project, location, List.of(jobId), p.until, false, !adopted).getFirst();
             }
             state = VertexAiUtil.state(job);
         } else {
@@ -595,7 +610,11 @@ public class VertexAiAction implements ActionService {
      * the jobs are ours ({@code own}: submitted by this step, not adopted or merely waited for).
      */
     private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> jobIds, final WaitUntil until, final boolean cancelRequested, final boolean own) throws Exception {
-        return ActionSupport.waitForAll(name, "vertex ai batch prediction jobs", jobIds, p.timeoutSeconds, sleeper,
+        return waitForAll(p, project, location, jobIds, until, cancelRequested, own, p.timeoutSeconds);
+    }
+
+    private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> jobIds, final WaitUntil until, final boolean cancelRequested, final boolean own, final long timeoutSeconds) throws Exception {
+        return ActionSupport.waitForAll(name, "vertex ai batch prediction jobs", jobIds, timeoutSeconds, sleeper,
                 jobId -> {
                     final JsonObject job = client.getBatchPredictionJob(project, location, jobId);
                     final String state = VertexAiUtil.state(job);
@@ -618,10 +637,16 @@ public class VertexAiAction implements ActionService {
                 p.cancelOnTimeout && own ? jobId -> client.cancelBatchPredictionJob(project, location, jobId) : null);
     }
 
-    /** 429 / 5xx from the API, or a transport failure (wrapped I/O error) - worth another poll. */
+    /**
+     * 429 / 5xx from the API, or a transport failure (wrapped I/O error) - worth another poll.
+     * A credentials failure ({@link VertexAiUtil.CredentialsException}) is not: re-polling cannot fix it.
+     */
     private static boolean isTransient(final RuntimeException e) {
         if(e instanceof VertexAiException ve) {
             return ve.isRetryable();
+        }
+        if(e instanceof VertexAiUtil.CredentialsException) {
+            return false;
         }
         return e instanceof IllegalStateException && e.getCause() instanceof IOException;
     }

@@ -58,13 +58,13 @@ Waiting happens inside the action's DoFn (as in the [bigquery](bigquery.md) / [d
 |---|---|---|---|
 | projectId | optional | String | Project of the job / model. Default: the pipeline's project. Template allowed. |
 | location | conditionally required | String | Vertex AI location. For the `batchPredictionJobs.*` operations a **regional** location is required (`us-central1`, `asia-northeast1`, …; batch jobs and a BigQuery input table must be in the same region). For `models.generateContent` default `global` (the [global endpoint](https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations)); set a region for data residency or Provisioned Throughput. Template allowed. |
-| model | conditionally required | String | `batchPredictionJobs.create` / `models.generateContent`: a Gemini model id (`gemini-2.5-flash` → `publishers/google/models/gemini-2.5-flash`), a `publishers/…` resource, or a tuned model endpoint `projects/…/locations/…/endpoints/…`. Template allowed. |
+| model | conditionally required | String | A Gemini model id (`gemini-2.5-flash` → `publishers/google/models/gemini-2.5-flash`) or a `publishers/…` resource. `models.generateContent` also accepts a tuned model endpoint `projects/…/locations/…/endpoints/…`; `batchPredictionJobs.create` takes a model resource only (a tuned model as `projects/…/locations/…/models/…`), not an endpoint. Template allowed. |
 | jobId | conditionally required | String | Target job for `get` / `wait` / `cancel` (the numeric id or the full resource name). Template allowed, e.g. `${jobId}` from a create envelope. |
-| jobIdField | optional | String | `wait` with `trigger: collect`: field of the collected elements holding job ids (`jobId` of create envelopes). |
+| jobIdField | optional | String | `wait` with `trigger: collect`: field of the collected elements holding job ids (`jobId` of create envelopes; a comma-joined `jobId` of a `list` / multi-job `wait` envelope contributes each id). |
 | filter | optional | String | `list`: the [list filter](https://cloud.google.com/vertex-ai/docs/reference/rest/v1/projects.locations.batchPredictionJobs/list) (`display_name="…"`, `state="JOB_STATE_RUNNING"`, `create_time>"2026-08-28T00:00:00Z"`, `labels.run="r1"`, combined with `AND`). `wait`: polls the list until a job matches, then waits for the newest one. Template allowed. |
 | pageSize | optional | Integer | `list`: max jobs to return. Default `100`. |
 | wait | optional | Boolean | `create` / `cancel`: wait for the job. Default `true`. |
-| waitUntil | optional | Enum | `terminal` (default) / `running` (return as soon as the job leaves the queue) / `none` (`wait`: report the current state without polling). |
+| waitUntil | optional | Enum | `terminal` (default) / `running` (return as soon as the job leaves the queue) / `none` (`wait`: report the current state without polling — with `filter`, the newest matching job, failing when none matches). Case-sensitive. |
 | timeoutSeconds | optional | Long | Max seconds to wait. Default `86400`. |
 | cancelOnTimeout | optional | Boolean | Cancel the pending job(s) on timeout. Default `true` for `create`, `false` otherwise (a job submitted elsewhere is not ours to cancel). |
 | endpoint | optional | String | API endpoint override (tests / private endpoints). Default: derived from `location`. |

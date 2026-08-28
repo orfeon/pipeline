@@ -9,10 +9,15 @@ import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.util.cloud.google.vertexai.VertexAiUtil;
+import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,6 +25,12 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class VertexAiActionTest {
+
+    @BeforeAll
+    static void noSleep() {
+        // the poll backoff (2s -> 30s) is not what these tests exercise
+        VertexAiAction.testSleeper = millis -> {};
+    }
 
     private static final String SOURCE_YAML = """
             sources:
@@ -385,6 +396,21 @@ public class VertexAiActionTest {
         run(p3, yaml.formatted("displayName: x-r3\n      failOnPartial: true"), "create");
         Assertions.assertTrue(messages(Assertions.assertThrows(Exception.class, p3::run)).contains("JOB_STATE_PARTIALLY_SUCCEEDED"));
 
+        // a re-run with the same displayName does not adopt the partially succeeded job: a new one is submitted
+        final int submitted = client.requests.size();
+        client.path = List.of("JOB_STATE_PENDING", "JOB_STATE_RUNNING", "JOB_STATE_SUCCEEDED");
+        client.failedCount = "0";
+        final TestPipeline p3b = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(run(p3b, yaml.formatted("displayName: x-r3\n      failOnPartial: true"), "create").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("JOB_STATE_SUCCEEDED", e.getPrimitiveValue("state"));
+                Assertions.assertFalse(payload(e).has("adopted"));
+            }
+            return null;
+        });
+        p3b.run();
+        Assertions.assertEquals(submitted + 1, client.requests.size());
+
         // a job that produced no displayName still runs (not idempotent, WARN)
         client.path = List.of("JOB_STATE_SUCCEEDED");
         final TestPipeline p4 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
@@ -533,6 +559,60 @@ public class VertexAiActionTest {
         });
         p2.run();
         Assertions.assertTrue(client.ops.stream().filter(o -> o.equals("list:display_name=\"other\"")).count() >= 3, client.ops.toString());
+
+        // wait by filter with waitUntil: none reports the newest match without polling, fails when nothing matches
+        final TestPipeline p2c = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(run(p2c, """
+                actions:
+                  - name: wait
+                    module: vertexai
+                    operation: batchPredictionJobs.wait
+                    parameters: { projectId: myproject, location: us-central1, endpoint: memory://ops, filter: 'display_name="nightly"', waitUntil: none }
+                """, "wait").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("2", e.getPrimitiveValue("jobId"));
+                Assertions.assertEquals("JOB_STATE_SUCCEEDED", e.getPrimitiveValue("state"));
+            }
+            return null;
+        });
+        p2c.run();
+        final int listsBefore = (int) client.ops.stream().filter(o -> o.startsWith("list:display_name=\"nothing\"")).count();
+        final TestPipeline p2d = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        run(p2d, """
+                actions:
+                  - name: wait
+                    module: vertexai
+                    operation: batchPredictionJobs.wait
+                    failFast: true
+                    retry: { maxAttempts: 3, initialBackoff: 10ms }
+                    parameters: { projectId: myproject, location: us-central1, endpoint: memory://ops, filter: 'display_name="nothing"', waitUntil: none }
+                """, "wait");
+        Assertions.assertTrue(messages(Assertions.assertThrows(Exception.class, p2d::run)).contains("no vertex ai batch prediction job matches"));
+        Assertions.assertEquals(listsBefore + 1, client.ops.stream().filter(o -> o.startsWith("list:display_name=\"nothing\"")).count(), "waitUntil none must not poll nor retry");
+
+        // a list envelope's comma-joined jobId feeds a collected wait: each id is polled
+        final TestPipeline p2e = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> chained = MPipeline.apply(p2e, Config.load("""
+                actions:
+                  - name: list
+                    module: vertexai
+                    operation: batchPredictionJobs.list
+                    parameters: { projectId: myproject, location: us-central1, endpoint: memory://ops, filter: 'display_name="nightly"' }
+                  - name: wait
+                    module: vertexai
+                    operation: batchPredictionJobs.wait
+                    trigger: collect
+                    inputs: [list]
+                    parameters: { projectId: myproject, location: us-central1, endpoint: memory://ops, jobIdField: jobId, waitUntil: none }
+                """));
+        PAssert.that(chained.get("wait").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("2,1", e.getPrimitiveValue("jobId"));
+                Assertions.assertEquals(2, payload(e).get("count").getAsInt());
+            }
+            return null;
+        });
+        p2e.run();
 
         // waitUntil: running returns as soon as the job runs
         client.put("4", "JOB_STATE_PENDING", "r", 41);
@@ -697,6 +777,8 @@ public class VertexAiActionTest {
         assertInvalid(base.formatted("batchPredictionJobs.create", "model: gemini-2.5-flash\n      " + io), "location is required");
         assertInvalid(base.formatted("batchPredictionJobs.create", "location: global\n      model: gemini-2.5-flash\n      " + io), "location must be a regional location");
         assertInvalid(base.formatted("batchPredictionJobs.create", "location: us-central1\n      " + io), "model is required");
+        assertInvalid(base.formatted("batchPredictionJobs.create", "location: us-central1\n      model: projects/p/locations/us-central1/endpoints/1\n      " + io), "not an endpoint");
+        assertInvalid(base.formatted("batchPredictionJobs.wait", "location: us-central1\n      jobId: '1'\n      waitUntil: RUNNING"), "waitUntil must be one of");
         assertInvalid(base.formatted("batchPredictionJobs.create", "location: us-central1\n      model: m\n      outputConfig: { gcsDestination: { outputUriPrefix: gs://b/out/ } }"), "inputConfig is required");
         assertInvalid(base.formatted("batchPredictionJobs.create", "location: us-central1\n      model: m\n      inputConfig: { instancesFormat: jsonl }\n      outputConfig: { gcsDestination: { outputUriPrefix: gs://b/out/ } }"), "inputConfig requires gcsSource or bigquerySource");
         assertInvalid(base.formatted("batchPredictionJobs.create", "location: us-central1\n      model: m\n      inputConfig: { gcsSource: { uris: [gs://b/in.jsonl] } }"), "outputConfig is required");
@@ -710,7 +792,11 @@ public class VertexAiActionTest {
         assertInvalid(base.formatted("models.generateContent", "model: m\n      prompt: hi\n      system: s\n      systemInstruction: { parts: [{ text: s }] }"), "system and systemInstruction are exclusive");
         assertInvalid(base.formatted("models.generateContent", "model: m\n      prompt: hi\n      responseSchema: { type: OBJECT }\n      generationConfig: { responseSchema: { type: OBJECT } }"), "responseSchema and generationConfig.responseSchema are exclusive");
         assertInvalid(base.formatted("models.generateContent", "model: m\n      prompt: hi\n      timeoutSeconds: 0"), "timeoutSeconds must be positive");
-        assertInvalid("""
+        // no projectId anywhere: pin the pipeline project to blank so the gcloud SDK default cannot supply one
+        final PipelineOptions options = TestPipeline.testingPipelineOptions();
+        options.as(GcpOptions.class).setProject("");
+        final TestPipeline p = TestPipeline.fromOptions(options).enableAbandonedNodeEnforcement(false);
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class, () -> run(p, """
                 actions:
                   - name: step
                     module: vertexai
@@ -718,13 +804,23 @@ public class VertexAiActionTest {
                     parameters:
                       model: m
                       prompt: hi
-                """, "projectId is required");
+                """, "step"));
+        Assertions.assertTrue(e.getMessage().contains("projectId is required"), e.getMessage());
     }
 
     private static void assertInvalid(final String yaml, final String expected) {
         final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class, () -> run(p, yaml, "step"));
         Assertions.assertTrue(e.getMessage().contains(expected), e.getMessage());
+    }
+
+    @Test
+    public void testCredentialsFailureIsNotATransportError() {
+        final VertexAiUtil util = new VertexAiUtil("http://127.0.0.1:1/", () -> { throw new IOException("Application Default Credentials are not available"); });
+        final VertexAiUtil.CredentialsException e = Assertions.assertThrows(VertexAiUtil.CredentialsException.class,
+                () -> util.getBatchPredictionJob("p", "us-central1", "1"));
+        Assertions.assertTrue(e.getMessage().contains("access token"), e.getMessage());
+        Assertions.assertInstanceOf(IOException.class, e.getCause());
     }
 
     @Test
