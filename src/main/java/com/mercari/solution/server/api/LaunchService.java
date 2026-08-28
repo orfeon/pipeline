@@ -6,6 +6,7 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.server.launch.CloudRunJobLauncher;
 import com.mercari.solution.server.launch.CloudRunWorkerPoolLauncher;
+import com.mercari.solution.server.launch.ConfigStager;
 import com.mercari.solution.server.launch.DataflowFlexTemplateLauncher;
 import com.mercari.solution.server.launch.DataflowInProcessLauncher;
 import com.mercari.solution.server.launch.DataprocServerlessLauncher;
@@ -47,12 +48,18 @@ public class LaunchService {
     private static final Map<String, String> LEGACY_RUNNERS = Map.of(
             "dataflowTemplate", "dataflow/flexTemplate");
 
-    private static final Map<String, Launcher> LAUNCHERS = register(List.of(
-            new DataflowFlexTemplateLauncher(),
-            new DataflowInProcessLauncher(),
-            new CloudRunJobLauncher(),
-            new CloudRunWorkerPoolLauncher(),
-            new DataprocServerlessLauncher()));
+    private static final Map<String, Launcher> LAUNCHERS = register(launchers());
+
+    private static List<Launcher> launchers() {
+        final CloudRunUtil cloudRun = new CloudRunUtil();
+        final ConfigStager stager = new ConfigStager();
+        return List.of(
+                new DataflowFlexTemplateLauncher(),
+                new DataflowInProcessLauncher(),
+                new CloudRunJobLauncher(cloudRun, stager),
+                new CloudRunWorkerPoolLauncher(cloudRun, stager),
+                new DataprocServerlessLauncher());
+    }
 
     private static Map<String, Launcher> register(final List<Launcher> launchers) {
         final Map<String, Launcher> map = new LinkedHashMap<>();
@@ -131,8 +138,9 @@ public class LaunchService {
             // launch.args (JSON object from the modal) overrides the request-level args text.
             final JsonObject launchArgs = launch.has("args") && launch.get("args").isJsonObject()
                     ? launch.getAsJsonObject("args") : null;
-            final String effectiveArgs = launchArgs != null ? launchArgs.toString() : argsText;
-            final Config config = Config.load(configText, null, Config.Format.unknown, effectiveArgs);
+            final Config config = launchArgs != null
+                    ? Config.load(configText, null, Config.Format.unknown, argsMap(launchArgs))
+                    : Config.load(configText, null, Config.Format.unknown, argsText);
             configContent = config.getContent();
 
             final String runner = launch.has("runner") && !launch.get("runner").isJsonNull()
@@ -170,6 +178,19 @@ public class LaunchService {
      * job, a 4xx from the target API) are reported as plain messages; anything unexpected keeps the
      * stack trace so it can be diagnosed.
      */
+    /** JSON args as template args: string values as-is (not JSON-quoted), other values as their JSON text. */
+    public static Map<String, String> argsMap(final JsonObject args) {
+        final Map<String, String> map = new java.util.HashMap<>();
+        for(final Map.Entry<String, JsonElement> entry : args.entrySet()) {
+            final JsonElement value = entry.getValue();
+            if(value == null || value.isJsonNull()) {
+                continue;
+            }
+            map.put(entry.getKey(), value.isJsonPrimitive() ? value.getAsString() : value.toString());
+        }
+        return map;
+    }
+
     private static JsonObject errorResponse(final String module, final long millis, final Throwable e) {
         final JsonObject responseJson = new JsonObject();
         responseJson.addProperty("type", "launch");

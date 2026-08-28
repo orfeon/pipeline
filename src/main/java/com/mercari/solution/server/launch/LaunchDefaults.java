@@ -41,14 +41,18 @@ public class LaunchDefaults {
     public static final String KEY_TEMP_LOCATION = "TEMP_LOCATION";
     public static final String KEY_LABELS = "LABELS";
 
-    /** Legacy env var names, keyed by "<runner>/<key>" or "<key>" (common). Read as a fallback with a warning. */
+    /**
+     * Legacy env var names, keyed by "<runner>/<key>" or "<key>" (common). Read as a fallback with a warning.
+     * Project / region / temp location were the deployment defaults and stay common; the worker service
+     * account, subnetwork and staging bucket are Dataflow-shaped values and only apply to Dataflow launches.
+     */
     private static final Map<String, String> LEGACY = Map.of(
             KEY_PROJECT, "MERCARI_PIPELINE_DATAFLOW_PROJECT",
             KEY_REGION, "MERCARI_PIPELINE_DATAFLOW_REGION",
-            KEY_SERVICE_ACCOUNT, "MERCARI_PIPELINE_DATAFLOW_SERVICE_ACCOUNT",
-            KEY_SUBNETWORK, "MERCARI_PIPELINE_DATAFLOW_SUBNETWORK",
-            KEY_STAGING_LOCATION, "MERCARI_PIPELINE_DATAFLOW_STAGING_LOCATION",
             KEY_TEMP_LOCATION, "MERCARI_PIPELINE_TEMP_LOCATION",
+            "dataflow/" + KEY_SERVICE_ACCOUNT, "MERCARI_PIPELINE_DATAFLOW_SERVICE_ACCOUNT",
+            "dataflow/" + KEY_SUBNETWORK, "MERCARI_PIPELINE_DATAFLOW_SUBNETWORK",
+            "dataflow/" + KEY_STAGING_LOCATION, "MERCARI_PIPELINE_DATAFLOW_STAGING_LOCATION",
             "dataflow/TEMPLATE_LOCATION", "MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION");
 
     private static final Set<String> WARNED = ConcurrentHashMap.newKeySet();
@@ -149,32 +153,39 @@ public class LaunchDefaults {
                         + envName(runner, key) + " (or " + envName(key) + ")"));
     }
 
-    /** Project from the config options: the runner block (Dataflow) first, then {@code options.gcp.project}. */
+    /**
+     * Project from the config options. Dataflow: {@code options.dataflow.project} then {@code options.gcp.project};
+     * other runners: {@code options.gcp.project} first, with {@code options.dataflow.project} as a last resort
+     * (configs written for Dataflow-only launches still resolve).
+     */
     public static String optionsProject(final String runner, final Options options) {
         if(options == null) {
             return null;
         }
-        if("dataflow".equals(runner) && options.getDataflow() != null && options.getDataflow().getProject() != null) {
-            return options.getDataflow().getProject();
-        }
-        if(options.getGcp() != null) {
-            return options.getGcp().getProject();
-        }
-        return null;
+        final String dataflow = options.getDataflow() == null ? null : blank(options.getDataflow().getProject());
+        final String gcp = options.getGcp() == null ? null : blank(options.getGcp().getProject());
+        return "dataflow".equals(runner)
+                ? (dataflow != null ? dataflow : gcp)
+                : (gcp != null ? gcp : dataflow);
     }
 
-    /** Region from the config options: {@code options.dataflow.region} (Dataflow) first, then {@code options.gcp.workerRegion}. */
+    /**
+     * Region from the config options. Dataflow: {@code options.dataflow.region} then {@code options.gcp.workerRegion};
+     * other runners: {@code options.gcp.workerRegion} first, then {@code options.dataflow.region}.
+     */
     public static String optionsRegion(final String runner, final Options options) {
         if(options == null) {
             return null;
         }
-        if("dataflow".equals(runner) && options.getDataflow() != null && options.getDataflow().getRegion() != null) {
-            return options.getDataflow().getRegion();
-        }
-        if(options.getGcp() != null) {
-            return options.getGcp().getWorkerRegion();
-        }
-        return null;
+        final String dataflow = options.getDataflow() == null ? null : blank(options.getDataflow().getRegion());
+        final String gcp = options.getGcp() == null ? null : blank(options.getGcp().getWorkerRegion());
+        return "dataflow".equals(runner)
+                ? (dataflow != null ? dataflow : gcp)
+                : (gcp != null ? gcp : dataflow);
+    }
+
+    private static String blank(final String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /** Additional labels from {@code MERCARI_PIPELINE_LAUNCH_LABELS} ({@code k=v,k=v}). */

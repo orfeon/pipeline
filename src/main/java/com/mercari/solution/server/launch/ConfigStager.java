@@ -46,6 +46,14 @@ public class ConfigStager {
      * @return the {@code --config} value ({@code gs://...} or {@code data:...}).
      */
     public String stage(final String stagingLocation, final String launchId, final String content) throws IOException {
+        return stage(stagingLocation, launchId, content, 0);
+    }
+
+    /**
+     * @param reservedBytes bytes the caller adds to the same container spec next to the config
+     *                      (the {@code --args.*} entries), counted against the inline limit.
+     */
+    public String stage(final String stagingLocation, final String launchId, final String content, final int reservedBytes) throws IOException {
         if(stagingLocation != null && !stagingLocation.isBlank()) {
             if(!stagingLocation.startsWith("gs://")) {
                 throw new IllegalArgumentException("staging location must start with gs://, but: " + stagingLocation);
@@ -58,8 +66,10 @@ public class ConfigStager {
             return path;
         }
         final byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
-        if(bytes.length > MAX_INLINE_BYTES) {
-            throw new IllegalArgumentException("config is too large to pass inline (" + bytes.length + " bytes > "
+        // base64 grows the payload by 4/3
+        final int inlineBytes = (bytes.length + 2) / 3 * 4 + reservedBytes;
+        if(inlineBytes > MAX_INLINE_BYTES) {
+            throw new IllegalArgumentException("config is too large to pass inline (" + inlineBytes + " bytes with args > "
                     + MAX_INLINE_BYTES + "); set " + LaunchDefaults.envName(LaunchDefaults.KEY_STAGING_LOCATION)
                     + " to a gs:// location so the config can be staged to GCS");
         }
@@ -74,6 +84,15 @@ public class ConfigStager {
             list.add("--args." + entry.getKey() + "=" + entry.getValue());
         }
         return list;
+    }
+
+    /** Size of the {@code --args.k=v} entries, for the inline limit. */
+    public static int argsBytes(final Map<String, String> args) {
+        int total = 0;
+        for(final Map.Entry<String, String> entry : args.entrySet()) {
+            total += ("--args." + entry.getKey() + "=" + entry.getValue()).getBytes(StandardCharsets.UTF_8).length;
+        }
+        return total;
     }
 
     public static String newLaunchId() {

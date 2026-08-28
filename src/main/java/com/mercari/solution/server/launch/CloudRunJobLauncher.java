@@ -21,7 +21,8 @@ public class CloudRunJobLauncher implements Launcher {
     public static final String KEY_TASK_TIMEOUT = "TASK_TIMEOUT";
 
     private static final Duration WAIT_INTERVAL = Duration.ofSeconds(5);
-    private static final int MAX_WAIT_SECONDS = 3600;
+    /** Below the Builder request timeout of 300s: a launch must answer before the browser gives up. */
+    static final int MAX_WAIT_SECONDS = 240;
 
     private final CloudRunUtil cloudRun;
     private final ConfigStager stager;
@@ -67,8 +68,10 @@ public class CloudRunJobLauncher implements Launcher {
         final String launchId = ConfigStager.newLaunchId();
         final String stagingLocation = defaults.resolve(runner, LaunchDefaults.KEY_STAGING_LOCATION,
                 request.param("stagingLocation")).orElse(null);
-        final String configValue = stager.stage(stagingLocation, launchId, request.config().getContent());
-        final List<String> args = ConfigStager.containerArgs(configValue, request.argsMap());
+        final Map<String, String> templateArgs = request.argsMap();
+        final String configValue = stager.stage(stagingLocation, launchId, request.config().getContent(),
+                ConfigStager.argsBytes(templateArgs));
+        final List<String> args = ConfigStager.containerArgs(configValue, templateArgs);
 
         final JsonObject containerOverride = new JsonObject();
         final JsonArray argsArray = new JsonArray();
@@ -92,7 +95,7 @@ public class CloudRunJobLauncher implements Launcher {
                 ? String.valueOf(taskTimeout)
                 : defaults.resolve(runner, KEY_TASK_TIMEOUT).orElse(null);
         if(timeoutSeconds != null) {
-            overrides.addProperty("timeout", timeoutSeconds.endsWith("s") ? timeoutSeconds : timeoutSeconds + "s");
+            overrides.addProperty("timeout", timeoutDuration(timeoutSeconds));
         }
 
         final JsonObject runRequest = new JsonObject();
@@ -135,6 +138,15 @@ public class CloudRunJobLauncher implements Launcher {
             result.consoleUrl(CloudRunUtil.executionConsoleUrl(executionName, project));
         }
         return result.build();
+    }
+
+    /** Seconds ({@code 1800} or {@code 1800s}) to the {@code Duration} string Cloud Run expects. */
+    static String timeoutDuration(final String value) {
+        final String text = value.trim();
+        if(text.matches("^[0-9]+s?$")) {
+            return text.endsWith("s") ? text : text + "s";
+        }
+        throw new IllegalArgumentException("task timeout must be a number of seconds (e.g. 1800 or 1800s), but: " + value);
     }
 
     /** {@code K=V,K=V} (or JSON object text) → Cloud Run {@code EnvVar[]}. */

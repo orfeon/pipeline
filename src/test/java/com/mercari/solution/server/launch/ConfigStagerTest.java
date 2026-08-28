@@ -28,6 +28,12 @@ public class ConfigStagerTest {
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
                 () -> stager.stage("", "abc", big));
         Assertions.assertTrue(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_STAGING_LOCATION"), e.getMessage());
+        // the base64 growth and the --args.* entries count against the same limit
+        final String nearLimit = "x".repeat(ConfigStager.MAX_INLINE_BYTES * 3 / 4 - 100);
+        Assertions.assertDoesNotThrow(() -> stager.stage(null, "abc", nearLimit, 0));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> stager.stage(null, "abc", nearLimit, 200));
+        Assertions.assertEquals("--args.a=1".length() + "--args.bb=22".length(),
+                ConfigStager.argsBytes(new LinkedHashMap<>(Map.of("a", "1", "bb", "22"))));
     }
 
     @Test

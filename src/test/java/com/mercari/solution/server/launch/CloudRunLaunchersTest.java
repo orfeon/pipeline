@@ -339,6 +339,26 @@ public class CloudRunLaunchersTest {
                 () -> client.waitOperation(failed, Duration.ofSeconds(1), Duration.ofMillis(10)));
         Assertions.assertTrue(failure.getMessage().contains("boom"));
 
+        // LRO errors carry google.rpc.Code, surfaced as the equivalent HTTP status
+        final JsonObject notFound = failed.deepCopy();
+        notFound.getAsJsonObject("error").addProperty("code", 5);
+        Assertions.assertTrue(Assertions.assertThrows(CloudRunUtil.CloudRunException.class,
+                () -> client.waitOperation(notFound, Duration.ofSeconds(1), Duration.ofMillis(10))).isNotFound());
+        Assertions.assertEquals(409, CloudRunUtil.httpStatus(6));
+        Assertions.assertEquals(400, CloudRunUtil.httpStatus(3));
+        Assertions.assertEquals(503, CloudRunUtil.httpStatus(14));
+
+        // a pending operation past the deadline reports a timeout the caller can recover from
+        final JsonObject pending = new JsonObject();
+        pending.addProperty("name", "projects/p/locations/r/operations/slow");
+        final CloudRunUtil.OperationTimeoutException timeout = Assertions.assertThrows(CloudRunUtil.OperationTimeoutException.class,
+                () -> client.waitOperation(pending, Duration.ofMillis(1), Duration.ofMillis(1)));
+        Assertions.assertEquals("projects/p/locations/r/operations/slow", timeout.operationName);
+
+        Assertions.assertEquals("1800s", CloudRunJobLauncher.timeoutDuration("1800"));
+        Assertions.assertEquals("1800s", CloudRunJobLauncher.timeoutDuration("1800s"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> CloudRunJobLauncher.timeoutDuration("30m"));
+
         Assertions.assertEquals("e", CloudRunUtil.lastSegment("projects/p/locations/r/jobs/j/executions/e"));
         final JsonObject execution = new JsonObject();
         Assertions.assertEquals("RUNNING", CloudRunUtil.executionState(execution));

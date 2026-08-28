@@ -54,10 +54,15 @@ public class DataprocServerlessLauncher implements Launcher {
             args.put("--args." + entry.getKey(), entry.getValue());
         }
 
-        final JsonObject batch = DataprocUtil
+        // batches.create returns a long-running Operation whose metadata names the batch.
+        final JsonObject operation = DataprocUtil
                 .launchServerlessBatchJob(jars, version, args, project, region, null);
-
-        final String name = batch.has("name") ? batch.get("name").getAsString() : null;
+        final JsonObject metadata = operation.has("metadata") && operation.get("metadata").isJsonObject()
+                ? operation.getAsJsonObject("metadata") : new JsonObject();
+        final JsonObject batch = metadata.has("batch") ? metadata : operation;
+        final String name = batch.has("batch") ? batch.get("batch").getAsString()
+                : batch.has("name") && batch.get("name").getAsString().contains("/batches/") ? batch.get("name").getAsString()
+                : null;
         final String id = name == null ? null : name.substring(name.lastIndexOf('/') + 1);
         return LaunchResult.job(this)
                 .id(id)
@@ -68,7 +73,7 @@ public class DataprocServerlessLauncher implements Launcher {
                 .state(batch.has("state") ? batch.get("state").getAsString() : null)
                 .consoleUrl(id == null ? null
                         : "https://console.cloud.google.com/dataproc/batches/" + region + "/" + id + "?project=" + project)
-                .put("batch", batch)
+                .put("operation", operation)
                 .build();
     }
 

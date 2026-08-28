@@ -101,12 +101,18 @@ public class DataflowFlexTemplateLauncher implements Launcher {
 
         builder.putAllAdditionalUserLabels(LaunchResult.labels(request, runner, ServerVersion.get()));
 
-        if(builder.getServiceAccountEmail().isEmpty()) {
-            defaults.resolve(runner, LaunchDefaults.KEY_SERVICE_ACCOUNT, request.param("serviceAccount"),
+        // Launch parameters are explicit and win over the config options already copied into the
+        // builder; the environment only fills what both left empty.
+        if(request.param("serviceAccount") != null) {
+            builder.setServiceAccountEmail(request.param("serviceAccount"));
+        } else if(builder.getServiceAccountEmail().isEmpty()) {
+            defaults.resolve(runner, LaunchDefaults.KEY_SERVICE_ACCOUNT,
                     dataflow == null ? null : dataflow.getServiceAccount()).ifPresent(builder::setServiceAccountEmail);
         }
-        if(builder.getSubnetwork().isEmpty()) {
-            defaults.resolve(runner, LaunchDefaults.KEY_SUBNETWORK, request.param("subnetwork"),
+        if(request.param("subnetwork") != null) {
+            builder.setSubnetwork(request.param("subnetwork"));
+        } else if(builder.getSubnetwork().isEmpty()) {
+            defaults.resolve(runner, LaunchDefaults.KEY_SUBNETWORK,
                     dataflow == null ? null : dataflow.getSubnetwork()).ifPresent(builder::setSubnetwork);
         }
         if(builder.getStagingLocation().isEmpty()) {

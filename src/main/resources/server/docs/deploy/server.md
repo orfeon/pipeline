@@ -8,8 +8,9 @@ config from the UI.
 ## Launch targets
 
 `POST /api/launch` (the Builder's Launch button) submits the current config to a runner on an
-execution environment. The modal is rendered from `/api/spec/launch`; the server fills the
-defaults it resolved from its environment into the form.
+execution environment. The modal is rendered from `/api/spec/launch`; the server shows the values
+it resolved from its environment as placeholders (an untouched field is submitted empty, so config
+options still take precedence).
 
 | runner | environment | what happens | pre-requisites |
 |---|---|---|---|
@@ -26,7 +27,8 @@ match wins:
 1. the launch modal's parameters,
 2. the config's `options` — the runner block first (`options.dataflow.project` / `region` /
    `serviceAccount` / `templateLocation`, Dataflow only), then the common `options.gcp.project` /
-   `options.gcp.workerRegion` (all runners),
+   `options.gcp.workerRegion` (all runners; non-Dataflow runners still consult
+   `options.dataflow.project` / `region` last, so Dataflow-only configs keep resolving),
 3. the runner-specific env var `MERCARI_PIPELINE_LAUNCH_<RUNNER>_<KEY>`,
 4. the common env var `MERCARI_PIPELINE_LAUNCH_<KEY>`,
 5. the environment the server runs in: `GOOGLE_CLOUD_PROJECT`, then the GCE metadata server
@@ -64,8 +66,9 @@ Every launched Dataflow job / worker pool carries the labels `mercari-pipeline-v
 **Deprecated names** (still read, with a startup warning): `MERCARI_PIPELINE_DATAFLOW_PROJECT`,
 `MERCARI_PIPELINE_DATAFLOW_REGION`, `MERCARI_PIPELINE_DATAFLOW_SERVICE_ACCOUNT`,
 `MERCARI_PIPELINE_DATAFLOW_SUBNETWORK`, `MERCARI_PIPELINE_DATAFLOW_STAGING_LOCATION`,
-`MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION`, `MERCARI_PIPELINE_TEMP_LOCATION`. They map to the
-common (`_LAUNCH_`) keys, so they keep applying to every runner.
+`MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION`, `MERCARI_PIPELINE_TEMP_LOCATION`. Project, region and
+temp location map to the common keys (every runner); service account, subnetwork, staging and
+template location stay Dataflow-only (`_LAUNCH_DATAFLOW_*`).
 
 ### Other server features
 

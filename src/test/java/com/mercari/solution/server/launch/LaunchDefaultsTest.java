@@ -39,9 +39,19 @@ public class LaunchDefaultsTest {
                 "MERCARI_PIPELINE_DATAFLOW_PROJECT", "legacy-project",
                 "MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION", "gs://legacy/template.json",
                 "MERCARI_PIPELINE_TEMP_LOCATION", "gs://legacy/temp"));
-        // legacy dataflow names are common defaults (they were the only launch target before)
+        // legacy project/region/temp names are common defaults (they were the only launch target before)
         Assertions.assertEquals("legacy-project", defaults.fromEnv("dataflow", LaunchDefaults.KEY_PROJECT));
         Assertions.assertEquals("legacy-project", defaults.fromEnv("direct", LaunchDefaults.KEY_PROJECT));
+        // Dataflow-shaped values (worker SA, subnetwork, staging) never leak into other runners
+        final LaunchDefaults dataflowOnly = LaunchDefaults.of(Map.of(
+                "MERCARI_PIPELINE_DATAFLOW_SERVICE_ACCOUNT", "df-worker@p.iam.gserviceaccount.com",
+                "MERCARI_PIPELINE_DATAFLOW_SUBNETWORK", "regions/r/subnetworks/df",
+                "MERCARI_PIPELINE_DATAFLOW_STAGING_LOCATION", "gs://df/staging"));
+        Assertions.assertEquals("df-worker@p.iam.gserviceaccount.com", dataflowOnly.fromEnv("dataflow", LaunchDefaults.KEY_SERVICE_ACCOUNT));
+        Assertions.assertNull(dataflowOnly.fromEnv("direct", LaunchDefaults.KEY_SERVICE_ACCOUNT));
+        Assertions.assertNull(dataflowOnly.fromEnv("direct", LaunchDefaults.KEY_SUBNETWORK));
+        Assertions.assertNull(dataflowOnly.fromEnv("direct", LaunchDefaults.KEY_STAGING_LOCATION));
+        Assertions.assertEquals("gs://df/staging", dataflowOnly.fromEnv("dataflow", LaunchDefaults.KEY_STAGING_LOCATION));
         Assertions.assertEquals("gs://legacy/template.json",
                 defaults.fromEnv("dataflow", DataflowFlexTemplateLauncher.KEY_TEMPLATE_LOCATION));
         Assertions.assertEquals("gs://legacy/temp", defaults.fromEnv("dataflow", LaunchDefaults.KEY_TEMP_LOCATION));
@@ -108,6 +118,33 @@ public class LaunchDefaultsTest {
         Assertions.assertEquals("asia-northeast1", LaunchDefaults.optionsRegion("direct", options));
         Assertions.assertEquals("gcp-project", LaunchDefaults.optionsProject("spark", options));
         Assertions.assertNull(LaunchDefaults.optionsProject("direct", null));
+
+        // a Dataflow-only config still resolves for other runners (last resort), and vice versa
+        final Config dataflowOnly = Config.load("""
+                options:
+                  dataflow:
+                    project: df-project
+                    region: us-central1
+                sources:
+                  - name: in
+                    module: create
+                    parameters:
+                      elements: [1]
+                """, null, Config.Format.yaml, (String) null);
+        Assertions.assertEquals("df-project", LaunchDefaults.optionsProject("spark", dataflowOnly.getOptions()));
+        Assertions.assertEquals("us-central1", LaunchDefaults.optionsRegion("direct", dataflowOnly.getOptions()));
+        final Config gcpOnly = Config.load("""
+                options:
+                  gcp:
+                    project: gcp-project
+                sources:
+                  - name: in
+                    module: create
+                    parameters:
+                      elements: [1]
+                """, null, Config.Format.yaml, (String) null);
+        Assertions.assertEquals("gcp-project", LaunchDefaults.optionsProject("dataflow", gcpOnly.getOptions()));
+        Assertions.assertNull(LaunchDefaults.optionsRegion("dataflow", gcpOnly.getOptions()));
     }
 
     @Test

@@ -29,6 +29,16 @@ public class CloudRunUtil {
         String get() throws IOException;
     }
 
+    /** An operation did not reach {@code done} within the wait; the caller can keep the operation name. */
+    public static class OperationTimeoutException extends IllegalStateException {
+        public final String operationName;
+
+        public OperationTimeoutException(final String operationName, final Duration timeout) {
+            super("Operation did not finish within " + timeout + ": " + operationName);
+            this.operationName = operationName;
+        }
+    }
+
     public static class CloudRunException extends RuntimeException {
         public final int status;
         public final String body;
@@ -161,14 +171,16 @@ public class CloudRunUtil {
         final long deadline = System.currentTimeMillis() + timeout.toMillis();
         while(!current.has("done") || !current.get("done").getAsBoolean()) {
             if(System.currentTimeMillis() > deadline) {
-                throw new IllegalStateException("Operation did not finish within " + timeout + ": " + name(current));
+                throw new OperationTimeoutException(name(current), timeout);
             }
             sleep(interval);
             current = getOperation(name(current));
         }
         if(current.has("error")) {
             final JsonObject error = current.getAsJsonObject("error");
-            final int code = error.has("code") ? error.get("code").getAsInt() : 0;
+            // Operation errors carry a google.rpc.Code; map it to the HTTP status the rest of the
+            // client (isNotFound / isRetryable / 409 checks) expects.
+            final int code = httpStatus(error.has("code") ? error.get("code").getAsInt() : 0);
             throw new CloudRunException(code, error.toString(), "Operation " + name(current) + " failed: "
                     + (error.has("message") ? error.get("message").getAsString() : error));
         }
@@ -213,6 +225,25 @@ public class CloudRunUtil {
             return "SUCCEEDED";
         }
         return "COMPLETED";
+    }
+
+    /** google.rpc.Code to HTTP status (the mapping used by Google REST transcoding). */
+    public static int httpStatus(final int rpcCode) {
+        return switch (rpcCode) {
+            case 0 -> 200;
+            case 1 -> 499;
+            case 2, 13, 15 -> 500;
+            case 3, 9, 11 -> 400;
+            case 4 -> 504;
+            case 5 -> 404;
+            case 6, 10 -> 409;
+            case 7 -> 403;
+            case 8 -> 429;
+            case 12 -> 501;
+            case 14 -> 503;
+            case 16 -> 401;
+            default -> 500;
+        };
     }
 
     private static int intField(final JsonObject object, final String field) {

@@ -55,7 +55,7 @@ public class LaunchSchemaTest {
     }
 
     @Test
-    public void testDefaultsInjectedFromEnvironment() {
+    public void testHintsInjectedFromEnvironment() {
         final LaunchDefaults defaults = LaunchDefaults.of(Map.of(
                 "MERCARI_PIPELINE_LAUNCH_PROJECT", "env-project",
                 "MERCARI_PIPELINE_LAUNCH_DIRECT_REGION", "asia-northeast1",
@@ -67,24 +67,49 @@ public class LaunchSchemaTest {
         final JsonObject filled = LaunchSchema.withDefaults(original, defaults);
         Assertions.assertNotSame(original, filled);
 
+        final String HINT = LaunchSchema.X_DEFAULT_HINT;
         final JsonObject dataflow = runner(filled, "dataflow");
-        Assertions.assertEquals("env-project", dataflow.getAsJsonObject("properties").getAsJsonObject("project").get("default").getAsString());
-        Assertions.assertFalse(dataflow.getAsJsonObject("properties").getAsJsonObject("region").has("default"));
+        Assertions.assertEquals("env-project", dataflow.getAsJsonObject("properties").getAsJsonObject("project").get(HINT).getAsString());
+        // hints never become defaults: the form must submit an empty value so config options win over env
+        Assertions.assertFalse(dataflow.getAsJsonObject("properties").getAsJsonObject("project").has("default"));
+        Assertions.assertFalse(dataflow.getAsJsonObject("properties").getAsJsonObject("region").has(HINT));
         final JsonObject flex = environment(dataflow, "flexTemplate");
         Assertions.assertEquals("gs://legacy/template.json",
-                flex.getAsJsonObject("properties").getAsJsonObject("templateLocation").get("default").getAsString());
+                flex.getAsJsonObject("properties").getAsJsonObject("templateLocation").get(HINT).getAsString());
 
         final JsonObject direct = runner(filled, "direct");
-        Assertions.assertEquals("asia-northeast1", direct.getAsJsonObject("properties").getAsJsonObject("region").get("default").getAsString());
+        Assertions.assertEquals("asia-northeast1", direct.getAsJsonObject("properties").getAsJsonObject("region").get(HINT).getAsString());
         final JsonObject job = environment(direct, "cloudRunJob");
-        Assertions.assertEquals("mp-job", job.getAsJsonObject("properties").getAsJsonObject("jobName").get("default").getAsString());
-        Assertions.assertEquals(1800, job.getAsJsonObject("properties").getAsJsonObject("taskTimeout").get("default").getAsInt());
+        Assertions.assertEquals("mp-job", job.getAsJsonObject("properties").getAsJsonObject("jobName").get(HINT).getAsString());
+        Assertions.assertEquals("1800", job.getAsJsonObject("properties").getAsJsonObject("taskTimeout").get(HINT).getAsString());
         final JsonObject pool = environment(direct, "cloudRunWorkerPool");
-        Assertions.assertEquals(3, pool.getAsJsonObject("properties").getAsJsonObject("instances").get("default").getAsInt());
-        Assertions.assertFalse(pool.getAsJsonObject("properties").getAsJsonObject("image").has("default"));
+        Assertions.assertEquals("3", pool.getAsJsonObject("properties").getAsJsonObject("instances").get(HINT).getAsString());
+        Assertions.assertEquals(1, pool.getAsJsonObject("properties").getAsJsonObject("instances").get("default").getAsInt());
+        Assertions.assertFalse(pool.getAsJsonObject("properties").getAsJsonObject("image").has(HINT));
 
         // the classpath schema itself is untouched
-        Assertions.assertFalse(runner(original, "direct").getAsJsonObject("properties").getAsJsonObject("region").has("default"));
+        Assertions.assertFalse(runner(original, "direct").getAsJsonObject("properties").getAsJsonObject("region").has(HINT));
+    }
+
+    @Test
+    public void testRequiredOnlyWhereTheServerHasNoConfigFallback() {
+        final JsonObject schema = schema();
+        // templateLocation can come from options.dataflow.templateLocation, which the UI cannot see
+        Assertions.assertFalse(environment(runner(schema, "dataflow"), "flexTemplate").has("required"));
+        Assertions.assertEquals("jobName", environment(runner(schema, "direct"), "cloudRunJob").getAsJsonArray("required").get(0).getAsString());
+        Assertions.assertEquals("image", environment(runner(schema, "direct"), "cloudRunWorkerPool").getAsJsonArray("required").get(0).getAsString());
+    }
+
+    @Test
+    public void testArgsMapKeepsStringsUnquoted() {
+        final JsonObject args = new JsonObject();
+        args.addProperty("table", "orders");
+        args.addProperty("n", 3);
+        args.add("filter", new Gson().fromJson("{\"a\":1}", JsonObject.class));
+        final Map<String, String> map = LaunchService.argsMap(args);
+        Assertions.assertEquals("orders", map.get("table"));
+        Assertions.assertEquals("3", map.get("n"));
+        Assertions.assertEquals("{\"a\":1}", map.get("filter"));
     }
 
     @Test

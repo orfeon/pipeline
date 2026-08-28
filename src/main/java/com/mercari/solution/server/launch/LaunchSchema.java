@@ -8,14 +8,16 @@ import java.util.Map;
 
 /**
  * Prepares the launch JSON Schema ({@code server/api/spec/launch.json}) for the Builder UI:
- * every property carrying {@code x-launch-default: "<KEY>"} gets its {@code default} filled from
- * {@link LaunchDefaults} (environment variables / metadata server), so the modal opens with the
- * values that are in effect. Config-derived defaults ({@code options.gcp.*}) are not known here
- * and are applied server-side at launch time.
+ * every property carrying {@code x-launch-default: "<KEY>"} gets an {@code x-default-hint} with the
+ * value {@link LaunchDefaults} resolves from the environment / metadata server. The UI shows it as
+ * a placeholder only; the field is submitted empty so that config options (unknown here) still take
+ * precedence over the environment at launch time.
  */
 public class LaunchSchema {
 
     public static final String X_LAUNCH_DEFAULT = "x-launch-default";
+    /** The value the server would use when the field is left empty (rendered as a placeholder, never submitted). */
+    public static final String X_DEFAULT_HINT = "x-default-hint";
     public static final String X_HIDDEN = "x-hidden";
 
     public static JsonObject withDefaults(final JsonObject schema, final LaunchDefaults defaults) {
@@ -62,25 +64,9 @@ public class LaunchSchema {
             if(value == null) {
                 continue;
             }
-            final String type = property.has("type") ? property.get("type").getAsString() : "string";
-            switch (type) {
-                case "integer" -> {
-                    try {
-                        property.addProperty("default", Integer.parseInt(value.replaceAll("[^0-9-]", "")));
-                    } catch (final NumberFormatException ignored) {
-                        // leave the schema default
-                    }
-                }
-                case "number" -> {
-                    try {
-                        property.addProperty("default", Double.parseDouble(value));
-                    } catch (final NumberFormatException ignored) {
-                        // leave the schema default
-                    }
-                }
-                case "boolean" -> property.addProperty("default", Boolean.parseBoolean(value));
-                default -> property.addProperty("default", value);
-            }
+            // A hint, not a default: the form must submit an empty value so the server keeps its
+            // resolution order (config options come before the environment).
+            property.addProperty(X_DEFAULT_HINT, value);
         }
     }
 

@@ -28,7 +28,6 @@
       "oneOf": [
         {
           "$id": "https://mercari.com/server/api/spec/launch/dataflow/flexTemplate",
-          "required": ["templateLocation"],
           "type": "object",
           "title": "Flex Template",
           "description": "Launch the deployed dataflow image as a Flex Template job",

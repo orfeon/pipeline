@@ -487,6 +487,9 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
         const prop = allProps[propName];
         const desc = prop.description || '';
         const defaultVal = prop.default !== undefined ? prop.default : '';
+        // Server-resolved value used when the field is left empty: shown as a placeholder only, so
+        // an untouched field is submitted empty and config options keep precedence over the environment.
+        const hint = prop['x-default-hint'] !== undefined ? String(prop['x-default-hint']) : '';
         const isReadonly = prop.readOnly === true;
         const type = prop.type || 'string';
 
@@ -541,6 +544,7 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
             input.className = 'form-control form-control-sm launch-param-field';
             input.dataset.paramName = propName;
             if (defaultVal !== '') input.value = defaultVal;
+            if (hint) input.placeholder = hint;
             if (isReadonly) input.readOnly = true;
             if (type === 'integer') input.step = '1';
         } else {
@@ -550,6 +554,7 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
             input.className = 'form-control form-control-sm launch-param-field';
             input.dataset.paramName = propName;
             if (defaultVal !== '') input.value = defaultVal;
+            if (hint) input.placeholder = hint;
             if (isReadonly) input.readOnly = true;
         }
 
@@ -585,7 +590,8 @@ function showLaunchParametersForm(runnerSchema, envSchema) {
 function validateLaunchParameters() {
     let firstInvalid = null;
     document.querySelectorAll('#launch-parameters-fields .launch-param-field[data-required="true"]').forEach(function(el) {
-        const empty = el.type === 'checkbox' ? false : String(el.value).trim() === '';
+        // a field the server can fill (placeholder = resolved default) is satisfied when left empty
+        const empty = el.type === 'checkbox' ? false : (String(el.value).trim() === '' && !el.placeholder);
         el.classList.toggle('is-invalid', empty);
         const feedback = el.closest('.mb-2') && el.closest('.mb-2').querySelector('.launch-required-feedback');
         if (feedback) feedback.style.display = empty ? 'block' : 'none';

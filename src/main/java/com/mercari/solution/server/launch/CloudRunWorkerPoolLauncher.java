@@ -29,7 +29,8 @@ public class CloudRunWorkerPoolLauncher implements Launcher {
     private static final String DEFAULT_CPU = "4";
     private static final String DEFAULT_MEMORY = "6Gi";
     private static final int DEFAULT_INSTANCES = 1;
-    private static final Duration CREATE_TIMEOUT = Duration.ofMinutes(5);
+    /** Below the Builder request timeout of 300s; a slower rollout is reported as CREATING with the operation name. */
+    private static final Duration CREATE_TIMEOUT = Duration.ofSeconds(240);
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(3);
     private static final DateTimeFormatter NAME_SUFFIX = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
 
@@ -73,7 +74,7 @@ public class CloudRunWorkerPoolLauncher implements Launcher {
         final String cpu = defaults.resolve(runner, KEY_CPU, request.param("cpu")).orElse(DEFAULT_CPU);
         final String memory = defaults.resolve(runner, KEY_MEMORY, request.param("memory")).orElse(DEFAULT_MEMORY);
         final int instances = defaults.resolve(runner, KEY_INSTANCES, request.param("instances"))
-                .map(Integer::parseInt).orElse(DEFAULT_INSTANCES);
+                .map(CloudRunWorkerPoolLauncher::parseInstances).orElse(DEFAULT_INSTANCES);
         final String name = request.param("name") != null ? request.param("name") : defaultName(request);
         validateName(name);
         final boolean replaceExisting = request.paramBool("replaceExisting");
@@ -81,8 +82,10 @@ public class CloudRunWorkerPoolLauncher implements Launcher {
         final String launchId = ConfigStager.newLaunchId();
         final String stagingLocation = defaults.resolve(runner, LaunchDefaults.KEY_STAGING_LOCATION,
                 request.param("stagingLocation")).orElse(null);
-        final String configValue = stager.stage(stagingLocation, launchId, request.config().getContent());
-        final List<String> args = ConfigStager.containerArgs(configValue, request.argsMap());
+        final Map<String, String> templateArgs = request.argsMap();
+        final String configValue = stager.stage(stagingLocation, launchId, request.config().getContent(),
+                ConfigStager.argsBytes(templateArgs));
+        final List<String> args = ConfigStager.containerArgs(configValue, templateArgs);
 
         final JsonObject workerPool = workerPool(image, args, serviceAccount, subnetwork, cpu, memory, instances,
                 LaunchResult.labels(request, runner, ServerVersion.get()));
@@ -105,10 +108,20 @@ public class CloudRunWorkerPoolLauncher implements Launcher {
         if(existed) {
             operation = cloudRun.patchWorkerPool(workerPoolName, workerPool);
         }
-        final JsonObject finished = cloudRun.waitOperation(operation, CREATE_TIMEOUT, POLL_INTERVAL);
-        final JsonObject resource = finished.has("response") && finished.get("response").isJsonObject()
-                ? finished.getAsJsonObject("response")
-                : cloudRun.getWorkerPool(workerPoolName);
+        String state = existed ? "UPDATED" : "CREATED";
+        String operationName = null;
+        JsonObject resource;
+        try {
+            final JsonObject finished = cloudRun.waitOperation(operation, CREATE_TIMEOUT, POLL_INTERVAL);
+            resource = finished.has("response") && finished.get("response").isJsonObject()
+                    ? finished.getAsJsonObject("response")
+                    : cloudRun.getWorkerPool(workerPoolName);
+        } catch (final CloudRunUtil.OperationTimeoutException e) {
+            // The rollout continues on Cloud Run; answer before the client times out.
+            state = existed ? "UPDATING" : "CREATING";
+            operationName = e.operationName;
+            resource = new JsonObject();
+        }
 
         return LaunchResult.job(this)
                 .id(name)
@@ -118,7 +131,8 @@ public class CloudRunWorkerPoolLauncher implements Launcher {
                 .put("launchId", launchId)
                 .put("config", configValue.startsWith("gs://") ? configValue : null)
                 .createTime(resource.has("createTime") ? resource.get("createTime").getAsString() : null)
-                .state(existed ? "UPDATED" : "CREATED")
+                .state(state)
+                .put("operation", operationName)
                 .consoleUrl(CloudRunUtil.workerPoolConsoleUrl(workerPoolName, project))
                 .put("stopCommand", "gcloud run worker-pools delete " + name + " --project=" + project + " --region=" + region)
                 .build();
@@ -175,6 +189,18 @@ public class CloudRunWorkerPoolLauncher implements Launcher {
             workerPool.add("labels", labelsObject);
         }
         return workerPool;
+    }
+
+    private static int parseInstances(final String value) {
+        try {
+            final int instances = Integer.parseInt(value.trim());
+            if(instances < 0) {
+                throw new NumberFormatException();
+            }
+            return instances;
+        } catch (final NumberFormatException e) {
+            throw new IllegalArgumentException("instances must be a non-negative integer, but: " + value);
+        }
     }
 
     private static String defaultName(final LaunchRequest request) {
