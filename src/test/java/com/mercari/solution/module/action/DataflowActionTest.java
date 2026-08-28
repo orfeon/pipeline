@@ -78,7 +78,8 @@ public class DataflowActionTest {
                     .toBuilder().setType(launchType).build();
             jobs.put(id, job);
             transitions.put(id, new ArrayDeque<>(launchPath.subList(1, launchPath.size())));
-            return job;
+            // like the real API: the launch response carries no type yet (the graph is not built while queued)
+            return job.toBuilder().setType(JobType.JOB_TYPE_UNKNOWN).build();
         }
 
         @Override
@@ -118,7 +119,7 @@ public class DataflowActionTest {
                 b.setRequestedState(job.getRequestedState());
                 final JobState target = job.getRequestedState();
                 final JobState intermediate = JobState.JOB_STATE_DRAINED.equals(target) ? JobState.JOB_STATE_DRAINING : JobState.JOB_STATE_CANCELLING;
-                transitions.put(jobId, new ArrayDeque<>(List.of(intermediate, target)));
+                transitions.putIfAbsent(jobId, new ArrayDeque<>(List.of(intermediate, target)));
             }
             if(job.hasRuntimeUpdatableParams()) {
                 b.setRuntimeUpdatableParams(job.getRuntimeUpdatableParams());
@@ -213,21 +214,32 @@ public class DataflowActionTest {
         // polled until DONE
         Assertions.assertTrue(client.ops.stream().filter(o -> o.equals("get:job-1")).count() >= 2);
 
-        // second run while the same-named job is still active -> adopted with state EXISTS
-        client.launchPath = List.of(JobState.JOB_STATE_RUNNING, JobState.JOB_STATE_RUNNING, JobState.JOB_STATE_DONE);
+        // second run while the same-named job is still active -> adopted (payload.adopted) and waited for
         client.put("job-9", "backfill-20260828", JobState.JOB_STATE_RUNNING, 5000);
         client.transitions.put("job-9", new ArrayDeque<>(List.of(JobState.JOB_STATE_DONE)));
         final TestPipeline p2 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         PAssert.that(run(p2, yaml, "launch").getCollection()).satisfies(elements -> {
             for(final MElement e : elements) {
                 Assertions.assertEquals("job-9", e.getPrimitiveValue("jobId"));
-                Assertions.assertEquals("EXISTS", e.getPrimitiveValue("state"));
+                Assertions.assertEquals("JOB_STATE_DONE", e.getPrimitiveValue("state"));
+                Assertions.assertTrue(payload(e).get("adopted").getAsBoolean());
                 Assertions.assertEquals("JOB_STATE_DONE", payload(e).get("currentState").getAsString());
             }
             return null;
         });
         p2.run();
         Assertions.assertEquals(1, client.launches.size());
+
+        // adopted without wait -> EXISTS
+        client.put("job-10", "backfill-20260828", JobState.JOB_STATE_RUNNING, 6000);
+        final TestPipeline p3 = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        PAssert.that(run(p3, yaml + "      wait: false\n", "launch").getCollection()).satisfies(elements -> {
+            for(final MElement e : elements) {
+                Assertions.assertEquals("EXISTS", e.getPrimitiveValue("state"));
+            }
+            return null;
+        });
+        p3.run();
         DataflowAction.unregisterMemoryClient("launch");
     }
 
@@ -257,6 +269,24 @@ public class DataflowActionTest {
         });
         p.run();
         DataflowAction.unregisterMemoryClient("streaming");
+    }
+
+    @Test
+    public void testRejectedRequestIsNotRetried() throws Exception {
+        final MemoryDataflowClient client = register("rejected");
+        final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        run(p, """
+                actions:
+                  - name: get
+                    module: dataflow
+                    operation: jobs.get
+                    failFast: true
+                    retry: { maxAttempts: 3, initialBackoff: 10ms }
+                    parameters: { projectId: myproject, region: asia-northeast1, endpoint: memory://rejected, jobId: missing }
+                """, "get");
+        Assertions.assertThrows(Exception.class, p::run);
+        Assertions.assertEquals(1, client.ops.stream().filter(o -> o.equals("get:missing")).count(), client.ops.toString());
+        DataflowAction.unregisterMemoryClient("rejected");
     }
 
     @Test
@@ -417,6 +447,24 @@ public class DataflowActionTest {
         p3.run();
         Assertions.assertTrue(client.ops.contains("update:j-new:requested_state,runtime_updatable_params.max_num_workers"), client.ops.toString());
         Assertions.assertEquals(3, client.jobs.get("j-new").getRuntimeUpdatableParams().getMaxNumWorkers());
+
+        // drain requested but the job ends CANCELLED (someone else cancelled it) -> failure
+        client.put("j-drain", "drainme", JobState.JOB_STATE_RUNNING, 400);
+        client.transitions.put("j-drain", new ArrayDeque<>(List.of(JobState.JOB_STATE_CANCELLED)));
+        final TestPipeline p3b = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        run(p3b, """
+                actions:
+                  - name: drain
+                    module: dataflow
+                    operation: jobs.update
+                    failFast: true
+                    parameters: { projectId: myproject, region: asia-northeast1, endpoint: memory://ops, jobId: j-drain, requestedState: DRAINED }
+                """, "drain");
+        final StringBuilder message = new StringBuilder();
+        for(Throwable t = Assertions.assertThrows(Exception.class, p3b::run); t != null; t = t.getCause()) {
+            message.append(t.getMessage()).append(" ");
+        }
+        Assertions.assertTrue(message.toString().contains("cancelled"), message.toString());
 
         // jobs.messages.list
         client.messages.add(JobMessage.newBuilder().setMessageImportance(JobMessageImportance.JOB_MESSAGE_ERROR).setMessageText("oops").build());

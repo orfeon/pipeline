@@ -4,6 +4,8 @@ import com.google.api.client.util.ExponentialBackOff;
 import com.google.api.gax.core.NoCredentialsProvider;
 import com.google.api.gax.grpc.InstantiatingGrpcChannelProvider;
 import com.google.api.gax.rpc.AlreadyExistsException;
+import com.google.api.gax.rpc.ApiException;
+import com.google.api.gax.rpc.StatusCode;
 import com.google.dataflow.v1beta3.*;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
@@ -419,8 +421,8 @@ public class DataflowAction implements ActionService {
     private Trigger trigger;
     private String operation;
     private Parameters parameters;
-    /** Environment values inherited from the parent pipeline's Dataflow options (empty on other runners). */
-    private Map<String, String> inheritedEnvironment;
+    /** {@code FlexTemplateRuntimeEnvironment} JSON inherited from the parent pipeline's Dataflow options (null on other runners). */
+    private String inheritedEnvironment;
 
     private transient DataflowClient client;
 
@@ -429,11 +431,8 @@ public class DataflowAction implements ActionService {
         this.name = name;
         this.trigger = trigger;
         this.operation = operation;
-        if(parametersJson == null || parametersJson.size() == 0) {
-            throw new IllegalModuleException("action module[" + name + "].parameters must not be empty");
-        }
         // environment is a nested REST object: keep it as JSON text (the instance is serialized into the DoFn)
-        final JsonObject json = parametersJson.deepCopy();
+        final JsonObject json = parametersJson == null ? new JsonObject() : parametersJson.deepCopy();
         String environment = null;
         if(json.has("environment") && !json.get("environment").isJsonNull()) {
             final JsonElement env = json.remove("environment");
@@ -443,20 +442,13 @@ public class DataflowAction implements ActionService {
         this.parameters.environment = environment;
         this.parameters.op = Op.of(operation);
 
-        final DataflowOptions dataflow = copyDataflowOptions(options);
         if(this.parameters.projectId == null) {
             this.parameters.projectId = DataflowOptions.getProject(options);
         }
-        if(this.parameters.region == null && dataflow != null) {
-            this.parameters.region = dataflow.getRegion();
+        if(this.parameters.region == null) {
+            this.parameters.region = dataflowOption(options, "getRegion");
         }
-        this.inheritedEnvironment = new HashMap<>();
-        if(dataflow != null) {
-            putIfNotNull(inheritedEnvironment, "serviceAccountEmail", dataflow.getServiceAccount());
-            putIfNotNull(inheritedEnvironment, "subnetwork", dataflow.getSubnetwork());
-            putIfNotNull(inheritedEnvironment, "tempLocation", dataflow.getTempLocation());
-            putIfNotNull(inheritedEnvironment, "stagingLocation", dataflow.getStagingLocation());
-        }
+        this.inheritedEnvironment = inheritedEnvironment(options);
 
         final List<String> errorMessages = this.parameters.validate(name, trigger);
         if(!errorMessages.isEmpty()) {
@@ -484,10 +476,22 @@ public class DataflowAction implements ActionService {
         final String project = template(p.projectId, data);
         final String region = template(p.region, data);
 
+        try {
+            return execute(p, project, region, data, elements);
+        } catch (final ApiException e) {
+            final NonRetryableException rejected = rejectedRequest(e);
+            if(rejected != null) {
+                throw rejected;
+            }
+            throw e;
+        }
+    }
+
+    private ActionResult execute(final Parameters p, final String project, final String region, final Map<String, Object> data, final List<MElement> elements) throws Exception {
         return switch (p.op) {
             case launch -> launch(p, project, region, data);
             case get -> {
-                final Job job = resolveJob(p, project, region, data, JobView.valueOf(p.view));
+                final Job job = resolveJob(p, project, region, data, JobView.valueOf(p.view), false);
                 yield result(operation, job.getId(), job);
             }
             case list -> {
@@ -512,17 +516,21 @@ public class DataflowAction implements ActionService {
             }
             case wait -> {
                 final List<String> jobIds = new ArrayList<>();
-                if(Trigger.collect.equals(trigger) && p.jobIdField != null) {
+                final boolean collected = Trigger.collect.equals(trigger) && p.jobIdField != null;
+                if(collected) {
                     jobIds.addAll(BigQueryAction.collectField(elements, p.jobIdField));
                     if(jobIds.isEmpty()) {
                         LOG.info("action module[{}] found no job id in field: {}", name, p.jobIdField);
                         yield ActionResult.of(operation, null, "SKIPPED", null);
                     }
+                } else if(p.jobId != null) {
+                    jobIds.add(template(p.jobId, data));
                 } else {
-                    jobIds.add(resolveJob(p, project, region, data, JobView.JOB_VIEW_SUMMARY).getId());
+                    jobIds.add(resolveJob(p, project, region, data, JobView.JOB_VIEW_SUMMARY, true).getId());
                 }
-                final List<Job> completed = waitForAll(p, project, region, jobIds, p.waitUntil);
-                if(completed.size() == 1) {
+                final List<Job> completed = waitForAll(p, project, region, jobIds, p.waitUntil, null);
+                if(!collected) {
+                    // a single explicit job: the payload is the Job itself (same shape as jobs.get)
                     yield result(operation, jobIds.getFirst(), completed.getFirst());
                 }
                 final Map<String, Object> payload = new LinkedHashMap<>();
@@ -533,7 +541,7 @@ public class DataflowAction implements ActionService {
                 yield ActionResult.ofValues(operation, String.join(",", jobIds), "DONE", payload);
             }
             case update -> {
-                final Job target = resolveJob(p, project, region, data, JobView.JOB_VIEW_SUMMARY);
+                final Job target = resolveJob(p, project, region, data, JobView.JOB_VIEW_SUMMARY, true);
                 final Job.Builder builder = Job.newBuilder();
                 final FieldMask.Builder mask = FieldMask.newBuilder();
                 final JobState requested = p.requestedState == null ? null : toJobState(p.requestedState);
@@ -559,12 +567,12 @@ public class DataflowAction implements ActionService {
                 }
                 Job updated = client.updateJob(project, region, target.getId(), builder.build(), mask.build());
                 if(requested != null && p.wait) {
-                    updated = waitForAll(p, project, region, List.of(target.getId()), WaitUntil.terminal).getFirst();
+                    updated = waitForAll(p, project, region, List.of(target.getId()), WaitUntil.terminal, requested).getFirst();
                 }
                 yield result(operation, target.getId(), updated);
             }
             case messages -> {
-                final Job target = resolveJob(p, project, region, data, JobView.JOB_VIEW_SUMMARY);
+                final Job target = resolveJob(p, project, region, data, JobView.JOB_VIEW_SUMMARY, false);
                 final List<JobMessage> messages = client.listJobMessages(
                         project, region, target.getId(), JobMessageImportance.valueOf(p.minimumImportance), p.limit);
                 final Map<String, Object> payload = new LinkedHashMap<>();
@@ -610,30 +618,21 @@ public class DataflowAction implements ActionService {
         if(p.transformNameMappings != null) {
             builder.putAllTransformNameMappings(p.transformNameMappings);
         }
-        final FlexTemplateRuntimeEnvironment.Builder environment = p.environment == null
+        // inherited parent values first, the explicit environment merged over them (proto merge skips unset scalars)
+        final FlexTemplateRuntimeEnvironment.Builder environment = inheritedEnvironment == null
                 ? FlexTemplateRuntimeEnvironment.newBuilder()
-                : parseEnvironment(p.environment).toBuilder();
-        if(environment.getServiceAccountEmail().isEmpty() && inheritedEnvironment.containsKey("serviceAccountEmail")) {
-            environment.setServiceAccountEmail(inheritedEnvironment.get("serviceAccountEmail"));
-        }
-        if(environment.getSubnetwork().isEmpty() && inheritedEnvironment.containsKey("subnetwork")) {
-            environment.setSubnetwork(inheritedEnvironment.get("subnetwork"));
-        }
-        if(environment.getTempLocation().isEmpty() && inheritedEnvironment.containsKey("tempLocation")) {
-            environment.setTempLocation(inheritedEnvironment.get("tempLocation"));
-        }
-        if(environment.getStagingLocation().isEmpty() && inheritedEnvironment.containsKey("stagingLocation")) {
-            environment.setStagingLocation(inheritedEnvironment.get("stagingLocation"));
+                : parseEnvironment(inheritedEnvironment).toBuilder();
+        if(p.environment != null) {
+            environment.mergeFrom(parseEnvironment(p.environment));
         }
         builder.setEnvironment(environment);
 
         Job job;
-        String state;
+        boolean adopted = false;
         try {
             job = client.launchFlexTemplate(project, region, builder.build());
-            state = null;
             LOG.info("action module[{}] launched dataflow job: {} ({})", name, job.getId(), jobName);
-        } catch (final Exception e) {
+        } catch (final ApiException e) {
             if(!isAlreadyExists(e)) {
                 throw e;
             }
@@ -642,32 +641,38 @@ public class DataflowAction implements ActionService {
                 throw new NonRetryableException("action module[" + name + "] dataflow rejected job name " + jobName
                         + " as already existing but no active job with that name was found", e);
             }
-            state = "EXISTS";
+            adopted = true;
             LOG.info("action module[{}] dataflow job already exists, adopting: {} ({})", name, job.getId(), jobName);
         }
 
-        if(p.wait) {
-            final WaitUntil until = p.waitUntil != null ? p.waitUntil
-                    : JobType.JOB_TYPE_STREAMING.equals(job.getType()) ? WaitUntil.running : WaitUntil.terminal;
-            if(!WaitUntil.none.equals(until)) {
-                job = waitForAll(p, project, region, List.of(job.getId()), until).getFirst();
-            }
-        } else {
-            // the launch response carries the job as it was created; report its current state
-            job = client.getJob(project, region, job.getId(), JobView.JOB_VIEW_SUMMARY);
+        // Without wait an adopted job is reported as EXISTS; with wait the job's outcome is what
+        // matters, so the state is the observed job state on both paths (payload.adopted marks adoption).
+        String state = adopted ? "EXISTS" : job.getCurrentState().name();
+        if(p.wait && !WaitUntil.none.equals(p.waitUntil)) {
+            // waitUntil null: decided per poll from the job type (unset in the launch response while QUEUED)
+            job = waitForAll(p, project, region, List.of(job.getId()), p.waitUntil, null).getFirst();
+            state = job.getCurrentState().name();
         }
-        return ActionResult.ofValues(operation, job.getId(), state != null ? state : job.getCurrentState().name(), DataflowUtil.toPayload(job));
+        final Map<String, Object> payload = DataflowUtil.toPayload(job);
+        if(adopted) {
+            payload.put("adopted", true);
+        }
+        return ActionResult.ofValues(operation, job.getId(), state, payload);
     }
 
-    /** Resolve the target job from {@code jobId} (exact) or {@code jobName} (the latest job with that name). */
-    private Job resolveJob(final Parameters p, final String project, final String region, final Map<String, Object> data, final JobView view) {
+    /**
+     * Resolve the target job from {@code jobId} (exact) or {@code jobName} (the latest job with that
+     * name; only among active jobs when {@code activeOnly} - wait / update only make sense for those).
+     */
+    private Job resolveJob(final Parameters p, final String project, final String region, final Map<String, Object> data, final JobView view, final boolean activeOnly) {
         if(p.jobId != null) {
             final String jobId = template(p.jobId, data);
             return client.getJob(project, region, jobId, view);
         }
         final String jobName = template(p.jobName, data);
         Job latest = null;
-        for(final Job job : client.listJobs(project, region, ListJobsRequest.Filter.ALL, NAME_SEARCH_LIMIT)) {
+        final ListJobsRequest.Filter filter = activeOnly ? ListJobsRequest.Filter.ACTIVE : ListJobsRequest.Filter.ALL;
+        for(final Job job : client.listJobs(project, region, filter, NAME_SEARCH_LIMIT)) {
             if(!jobName.equals(job.getName())) {
                 continue;
             }
@@ -676,8 +681,8 @@ public class DataflowAction implements ActionService {
             }
         }
         if(latest == null) {
-            throw new NonRetryableException("action module[" + name + "] found no dataflow job named " + jobName
-                    + " in " + project + "/" + region);
+            throw new NonRetryableException("action module[" + name + "] found no " + (activeOnly ? "active " : "")
+                    + "dataflow job named " + jobName + " in " + project + "/" + region);
         }
         return JobView.JOB_VIEW_SUMMARY.equals(view) ? latest : client.getJob(project, region, latest.getId(), view);
     }
@@ -697,14 +702,14 @@ public class DataflowAction implements ActionService {
      * A job that ended FAILED (or was CANCELLED while a terminal/running state was awaited) fails the
      * firing as non-retryable with its error messages attached.
      */
-    private List<Job> waitForAll(final Parameters p, final String project, final String region, final List<String> jobIds, final WaitUntil until) throws IOException, InterruptedException {
+    private List<Job> waitForAll(final Parameters p, final String project, final String region, final List<String> jobIds, final WaitUntil until, final JobState requested) throws IOException, InterruptedException {
         final Map<String, Job> completed = new LinkedHashMap<>();
         final ExponentialBackOff backOff = new ExponentialBackOff.Builder()
                 .setInitialIntervalMillis(2000)
                 .setMaxIntervalMillis(30000)
                 .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
                 .build();
-        final boolean cancelRequested = Op.update.equals(p.op);
+        final boolean cancelRequested = JobState.JOB_STATE_CANCELLED.equals(requested);
         while(true) {
             for(final String jobId : jobIds) {
                 if(completed.containsKey(jobId)) {
@@ -720,7 +725,7 @@ public class DataflowAction implements ActionService {
                         throw new NonRetryableException("action module[" + name + "] dataflow job was cancelled: " + jobId);
                     }
                     completed.put(jobId, job);
-                } else if(WaitUntil.running.equals(until) && JobState.JOB_STATE_RUNNING.equals(state)) {
+                } else if(WaitUntil.running.equals(targetOf(until, job)) && JobState.JOB_STATE_RUNNING.equals(state)) {
                     completed.put(jobId, job);
                 }
             }
@@ -741,10 +746,11 @@ public class DataflowAction implements ActionService {
                     }
                 }
                 throw new NonRetryableException("action module[" + name + "] dataflow jobs: " + pending
-                        + " did not reach " + until + " within timeoutSeconds: " + p.timeoutSeconds
+                        + " did not reach " + (until == null ? "terminal (batch) / running (streaming)" : until.name())
+                        + " within timeoutSeconds: " + p.timeoutSeconds
                         + (p.cancelOnTimeout ? " (cancel requested)" : ""));
             }
-            LOG.info("action module[{}] waiting for dataflow jobs ({}): {}/{} done", name, until, completed.size(), jobIds.size());
+            LOG.info("action module[{}] waiting for dataflow jobs: {}/{} done", name, completed.size(), jobIds.size());
             Thread.sleep(next);
         }
     }
@@ -766,12 +772,41 @@ public class DataflowAction implements ActionService {
         return ActionResult.ofValues(operation, jobId, job.getCurrentState().name(), DataflowUtil.toPayload(job));
     }
 
-    private static boolean isAlreadyExists(final Exception e) {
-        if(e instanceof AlreadyExistsException) {
+    /**
+     * The wait target of a job: the explicit {@code until}, or by job type when none was given -
+     * terminal for batch, running for streaming; null while the type is still unknown (a queued
+     * launch has no type yet), in which case only a terminal state completes the wait.
+     */
+    private static WaitUntil targetOf(final WaitUntil until, final Job job) {
+        if(until != null) {
+            return until;
+        }
+        return switch (job.getType()) {
+            case JOB_TYPE_STREAMING -> WaitUntil.running;
+            case JOB_TYPE_BATCH -> WaitUntil.terminal;
+            default -> null;
+        };
+    }
+
+    private static boolean isAlreadyExists(final ApiException e) {
+        if(e instanceof AlreadyExistsException || StatusCode.Code.ALREADY_EXISTS.equals(e.getStatusCode().getCode())) {
             return true;
         }
         final String message = e.getMessage();
         return message != null && message.toLowerCase().contains("already exists");
+    }
+
+    /**
+     * Rejected requests (bad argument, unknown job, missing permission, ...) cannot be fixed by
+     * re-execution: map them to {@link NonRetryableException} so the module-level {@code retry}
+     * is spent on transient errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED) only.
+     */
+    static NonRetryableException rejectedRequest(final ApiException e) {
+        return switch (e.getStatusCode().getCode()) {
+            case INVALID_ARGUMENT, NOT_FOUND, PERMISSION_DENIED, UNAUTHENTICATED, FAILED_PRECONDITION, OUT_OF_RANGE, UNIMPLEMENTED ->
+                    new NonRetryableException("dataflow request rejected (" + e.getStatusCode().getCode() + "): " + e.getMessage(), e);
+            default -> null;
+        };
     }
 
     static String defaultJobName(final String stepName) {
@@ -794,18 +829,50 @@ public class DataflowAction implements ActionService {
         return builder.build();
     }
 
-    private static DataflowOptions copyDataflowOptions(final PipelineOptions options) {
+    /**
+     * A single {@code DataflowPipelineOptions} getter via reflection: null when the class is not on
+     * the classpath (other runners) or the getter fails (Beam default factories may throw or reach
+     * the network, e.g. {@code getStagingLocation} without a GCS tempLocation).
+     */
+    static String dataflowOption(final PipelineOptions options, final String getter) {
         try {
-            return DataflowOptions.copy(options);
-        } catch (final RuntimeException e) {
-            // DataflowPipelineOptions is not on the classpath of the other runners
+            @SuppressWarnings("unchecked")
+            final Class<? extends PipelineOptions> clazz = (Class<? extends PipelineOptions>) Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions");
+            final Object value = clazz.getMethod(getter).invoke(options.as(clazz));
+            return value == null || value.toString().isEmpty() ? null : value.toString();
+        } catch (final Throwable e) {
             return null;
         }
     }
 
-    private static void putIfNotNull(final Map<String, String> map, final String key, final String value) {
-        if(value != null && !value.isEmpty()) {
-            map.put(key, value);
+    /** Environment inherited by launched jobs from the parent pipeline's Dataflow options, as JSON; null when there is none. */
+    static String inheritedEnvironment(final PipelineOptions options) {
+        final FlexTemplateRuntimeEnvironment.Builder builder = FlexTemplateRuntimeEnvironment.newBuilder();
+        final String serviceAccount = dataflowOption(options, "getServiceAccount");
+        if(serviceAccount != null) {
+            builder.setServiceAccountEmail(serviceAccount);
+        }
+        final String subnetwork = dataflowOption(options, "getSubnetwork");
+        if(subnetwork != null) {
+            builder.setSubnetwork(subnetwork);
+        }
+        final String tempLocation = options.getTempLocation();
+        if(tempLocation != null && tempLocation.startsWith("gs://")) {
+            builder.setTempLocation(tempLocation);
+            // the staging default factory derives from a GCS tempLocation; without one it throws or creates a bucket
+            final String stagingLocation = dataflowOption(options, "getStagingLocation");
+            if(stagingLocation != null) {
+                builder.setStagingLocation(stagingLocation);
+            }
+        }
+        final FlexTemplateRuntimeEnvironment environment = builder.build();
+        if(environment.equals(FlexTemplateRuntimeEnvironment.getDefaultInstance())) {
+            return null;
+        }
+        try {
+            return JsonFormat.printer().omittingInsignificantWhitespace().print(environment);
+        } catch (final InvalidProtocolBufferException e) {
+            throw new IllegalStateException(e);
         }
     }
 

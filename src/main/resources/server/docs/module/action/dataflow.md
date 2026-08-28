@@ -23,10 +23,10 @@ Typical uses:
 
 | operation | effect | state in envelope | idempotent on bundle retry |
 |---|---|---|---|
-| `flexTemplates.launch` | Launch a Flex Template job ([`LaunchFlexTemplateParameter`](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.flexTemplates/launch)) and, by default, wait for it. | The job's `currentState` (`JOB_STATE_DONE`, `JOB_STATE_RUNNING`, …), or `EXISTS` when an active job with the same name was adopted. | yes with a deterministic `jobName` (see below) |
+| `flexTemplates.launch` | Launch a Flex Template job ([`LaunchFlexTemplateParameter`](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.flexTemplates/launch)) and, by default, wait for it. | The job's `currentState` after the wait (`JOB_STATE_DONE`, `JOB_STATE_RUNNING`, …); with `wait: false`, the state right after the launch, or `EXISTS` when an active job with the same name was adopted (`payload.adopted = true` in both cases). | yes with a deterministic `jobName` (see below) |
 | `jobs.get` | Read one job (`jobId`, or the latest job named `jobName`). | `currentState` | yes |
 | `jobs.list` | List jobs (`filter`, optionally narrowed to `jobName`). Payload: `jobs[]`, `count`, `firstJob`. | `DONE` | yes |
-| `jobs.wait` | Wait for jobs launched elsewhere: `jobId` / `jobName`, or with `trigger: collect` every id in `jobIdField` (one poll loop for all). Payload: the `Job`, or `jobs[]` / `count` / `firstJob` for several. | `currentState`, or `DONE` for several | yes |
+| `jobs.wait` | Wait for jobs launched elsewhere: `jobId` / `jobName` (payload: the `Job`, state = `currentState`), or with `trigger: collect` every id in `jobIdField` in one poll loop (payload: always `jobs[]` / `count` / `firstJob`, state `DONE` — also for a single collected id). | see left | yes |
 | `jobs.update` | [`jobs.update`](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.jobs/update): `requestedState` (`JOB_STATE_CANCELLED` / `JOB_STATE_DRAINED`, waits until reached) and/or `runtimeUpdatableParams` (`minNumWorkers` / `maxNumWorkers` / `workerUtilizationHint`, streaming). | `currentState` | yes |
 | `jobs.messages.list` | Job messages of `minimumImportance` and above (default `JOB_MESSAGE_ERROR`). Payload: `messages[]`, `count`, `currentState`. | `DONE` | yes |
 
@@ -34,14 +34,15 @@ Typical uses:
 
 ### Idempotency and failure handling
 
-Dataflow rejects a second **active** job with the same name in a project / region. A deterministic `jobName` (e.g. `backfill-${table}-${args.run_id}`) therefore makes `flexTemplates.launch` safe on a retried bundle: ALREADY_EXISTS adopts the running job (state `EXISTS`) and waits for it like a fresh launch. The name of a *finished* job can be reused, so a retry after completion launches again. Without `jobName` the step launches as `<step name>-<yyyyMMddHHmmss>` (a WARN is logged; not idempotent).
+Dataflow rejects a second **active** job with the same name in a project / region. A deterministic `jobName` (e.g. `backfill-${table}-${args.run_id}`) therefore makes `flexTemplates.launch` safe on a retried bundle: ALREADY_EXISTS adopts the running job (`payload.adopted = true`) and waits for it like a fresh launch, so the envelope `state` is the job's outcome on both paths. The name of a *finished* job can be reused, so a retry after completion launches again. Without `jobName` the step launches as `<step name>-<yyyyMMddHHmmss>` (a WARN is logged; not idempotent).
 
 | situation | behaviour |
 |---|---|
 | Job ends `JOB_STATE_FAILED` | Non-retryable failure; the error messages (`jobs.messages.list`, ERROR) are attached to the failure description. |
 | Job is `JOB_STATE_CANCELLED` by someone else while waited for | Non-retryable failure. A `JOB_STATE_DRAINED` job counts as completed. |
 | `timeoutSeconds` exceeded | Non-retryable failure; the job is cancelled first when `cancelOnTimeout` is true (default for jobs this step launched). |
-| API errors on launch / poll (UNAVAILABLE, DEADLINE_EXCEEDED, …) | Retryable — use the module-level `retry`. |
+| Rejected request (INVALID_ARGUMENT, NOT_FOUND, PERMISSION_DENIED, FAILED_PRECONDITION, …) | Non-retryable — re-execution cannot fix it. |
+| Transient API errors on launch / poll (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED, …) | Retryable — use the module-level `retry`. |
 
 Waiting happens inside the action's DoFn (the same model as the [bigquery](bigquery.md) action), so a `perElement` launch with `wait: true` occupies one worker thread per element and elements of the same bundle wait one after another. For fan-out prefer `wait: false` + a `collect` `jobs.wait` (example below): launches are instant and one step polls every job. Concurrency is then bounded by Dataflow's concurrent-job quota (jobs beyond it wait in `JOB_STATE_QUEUED`).
 
@@ -52,12 +53,12 @@ Waiting happens inside the action's DoFn (the same model as the [bigquery](bigqu
 | parameter | optional | type | description |
 |---|---|---|---|
 | projectId | optional | String | Project of the job. Default: the pipeline's project. Template allowed. |
-| region | optional | String | Regional endpoint (`asia-northeast1`). Default: the pipeline's Dataflow region when running on Dataflow; required on other runners. Template allowed. |
+| region | optional | String | Regional endpoint (`asia-northeast1`). Default: the pipeline's Dataflow region when running on Dataflow; required on other runners. Template allowed. `parameters` itself may be omitted when every value is defaulted (e.g. `jobs.list` on Dataflow). |
 | jobId | conditionally required | String | Target job for `jobs.get` / `jobs.wait` / `jobs.update` / `jobs.messages.list`. Template allowed, e.g. `${jobId}` from a launch envelope. |
-| jobName | conditionally required | String | Alternative to `jobId`: the **latest** job with this name. For `flexTemplates.launch` the name of the new job (`[a-z]([-a-z0-9]{0,1022}[a-z0-9])?`). Template allowed. |
+| jobName | conditionally required | String | Alternative to `jobId`: the **latest** job with this name (among active jobs for `jobs.wait` / `jobs.update`, among all jobs for `jobs.get` / `jobs.messages.list`). For `flexTemplates.launch` the name of the new job (`[a-z]([-a-z0-9]{0,1022}[a-z0-9])?`). Template allowed. |
 | jobIdField | optional | String | `jobs.wait` with `trigger: collect`: field of the collected elements holding job ids (`jobId` of launch envelopes). |
 | wait | optional | Boolean | `flexTemplates.launch` / `jobs.update` with `requestedState`: wait for the job. Default `true`. |
-| waitUntil | optional | Enum | `terminal` (DONE / FAILED / CANCELLED / DRAINED / UPDATED), `running` (RUNNING, or terminal), `none`. Default for a launch: `terminal` for a batch job, `running` for a streaming job (a streaming job never ends by itself); `terminal` for `jobs.wait`. |
+| waitUntil | optional | Enum | `terminal` (DONE / FAILED / CANCELLED / DRAINED / UPDATED), `running` (RUNNING, or terminal), `none`. Default for a launch: by the job type as soon as Dataflow reports it — `terminal` for a batch job, `running` for a streaming job (a streaming job never ends by itself); `terminal` for `jobs.wait`. |
 | timeoutSeconds | optional | Long | Wait deadline; exceeding it fails the step. Default `86400`. |
 | cancelOnTimeout | optional | Boolean | Cancel the job when the deadline passes. Default `true` for `flexTemplates.launch`, `false` otherwise (a job launched elsewhere is not ours to cancel). |
 | view | optional | Enum | `JobView` of the payload for `jobs.get`: `JOB_VIEW_SUMMARY` (default), `JOB_VIEW_ALL` (includes steps and environment — large), `JOB_VIEW_DESCRIPTION`. |
@@ -74,7 +75,7 @@ The parameters mirror [`LaunchFlexTemplateParameter`](https://cloud.google.com/d
 | args | optional | Map<String,String\> | Child pipeline `args` (`${args.x}` in the child config); each becomes the template parameter `args.<key>`. Values are templates, e.g. `table: ${table_name}` with `trigger: perElement`. |
 | parameters | optional | Map<String,String\> | Any other template parameters (values template-able). `config` / `args` win on conflict. |
 | launchOptions | optional | Map<String,String\> | `launchOptions` of the request. |
-| environment | optional | [FlexTemplateRuntimeEnvironment](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.flexTemplates/launch#FlexTemplateRuntimeEnvironment) | REST field names: `maxWorkers`, `numWorkers`, `machineType`, `serviceAccountEmail`, `subnetwork`, `network`, `tempLocation`, `stagingLocation`, `additionalUserLabels`, `additionalExperiments`, `enableStreamingEngine`, `workerRegion`, `workerZone`, `ipConfiguration`, `kmsKeyName`, … When running on Dataflow, `serviceAccountEmail`, `subnetwork`, `tempLocation` and `stagingLocation` default to the parent job's values. |
+| environment | optional | [FlexTemplateRuntimeEnvironment](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.flexTemplates/launch#FlexTemplateRuntimeEnvironment) | REST field names: `maxWorkers`, `numWorkers`, `machineType`, `serviceAccountEmail`, `subnetwork`, `network`, `tempLocation`, `stagingLocation`, `additionalUserLabels`, `additionalExperiments`, `enableStreamingEngine`, `workerRegion`, `workerZone`, `ipConfiguration`, `kmsKeyName`, … When running on Dataflow, `serviceAccountEmail`, `subnetwork`, `tempLocation` and `stagingLocation` default to the parent job's values (explicit fields win; `tempLocation` / `stagingLocation` only when the parent's tempLocation is a `gs://` path). |
 | update | optional | Boolean | In-place update of the running streaming job named `jobName` (`transformNameMappings` optional). |
 | transformNameMappings | optional | Map<String,String\> | Transform name mapping for `update`. |
 
