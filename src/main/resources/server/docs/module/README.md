@@ -80,6 +80,7 @@ Action modules execute an operation against an external service at a point in th
 | [http](action/http.md) | One HTTP request per firing: notify, trigger jobs, maintenance calls, start + poll async jobs |
 | [tasks](action/tasks.md) | Cloud Tasks queue operations (create/update/pause/resume/purge/delete, waitForEmpty, run/delete task) |
 | [dataflow](action/dataflow.md) | Cloud Dataflow job operations (launch a Flex Template and wait, get/list as a guard, wait, cancel/drain/rescale, messages) |
+| [build](action/build.md) | Cloud Build operations (run a build or a one-step image + script and wait, outputs as payload, get/list as a guard, wait, cancel, run a trigger) |
 
 ## Failure Modules
 

@@ -285,7 +285,7 @@ public class DataflowUtil {
         }
     }
 
-    private static Object toValue(final JsonElement element) {
+    static Object toValue(final JsonElement element) {
         if(element == null || element.isJsonNull()) {
             return null;
         }
