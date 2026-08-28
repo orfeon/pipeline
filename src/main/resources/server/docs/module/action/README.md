@@ -16,7 +16,7 @@ actions:
       destinationTable: myproject.mydataset.loaded
 ```
 
-Available services: [bigquery](bigquery.md) · [vertexai_gemini](vertexai_gemini.md) · [storage](storage.md) · [tasks](tasks.md) · [http](http.md)
+Available services: [bigquery](bigquery.md) · [vertexai_gemini](vertexai_gemini.md) · [storage](storage.md) · [tasks](tasks.md) · [http](http.md) · [dataflow](dataflow.md)
 
 ## The two planes
 
@@ -53,6 +53,7 @@ An action step is "which service" (`module`), "which operation" (`operation`) an
 |---|---|
 | bigquery | `jobs.query`, `jobs.load`, `jobs.extract`, `jobs.copy`, `jobs.wait`, `tables.get`, `tables.insert`, `tables.patch`, `tables.delete`, `datasets.get`, `datasets.insert`, `datasets.delete` |
 | tasks | `queues.create`, `queues.update`, `queues.delete`, `queues.pause`, `queues.resume`, `queues.purge`, `queues.get`, `queues.waitForEmpty`, `tasks.run`, `tasks.delete` |
+| dataflow | `flexTemplates.launch`, `jobs.get`, `jobs.list`, `jobs.wait`, `jobs.update`, `jobs.messages.list` |
 | vertexai_gemini | `batchPredictionJobs.create` |
 | storage, http | none — single-operation services; `operation` must be omitted |
 
@@ -76,7 +77,7 @@ Every execution emits exactly one record with the same schema regardless of serv
 
 | field      | type      | description                                                        |
 |------------|-----------|--------------------------------------------------------------------|
-| service    | STRING    | The action service (`bigquery`, `vertexai_gemini`, `storage`, `tasks`, `http`). |
+| service    | STRING    | The action service (`bigquery`, `vertexai_gemini`, `storage`, `tasks`, `http`, `dataflow`). |
 | operation  | STRING    | The operation executed: the config's `operation` for multi-operation services (e.g. `jobs.load`, `queues.pause`), a service-defined value otherwise (`write` for storage, the HTTP method for http). |
 | jobId      | STRING (nullable) | Id / resource name of the launched job or written object.  |
 | state      | STRING (nullable) | Final (or last observed) state, e.g. `DONE`.               |
@@ -87,7 +88,7 @@ Every execution emits exactly one record with the same schema regardless of serv
 ## Failure handling and execution guarantees
 
 - If the action throws (e.g. a transient job failure), the firing is first retried on the same worker per `retry` (exponential backoff `initialBackoff × 2^n`, capped at `maxBackoff`; a single attempt when `retry` is absent), then the trigger element is routed to failure handling as a `BadRecord`, honoring `failFast` / `failureSinks`. Use `retry` for transient API errors (429/503, network). Failures that re-execution cannot fix are not retried: a service's `NonRetryableException` (e.g. the http action on a 4xx response or a `poll.failWhen` match, the bigquery action on a rejected job, a permanent job error such as `invalidQuery` / `notFound` / `accessDenied`, or a wait timeout), a module-level `failWhen` match, configuration/template errors, and interruption.
-- Execution is **at-least-once**: Beam may retry a bundle and re-invoke the action, and `retry` re-invokes it as well. The bigquery service submits jobs idempotently (deterministic job ids, resubmitting under a `-r<n>` suffix only when the earlier attempt failed transiently); services without a client-supplied id (vertexai_gemini) may duplicate on retry.
+- Execution is **at-least-once**: Beam may retry a bundle and re-invoke the action, and `retry` re-invokes it as well. The bigquery service submits jobs idempotently (deterministic job ids, resubmitting under a `-r<n>` suffix only when the earlier attempt failed transiently); services without a client-supplied id (vertexai_gemini) may duplicate on retry; the dataflow service is idempotent only with a deterministic `jobName` (an active job with that name is adopted) — without one, a retried launch starts a second job.
 
 ## Result conditions: failWhen / skipWhen
 
@@ -134,8 +135,8 @@ actions:
 | field        | optional | type            | description |
 |--------------|----------|-----------------|-------------|
 | name         | required | String          | Step name (referenced by other steps' `inputs` / `waits`). |
-| module       | required | String          | The action service: `bigquery`, `vertexai_gemini`, `storage`, `tasks`, `http`. |
-| operation    | conditionally required | String | Which operation of the service to execute — see [Operation](#operation). Required for services that declare operations (bigquery, tasks, vertexai_gemini); must be omitted for single-operation services (storage, http). |
+| module       | required | String          | The action service: `bigquery`, `vertexai_gemini`, `storage`, `tasks`, `http`, `dataflow`. |
+| operation    | conditionally required | String | Which operation of the service to execute — see [Operation](#operation). Required for services that declare operations (bigquery, tasks, vertexai_gemini, dataflow); must be omitted for single-operation services (storage, http). |
 | trigger      | optional | Enum            | `once` (default), `perElement`, `collect` — see [Trigger](#trigger). |
 | inputs       | optional | Array<String\>  | Upstream step names. Pure completion signals for `once`; the elements for `perElement` / `collect`. |
 | waits        | optional | Array<String\>  | Steps that must complete before this action fires. |

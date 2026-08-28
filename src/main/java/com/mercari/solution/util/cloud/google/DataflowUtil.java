@@ -1,9 +1,17 @@
 package com.mercari.solution.util.cloud.google;
 
 import com.google.dataflow.v1beta3.*;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.MessageOrBuilder;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
+import com.google.protobuf.util.JsonFormat;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -248,6 +256,72 @@ public class DataflowUtil {
             }
         }
         return result.toString();
+    }
+
+    /** Console URL of a job, shared by the launch API result and the action docs. */
+    public static String consoleUrl(final Job job) {
+        return "https://console.cloud.google.com/dataflow/jobs/" + job.getLocation() + "/" + job.getId()
+                + "?project=" + job.getProjectId();
+    }
+
+    /**
+     * The REST (proto JSON) representation of a Dataflow message as a nested map, for the action
+     * envelope payload: field names as in the REST API, enums as names, integral numbers as
+     * {@code Long} and other numbers as {@code Double} (proto JSON prints int64 as strings; those
+     * stay strings, as the v1b3 discovery document types them).
+     */
+    public static Map<String, Object> toPayload(final MessageOrBuilder message) {
+        try {
+            final String json = JsonFormat.printer().omittingInsignificantWhitespace().print(message);
+            final Object value = toValue(JsonParser.parseString(json));
+            if(value instanceof Map<?, ?> map) {
+                @SuppressWarnings("unchecked")
+                final Map<String, Object> result = (Map<String, Object>) map;
+                return result;
+            }
+            return new LinkedHashMap<>();
+        } catch (final InvalidProtocolBufferException e) {
+            throw new IllegalStateException("Failed to serialize dataflow message", e);
+        }
+    }
+
+    private static Object toValue(final JsonElement element) {
+        if(element == null || element.isJsonNull()) {
+            return null;
+        }
+        if(element.isJsonObject()) {
+            final Map<String, Object> map = new LinkedHashMap<>();
+            for(final Map.Entry<String, JsonElement> entry : ((JsonObject) element).entrySet()) {
+                final Object value = toValue(entry.getValue());
+                if(value != null) {
+                    map.put(entry.getKey(), value);
+                }
+            }
+            return map;
+        }
+        if(element.isJsonArray()) {
+            final List<Object> list = new ArrayList<>();
+            for(final JsonElement e : (JsonArray) element) {
+                list.add(toValue(e));
+            }
+            return list;
+        }
+        final JsonPrimitive primitive = element.getAsJsonPrimitive();
+        if(primitive.isBoolean()) {
+            return primitive.getAsBoolean();
+        }
+        if(primitive.isNumber()) {
+            final String text = primitive.getAsString();
+            if(text.matches("-?\\d+")) {
+                try {
+                    return Long.parseLong(text);
+                } catch (final NumberFormatException ignored) {
+                    // fall through to double
+                }
+            }
+            return primitive.getAsDouble();
+        }
+        return primitive.getAsString();
     }
 
     public static Instant toInstant(final Timestamp timestamp) {
