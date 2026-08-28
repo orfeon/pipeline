@@ -1,12 +1,12 @@
 package com.mercari.solution.module.action;
 
 import com.google.api.client.util.ExponentialBackOff;
+import com.google.api.client.util.Sleeper;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.google.gson.JsonPrimitive;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.Action;
 import com.mercari.solution.module.Action.Trigger;
@@ -47,7 +47,7 @@ public class BuildAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(BuildAction.class);
 
-    public static final String ENDPOINT_MEMORY_PREFIX = "memory://";
+    public static final String ENDPOINT_MEMORY_PREFIX = ActionSupport.ENDPOINT_MEMORY_PREFIX;
     /** {@code ${root...}} - group 1 is the root identifier (after optional whitespace / a leading paren). */
     private static final java.util.regex.Pattern PATTERN_TEMPLATE_EXPRESSION =
             java.util.regex.Pattern.compile("\\$\\{\\s*\\(?\\s*([A-Za-z_][A-Za-z0-9_]*)[^}]*}");
@@ -235,30 +235,20 @@ public class BuildAction implements ActionService {
         JsonObject runTrigger(String project, String location, String trigger, JsonObject source);
     }
 
-    private static final Map<String, BuildClient> MEMORY_CLIENTS = new HashMap<>();
+    private static final ActionSupport.MemoryClients<BuildClient> MEMORY_CLIENTS = new ActionSupport.MemoryClients<>("build");
 
     public static void registerMemoryClient(final String name, final BuildClient client) {
-        synchronized (MEMORY_CLIENTS) {
-            MEMORY_CLIENTS.put(name, client);
-        }
+        MEMORY_CLIENTS.register(name, client);
     }
 
     public static void unregisterMemoryClient(final String name) {
-        synchronized (MEMORY_CLIENTS) {
-            MEMORY_CLIENTS.remove(name);
-        }
+        MEMORY_CLIENTS.unregister(name);
     }
 
     static BuildClient createClient(final Parameters parameters) {
-        if(parameters.endpoint != null && parameters.endpoint.startsWith(ENDPOINT_MEMORY_PREFIX)) {
-            final String name = parameters.endpoint.substring(ENDPOINT_MEMORY_PREFIX.length());
-            synchronized (MEMORY_CLIENTS) {
-                final BuildClient client = MEMORY_CLIENTS.get(name);
-                if(client == null) {
-                    throw new IllegalStateException("in-memory build client is not registered: " + name);
-                }
-                return client;
-            }
+        final BuildClient memory = MEMORY_CLIENTS.resolve(parameters.endpoint);
+        if(memory != null) {
+            return memory;
         }
         final CloudBuildUtil util = parameters.endpoint == null
                 ? new CloudBuildUtil()
@@ -390,7 +380,7 @@ public class BuildAction implements ActionService {
                 final List<String> buildIds = new ArrayList<>();
                 final boolean collected = Trigger.collect.equals(trigger) && p.jobIdField != null;
                 if(collected) {
-                    buildIds.addAll(BigQueryAction.collectField(elements, p.jobIdField));
+                    buildIds.addAll(ActionSupport.collectField(elements, p.jobIdField));
                     if(buildIds.isEmpty()) {
                         LOG.info("action module[{}] found no build id in field: {}", name, p.jobIdField);
                         yield ActionResult.of(operation, null, "SKIPPED", null);
@@ -509,7 +499,7 @@ public class BuildAction implements ActionService {
      * an older build should bound it with {@code create_time>=...}.
      */
     private String waitForFilter(final Parameters p, final String project, final String location, final String filter) throws IOException, InterruptedException {
-        final ExponentialBackOff backOff = createPollBackOff(p);
+        final ExponentialBackOff backOff = ActionSupport.createPollBackOff(p.timeoutSeconds);
         while(true) {
             List<JsonObject> builds = null;
             try {
@@ -543,44 +533,29 @@ public class BuildAction implements ActionService {
      * cancelled on timeout only when {@code cancelOnTimeout} is set and the builds are ours
      * ({@code own}: started by this step, not adopted or merely waited for).
      */
-    private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> buildIds, final WaitUntil until, final boolean cancelRequested, final boolean own) throws IOException, InterruptedException {
-        final Map<String, JsonObject> completed = new LinkedHashMap<>();
-        final ExponentialBackOff backOff = createPollBackOff(p);
-        while(true) {
-            for(final String buildId : buildIds) {
-                if(completed.containsKey(buildId)) {
-                    continue;
-                }
-                final JsonObject build;
-                try {
-                    build = client.getBuild(project, location, buildId);
-                } catch (final RuntimeException e) {
-                    if(!isTransient(e)) {
-                        throw e;
+    private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> buildIds, final WaitUntil until, final boolean cancelRequested, final boolean own) throws Exception {
+        return ActionSupport.waitForAll(name, "cloud builds", buildIds, p.timeoutSeconds, Sleeper.DEFAULT,
+                buildId -> {
+                    final JsonObject build = client.getBuild(project, location, buildId);
+                    final String status = CloudBuildUtil.status(build);
+                    if(CloudBuildUtil.isTerminal(status)) {
+                        if("CANCELLED".equals(status) && !cancelRequested) {
+                            throw new NonRetryableException("action module[" + name + "] cloud build was cancelled: " + buildId + CloudBuildUtil.describeFailure(build));
+                        }
+                        if(!"SUCCESS".equals(status) && !"CANCELLED".equals(status)) {
+                            throw new NonRetryableException("action module[" + name + "] cloud build " + buildId + " ended " + status + ":" + CloudBuildUtil.describeFailure(build));
+                        }
+                        return build;
+                    } else if(WaitUntil.working.equals(until) && "WORKING".equals(status)) {
+                        return build;
                     }
-                    LOG.info("action module[{}] failed to poll cloud build: {} ({}), retrying", name, buildId, e.getMessage());
-                    continue;
-                }
-                final String status = CloudBuildUtil.status(build);
-                if(CloudBuildUtil.isTerminal(status)) {
-                    if("CANCELLED".equals(status) && !cancelRequested) {
-                        throw new NonRetryableException("action module[" + name + "] cloud build was cancelled: " + buildId + CloudBuildUtil.describeFailure(build));
+                    return null;
+                },
+                e -> e instanceof RuntimeException r && isTransient(r),
+                pending -> {
+                    if(!(p.cancelOnTimeout && own)) {
+                        return;
                     }
-                    if(!"SUCCESS".equals(status) && !"CANCELLED".equals(status)) {
-                        throw new NonRetryableException("action module[" + name + "] cloud build " + buildId + " ended " + status + ":" + CloudBuildUtil.describeFailure(build));
-                    }
-                    completed.put(buildId, build);
-                } else if(WaitUntil.working.equals(until) && "WORKING".equals(status)) {
-                    completed.put(buildId, build);
-                }
-            }
-            if(completed.size() == buildIds.size()) {
-                return buildIds.stream().map(completed::get).toList();
-            }
-            final long next = backOff.nextBackOffMillis();
-            if(next == ExponentialBackOff.STOP) {
-                final List<String> pending = buildIds.stream().filter(id -> !completed.containsKey(id)).toList();
-                if(p.cancelOnTimeout && own) {
                     for(final String buildId : pending) {
                         try {
                             client.cancelBuild(project, location, buildId);
@@ -589,22 +564,10 @@ public class BuildAction implements ActionService {
                             LOG.warn("action module[{}] failed to cancel cloud build: {}: {}", name, buildId, e.getMessage());
                         }
                     }
-                }
-                throw new NonRetryableException("action module[" + name + "] cloud builds: " + pending
+                },
+                pending -> new NonRetryableException("action module[" + name + "] cloud builds: " + pending
                         + " did not reach " + until.name() + " within timeoutSeconds: " + p.timeoutSeconds
-                        + (p.cancelOnTimeout && own ? " (cancel requested)" : ""));
-            }
-            LOG.info("action module[{}] waiting for cloud builds: {}/{} done", name, completed.size(), buildIds.size());
-            Thread.sleep(next);
-        }
-    }
-
-    private static ExponentialBackOff createPollBackOff(final Parameters p) {
-        return new ExponentialBackOff.Builder()
-                .setInitialIntervalMillis(2000)
-                .setMaxIntervalMillis(30000)
-                .setMaxElapsedTimeMillis(Math.toIntExact(Math.min(p.timeoutSeconds * 1000L, Integer.MAX_VALUE)))
-                .build();
+                        + (p.cancelOnTimeout && own ? " (cancel requested)" : "")));
     }
 
     /** 429 / 5xx from the API, or a transport failure (wrapped I/O error) - worth another poll. */
@@ -687,28 +650,7 @@ public class BuildAction implements ActionService {
 
     /** Every string leaf of the JSON expanded as a FreeMarker template with the element data. */
     static JsonObject templateJson(final JsonObject object, final Map<String, Object> data) {
-        final JsonObject result = new JsonObject();
-        for(final Map.Entry<String, JsonElement> entry : object.entrySet()) {
-            result.add(entry.getKey(), templateElement(entry.getValue(), data));
-        }
-        return result;
-    }
-
-    private static JsonElement templateElement(final JsonElement element, final Map<String, Object> data) {
-        if(element.isJsonObject()) {
-            return templateJson(element.getAsJsonObject(), data);
-        }
-        if(element.isJsonArray()) {
-            final JsonArray array = new JsonArray();
-            for(final JsonElement e : element.getAsJsonArray()) {
-                array.add(templateElement(e, data));
-            }
-            return array;
-        }
-        if(element.isJsonPrimitive() && element.getAsJsonPrimitive().isString()) {
-            return new JsonPrimitive(template(element.getAsString(), data));
-        }
-        return element;
+        return ActionSupport.templateJson(object, text -> template(text, data)).getAsJsonObject();
     }
 
     /**
