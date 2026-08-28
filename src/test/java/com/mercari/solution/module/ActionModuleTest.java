@@ -575,8 +575,8 @@ public class ActionModuleTest {
                 java.util.Arrays.stream(com.mercari.solution.module.action.TasksAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
                 new HashSet<>(Action.operations("tasks")));
         Assertions.assertEquals(
-                java.util.Arrays.stream(com.mercari.solution.module.action.vertexai.GeminiAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
-                new HashSet<>(Action.operations("vertexai_gemini")));
+                java.util.Arrays.stream(com.mercari.solution.module.action.VertexAiAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("vertexai")));
         Assertions.assertEquals(
                 java.util.Arrays.stream(com.mercari.solution.module.action.DataflowAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
                 new HashSet<>(Action.operations("dataflow")));
