@@ -44,6 +44,11 @@ public class Schema implements Serializable {
 
     private List<Field> fields;
     private Map<String, String> options;
+    // schema-level (table / view / record) description. Set by sources from the destination
+    // metadata (BigQuery table description, jdbc table comment, Avro record doc) or by config;
+    // intentionally NOT carried over by Builder(Schema) so that derived schemas do not claim
+    // to be the source table.
+    private String description;
 
     // extension schemas
     private RowSchema row;
@@ -63,6 +68,14 @@ public class Schema implements Serializable {
 
     public DataType getType() {
         return type;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public Map<String, String> getOptions() {
+        return options;
     }
 
     public List<Field> getFields() {
@@ -101,7 +114,7 @@ public class Schema implements Serializable {
     public AvroSchema getAvro() {
         if((avro == null || avro.json == null)) {
             if(fields != null && !fields.isEmpty()) {
-                avro = new AvroSchema(ElementToAvroConverter.convertSchema(fields));
+                avro = new AvroSchema(AvroSchemaUtil.withDoc(ElementToAvroConverter.convertSchema(fields), description));
             }
         } else if(avro.schema == null) {
             avro.setup();
@@ -124,7 +137,7 @@ public class Schema implements Serializable {
         return Optional
                 .ofNullable(getAvro())
                 .map(AvroSchema::getSchema)
-                .orElseGet(() -> ElementToAvroConverter.convertSchema(fields));
+                .orElseGet(() -> AvroSchemaUtil.withDoc(ElementToAvroConverter.convertSchema(fields), description));
     }
 
     public Descriptors.Descriptor getProtobufDescriptor() {
@@ -213,7 +226,7 @@ public class Schema implements Serializable {
             case AVRO -> {
                 if(avro == null || avro.schema == null) {
                     if(fields != null && !fields.isEmpty()) {
-                        avro = new AvroSchema(ElementToAvroConverter.convertSchema(this.fields));
+                        avro = new AvroSchema(AvroSchemaUtil.withDoc(ElementToAvroConverter.convertSchema(this.fields), description));
                     }
                 }
                 avro.setup();
@@ -313,6 +326,10 @@ public class Schema implements Serializable {
             errorMessages.add("schema must not mix new-format keys (encoding, reference) with old-format keys (avro, protobuf, useDestinationSchema, avroSchema, protobufDescriptor)");
         } else if(hasNewKeys) {
             parseEncodingAndReference(jsonObject, builder, errorMessages);
+        }
+
+        if(jsonObject.has("description") && jsonObject.get("description").isJsonPrimitive()) {
+            builder.withDescription(jsonObject.get("description").getAsString());
         }
 
         if(jsonObject.has("fields")) {
@@ -509,12 +526,17 @@ public class Schema implements Serializable {
     }
 
     public Schema copy() {
-        return Schema.builder(this).build();
+        final Schema copied = Schema.builder(this).build();
+        copied.description = this.description;
+        return copied;
     }
 
     public JsonObject toJsonObject() {
         final JsonObject jsonObject = new JsonObject();
         jsonObject.addProperty("dataType", this.type.name());
+        if(description != null && !description.isEmpty()) {
+            jsonObject.addProperty("description", description);
+        }
         {
             final JsonArray fieldsArray = new JsonArray();
             for(final Field field : fields) {
@@ -539,7 +561,11 @@ public class Schema implements Serializable {
 
     public static Schema of(org.apache.avro.Schema avroSchema) {
         final List<Field> fields = AvroToElementConverter.convertFields(avroSchema.getFields());
-        return new Schema(DataType.AVRO, fields, null, avroSchema, null);
+        final Schema schema = new Schema(DataType.AVRO, fields, null, avroSchema, null);
+        if(avroSchema.getDoc() != null && !avroSchema.getDoc().isEmpty()) {
+            schema.description = avroSchema.getDoc();
+        }
+        return schema;
     }
 
     public static Schema of(com.google.cloud.spanner.Type type) {
@@ -667,7 +693,18 @@ public class Schema implements Serializable {
             final Mode mode = Mode.of(modeString);
 
             final FieldType fieldType = FieldType.parse(name, type, mode, jsonObject);
-            return Field.of(name, fieldType);
+            final Field field = Field.of(name, fieldType);
+            if(jsonObject.has("description") && jsonObject.get("description").isJsonPrimitive()) {
+                field.description = jsonObject.get("description").getAsString();
+            }
+            if(jsonObject.has("options") && jsonObject.get("options").isJsonObject()) {
+                for(final Map.Entry<String, JsonElement> entry : jsonObject.getAsJsonObject("options").entrySet()) {
+                    if(entry.getValue() != null && entry.getValue().isJsonPrimitive()) {
+                        field.options.put(entry.getKey(), entry.getValue().getAsString());
+                    }
+                }
+            }
+            return field;
         }
 
         public static Field of(final String name, final FieldType type) {
@@ -688,6 +725,16 @@ public class Schema implements Serializable {
                 default -> Optional.ofNullable(type.getNullable()).orElse(true) ? Mode.nullable : Mode.required;
             };
             jsonObject.addProperty("mode", mode.name());
+            if(description != null && !description.isEmpty()) {
+                jsonObject.addProperty("description", description);
+            }
+            if(options != null && !options.isEmpty()) {
+                final JsonObject optionsObject = new JsonObject();
+                for(final Map.Entry<String, String> entry : options.entrySet()) {
+                    optionsObject.addProperty(entry.getKey(), entry.getValue());
+                }
+                jsonObject.add("options", optionsObject);
+            }
 
             switch (type.getType()) {
                 case element -> {
@@ -1359,9 +1406,15 @@ public class Schema implements Serializable {
         private Boolean useDestinationSchema;
         private Encoding encoding;
         private Reference reference;
+        private String description;
 
         private Builder() {
             this("", new ArrayList<>());
+        }
+
+        public Builder withDescription(final String description) {
+            this.description = description;
+            return this;
         }
 
         private Builder(String name, List<Field> fields) {
@@ -1436,6 +1489,9 @@ public class Schema implements Serializable {
             }
             schema.name = name;
             schema.useDestinationSchema = useDestinationSchema;
+            if(description != null && !description.isEmpty()) {
+                schema.description = description;
+            }
             if(type != null) {
                 schema.type = type;
             }
@@ -1661,7 +1717,8 @@ public class Schema implements Serializable {
           "oneOf": [
             {
               "properties": {
-                "fields": { "$ref": "#/$defs/fields" }
+                "fields": { "$ref": "#/$defs/fields" },
+                "description": { "type": "string", "title": "Description", "description": "Human-readable description of the schema (table / view / record). Sources such as bigquery or jdbc fill it from the table metadata; it is shown in the dry-run output schema." }
               },
               "required": ["fields"]
             },
@@ -1711,7 +1768,8 @@ public class Schema implements Serializable {
               "type": "object",
               "title": "Simple Schema",
               "properties": {
-                "fields": { "$ref": "#/$defs/fields" }
+                "fields": { "$ref": "#/$defs/fields" },
+                "description": { "type": "string", "title": "Description" }
               },
               "required": ["fields"]
             },
@@ -1722,7 +1780,9 @@ public class Schema implements Serializable {
               "properties": {
                 "name": { "type": "string", "title": "Name" },
                 "type": { "$ref": "#/$defs/type" },
-                "mode": { "$ref": "#/$defs/mode" }
+                "mode": { "$ref": "#/$defs/mode" },
+                "description": { "type": "string", "title": "Description", "description": "Human-readable description of the field. Sources such as bigquery or jdbc fill it from the table metadata; it is shown in the dry-run output schema." },
+                "options": { "type": "object", "title": "Options", "additionalProperties": { "type": "string" }, "description": "Free-form key/value metadata attached to the field." }
               },
               "required": ["name", "type"],
               "allOf": [

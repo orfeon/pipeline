@@ -243,12 +243,16 @@ public class BigQueryUtil {
     }
 
     public static TableSchema getTableSchemaFromTable(final TableReference tableReference) {
+        return getTable(tableReference).getSchema();
+    }
+
+    /** The table (or view) resource: schema plus metadata such as description and labels. */
+    public static Table getTable(final TableReference tableReference) {
         final Bigquery bigquery = getBigquery();
         try {
-            final Table table = bigquery.tables()
+            return bigquery.tables()
                     .get(tableReference.getProjectId(), tableReference.getDatasetId(), tableReference.getTableId())
                     .execute();
-            return table.getSchema();
         } catch (IOException e) {
             throw new RuntimeException("Failed to get schema from BigQuery table: " + tableReference, e);
         }

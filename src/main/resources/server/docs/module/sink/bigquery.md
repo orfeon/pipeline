@@ -65,6 +65,11 @@ These parameters are effective only when `createDisposition` is `CREATE_IF_NEEDE
 | clusteringFields  | optional | Array<String\> | Field names to use for [clustering](https://cloud.google.com/bigquery/docs/clustered-tables). Up to 4 fields.                                            |
 | primaryKeyFields  | optional | Array<String\> | Field names to set as [primary key](https://cloud.google.com/bigquery/docs/information-schema-table-constraints) on the table.                           |
 
+When the table is auto-created, the `description` of each input schema field (declared in a
+`schema.fields` entry or read from a source such as a `bigquery` table or a `jdbc` table with column
+comments — see [schema](../common/schema.md#field-descriptions)) is set as the BigQuery field
+description. Existing tables are not modified.
+
 ### Streaming mode parameters
 
 These parameters are applicable only in streaming mode.

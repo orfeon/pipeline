@@ -61,6 +61,10 @@ The output schema is automatically inferred from the query or table metadata; no
 | parameter | optional | type | description |
 | --- | --- | --- | --- |
 | table | selective required | String | Table name to read. Either `query` or `table` must be specified (not both). |
+
+For `table` reads the column comments of the table (JDBC `REMARKS`: PostgreSQL `COMMENT ON COLUMN`,
+MySQL / TiDB column `COMMENT`) are attached to the output schema as field `description`s (see
+[schema](../common/schema.md#field-descriptions)). Reading the comments never fails the pipeline.
 | select | optional | String | The text to be inserted into the SELECT clause to specify the columns to be retrieved. The default is `*`. |
 | seekFields | optional | Array<String\> | Fields used for seek-based (keyset) pagination and range splitting. If not specified, the table's primary key columns are used. |
 | fetchSize | optional | Integer | Number of records fetched per page while seeking through the table. The default is `50000`. |

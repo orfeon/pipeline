@@ -113,12 +113,24 @@ public class JdbcUtil {
             final Schema schema = ResultSetToRecordConverter.convertSchema(statement.getMetaData());
             final List<String> parameterFieldNames = getPrimaryKeyNames(connection, null, null, table);
             final String parameterFieldNamesAttr = String.join(",", parameterFieldNames);
-            final SchemaBuilder.FieldAssembler<Schema> schemaBuilder = SchemaBuilder
-                    .record("root")
+            final Map<String, String> columnRemarks = getColumnRemarks(connection, table);
+            final String tableRemark = getTableRemark(connection, table);
+            final SchemaBuilder.RecordBuilder<Schema> recordBuilder = SchemaBuilder.record("root");
+            if(tableRemark != null) {
+                recordBuilder.doc(tableRemark);
+            }
+            final SchemaBuilder.FieldAssembler<Schema> schemaBuilder = recordBuilder
                     .prop("table", table)
                     .prop("primaryKeys", parameterFieldNamesAttr)
                     .fields();
-            schema.getFields().forEach(f -> schemaBuilder.name(f.name()).type(f.schema()).noDefault());
+            for(final Schema.Field f : schema.getFields()) {
+                final SchemaBuilder.FieldBuilder<Schema> fieldBuilder = schemaBuilder.name(f.name());
+                final String remark = columnRemarks.get(f.name());
+                if(remark != null) {
+                    fieldBuilder.doc(remark);
+                }
+                fieldBuilder.type(f.schema()).noDefault();
+            }
             return schemaBuilder.endRecord();
         }
     }
@@ -465,6 +477,73 @@ public class JdbcUtil {
             case UNION -> setStatement(statement, parameterIndex, AvroSchemaUtil.unnestUnion(fieldSchema), fieldValue);
             default -> throw new IllegalStateException("Not supported prepare parameter type: " + fieldSchema.getType().getName());
         }
+    }
+
+    /**
+     * Column comments ({@code REMARKS} of {@link DatabaseMetaData#getColumns}) of the table, keyed by
+     * column name (matched case-insensitively against the result set column names). Never throws:
+     * any failure yields an empty map since the comments are informational only.
+     */
+    public static Map<String, String> getColumnRemarks(final Connection connection, final String table) {
+        final Map<String, String> remarks = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        if(table == null || table.isEmpty()) {
+            return remarks;
+        }
+        final String[] parts = table.split("\\.");
+        final String tableName = parts[parts.length - 1];
+        final String schemaName = parts.length > 1 ? parts[parts.length - 2] : null;
+        try {
+            final DatabaseMetaData metaData = connection.getMetaData();
+            for(final String candidate : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                try(final ResultSet resultSet = metaData.getColumns(null, schemaName, candidate, null)) {
+                    while(resultSet.next()) {
+                        final String remark = resultSet.getString("REMARKS");
+                        if(remark != null && !remark.isEmpty()) {
+                            remarks.put(resultSet.getString("COLUMN_NAME"), remark);
+                        }
+                    }
+                } catch (final SQLException e) {
+                    // try the next name candidate
+                }
+                if(!remarks.isEmpty()) {
+                    break;
+                }
+            }
+        } catch (final Exception e) {
+            LOG.warn("Failed to get column remarks of table: {}, cause: {}", table, e.getMessage());
+        }
+        return remarks;
+    }
+
+    /**
+     * Table comment ({@code REMARKS} of {@link DatabaseMetaData#getTables}), or null when the table
+     * has none or the metadata cannot be read (informational only, never throws).
+     */
+    public static String getTableRemark(final Connection connection, final String table) {
+        if(table == null || table.isEmpty()) {
+            return null;
+        }
+        final String[] parts = table.split("\\.");
+        final String tableName = parts[parts.length - 1];
+        final String schemaName = parts.length > 1 ? parts[parts.length - 2] : null;
+        try {
+            final DatabaseMetaData metaData = connection.getMetaData();
+            for(final String candidate : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                try(final ResultSet resultSet = metaData.getTables(null, schemaName, candidate, null)) {
+                    while(resultSet.next()) {
+                        final String remark = resultSet.getString("REMARKS");
+                        if(remark != null && !remark.isEmpty()) {
+                            return remark;
+                        }
+                    }
+                } catch (final SQLException e) {
+                    // try the next name candidate
+                }
+            }
+        } catch (final Exception e) {
+            LOG.warn("Failed to get table remark of table: {}, cause: {}", table, e.getMessage());
+        }
+        return null;
     }
 
     public static List<String> getPrimaryKeyNames(
