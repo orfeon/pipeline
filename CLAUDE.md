@@ -126,6 +126,12 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 - `PipelineApiServer.java` — REST API for validating/launching pipelines (`api/`: Pipeline/Schema/Spec/Launch/Probe/Agent).
 - `PipelineMcpStreamableServer.java` / `PipelineMcpSseServer.java` — MCP servers (`mcp/tool`, `mcp/resource`, `mcp/prompt`) for AI integration.
 - `PipelineWebhookServer.java`, `agent/` (PipelineAgent + tools). Docs served from `src/main/resources/server/docs/`.
+- `launch/` — `/api/launch` targets: `Launcher` SPI keyed `runner/environment` (`dataflow/flexTemplate`,
+  `direct/cloudRunJob`, `direct/cloudRunWorkerPool`, `spark/dataprocServerless`), `LaunchDefaults` (the only
+  reader of `MERCARI_PIPELINE_LAUNCH[_<RUNNER>]_<KEY>` env vars + metadata fallbacks), `LaunchSchema` (turns
+  `x-launch-default` keys in `server/api/spec/launch.json` into `x-default-hint` placeholders for the UI). Cloud Run calls go through
+  `util/cloud/google/CloudRunUtil` (REST v2, shared with a future `run` action). Env/IAM reference:
+  `server/docs/deploy/server.md`.
 
 ## Skills
 

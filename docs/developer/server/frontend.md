@@ -117,11 +117,11 @@ The center pane holds two views of the same store, switched by the tab bar
   `display:none`, so store changes that arrive while hidden are deferred and rendered when
   the tab is shown.
 - **Config** (`editor.js`): a Monaco YAML/JSON editor (`#config-editor`, model URI
-  `internal://server/config-editor.yaml`) with Import / Copy / Download and a format switch
-  in the tab bar. Text edits are parsed after a 500 ms pause and pushed to the store with
+  `internal://server/config-editor.yaml`) with a format switch in the tab bar (the tab bar's
+  Clear button, shown for both views, empties the config, the canvas and the saved workspace). Text edits are parsed after a 500 ms pause and pushed to the store with
   `source: 'editor'` (skipped when identical to the store); unparseable or empty text is
   never pushed (the message shows in `#editor-status`, the store keeps the last good config —
-  the header's Clear button is the way to empty a pipeline). `flushEditor()` pushes a pending
+  the tab bar's Clear button is the way to empty a pipeline). `flushEditor()` pushes a pending
   edit immediately and returns whether the store now matches the text; it is called before
   Dry Run / Run / Launch (which are refused on `false`), before sending to the agent, before a
   catalog snippet insertion, and on the switch to the canvas tab (refused on `false`, so a
@@ -386,8 +386,6 @@ on('btn-agent-reject', 'click', agentReject)
 
 // Edit config modal
 on('edit-format', 'change', updateConfigEditorContent)
-on('btn-copy-config', 'click', copyConfigToClipboard)
-on('btn-download-config', 'click', downloadConfig)
 on('btn-apply-config', 'click', applyConfig)
 on('btn-clear-config', 'click', clearConfigEditor)
 
@@ -408,7 +406,7 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 
 ```html
 <!-- Header -->
-#btn-agent, #btn-dryrun, #btn-run, #btn-launch, #btn-workspace-clear
+#btn-dryrun, #btn-run, #btn-launch, #btn-agent
 
 <!-- Left Pane (explorer) -->
 #left-pane
@@ -418,7 +416,7 @@ container.addEventListener('dblclick', handleDoubleClick)  // Opens module confi
 
 <!-- Center Pane -->
 #tab-canvas, #tab-editor (view tabs)
-#editor-toolbar: #editor-format, #file-import, #btn-import-config, #btn-copy-config, #btn-download-config
+#editor-toolbar: #editor-format (Config view only); #btn-workspace-clear (both views)
 #view-canvas > #drawflow (Drawflow container)
 #view-editor > #config-editor (Monaco container), #config-diff (proposal diff), #editor-status (parse problems)
 

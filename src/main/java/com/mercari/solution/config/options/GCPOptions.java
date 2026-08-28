@@ -31,6 +31,10 @@ public class GCPOptions implements Serializable {
         return workerRegion;
     }
 
+    public String getImpersonateServiceAccount() {
+        return impersonateServiceAccount;
+    }
+
     public static void setOptions(
             final PipelineOptions pipelineOptions,
             final GCPOptions gcp) {

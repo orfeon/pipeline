@@ -39,6 +39,8 @@ public class IAMUtil {
     private static final String ENDPOINT_METADATA_ACCESS_TOKEN = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
     private static final String ENDPOINT_METADATA_PROJECT = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
     private static final String ENDPOINT_METADATA_SERVICE_ACCOUNT = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email";
+    private static final String ENDPOINT_METADATA_REGION = "http://metadata.google.internal/computeMetadata/v1/instance/region";
+    private static final String ENDPOINT_METADATA_ZONE = "http://metadata.google.internal/computeMetadata/v1/instance/zone";
 
     private static final Pattern PATTERN_MAIL = Pattern.compile("^[a-zA-Z0-9_.+-]+@([a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]*\\.)+[a-zA-Z]{2,}$");
     private static final Pattern PATTERN_SERVICE_ACCOUNT = Pattern.compile("^projects\\/-\\/serviceAccounts\\/[a-zA-Z0-9_.+-]+@([a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]*\\.)+[a-zA-Z]{2,}$");
@@ -154,6 +156,25 @@ public class IAMUtil {
 
     public static String getMetadataServiceAccount() {
         return getMetadataAttribute(ENDPOINT_METADATA_SERVICE_ACCOUNT, DEFAULT_RETRY, DEFAULT_INTERVAL_MILLIS);
+    }
+
+    /**
+     * Region of the instance this process runs on, or null off Google Cloud.
+     * Cloud Run exposes {@code instance/region} ({@code projects/NUM/regions/REGION}); GCE only exposes
+     * {@code instance/zone} ({@code projects/NUM/zones/REGION-x}), from which the region is derived.
+     */
+    public static String getMetadataRegion() {
+        final String region = getMetadataAttribute(ENDPOINT_METADATA_REGION, 0, DEFAULT_INTERVAL_MILLIS);
+        if(region != null && !region.isBlank()) {
+            return region.substring(region.lastIndexOf('/') + 1);
+        }
+        final String zone = getMetadataAttribute(ENDPOINT_METADATA_ZONE, 0, DEFAULT_INTERVAL_MILLIS);
+        if(zone == null || zone.isBlank()) {
+            return null;
+        }
+        final String zoneName = zone.substring(zone.lastIndexOf('/') + 1);
+        final int dash = zoneName.lastIndexOf('-');
+        return dash > 0 ? zoneName.substring(0, dash) : zoneName;
     }
 
     public static String getMetadataIdToken(final String endpoint) {

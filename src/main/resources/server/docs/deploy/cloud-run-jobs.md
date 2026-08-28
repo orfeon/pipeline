@@ -91,6 +91,33 @@ gcloud run jobs execute {job_name} \
 For scheduled runs, trigger the job from
 [Cloud Scheduler](https://cloud.google.com/run/docs/execute/jobs-on-schedule).
 
+## Launch from the Pipeline Builder
+
+The Builder UI's **Launch** (runner `Direct`, environment `Cloud Run Job`) executes an existing
+job like the `gcloud run jobs execute --args=...` form above: it calls `jobs.run` on the job with
+this launch's `--config=...` / `--args.*` as container-argument overrides (plus an optional task
+timeout, task count and extra env vars). It never creates, updates or deletes the job — the
+image, service account, cpu, memory and network stay whatever you set when you created it, and
+every launch is one more execution of the same job.
+
+Create the job once as shown in [Create the job](#create-the-job) (the `--args` given at creation
+are replaced per launch, so any placeholder such as `--args="--config=gs://bucket/placeholder.yaml"`
+will do), then tell the server which job to run:
+
+```sh
+MERCARI_PIPELINE_LAUNCH_DIRECT_JOB={job_name}
+# project / region default to the ones the server itself runs in; override with
+MERCARI_PIPELINE_LAUNCH_PROJECT={project}
+MERCARI_PIPELINE_LAUNCH_REGION={region}
+# optional: stage configs to GCS instead of passing them inline (needed above ~24KB)
+MERCARI_PIPELINE_LAUNCH_STAGING_LOCATION=gs://{bucket}/{prefix}
+```
+
+The modal shows these as the form's defaults; a different job name, project or region can be
+typed per launch. The server's service account needs `roles/run.invoker` on the job (and the
+job's own service account needs read access to the staging bucket if one is configured). The
+full list of variables and roles is in [server.md](server.md).
+
 ## Notes
 
 * The `direct` image disables DirectRunner's per-element enforcement checks by default

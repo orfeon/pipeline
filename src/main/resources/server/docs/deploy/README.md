@@ -107,3 +107,7 @@ gcloud run deploy {service_name} \
   --port=8080 \
   --no-allow-unauthenticated
 ```
+
+Everything the server reads from its environment — including what the Builder's **Launch**
+button needs for Dataflow, Cloud Run Jobs / Worker Pools and Dataproc — is listed in
+[server.md](server.md).

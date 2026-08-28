@@ -76,6 +76,33 @@ gcloud pubsub topics publish {config_topic} --message="$(cat config.yaml)"
 
 Multiple instances process the queue in parallel (one config per instance at a time).
 
+## Launch from the Pipeline Builder
+
+The Builder UI's **Launch** (runner `Direct`, environment `Cloud Run Worker Pool`) deploys the
+direct image as a new worker pool running the current config — the Pattern 1 form above, with
+`--config` pointing at the config staged to `MERCARI_PIPELINE_LAUNCH_STAGING_LOCATION` (or inlined
+as `data:…`). One launch is one pool; the name defaults to `mp-<config name>-<timestamp>` and an
+existing name is only redeployed when *Replace existing* is checked.
+
+```sh
+MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct:latest
+# defaults for the form (all overridable per launch):
+MERCARI_PIPELINE_LAUNCH_DIRECT_SERVICE_ACCOUNT={service_account_email}   # default: the server's own account
+MERCARI_PIPELINE_LAUNCH_DIRECT_CPU=4
+MERCARI_PIPELINE_LAUNCH_DIRECT_MEMORY=6Gi
+MERCARI_PIPELINE_LAUNCH_DIRECT_INSTANCES=1
+```
+
+**The pool is not stopped by the Builder.** It keeps running — and billing — until you delete it
+or scale it to zero; the launch result shows the command:
+
+```sh
+gcloud run worker-pools delete {worker_pool_name} --project={project} --region={region}
+```
+
+The server's service account needs `roles/run.developer` and `roles/iam.serviceAccountUser` on
+the pool's service account (see [server.md](server.md#iam-for-the-servers-service-account)).
+
 ## Updating
 
 `gcloud run worker-pools update {worker_pool_name} --args=...` (or `deploy` again) creates a

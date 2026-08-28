@@ -423,47 +423,6 @@ function onFormatChanged() {
     ensureEditor().then(refreshFromStore);
 }
 
-function copyToClipboard() {
-    navigator.clipboard.writeText(getEditorValue(CONTAINER)).then(function() {
-        setStatus('Copied to clipboard');
-    });
-}
-
-function download() {
-    const content = getEditorValue(CONTAINER);
-    const filename = 'pipeline-config.' + (format === 'yaml' ? 'yaml' : 'json');
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus('Downloaded ' + filename);
-}
-
-function onImportFileSelected(e) {
-    const file = e.target.files[0];
-    e.target.value = ''; // allow re-selecting the same file later
-    if (!file) return;
-
-    const isJson = file.name.toLowerCase().endsWith('.json');
-    file.text().then(function(text) {
-        format = isJson ? 'json' : 'yaml';
-        $id('editor-format').value = format;
-        suppress = true;
-        return ensureEditor().then(function() { return setEditorValue(CONTAINER, text, format); });
-    }).then(function() {
-        suppress = false;
-        clearTimeout(pushTimer);
-        pushTimer = null;
-        setStatus(pushToStore() ? 'Imported ' + file.name : 'Imported ' + file.name + ' — fix the problems shown before it is applied', 'warning');
-    }).catch(function(err) {
-        suppress = false;
-        setStatus('Failed to read ' + file.name + ': ' + err.message, 'error');
-    });
-}
-
 // =============================
 // Lifecycle
 // =============================
@@ -511,10 +470,6 @@ function ensureEditor() {
 
 export function initEditor() {
     on('editor-format', 'change', onFormatChanged);
-    on('btn-import-config', 'click', function() { $id('file-import').click(); });
-    on('file-import', 'change', onImportFileSelected);
-    on('btn-copy-config', 'click', copyToClipboard);
-    on('btn-download-config', 'click', download);
 
     loadMonaco(); // pre-warm the language service for the modals; the editor itself is created on first display
     workspace.subscribe(onWorkspaceChange);

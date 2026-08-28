@@ -67,7 +67,7 @@ asynchronously on a single background worker.
 
 | Env var | Meaning |
 |---|---|
-| `MERCARI_PIPELINE_DATAFLOW_PROJECT` / `MERCARI_PIPELINE_DATAFLOW_REGION` | Defaults for job lookup (the event's own project/region take precedence) |
+| `MERCARI_PIPELINE_LAUNCH_PROJECT` / `MERCARI_PIPELINE_LAUNCH_REGION` (or `_LAUNCH_DATAFLOW_`) | Defaults for job lookup (the event's own project/region take precedence); the same variables the [launch feature](server.md#environment-variables) uses |
 | `MERCARI_PIPELINE_WEBHOOK_TOKEN` | Optional shared secret for the webhook endpoint |
 | `MERCARI_PIPELINE_DIAGNOSIS_SLACK_WEBHOOK` | Slack incoming-webhook URL to post the verdict to |
 | `MERCARI_PIPELINE_DIAGNOSIS_WEBHOOK` | Generic endpoint that receives the full diagnosis record as JSON |
