@@ -640,12 +640,13 @@ public final class FeatureStages {
             }
         }
 
-        void evaluateKeyed(final Map<String, Object> values, final long nowMillis, final List<Past> history) {
+        void evaluateKeyed(final Map<String, Object> values, final long nowMillis, final List<Past> history,
+                           final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
             for (final OutputColumn c : columns) {
                 final Object v = switch (kindOf(c)) {
                     case row -> row.evaluateColumn(c, values);
-                    case sequence -> sequence.evaluateColumn(c, values, nowMillis, history);
-                    case population -> population.evaluateColumn(c, values, nowMillis, history);
+                    case sequence -> sequence.evaluateColumn(c, values, nowMillis, history, sequenceState);
+                    case population -> population.evaluateColumn(c, values, nowMillis, history, populationState);
                     default -> null;
                 };
                 values.put(c.getCanonicalName(), v);
@@ -838,6 +839,8 @@ public final class FeatureStages {
             elements.sort(Comparator.comparingLong(MElement::getEpochMillis));
             prepare(c);
             final List<Past> history = new ArrayList<>();
+            final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
+            final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
@@ -855,9 +858,9 @@ public final class FeatureStages {
                         history.addAll(pending);
                         pending.clear();
                         pendingMillis = now.getMillis();
-                        trim(history, now.getMillis());
+                        // no structural trimming: the incremental fold / evict pointers index into this list
                     }
-                    evaluator.evaluateKeyed(values, now.getMillis(), history);
+                    evaluator.evaluateKeyed(values, now.getMillis(), history, sequenceState, populationState);
                     c.outputWithTimestamp(MElement.of(values, now), now);
                     pending.add(new Past(now.getMillis(), evaluator.project(values)));
                 } catch (final Throwable e) {
@@ -866,11 +869,6 @@ public final class FeatureStages {
             }
         }
 
-        private void trim(final List<Past> history, final long nowMillis) {
-            if (evaluator.retention == null || evaluator.retention.isZero()) return;
-            final long limit = nowMillis - evaluator.retention.toMillis();
-            history.removeIf(p -> p.millis() < limit);
-        }
     }
 
     /** Builds the output value map from the canonical row map (shared by both finalize DoFns). */
