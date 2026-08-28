@@ -580,6 +580,9 @@ public class ActionModuleTest {
         Assertions.assertEquals(
                 java.util.Arrays.stream(com.mercari.solution.module.action.DataflowAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
                 new HashSet<>(Action.operations("dataflow")));
+        Assertions.assertEquals(
+                java.util.Arrays.stream(com.mercari.solution.module.action.BuildAction.Op.values()).map(o -> o.operation).collect(java.util.stream.Collectors.toSet()),
+                new HashSet<>(Action.operations("build")));
         Assertions.assertTrue(Action.operations("storage").isEmpty());
         Assertions.assertTrue(Action.operations("http").isEmpty());
     }
