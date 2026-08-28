@@ -1,6 +1,5 @@
 package com.mercari.solution.module.action;
 
-import com.google.api.client.util.ExponentialBackOff;
 import com.google.api.client.util.Sleeper;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -47,7 +46,6 @@ public class BuildAction implements ActionService {
 
     private static final Logger LOG = LoggerFactory.getLogger(BuildAction.class);
 
-    public static final String ENDPOINT_MEMORY_PREFIX = ActionSupport.ENDPOINT_MEMORY_PREFIX;
     /** {@code ${root...}} - group 1 is the root identifier (after optional whitespace / a leading paren). */
     private static final java.util.regex.Pattern PATTERN_TEMPLATE_EXPRESSION =
             java.util.regex.Pattern.compile("\\$\\{\\s*\\(?\\s*([A-Za-z_][A-Za-z0-9_]*)[^}]*}");
@@ -298,6 +296,7 @@ public class BuildAction implements ActionService {
     private Parameters parameters;
 
     private transient BuildClient client;
+    private transient Sleeper sleeper;
 
     @Override
     public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
@@ -330,6 +329,14 @@ public class BuildAction implements ActionService {
     @Override
     public void setup() {
         this.client = createClient(parameters);
+        if(this.sleeper == null) {
+            this.sleeper = Sleeper.DEFAULT;
+        }
+    }
+
+    /** Test hook: replace the poll sleeper (call before {@link #setup()}). */
+    void setSleeper(final Sleeper sleeper) {
+        this.sleeper = sleeper;
     }
 
     @Override
@@ -498,29 +505,15 @@ public class BuildAction implements ActionService {
      * started elsewhere may not have been created yet), then return its id. Filters that could match
      * an older build should bound it with {@code create_time>=...}.
      */
-    private String waitForFilter(final Parameters p, final String project, final String location, final String filter) throws IOException, InterruptedException {
-        final ExponentialBackOff backOff = ActionSupport.createPollBackOff(p.timeoutSeconds);
-        while(true) {
-            List<JsonObject> builds = null;
-            try {
-                builds = client.listBuilds(project, location, filter, 1);
-            } catch (final RuntimeException e) {
-                if(!isTransient(e)) {
-                    throw e;
-                }
-                LOG.info("action module[{}] failed to list cloud builds ({}), retrying", name, e.getMessage());
-            }
-            if(builds != null && !builds.isEmpty()) {
-                return CloudBuildUtil.id(builds.getFirst());
-            }
-            final long next = backOff.nextBackOffMillis();
-            if(next == ExponentialBackOff.STOP) {
-                throw new NonRetryableException("action module[" + name + "] found no cloud build matching filter: " + filter
-                        + " in " + project + "/" + location + " within timeoutSeconds: " + p.timeoutSeconds);
-            }
-            LOG.info("action module[{}] waiting for a cloud build matching filter: {}", name, filter);
-            Thread.sleep(next);
-        }
+    private String waitForFilter(final Parameters p, final String project, final String location, final String filter) throws Exception {
+        return ActionSupport.waitForAll(name, "cloud build matching filter", List.of(filter), p.timeoutSeconds, sleeper,
+                f -> {
+                    final List<JsonObject> builds = client.listBuilds(project, location, f, 1);
+                    return builds.isEmpty() ? null : CloudBuildUtil.id(builds.getFirst());
+                },
+                e -> e instanceof RuntimeException r && isTransient(r),
+                "appear in " + project + "/" + location,
+                null).getFirst();
     }
 
     /**
@@ -534,7 +527,7 @@ public class BuildAction implements ActionService {
      * ({@code own}: started by this step, not adopted or merely waited for).
      */
     private List<JsonObject> waitForAll(final Parameters p, final String project, final String location, final List<String> buildIds, final WaitUntil until, final boolean cancelRequested, final boolean own) throws Exception {
-        return ActionSupport.waitForAll(name, "cloud builds", buildIds, p.timeoutSeconds, Sleeper.DEFAULT,
+        return ActionSupport.waitForAll(name, "cloud builds", buildIds, p.timeoutSeconds, sleeper,
                 buildId -> {
                     final JsonObject build = client.getBuild(project, location, buildId);
                     final String status = CloudBuildUtil.status(build);
@@ -552,22 +545,8 @@ public class BuildAction implements ActionService {
                     return null;
                 },
                 e -> e instanceof RuntimeException r && isTransient(r),
-                pending -> {
-                    if(!(p.cancelOnTimeout && own)) {
-                        return;
-                    }
-                    for(final String buildId : pending) {
-                        try {
-                            client.cancelBuild(project, location, buildId);
-                            LOG.warn("action module[{}] cancelled cloud build: {} after timeoutSeconds: {}", name, buildId, p.timeoutSeconds);
-                        } catch (final Exception e) {
-                            LOG.warn("action module[{}] failed to cancel cloud build: {}: {}", name, buildId, e.getMessage());
-                        }
-                    }
-                },
-                pending -> new NonRetryableException("action module[" + name + "] cloud builds: " + pending
-                        + " did not reach " + until.name() + " within timeoutSeconds: " + p.timeoutSeconds
-                        + (p.cancelOnTimeout && own ? " (cancel requested)" : "")));
+                "reach " + until.name(),
+                p.cancelOnTimeout && own ? buildId -> client.cancelBuild(project, location, buildId) : null);
     }
 
     /** 429 / 5xx from the API, or a transport failure (wrapped I/O error) - worth another poll. */

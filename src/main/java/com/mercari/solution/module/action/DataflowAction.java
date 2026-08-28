@@ -58,7 +58,9 @@ public class DataflowAction implements ActionService {
     private static final DateTimeFormatter JOB_NAME_SUFFIX = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneOffset.UTC);
     private static final int NAME_SEARCH_LIMIT = 200;
 
-    public static final String ENDPOINT_MEMORY_PREFIX = ActionSupport.ENDPOINT_MEMORY_PREFIX;
+    /** Poll errors worth another poll inside the wait window; every other ApiException fails the firing at once. */
+    private static final Set<StatusCode.Code> TRANSIENT_POLL_CODES = Set.of(
+            StatusCode.Code.UNAVAILABLE, StatusCode.Code.DEADLINE_EXCEEDED, StatusCode.Code.RESOURCE_EXHAUSTED);
 
     private static final Set<JobState> TERMINAL_STATES = EnumSet.of(
             JobState.JOB_STATE_DONE, JobState.JOB_STATE_FAILED, JobState.JOB_STATE_CANCELLED,
@@ -412,6 +414,7 @@ public class DataflowAction implements ActionService {
     private String inheritedEnvironment;
 
     private transient DataflowClient client;
+    private transient Sleeper sleeper;
 
     @Override
     public void configure(final String name, final Trigger trigger, final String operation, final JsonObject parametersJson, final PipelineOptions options, final Schema inputSchema) {
@@ -451,6 +454,14 @@ public class DataflowAction implements ActionService {
         } catch (final IOException e) {
             throw new IllegalStateException("Failed to create Dataflow client", e);
         }
+        if(this.sleeper == null) {
+            this.sleeper = Sleeper.DEFAULT;
+        }
+    }
+
+    /** Test hook: replace the poll sleeper (call before {@link #setup()}). */
+    void setSleeper(final Sleeper sleeper) {
+        this.sleeper = sleeper;
     }
 
     @Override
@@ -691,7 +702,7 @@ public class DataflowAction implements ActionService {
      */
     private List<Job> waitForAll(final Parameters p, final String project, final String region, final List<String> jobIds, final WaitUntil until, final JobState requested) throws Exception {
         final boolean cancelRequested = JobState.JOB_STATE_CANCELLED.equals(requested);
-        return ActionSupport.waitForAll(name, "dataflow jobs", jobIds, p.timeoutSeconds, Sleeper.DEFAULT,
+        return ActionSupport.waitForAll(name, "dataflow jobs", jobIds, p.timeoutSeconds, sleeper,
                 jobId -> {
                     final Job job = client.getJob(project, region, jobId, JobView.JOB_VIEW_SUMMARY);
                     final JobState state = job.getCurrentState();
@@ -708,24 +719,11 @@ public class DataflowAction implements ActionService {
                     }
                     return null;
                 },
-                e -> e instanceof ApiException a && rejectedRequest(a) == null,   // UNAVAILABLE / DEADLINE_EXCEEDED / RESOURCE_EXHAUSTED: poll again
-                pending -> {
-                    if(!p.cancelOnTimeout) {
-                        return;
-                    }
-                    for(final String jobId : pending) {
-                        try {
-                            client.updateJob(project, region, jobId, Job.newBuilder().setRequestedState(JobState.JOB_STATE_CANCELLED).build(), null);
-                            LOG.warn("action module[{}] cancelled dataflow job: {} after timeoutSeconds: {}", name, jobId, p.timeoutSeconds);
-                        } catch (final Exception e) {
-                            LOG.warn("action module[{}] failed to cancel dataflow job: {}: {}", name, jobId, e.getMessage());
-                        }
-                    }
-                },
-                pending -> new NonRetryableException("action module[" + name + "] dataflow jobs: " + pending
-                        + " did not reach " + (until == null ? "terminal (batch) / running (streaming)" : until.name())
-                        + " within timeoutSeconds: " + p.timeoutSeconds
-                        + (p.cancelOnTimeout ? " (cancel requested)" : "")));
+                e -> e instanceof ApiException a && TRANSIENT_POLL_CODES.contains(a.getStatusCode().getCode()),
+                "reach " + (until == null ? "terminal (batch) / running (streaming)" : until.name()),
+                p.cancelOnTimeout
+                        ? jobId -> client.updateJob(project, region, jobId, Job.newBuilder().setRequestedState(JobState.JOB_STATE_CANCELLED).build(), null)
+                        : null);
     }
 
     private String describeErrors(final String project, final String region, final String jobId) {

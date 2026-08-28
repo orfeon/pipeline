@@ -28,6 +28,7 @@ import com.google.api.services.bigquery.model.JobConfigurationLoad;
 import com.google.api.services.bigquery.model.JobConfigurationQuery;
 import com.google.api.services.bigquery.model.JobConfigurationTableCopy;
 import com.google.api.services.bigquery.model.JobReference;
+import com.google.api.services.bigquery.model.JobStatus;
 import com.google.api.services.bigquery.model.ModelReference;
 import com.google.api.services.bigquery.model.TableReference;
 import com.google.api.services.bigquery.model.ParquetOptions;
@@ -766,7 +767,7 @@ public class BigQueryAction implements ActionService {
             jobIds.add(p.jobId);
         }
         final List<Map<String, Object>> jobs = new ArrayList<>();
-        for(final Job completed : waitForAll(p, jobIds)) {
+        for(final Job completed : waitForAll(p, jobIds, false)) {
             jobs.add(toPayload(completed));
         }
         if(jobs.size() == 1) {
@@ -782,7 +783,7 @@ public class BigQueryAction implements ActionService {
      * backoff and a single {@code timeoutSeconds} window (not one full wait per job). A job that
      * finished with an error fails the firing as non-retryable (these jobs cannot be resubmitted).
      */
-    private List<Job> waitForAll(final Parameters p, final List<String> jobIds) throws Exception {
+    private List<Job> waitForAll(final Parameters p, final List<String> jobIds, final boolean own) throws Exception {
         return ActionSupport.waitForAll(name, "bigquery jobs", jobIds, p.timeoutSeconds, sleeper,
                 jobId -> {
                     // poll the status only; the full resource (statistics can be large) is fetched once when DONE
@@ -791,12 +792,7 @@ public class BigQueryAction implements ActionService {
                     if(!"DONE".equals(jobState(status))) {
                         return null;
                     }
-                    final Job job = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute();
-                    if(!BigQueryUtil.isJobResultSucceeded(job)) {
-                        throw new NonRetryableException(
-                                "bigquery job: " + jobId + " failed with error: " + job.getStatus().getErrorResult());
-                    }
-                    return job;
+                    return checkResult(jobId, bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute(), own);
                 },
                 e -> {
                     if(e instanceof GoogleJsonResponseException g) {
@@ -808,8 +804,8 @@ public class BigQueryAction implements ActionService {
                     }
                     return e instanceof IOException;
                 },
-                pending -> cancelPending(p, pending),
-                pending -> timedOut(p, pending));
+                "complete",
+                p.cancelOnTimeout ? jobId -> bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute() : null);
     }
 
     private ActionResult executeTableGet(final Parameters p) throws IOException {
@@ -1073,27 +1069,6 @@ public class BigQueryAction implements ActionService {
     /** The distinct, non-blank values of a field over the collected elements, in first-seen order. */
     private static String jobState(final Job job) {
         return Optional.ofNullable(job.getStatus()).map(st -> st.getState()).orElse(null);
-    }
-
-    /** Timeout handling shared by the poll loops: cancel the pending jobs when configured. */
-    private void cancelPending(final Parameters p, final List<String> pendingJobIds) {
-        if(!p.cancelOnTimeout) {
-            return;
-        }
-        for(final String jobId : pendingJobIds) {
-            try {
-                bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute();
-                LOG.warn("action module[{}] cancelled bigquery job: {} after timeoutSeconds: {}", name, jobId, p.timeoutSeconds);
-            } catch (final IOException e) {
-                LOG.warn("action module[{}] failed to cancel bigquery job: {}: {}", name, jobId, e.getMessage());
-            }
-        }
-    }
-
-    private NonRetryableException timedOut(final Parameters p, final List<String> pendingJobIds) {
-        return new NonRetryableException(
-                "bigquery jobs: " + pendingJobIds + " did not complete within timeoutSeconds: " + p.timeoutSeconds
-                        + (p.cancelOnTimeout ? " (cancel requested)" : ""));
     }
 
     private static String template(final String text, final Map<String, Object> data) {
@@ -1476,29 +1451,29 @@ public class BigQueryAction implements ActionService {
      * Polls the job this action submitted until DONE. A transient job error is reported as
      * retryable (a retry resubmits under the next {@code -r<n>} id), a permanent one as non-retryable.
      */
-    private Job waitForCompletion(final Parameters p, final Job job) {
+    private Job waitForCompletion(final Parameters p, final Job job) throws Exception {
         final String jobId = job.getJobReference().getJobId();
-        final Job completed;
         if("DONE".equals(jobState(job))) {
-            // already terminal (e.g. adopted or fetched job): no polling
-            completed = job;
-        } else {
-            completed = BigQueryUtil.pollJob(bigquery, job.getJobReference(), sleeper, ActionSupport.createPollBackOff(p.timeoutSeconds));
+            // already terminal (e.g. adopted or fetched job): no polling, only the outcome check
+            return checkResult(jobId, job, true);
         }
-        if(completed == null) {
-            cancelPending(p, List.of(jobId));
-            throw timedOut(p, List.of(jobId));
+        return waitForAll(p, List.of(jobId), true).getFirst();
+    }
+
+    /**
+     * Outcome of a DONE job. A transient error of a job this action submitted ({@code own}) is
+     * retryable (a retry resubmits under the next {@code -r<n>} id); any other error is final.
+     */
+    private static Job checkResult(final String jobId, final Job job, final boolean own) {
+        if(BigQueryUtil.isJobResultSucceeded(job)) {
+            return job;
         }
-        if(!BigQueryUtil.isJobResultSucceeded(completed)) {
-            final ErrorProto error = completed.getStatus().getErrorResult();
-            final String message = "bigquery job: " + jobId + " failed with error: " + error;
-            if(isRetryableReason(error)) {
-                // a retry resubmits the job under the next -r<n> id
-                throw new IllegalStateException(message);
-            }
-            throw new NonRetryableException(message);
+        final ErrorProto error = Optional.ofNullable(job.getStatus()).map(JobStatus::getErrorResult).orElse(null);
+        final String message = "bigquery job: " + jobId + " failed with error: " + error;
+        if(own && isRetryableReason(error)) {
+            throw new IllegalStateException(message);
         }
-        return completed;
+        throw new NonRetryableException(message);
     }
 
     static boolean isRetryableReason(final ErrorProto error) {

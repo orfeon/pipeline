@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 
@@ -98,14 +97,25 @@ final class ActionSupport {
         T poll(String id) throws Exception;
     }
 
+    /** Cancels one still-pending id on timeout; failures are logged and do not mask the timeout. */
+    @FunctionalInterface
+    interface Cancel {
+        void cancel(String id) throws Exception;
+    }
+
     /**
      * Waits for several ids at once: one poll loop over the still-pending set with a shared backoff
      * and a single {@code timeoutSeconds} window (not one full wait per id). Results are returned in
-     * the order of {@code ids}. On timeout {@code onTimeout} (cancel pending jobs, ...) runs with
-     * the pending ids, then the exception from {@code timedOut} is thrown.
+     * the order of {@code ids}. On timeout every pending id is passed to {@code cancel} (when given),
+     * then a {@link NonRetryableException} "{@code <label>: <pending> did not <target> within
+     * timeoutSeconds: N}" is thrown; when the last poll round failed transiently, that exception is
+     * attached as the cause and quoted in the message (a persistent transport / auth failure is then
+     * visible instead of looking like a slow job).
      *
-     * @param label       resource label for the log lines ("bigquery jobs", "cloud builds", ...)
+     * @param label       resource label for the log lines and the timeout message ("bigquery jobs", ...)
      * @param isTransient classifies a poll exception as retryable within the loop
+     * @param target      verb phrase for the timeout message ("complete", "reach RUNNING", ...)
+     * @param cancel      per-id cancel on timeout, or {@code null} when nothing should be cancelled
      */
     static <T> List<T> waitForAll(
             final String name,
@@ -115,12 +125,13 @@ final class ActionSupport {
             final Sleeper sleeper,
             final Poll<T> poll,
             final Predicate<Exception> isTransient,
-            final java.util.function.Consumer<List<String>> onTimeout,
-            final Function<List<String>, NonRetryableException> timedOut) throws Exception {
+            final String target,
+            final Cancel cancel) throws Exception {
 
         final Map<String, T> completed = new LinkedHashMap<>();
         final ExponentialBackOff backOff = createPollBackOff(timeoutSeconds);
         while(true) {
+            Exception lastTransient = null;
             for(final String id : ids) {
                 if(completed.containsKey(id)) {
                     continue;
@@ -136,6 +147,7 @@ final class ActionSupport {
                     }
                     // transient poll error: keep the completed set and the shared timeout window, retry after the backoff
                     LOG.info("action module[{}] failed to poll {}: {} ({}), retrying", name, label, id, e.getMessage());
+                    lastTransient = e;
                     continue;
                 }
                 if(result != null) {
@@ -148,10 +160,21 @@ final class ActionSupport {
             final long next = backOff.nextBackOffMillis();
             if(next == BackOff.STOP) {
                 final List<String> pending = ids.stream().filter(id -> !completed.containsKey(id)).toList();
-                if(onTimeout != null) {
-                    onTimeout.accept(pending);
+                if(cancel != null) {
+                    for(final String id : pending) {
+                        try {
+                            cancel.cancel(id);
+                            LOG.warn("action module[{}] cancelled {}: {} after timeoutSeconds: {}", name, label, id, timeoutSeconds);
+                        } catch (final Exception e) {
+                            LOG.warn("action module[{}] failed to cancel {}: {}: {}", name, label, id, e.getMessage());
+                        }
+                    }
                 }
-                throw timedOut.apply(pending);
+                throw new NonRetryableException("action module[" + name + "] " + label + ": " + pending
+                        + " did not " + target + " within timeoutSeconds: " + timeoutSeconds
+                        + (cancel != null ? " (cancel requested)" : "")
+                        + (lastTransient != null ? "; last poll error: " + lastTransient.getMessage() : ""),
+                        lastTransient);
             }
             LOG.info("action module[{}] waiting for {}: {}/{} done", name, label, completed.size(), ids.size());
             sleeper.sleep(next);

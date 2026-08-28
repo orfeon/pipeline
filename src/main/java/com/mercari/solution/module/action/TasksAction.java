@@ -59,7 +59,6 @@ public class TasksAction implements ActionService {
             .compile("^(projects/[^/]+/locations/[^/]+)/queues/([^/]+)$");
     private static final Pattern PATTERN_SHORT_DURATION = Pattern.compile("^(\\d+)\\s*(ms|s|m|h|d)$");
 
-    public static final String ENDPOINT_MEMORY_PREFIX = ActionSupport.ENDPOINT_MEMORY_PREFIX;
 
     /** Operations; {@code operation} is the config value (also listed in {@code @Action.Service}). */
     public enum Op {
@@ -375,7 +374,8 @@ public class TasksAction implements ActionService {
                         break;
                     }
                     if(Instant.now().isAfter(deadline)) {
-                        throw new IllegalStateException("action module[" + name + "] timed out waiting for queue to drain: "
+                        // a timeout is final: re-running the firing would only wait the same window again
+                        throw new NonRetryableException("action module[" + name + "] timed out waiting for queue to drain: "
                                 + queue + " (" + remaining + (remaining >= 1000 ? "+" : "") + " tasks remaining)");
                     }
                     LOG.info("action module[{}] waiting for queue {} to drain: {}{} tasks remaining",
