@@ -349,8 +349,61 @@ public class FeaturePlanCompilerTest {
     public void testUnsupportedPopulationTypeAndFitMode() {
         final String svd = SPEC.replace("type: encoding", "type: svd");
         Assertions.assertTrue(hasCode(compile(SOURCES, svd), "population.unsupported"));
-        final String fold = SPEC.replace("output:\n  prefix: f_", "fit: {mode: fold}\noutput:\n  prefix: f_");
-        Assertions.assertTrue(hasCode(compile(SOURCES, fold), "fit.mode.unsupported"));
+        final String folds = SPEC.replace("output:\n  prefix: f_", "fit: {mode: fold, folds: 1}\noutput:\n  prefix: f_");
+        Assertions.assertTrue(hasCode(compile(SOURCES, folds), "fit.folds"));
+    }
+
+    @Test
+    public void testFoldFitExpansion() {
+        final String block = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: fold, folds: 3, groupBy: seller, artifact: "gs://bucket/features"}
+                    keySets:
+                      - keys: [seller_id]
+                        windows: [{maxAge: P365D}]
+                    targets:
+                      - {stats: [count]}
+                      - {expr: "sold >= 1", stats: [mean, std]}
+                    shrinkage: {priorWeight: 5}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(block));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.fold"));
+        Assertions.assertTrue(hasCode(plan, "fit.mode.static.windows"));
+        Assertions.assertFalse(hasCode(plan, "fit.fold.identity")); // entity folds
+        // same hidden statistics as static, tagged with the fold unit (the seller entity's keys)
+        for (final String hidden : List.of("enc__seller_id__e2__n", "enc__seller_id__e2__sumsq", "enc__global__e2__n")) {
+            final OutputColumn c = column(plan, hidden);
+            Assertions.assertTrue(c.isIntermediate(), hidden);
+            Assertions.assertEquals("fold", c.getCoordinates().get("fit"));
+            Assertions.assertEquals("seller_id", c.getCoordinates().get("foldKeys"));
+            Assertions.assertEquals("3", c.getCoordinates().get("folds"));
+            Assertions.assertEquals("gs://bucket/features", c.getCoordinates().get("artifactUri"));
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+        }
+        Assertions.assertEquals("fitStat", column(plan, "enc__seller_id__count").getOperator());
+        Assertions.assertEquals("compose", column(plan, "enc__seller_id__e2__mean").getOperator());
+        Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() == FeaturePlan.StageKind.fit), plan::describe);
+
+        // a block-level groupBy naming an unknown entity is an error (it must not fall back to row folds)
+        final FeaturePlan typo = compile(SOURCES, withEncoding(block.replace("groupBy: seller", "groupBy: sellr")));
+        Assertions.assertTrue(hasCode(typo, "fit.groupBy"), typo::describe);
+        // fold is batch-only: the engine rejects it in streaming even with an artifact
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, true).stream().anyMatch(m -> m.contains("fit.mode fold")));
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).stream().noneMatch(m -> m.contains("fit.mode fold")));
+
+        // without groupBy the fold unit is the row identity: time.field + orderTieBreak
+        final FeaturePlan rows = compile(SOURCES, withEncoding(block.replace(", groupBy: seller", "")));
+        Assertions.assertFalse(rows.getDiagnostics().hasErrors(), rows::describe);
+        Assertions.assertEquals("session_time,session_id", column(rows, "enc__seller_id__e2__n").getCoordinates().get("foldKeys"));
+        Assertions.assertFalse(hasCode(rows, "fit.fold.identity"));
+        // ... and time.field alone (with a warning) when no tie-break is declared
+        final FeaturePlan noTie = compile(SOURCES, withEncoding(block.replace(", groupBy: seller", "")).replace(", orderTieBreak: [session_id]", ""));
+        Assertions.assertFalse(noTie.getDiagnostics().hasErrors(), noTie::describe);
+        Assertions.assertTrue(hasCode(noTie, "fit.fold.identity"));
+        Assertions.assertEquals("session_time", column(noTie, "enc__seller_id__e2__n").getCoordinates().get("foldKeys"));
     }
 
     @Test
@@ -510,7 +563,7 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(plan.getStages().stream().noneMatch(s -> s.kind() == FeaturePlan.StageKind.population), plan::describe);
 
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("mean, std", "distribution"))), "encoding.stat.static"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("mode: static", "mode: fold"))), "fit.mode.unsupported"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(block.replace("mean, std", "distribution").replace("mode: static", "mode: fold"))), "encoding.stat.static"));
     }
 
     private static final String FM_BLOCK = """
@@ -741,6 +794,40 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(0.0, Shrinkage.lambdaFromMoments(2, 6, 3, 3, 3.0, 18), 1e-9);
         // a single key cannot be estimated
         Assertions.assertNull(Shrinkage.lambdaFromMoments(1, 6, 3, 3, 1.5, 36));
+    }
+
+    @Test
+    public void testHotKeyAuditQueries() {
+        final FeaturePlan plan = compile(SOURCES, SPEC);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<FeaturePlan.AuditQuery> audit = plan.getAuditQueries();
+        // one query per distinct key set of the keyed stages, in stage order; row / fit stages contribute nothing
+        final List<List<String>> keySets = audit.stream().map(FeaturePlan.AuditQuery::keys).toList();
+        Assertions.assertEquals(keySets.size(), keySets.stream().distinct().count());
+        Assertions.assertTrue(keySets.contains(List.of("session_id")), keySets::toString);
+        Assertions.assertTrue(keySets.contains(List.of("seller_id")), keySets::toString);
+        Assertions.assertTrue(keySets.contains(List.of()), keySets::toString); // global level (share / shrinkage prior)
+        final FeaturePlan.AuditQuery seller = audit.stream().filter(q -> q.keys().equals(List.of("seller_id"))).findFirst().orElseThrow();
+        Assertions.assertEquals("SELECT seller_id, COUNT(1) AS row_count FROM {input} WHERE seller_id IS NOT NULL"
+                + " GROUP BY seller_id ORDER BY row_count DESC LIMIT 20", seller.sql());
+        Assertions.assertFalse(seller.stages().isEmpty());
+        Assertions.assertFalse(seller.note().contains("intermediate"));
+        final FeaturePlan.AuditQuery global = audit.stream().filter(q -> q.keys().isEmpty()).findFirst().orElseThrow();
+        Assertions.assertEquals("SELECT COUNT(1) AS row_count FROM {input}", global.sql());
+        Assertions.assertTrue(plan.describe().contains("-- audit"));
+        Assertions.assertEquals(audit.size(), plan.toJson().getAsJsonArray("audit").size());
+        // row-only plans have no keyed stage → no audit queries
+        final FeaturePlan rowOnly = compile(SOURCES, """
+                lineage:
+                  - {fields: [session_id, seller_id, category, quantity, start_price], from: listings}
+                time: {field: session_time}
+                predictAt: "event_time - PT8M"
+                features:
+                  - {name: unit, scope: row, expr: "start_price / quantity"}
+                """);
+        Assertions.assertFalse(rowOnly.getDiagnostics().hasErrors(), rowOnly::describe);
+        Assertions.assertTrue(rowOnly.getAuditQueries().isEmpty());
+        Assertions.assertFalse(rowOnly.describe().contains("-- audit"));
     }
 
     @Test

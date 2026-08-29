@@ -49,6 +49,11 @@ public class MPipeline {
         Boolean getServe();
         void setServe(Boolean serve);
 
+        @Description("Load the config and assemble the pipeline (module validation, schema resolution, feature plan compilation) without running it.")
+        @Default.Boolean(false)
+        boolean getDryRun();
+        void setDryRun(boolean dryRun);
+
     }
 
     public interface MPipelineServerOptions extends MPipelineOptions {
@@ -92,6 +97,23 @@ public class MPipeline {
 
         final Pipeline pipeline = Pipeline.create(pipelineOptions);
 
+        if(pipelineOptions.getDryRun()) {
+            // assemble only: module validation, schema resolution and feature plan compilation run at
+            // assembly time, so a failing config fails here without launching a job (same path as a real
+            // run: system.failure.alterConfig fallback and the empty-pipeline short-circuit included)
+            final Map<String, MCollection> outputs = apply(pipeline, pipelineOptions, args, config);
+            final StringBuilder report = new StringBuilder("dry run: pipeline assembled successfully (not run)\n");
+            for(final Map.Entry<String, MCollection> entry : outputs.entrySet()) {
+                if(entry.getKey().endsWith(".failures")) {
+                    continue;
+                }
+                report.append("  output ").append(entry.getKey()).append(": ").append(entry.getValue().getSchema()).append('\n');
+            }
+            LOG.info(report.toString());
+            System.out.println(report);
+            return;
+        }
+
         final Map<String, MCollection> outputs = apply(pipeline, pipelineOptions, args, config);
 
         for(final Map.Entry<String, MCollection> entry : outputs.entrySet()) {
@@ -113,7 +135,9 @@ public class MPipeline {
         if(Optional.ofNullable(config.getEmpty()).orElse(false)) {
             LOG.info("Empty pipeline");
             pipeline.apply("Empty", Create.of("").withCoder(StringUtf8Coder.of()));
-            pipeline.run();
+            if(!pipelineOptions.getDryRun()) {
+                pipeline.run();
+            }
             return new HashMap<>();
         }
 

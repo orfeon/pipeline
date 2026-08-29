@@ -118,6 +118,159 @@ public class SequenceIncrementalTest {
         Assertions.assertTrue(compared > 4000);
     }
 
+    /**
+     * The keyed stage trims the history behind every column's fold / evict pointer (or maxAge far edge).
+     * Replaying with trimming must give the same values as the untrimmed list, and must actually drop rows.
+     */
+    @Test
+    public void testTrimmedHistoryMatchesUntrimmed() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        // every column here is trimmable: windowed (evict pointer / maxAge far edge) or unbounded but
+        // incremental (fold pointer); an unbounded scan-path column would pin the whole history
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(SPEC, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> keyed = plan.getColumns().stream()
+                .filter(c -> c.getScope() == FeatureSpec.Scope.sequence || c.getScope() == FeatureSpec.Scope.population)
+                .toList();
+        Assertions.assertFalse(keyed.isEmpty());
+        // like StageEvaluator: each evaluator owns its scope's columns (its trim watermark covers only those)
+        final List<OutputColumn> sequences = keyed.stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
+        final List<OutputColumn> populations = keyed.stream().filter(c -> c.getScope() == FeatureSpec.Scope.population).toList();
+        final SequenceEvaluator sequence = new SequenceEvaluator(sequences);
+        final PopulationEvaluator population = new PopulationEvaluator(populations);
+        sequence.setup();
+        population.setup();
+        final SequenceEvaluator trimmedSequence = new SequenceEvaluator(sequences);
+        final PopulationEvaluator trimmedPopulation = new PopulationEvaluator(populations);
+        trimmedSequence.setup();
+        trimmedPopulation.setup();
+
+        final Random random = new Random(7);
+        long millis = 1_700_000_000_000L;
+        final List<SequenceEvaluator.Past> full = new ArrayList<>();
+        final SequenceEvaluator.History trimmed = new SequenceEvaluator.History();
+        final List<SequenceEvaluator.Past> pending = new ArrayList<>();
+        long pendingMillis = Long.MIN_VALUE;
+        final SequenceEvaluator.KeyState seq = new SequenceEvaluator.KeyState(), pop = new SequenceEvaluator.KeyState();
+        final SequenceEvaluator.KeyState tseq = new SequenceEvaluator.KeyState(), tpop = new SequenceEvaluator.KeyState();
+        int maxRetained = 0;
+        for (int i = 0; i < 5000; i++) {
+            millis += 1 + (long) (random.nextDouble() * 6 * 3600_000L); // ~ 3 hours on average → 30 days ≈ 240 rows
+            final Map<String, Object> row = new HashMap<>();
+            row.put("seller_id", "s1");
+            row.put("condition_grade", "g" + random.nextInt(3));
+            row.put("start_price", Math.round(random.nextDouble() * 1000) / 10.0);
+            row.put("sold", random.nextInt(2));
+            if (millis != pendingMillis) {
+                full.addAll(pending);
+                trimmed.addAll(pending);
+                pending.clear();
+                pendingMillis = millis;
+            }
+            final Map<String, Object> trimmedRow = new HashMap<>(row);
+            for (final OutputColumn c : keyed) {
+                final boolean isSequence = c.getScope() == FeatureSpec.Scope.sequence;
+                final Object expected = (isSequence ? sequence : population).evaluateColumn(c, row, millis, full, isSequence ? seq : pop);
+                final Object actual = (isSequence ? trimmedSequence : trimmedPopulation).evaluateColumn(c, trimmedRow, millis, trimmed, isSequence ? tseq : tpop);
+                assertSame(c.getCanonicalName() + "@" + i, expected, actual);
+            }
+            pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
+            trimmed.trimBefore(Math.min(trimmedSequence.retainFrom(tseq, millis, trimmed), trimmedPopulation.retainFrom(tpop, millis, trimmed)));
+            maxRetained = Math.max(maxRetained, trimmed.retained());
+        }
+        Assertions.assertEquals(full.size(), trimmed.size()); // absolute indices are preserved
+        Assertions.assertTrue(trimmed.base() > 0, () -> "history was never trimmed; unbounded: " + trimmedSequence.unboundedColumns() + " / " + trimmedPopulation.unboundedColumns());
+        final int retainedPeak = maxRetained;
+        Assertions.assertTrue(retainedPeak < full.size() / 2, () -> "retained " + retainedPeak + " of " + full.size());
+        Assertions.assertThrows(IndexOutOfBoundsException.class, () -> trimmed.get(0));
+    }
+
+    /**
+     * Scan-path columns without maxAge: lag / delta / trend and maxEvents-only windows read a bounded tail of
+     * the history and let it be trimmed; ewma (and filtered windows) are unbounded and pin it.
+     */
+    @Test
+    public void testBoundedTailTrimsWithoutMaxAge() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final String bounded = """
+                lineage:
+                  - {fields: [session_id, seller_id, condition_grade, start_price, sold], from: listings}
+                time: {field: session_time}
+                predictAt: "event_time - PT10M"
+                entities:
+                  - {name: seller, keys: [seller_id]}
+                features:
+                  - name: tail
+                    scope: sequence
+                    entity: seller
+                    ops:
+                      - {type: lag, fields: [start_price], k: 2}
+                      - {type: delta, fields: [start_price], k: 1}
+                      - {type: trend, fields: [start_price], k: 5}
+                  - name: last3
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 3}]
+                    ops:
+                      - {type: aggregate, fields: [start_price], funcs: [mean, max]}
+                """;
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(bounded, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> keyed = plan.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
+        Assertions.assertTrue(keyed.size() >= 5, plan::describe);
+        final SequenceEvaluator full = new SequenceEvaluator(keyed);
+        final SequenceEvaluator trimmedEvaluator = new SequenceEvaluator(keyed);
+        full.setup();
+        trimmedEvaluator.setup();
+        Assertions.assertTrue(trimmedEvaluator.unboundedColumns().isEmpty(), () -> trimmedEvaluator.unboundedColumns().toString());
+
+        final Random random = new Random(3);
+        long millis = 1_700_000_000_000L;
+        final List<SequenceEvaluator.Past> history = new ArrayList<>();
+        final SequenceEvaluator.History trimmed = new SequenceEvaluator.History();
+        final List<SequenceEvaluator.Past> pending = new ArrayList<>();
+        long pendingMillis = Long.MIN_VALUE;
+        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState(), trimmedState = new SequenceEvaluator.KeyState();
+        int maxRetained = 0;
+        for (int i = 0; i < 3000; i++) {
+            if (random.nextDouble() > 0.2) millis += 1 + (long) (random.nextDouble() * 3600_000L);
+            final Map<String, Object> row = new HashMap<>();
+            row.put("seller_id", "s1");
+            row.put("start_price", random.nextInt(8) == 0 ? null : (double) random.nextInt(100));
+            if (millis != pendingMillis) {
+                history.addAll(pending);
+                trimmed.addAll(pending);
+                pending.clear();
+                pendingMillis = millis;
+            }
+            final Map<String, Object> trimmedRow = new HashMap<>(row);
+            for (final OutputColumn c : keyed) {
+                assertSame(c.getCanonicalName() + "@" + i,
+                        full.evaluateColumn(c, row, millis, history, state),
+                        trimmedEvaluator.evaluateColumn(c, trimmedRow, millis, trimmed, trimmedState));
+            }
+            pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
+            trimmed.trimBefore(trimmedEvaluator.retainFrom(trimmedState, millis, trimmed));
+            maxRetained = Math.max(maxRetained, trimmed.retained());
+        }
+        final int retainedPeak = maxRetained;
+        Assertions.assertTrue(trimmed.base() > 0, "history was never trimmed");
+        // trend k=5 is the longest tail; the trim is amortised (drops wait for a 1024-row or half-size prefix)
+        Assertions.assertTrue(retainedPeak < 2100, () -> "retained " + retainedPeak);
+
+        // ewma and a filtered lag have no bounded tail
+        final String unbounded = bounded.replace("- {type: trend, fields: [start_price], k: 5}",
+                "- {type: ewma, fields: [start_price], halflife: [3]}")
+                .replace("windows: [{maxEvents: 3}]", "windows: [{maxEvents: 3, filter: \"start_price > 10\"}]");
+        final FeaturePlan plan2 = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(unbounded, Config.Format.yaml), null);
+        Assertions.assertFalse(plan2.getDiagnostics().hasErrors(), plan2::describe);
+        final SequenceEvaluator e2 = new SequenceEvaluator(plan2.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList());
+        e2.setup();
+        final List<String> pinned = e2.unboundedColumns();
+        Assertions.assertEquals(3, pinned.size(), pinned::toString); // ewma + 2 filtered aggregates
+        Assertions.assertTrue(pinned.stream().anyMatch(n -> n.contains("ewma")), pinned::toString);
+    }
+
     @SuppressWarnings("unchecked")
     private static void assertSame(final String at, final Object scan, final Object incremental) {
         if (scan == null || incremental == null) {

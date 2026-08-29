@@ -38,7 +38,43 @@ public final class VarianceComponents {
     private VarianceComponents() {}
 
     /** One level whose λ is estimated: keyed by the level's hidden {@code n} column name. */
-    public record LevelSpec(String id, List<String> keys, String field, String offsetColumn) implements Serializable {}
+    /**
+     * One lattice level whose per-key sufficient statistics are fitted; {@code foldKeys} (with {@code folds})
+     * additionally tags every contribution with the row's fold so out-of-fold statistics can be derived by
+     * subtraction ({@code fit.mode: fold}).
+     */
+    public record LevelSpec(String id, List<String> keys, String field, String offsetColumn, List<String> foldKeys, int folds) implements Serializable {
+        public LevelSpec(final String id, final List<String> keys, final String field, final String offsetColumn) {
+            this(id, keys, field, offsetColumn, null, 0);
+        }
+    }
+
+    /** Prefix of the per-fold entries in the per-key statistics map: {@code #<fold>} + separator + level entry. */
+    static final String FOLD_PREFIX = "#";
+
+    /** Deterministic fold of a fold-unit key (Java's String hash is stable across JVMs). */
+    public static int foldOf(final String unitKey, final int folds) {
+        return Math.floorMod(unitKey.hashCode(), folds);
+    }
+
+    static String foldEntry(final int fold, final String entry) {
+        return FOLD_PREFIX + fold + SEPARATOR + entry;
+    }
+
+    static boolean isFoldEntry(final String entry) {
+        return entry.startsWith(FOLD_PREFIX);
+    }
+
+    /** {@code total − part} (part = the row's own fold); null when nothing remains. */
+    static KeyStats subtract(final KeyStats total, final KeyStats part) {
+        if (total == null) return null;
+        if (part == null) return total;
+        final KeyStats out = new KeyStats();
+        out.n = total.n - part.n;
+        out.sum = total.sum - part.sum;
+        out.sumSq = total.sumSq - part.sumSq;
+        return out.n <= 0 ? null : out;
+    }
 
     /** Levels referenced by the composed columns of a stage that declare variance-components weights. */
     public static List<LevelSpec> specsOf(final List<OutputColumn> stageColumns, final Map<String, OutputColumn> allColumns) {
@@ -104,6 +140,7 @@ public final class VarianceComponents {
                     @ProcessElement
                     public void processElement(final ProcessContext c) {
                         final String composite = c.element().getKey();
+                        if (isFoldEntry(composite)) return; // per-fold tags are not keys of the level
                         c.output(KV.of(composite.substring(0, composite.indexOf(SEPARATOR)), c.element().getValue()));
                     }
                 }))
@@ -153,7 +190,13 @@ public final class VarianceComponents {
                 }
                 final String key = FeatureValues.key(row, spec.keys());
                 if (key == null) continue;
-                c.output(KV.of(spec.id() + SEPARATOR + key, y));
+                final String entry = spec.id() + SEPARATOR + key;
+                c.output(KV.of(entry, y));
+                if (spec.foldKeys() != null) {
+                    // the row's own fold, subtracted at apply time (rows with a null fold unit are not tagged)
+                    final String unit = FeatureValues.key(row, spec.foldKeys());
+                    if (unit != null) c.output(KV.of(foldEntry(foldOf(unit, spec.folds()), entry), y));
+                }
             }
         }
     }

@@ -330,6 +330,76 @@ public class FeatureTransformTest {
         second.run();
     }
 
+    /**
+     * A static fit is over the whole input even when the module declares a non-global windowing strategy:
+     * the statistics are computed in the global window, the artifact is still written, and the windowed rows
+     * see the same fitted values as under the default strategy.
+     */
+    @Test
+    public void testStaticFitUnderFixedWindows() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = staticConfig(dir)
+                .replace("    inputs: [create]\n    parameters:\n", "    inputs: [create]\n    strategy:\n      window: {type: fixed, unit: day, size: 1, offset: 0}\n    parameters:\n");
+        Assertions.assertTrue(config.contains("type: fixed"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // same values as testStaticFitWritesAndReusesArtifact: the fit ignores the daily windows
+            Assertions.assertEquals(4L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(0.7, byKey.get("A/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.7, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.75 + 2.0 / 3.0 * (0.5 - 0.75), byKey.get("A/s2").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(files[0], "enc.avro").exists());
+    }
+
+    /**
+     * fit.mode fold with entity folds: a seller's rows never see the seller's own statistics (its whole
+     * entity is its fold), and the global level holds only the other folds' rows. The expected values are
+     * derived from the same fold assignment the engine uses.
+     */
+    @Test
+    public void testFoldFit() throws java.io.IOException {
+        final java.util.function.IntFunction<Integer> foldOf = folds -> com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                com.mercari.solution.util.pipeline.feature.FeatureValues.key(Map.of("seller_id", "s1"), List.of("seller_id")), folds);
+        final java.util.function.IntFunction<Integer> foldOf2 = folds -> com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                com.mercari.solution.util.pipeline.feature.FeatureValues.key(Map.of("seller_id", "s2"), List.of("seller_id")), folds);
+        int folds = 2;
+        while (foldOf.apply(folds).equals(foldOf2.apply(folds))) folds++; // the two sellers must land in different folds
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = staticConfig(dir).replace("mode: static", "mode: fold, folds: " + folds + ", groupBy: seller");
+        Assertions.assertTrue(config.contains("mode: fold"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            for (final MElement row : byKey.values()) {
+                // the seller level is the row's own fold: nothing remains out of fold
+                Assertions.assertEquals(0L, ((Number) row.getPrimitiveValue("f_enc__seller_id__count")).longValue(), row::toString);
+                Assertions.assertNull(row.getPrimitiveValue("f_enc__seller_id__e2__std"), row::toString);
+            }
+            // shrinkage with an empty leaf falls back to the out-of-fold global mean: s1 sees s2's rows
+            // (sold 0, 1 → 0.5) and s2 sees s1's rows (sold 1, 0, 1, 1 → 0.75)
+            Assertions.assertEquals(0.5, byKey.get("A/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.5, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.75, byKey.get("A/s2").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.75, byKey.get("C/s2").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        // the artifact holds the whole-input statistics (a static serving run can load them)
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(files[0], "enc.avro").exists());
+    }
+
     @Test
     public void testFactorization() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();

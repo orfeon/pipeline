@@ -18,7 +18,17 @@ import java.util.List;
 public class FeatureSpec implements Serializable {
 
     public enum Scope { row, context, sequence, population }
-    public enum FitMode { expanding, fold, statik }
+    public enum FitMode {
+        expanding, fold, statik;
+
+        /** static / fold: statistics fitted over the input and applied by lookup (a fit stage, not a keyed stage). */
+        public boolean isLookup() { return this != expanding; }
+
+        /** The value written to the {@code fit} column coordinate. */
+        public String token() { return this == statik ? "static" : name(); }
+
+        public static boolean isLookupToken(final String token) { return "static".equals(token) || "fold".equals(token); }
+    }
     public enum NullPolicy { keep, fillZero, indicator }
     public enum Combine { product, zip }
 
@@ -139,6 +149,8 @@ public class FeatureSpec implements Serializable {
         public FitMode mode = FitMode.expanding;
         public Duration minHistory;
         public String groupBy;
+        /** Number of folds for {@code fit.mode: fold} (out-of-fold statistics). */
+        public Integer folds = 5;
         /** Root URI of fit artifacts ({@code <uri>/<planHash>/<block>.avro}); null = fit in-pipeline only. */
         public String artifactUri;
         /** Re-fit and overwrite even when an artifact for the plan hash exists. */
@@ -267,6 +279,7 @@ public class FeatureSpec implements Serializable {
             spec.fit.mode = parseFitMode(Json.string(fit, "mode"), diagnostics, "fit");
             spec.fit.minHistory = Json.duration(fit, "minHistory", null, diagnostics, "fit");
             spec.fit.groupBy = Json.string(fit, "groupBy");
+            if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
             FitSpec.parseArtifact(fit, spec.fit);
         }
 

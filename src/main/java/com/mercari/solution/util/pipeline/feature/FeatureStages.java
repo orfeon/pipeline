@@ -7,9 +7,13 @@ import com.mercari.solution.util.pipeline.feature.FeaturePlan.Stage;
 import com.mercari.solution.util.pipeline.feature.FeaturePlan.StageKind;
 import com.mercari.solution.util.pipeline.feature.FeatureSpec.Scope;
 import com.mercari.solution.util.pipeline.feature.SequenceEvaluator.Past;
+import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.extensions.sorter.BufferedExternalSorter;
+import org.apache.beam.sdk.extensions.sorter.ExternalSorter;
+import org.apache.beam.sdk.extensions.sorter.SortValues;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -36,6 +40,26 @@ public final class FeatureStages {
 
     private static final Logger LOG = LoggerFactory.getLogger(FeatureStages.class);
 
+    /** In-memory buffer (MB) of the per-key external sorter before it spills to local disk; system property for tests. */
+    public static final String SORTER_MEMORY_PROPERTY = "mpipeline.feature.sorterMemoryMB";
+    static int sorterMemoryMB() {
+        return Integer.getInteger(SORTER_MEMORY_PROPERTY, 100);
+    }
+
+    /** Runners that execute on the launcher machine (the sorter's spill directory must exist there, Windows included). */
+    private static boolean isLocalRunner(final PCollection<?> input) {
+        final Class<?> runner = input.getPipeline().getOptions().getRunner();
+        if (runner == null || runner.getSimpleName().startsWith("Test")) return true;
+        try {
+            return switch (com.mercari.solution.util.pipeline.OptionUtil.getRunner(input.getPipeline().getOptions())) {
+                case direct, prism, portable -> true;
+                case dataflow, flink, spark -> false;
+            };
+        } catch (final IllegalArgumentException e) {
+            return true; // unknown runner: assume local rather than a path that may not exist
+        }
+    }
+
     /** Key used for rows whose key fields contain null: they bypass keyed evaluation (§3.2). */
     static final String NULL_KEY = "\u0000";
 
@@ -58,6 +82,15 @@ public final class FeatureStages {
         final Schema elementSchema = Schema.builder(inputSchema).withType(DataType.ELEMENT).build();
         final Coder<MElement> elementCoder = ElementCoder.of(elementSchema);
         final KvCoder<String, MElement> kvCoder = KvCoder.of(StringUtf8Coder.of(), elementCoder);
+        // keyed stages carry (key, (sortable event time, row)) so SortValues can order each key's rows by
+        // the big-endian encoded secondary key
+        final KvCoder<String, KV<Long, MElement>> sortKvCoder = KvCoder.of(StringUtf8Coder.of(), KvCoder.of(BigEndianLongCoder.of(), elementCoder));
+        final BufferedExternalSorter.Options sorterOptions = BufferedExternalSorter.options()
+                .withExternalSorterType(ExternalSorter.Options.SorterType.NATIVE) // no Hadoop on the classpath
+                .withMemoryMB(sorterMemoryMB())
+                // the spill directory is resolved on the launcher: a remote runner's workers are Linux
+                // (/tmp), while the direct runner sorts where it was launched (Windows included)
+                .withTempLocation(isLocalRunner(input) ? System.getProperty("java.io.tmpdir") : "/tmp");
         final List<PCollection<BadRecord>> failures = new ArrayList<>();
         final Map<String, OutputColumn> columns = new HashMap<>();
         for (final OutputColumn c : plan.getColumns()) columns.put(c.getCanonicalName(), c);
@@ -98,9 +131,14 @@ public final class FeatureStages {
                                 .of(new ContextStageDoFn(evaluator, lambdas, loggings, failFast, failureTag))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                // keyed replay: group by key, then sort each key's rows by event time with the external sorter
+                // (in memory up to sorterMemoryMB, spilled to worker-local disk beyond) so a hot key — or the
+                // global level of a shrinkage lattice, which is ONE key holding every row — is never
+                // materialised as a list; the replay then streams the sorted rows and trims its history
                 case sequence, population -> current
-                        .apply(label + "_Key", ParDo.of(new KeyDoFn(stage.keys()))).setCoder(kvCoder)
+                        .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys()))).setCoder(sortKvCoder)
                         .apply(label + "_Group", GroupByKey.create())
+                        .apply(label + "_Sort", SortValues.create(sorterOptions))
                         .apply(label, ParDo
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag))
                                 .withSideInputs(sideInputs)
@@ -141,6 +179,9 @@ public final class FeatureStages {
         if (streaming && keyed) {
             errors.add("sequence / population features are supported in batch only (time-sorted keyed state)");
         }
+        if (streaming && plan.getColumns().stream().anyMatch(c -> "fold".equals(c.getCoordinates().get("fit")))) {
+            errors.add("fit.mode fold is supported in batch only (out-of-fold statistics are fitted from the whole input); use static with an artifact for streaming");
+        }
         for (final OutputColumn c : plan.getColumns()) {
             if (c.isIntermediate()) continue;
             if (c.getStatus() == OutputColumn.Status.runtimeFilter) {
@@ -160,9 +201,13 @@ public final class FeatureStages {
 
     /** One fitted lattice level of a static block: hidden columns it fills and how its statistics are keyed. */
     record FitLevel(String block, String id, String sumColumn, String sumSqColumn, List<String> keys, String field,
-                    String offsetColumn, String artifactUri, boolean refit) implements Serializable {
+                    String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds) implements Serializable {
         VarianceComponents.LevelSpec spec() {
-            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn);
+            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds);
+        }
+        /** fit.mode fold: out-of-fold statistics, always fitted in-pipeline (an artifact only holds the totals). */
+        boolean isFold() {
+            return foldKeys != null;
         }
     }
 
@@ -171,19 +216,23 @@ public final class FeatureStages {
         final Set<String> names = new HashSet<>();
         for (final OutputColumn c : stageColumns) names.add(c.getCanonicalName());
         for (final OutputColumn c : stageColumns) {
-            if (c.getScope() != Scope.population || !"encoding".equals(c.getOperator()) || !"static".equals(c.getCoordinates().get("fit"))) continue;
+            final String fit = c.getCoordinates().get("fit");
+            if (c.getScope() != Scope.population || !"encoding".equals(c.getOperator()) || !FeatureSpec.FitMode.isLookupToken(fit)) continue;
             final String name = c.getCanonicalName();
             final String base = name.substring(0, name.lastIndexOf("__"));
             final String id = base + "__n";
             if (levels.containsKey(id)) continue;
             final String keys = c.getCoordinates().getOrDefault("keys", "");
             final String offset = c.getCoordinates().containsKey("offset") ? "__baseline_" + c.getCoordinates().get("offset") : null;
+            final String foldKeys = c.getCoordinates().get("foldKeys");
             levels.put(id, new FitLevel(c.getBlock(), id,
                     names.contains(base + "__sum") ? base + "__sum" : null,
                     names.contains(base + "__sumsq") ? base + "__sumsq" : null,
                     keys.isEmpty() ? List.of() : List.of(keys.split(",")),
                     c.getCoordinates().get("field"), offset,
-                    c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit"))));
+                    c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
+                    foldKeys != null ? List.of(foldKeys.split(",")) : null,
+                    foldKeys != null ? Integer.parseInt(c.getCoordinates().get("folds")) : 0));
         }
         return new ArrayList<>(levels.values());
     }
@@ -202,12 +251,15 @@ public final class FeatureStages {
         final Map<String, String> writeBlocks = new LinkedHashMap<>();
         for (final FitLevel level : levels) {
             final String uri = level.artifactUri();
-            if (uri != null && !level.refit() && FitArtifact.exists(uri, planHash, level.block())) {
+            // fold levels are always fitted: the per-fold tags cannot come from an artifact (which holds totals)
+            final boolean exists = uri != null && !level.refit() && FitArtifact.exists(uri, planHash, level.block());
+            if (exists && !level.isFold()) {
                 loadBlocks.put(level.block(), uri);
                 continue;
             }
             fitted.add(level);
-            if (uri != null) writeBlocks.put(level.block(), uri);
+            // fold levels are re-fitted every run but respect refit: false for the (totals) artifact
+            if (uri != null && !exists) writeBlocks.put(level.block(), uri);
         }
         for (final Map.Entry<String, String> e : loadBlocks.entrySet()) {
             LOG.info("feature fit: block {} loads artifact {}", e.getKey(), FitArtifact.statsPath(e.getValue(), planHash, e.getKey()));
@@ -216,13 +268,14 @@ public final class FeatureStages {
             throw new IllegalStateException("fit.mode static in streaming requires an existing artifact for plan " + planHash
                     + " (fit the statistics with a batch run first)");
         }
-        // the artifact writer is triggered from a global-window Create: side-input mapping from a
-        // non-global module strategy would fail at runtime, so reject it up front
-        if (!writeBlocks.isEmpty()
-                && !(input.getWindowingStrategy().getWindowFn() instanceof org.apache.beam.sdk.transforms.windowing.GlobalWindows)) {
-            throw new IllegalStateException("fit.mode static with an artifact URI requires the default (global window) strategy; "
-                    + "remove the module's windowing strategy or fit the artifact in a separate batch run");
-        }
+        // a static fit is over the WHOLE input whatever the module's windowing strategy: the statistics
+        // are computed in the global window (single pane), which also lets the global-window artifact
+        // writer trigger and the windowed main input both map onto the side inputs
+        final boolean globalInput = input.getWindowingStrategy().getWindowFn() instanceof org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+        final PCollection<MElement> fitInput = globalInput ? input : input.apply(label + "_FitGlobal", org.apache.beam.sdk.transforms.windowing.Window.<MElement>into(new org.apache.beam.sdk.transforms.windowing.GlobalWindows())
+                .triggering(org.apache.beam.sdk.transforms.windowing.DefaultTrigger.of())
+                .withAllowedLateness(org.joda.time.Duration.ZERO)
+                .discardingFiredPanes());
 
         PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView = null;
         PCollectionView<Map<String, Double>> lambdasView = null;
@@ -230,7 +283,7 @@ public final class FeatureStages {
         if (!fitted.isEmpty()) {
             final List<VarianceComponents.LevelSpec> specs = new ArrayList<>();
             for (final FitLevel level : fitted) specs.add(level.spec());
-            final PCollection<KV<String, VarianceComponents.KeyStats>> perKey = VarianceComponents.perKeyStats(input, specs, label + "_Fit");
+            final PCollection<KV<String, VarianceComponents.KeyStats>> perKey = VarianceComponents.perKeyStats(fitInput, specs, label + "_Fit");
             statsView = perKey.apply(label + "_StatsView", View.asMap());
             sideInputs.add(statsView);
             if (evaluator.row.needsVarianceComponents()) {
@@ -260,7 +313,7 @@ public final class FeatureStages {
             if (com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
                 throw new IllegalStateException("factorization in streaming requires an existing artifact for plan " + planHash);
             }
-            final PCollectionView<List<Factorization.Model>> view = input
+            final PCollectionView<List<Factorization.Model>> view = fitInput
                     .apply(label + "_Fm_" + spec.block() + "_Examples", ParDo.of(new ExtractExamplesDoFn(spec)))
                     .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Example.class))
                     .apply(label + "_Fm_" + spec.block() + "_Gather", Combine.globally(new GatherFn()).withoutDefaults())
@@ -541,6 +594,14 @@ public final class FeatureStages {
                         final String entry = FitArtifact.entryKey(level.id(), key);
                         stats = loaded.get(entry);
                         if (stats == null) stats = fitted.get(entry);
+                        if (level.isFold() && stats != null) {
+                            // out-of-fold: remove the row's own fold from the totals
+                            final String unit = FeatureValues.key(values, level.foldKeys());
+                            if (unit != null) {
+                                stats = VarianceComponents.subtract(stats,
+                                        fitted.get(VarianceComponents.foldEntry(VarianceComponents.foldOf(unit, level.folds()), entry)));
+                            }
+                        }
                     }
                     values.put(level.id(), stats == null ? 0d : stats.n);
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);
@@ -680,6 +741,18 @@ public final class FeatureStages {
             }
         }
 
+        List<String> unboundedColumns() {
+            final List<String> names = new ArrayList<>(sequence.unboundedColumns());
+            names.addAll(population.unboundedColumns());
+            return names;
+        }
+
+        /** Trim watermark of the shared history: the smaller of both evaluators' (see {@link SequenceEvaluator#retainFrom}). */
+        int retainFrom(final long nowMillis, final List<Past> history,
+                       final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
+            return Math.min(sequence.retainFrom(sequenceState, nowMillis, history), population.retainFrom(populationState, nowMillis, history));
+        }
+
         Map<String, Object> project(final Map<String, Object> values) {
             final Map<String, Object> projected = new HashMap<>();
             for (final String f : bufferedFields) projected.put(f, values.get(f));
@@ -749,6 +822,37 @@ public final class FeatureStages {
                 FeatureValues.appendKeyComponent(sb, v);
             }
             c.output(KV.of(sb.toString(), element));
+        }
+    }
+
+    /** Keys like {@link KeyDoFn} and pairs each row with a byte-sortable event time for {@link SortValues}. */
+    static class SortKeyDoFn extends DoFn<MElement, KV<String, KV<Long, MElement>>> {
+        private final List<String> keys;
+
+        SortKeyDoFn(final List<String> keys) {
+            this.keys = keys;
+        }
+
+        /** Flips the sign bit so the big-endian encoding orders negative epoch millis before positive ones. */
+        static long sortable(final long millis) {
+            return millis ^ Long.MIN_VALUE;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final KV<Long, MElement> value = KV.of(sortable(element.getEpochMillis()), element);
+            final StringBuilder sb = new StringBuilder();
+            for (final String k : keys) {
+                final Object v = element.getPrimitiveValue(k);
+                if (v == null) {
+                    c.output(KV.of(NULL_KEY, value));
+                    return;
+                }
+                FeatureValues.appendKeyComponent(sb, v);
+            }
+            c.output(KV.of(sb.toString(), value));
         }
     }
 
@@ -846,7 +950,7 @@ public final class FeatureStages {
      * used because upstream GroupByKey stages re-emit rows at their event time, which that annotation
      * treats as late data and drops; a stateful variant is the streaming follow-up (engine doc §6).
      */
-    static class KeyedHistoryDoFn extends StageDoFn<KV<String, Iterable<MElement>>> {
+    static class KeyedHistoryDoFn extends StageDoFn<KV<String, Iterable<KV<Long, MElement>>>> {
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
@@ -858,26 +962,37 @@ public final class FeatureStages {
             return org.joda.time.Duration.millis(Long.MAX_VALUE);
         }
 
+        @Setup
+        @Override
+        public void setup() {
+            super.setup();
+            final List<String> unbounded = evaluator.unboundedColumns();
+            if (!unbounded.isEmpty()) {
+                LOG.info("keyed stage keeps the whole projected history per key (no maxAge on scan-path columns): {}", unbounded);
+            }
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final KV<String, Iterable<MElement>> kv = c.element();
+            final KV<String, Iterable<KV<Long, MElement>>> kv = c.element();
             if (kv == null) return;
-            final List<MElement> elements = new ArrayList<>();
-            kv.getValue().forEach(elements::add);
-            elements.sort(Comparator.comparingLong(MElement::getEpochMillis));
             prepare(c);
-            final List<Past> history = new ArrayList<>();
+            // the rows arrive sorted by event time (SortValues, spilled to disk for large keys) and are
+            // streamed: only the trimmable projected history and the running statistics stay in memory
+            final SequenceEvaluator.History history = new SequenceEvaluator.History();
             final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
             final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
             long pendingMillis = Long.MIN_VALUE;
-            for (final MElement input : elements) {
+            final boolean nullKey = NULL_KEY.equals(kv.getKey());
+            for (final KV<Long, MElement> sorted : kv.getValue()) {
+                final MElement input = sorted.getValue();
                 try {
                     final Map<String, Object> values = input.asPrimitiveMap();
                     final Instant now = input.getTimestamp();
-                    if (NULL_KEY.equals(kv.getKey())) {
+                    if (nullKey) {
                         evaluator.evaluateRow(values);
                         c.outputWithTimestamp(MElement.of(values, now), now);
                         continue;
@@ -886,11 +1001,12 @@ public final class FeatureStages {
                         history.addAll(pending);
                         pending.clear();
                         pendingMillis = now.getMillis();
-                        // no structural trimming: the incremental fold / evict pointers index into this list
                     }
                     evaluator.evaluateKeyed(values, now.getMillis(), history, sequenceState, populationState);
                     c.outputWithTimestamp(MElement.of(values, now), now);
                     pending.add(new Past(now.getMillis(), evaluator.project(values)));
+                    // absolute indices: the fold / evict pointers stay valid across trims
+                    history.trimBefore(evaluator.retainFrom(now.getMillis(), history, sequenceState, populationState));
                 } catch (final Throwable e) {
                     c.output(failureTag, Module.processError("Failed to evaluate keyed features", input, e, failFast));
                 }
