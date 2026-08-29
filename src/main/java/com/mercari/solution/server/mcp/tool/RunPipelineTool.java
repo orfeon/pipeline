@@ -5,15 +5,20 @@ import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
 
-
 @Tool.Module(
     name="run-pipeline",
     title="Run Pipeline",
     description= """
-        Run the pipeline defined in config parameter.
-        Results are returned in JSON format.
-        If the pipeline definition is valid, outputs the output schema for each step in 'outputs' attribute.
-        If the pipeline definition has errors, the error content is output in 'errors' attribute.
+        Run the pipeline defined in config parameter in the server process (DirectRunner), or with
+        dryRun=true only assemble it: every module is validated, schemas are resolved and declarative plans
+        such as the feature transform's are compiled against the real input schemas, without running.
+        The dry run is the way to iterate on a config before launching it on Dataflow / Cloud Run
+        (launch-pipeline): its response holds the resolved output schema of every step ('spec.modules') and,
+        for each feature transform, 'featurePlans' (the validate --expand report with stages, columns,
+        availability status, hot-key audit SQL and diagnostics).
+        Results are returned in JSON format. If the pipeline definition has errors, the error content is
+        output in 'error' attribute. A real run returns the debug outputs in 'outputs' and 'metrics';
+        it is meant for small local data, not for production-sized inputs.
         """,
     inputSchema = """
         {
@@ -22,6 +27,14 @@ import jakarta.servlet.ServletContext;
             "config": {
               "type": "string",
               "description": "Definition of pipeline. YAML or JSON format."
+            },
+            "dryRun": {
+              "type": "boolean",
+              "description": "Assemble and validate only (no execution). Default false."
+            },
+            "args": {
+              "type": ["object", "string"],
+              "description": "Template arguments (${args.*}) as a JSON object or JSON text."
             }
           },
           "required": ["config"]
@@ -33,13 +46,22 @@ import jakarta.servlet.ServletContext;
           "properties": {
             "status": {
               "type": "string",
-              "description": "Definition of pipeline. YAML or JSON format."
+              "description": "ok or error"
+            },
+            "spec": {
+              "type": "object",
+              "description": "modules: resolved output schema per step"
+            },
+            "featurePlans": {
+              "type": "array",
+              "description": "dryRun only: per feature transform {name, ok, describe, engineErrors}"
             },
             "outputs": {
-              "type": "object"
+              "type": "array",
+              "description": "real run only: debug outputs"
             }
           },
-          "required": ["config"]
+          "required": ["status"]
         }
         """
 )
@@ -63,7 +85,12 @@ public class RunPipelineTool implements Tool {
         }
 
         final String config = request.arguments().get("config").toString();
-        final PipelineService.RunResult result = PipelineService.run(config, null, false);
+        final Object dryRunValue = request.arguments().get("dryRun");
+        final boolean dryRun = dryRunValue != null && Boolean.parseBoolean(dryRunValue.toString());
+        final Object argsValue = request.arguments().get("args");
+        final String args = argsValue == null ? null
+                : argsValue instanceof String s ? s : new com.google.gson.Gson().toJson(argsValue);
+        final PipelineService.RunResult result = PipelineService.run(config, args, dryRun);
         return McpSchema.CallToolResult.builder()
                 .addTextContent(result.responseText)
                 .isError(result.isError)

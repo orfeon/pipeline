@@ -578,8 +578,12 @@ public class Config implements Serializable {
         try {
             final Map<String, String> parsed = new HashMap<>();
             final JsonObject jsonObject = JsonUtil.fromJson(argsText, JsonObject.class);
-            for(final Map.Entry<String, ?> entry : jsonObject.entrySet()) {
-                parsed.put(entry.getKey(), entry.getValue().toString());
+            for(final Map.Entry<String, JsonElement> entry : jsonObject.entrySet()) {
+                // string values are substituted as-is (toString() would keep the JSON quotes and break the
+                // config text); other values as their JSON text — the same convention as system.args
+                final JsonElement value = entry.getValue();
+                parsed.put(entry.getKey(), value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+                        ? value.getAsString() : value.toString());
             }
             return parsed;
         } catch (final Throwable t) {

@@ -156,6 +156,27 @@ the pipeline. Pass the config (or just the step's `parameters`) and optionally t
   `availability.violation` means the feature would use information unknown at `predictAt`), and read
   the hints (e.g. a suggestion to move an outcome mean from `sequence` to `population` encoding).
 - `run` (dryRun) performs the same compile, but `validateFeature` is cheaper and shows the full report.
+  A `run` dry run of a whole config additionally returns `featurePlans`: the same report compiled
+  against the real input schemas, including the hot-key audit SQL to size a large run.
+
+### launchPipeline
+
+Submit a validated config to an execution target and return the created job.
+
+- `config` (required), `runner` (required: `dataflow` | `direct` | `spark`), `environment` (optional:
+  `flexTemplate` | `cloudRunJob` | `cloudRunWorkerPool` | `dataprocServerless`), `parameters` (optional JSON
+  object: `project`, `region`, `jobName`, `serviceAccount`, `templateLocation`, `workerMachineType`, ...),
+  `args` (optional JSON object of template arguments).
+- Only call it when the user explicitly asks to launch / run on Dataflow or Cloud Run, and only after
+  `run` with `dryRun: true` succeeded on the same config. Never launch speculatively.
+- Report the returned job id and `consoleUrl`. For Cloud Run Jobs (`direct`) the Cloud Run Job must
+  already exist; a missing one is reported as an error with the `gcloud` command to create it.
+
+### getCloudRunExecution
+
+Status of a Cloud Run Job execution (`executionName` from the launch result) or the latest executions of a
+job (`jobName`, optional `project` / `region` / `limit`). Use it to follow a `direct` launch; for Dataflow
+use `getDataflowJob` / `listJobErrors`. A FAILED execution's `logUri` points at its Cloud Logging entries.
 
 ### listModules
 
