@@ -25,6 +25,12 @@ import java.util.*;
  * content-addressed directory {@code <artifactUri>/<planHash>/}. The plan hash covers the spec and the
  * sources contract, so a change in either invalidates the artifact; a {@code manifest.json} next to the
  * file records what was fitted.
+ *
+ * <p>Workers cache loaded artifacts per path for the lifetime of the JVM. Because paths are
+ * content-addressed (plan hash or {@code fit.artifact.id}), a changed spec always misses the cache; but
+ * overwriting the SAME path (e.g. {@code refit: true} against a pinned {@code id}) is only picked up by a
+ * fresh JVM — long-lived runners (server-launched runs, Flink / Spark sessions) keep serving the old
+ * statistics until restarted.
  */
 public final class FitArtifact {
 

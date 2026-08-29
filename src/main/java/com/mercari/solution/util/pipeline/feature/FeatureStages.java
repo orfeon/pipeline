@@ -214,6 +214,13 @@ public final class FeatureStages {
             throw new IllegalStateException("fit.mode static in streaming requires an existing artifact for plan " + planHash
                     + " (fit the statistics with a batch run first)");
         }
+        // the artifact writer is triggered from a global-window Create: side-input mapping from a
+        // non-global module strategy would fail at runtime, so reject it up front
+        if (!writeBlocks.isEmpty()
+                && !(input.getWindowingStrategy().getWindowFn() instanceof org.apache.beam.sdk.transforms.windowing.GlobalWindows)) {
+            throw new IllegalStateException("fit.mode static with an artifact URI requires the default (global window) strategy; "
+                    + "remove the module's windowing strategy or fit the artifact in a separate batch run");
+        }
 
         PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView = null;
         PCollectionView<Map<String, Double>> lambdasView = null;

@@ -8,6 +8,12 @@ import java.time.format.DateTimeParseException;
  * ISO 8601 duration parsing that also accepts date-based periods (P2Y, P6M, P90D).
  * Years and months are converted with fixed lengths (365 / 30 days); the compile layer only
  * needs a total order over offsets, so the approximation is acceptable for window sizing.
+ *
+ * <p>Deliberately separate from {@link com.mercari.solution.util.pipeline.outbound.Durations}: that class
+ * defines the outbound modules' grammar (ISO-8601 plus short forms like {@code 10m}, no calendar periods),
+ * while the feature DSL accepts ISO-8601 only (work-feature.md §2.3) but needs calendar periods and the
+ * short column-name tokens of {@link #shortName}. Sharing one class would silently widen one grammar
+ * with the other's.
  */
 public final class Durations {
 
