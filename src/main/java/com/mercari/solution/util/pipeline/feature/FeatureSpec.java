@@ -18,7 +18,17 @@ import java.util.List;
 public class FeatureSpec implements Serializable {
 
     public enum Scope { row, context, sequence, population }
-    public enum FitMode { expanding, fold, statik }
+    public enum FitMode {
+        expanding, fold, statik;
+
+        /** static / fold: statistics fitted over the input and applied by lookup (a fit stage, not a keyed stage). */
+        public boolean isLookup() { return this != expanding; }
+
+        /** The value written to the {@code fit} column coordinate. */
+        public String token() { return this == statik ? "static" : name(); }
+
+        public static boolean isLookupToken(final String token) { return "static".equals(token) || "fold".equals(token); }
+    }
     public enum NullPolicy { keep, fillZero, indicator }
     public enum Combine { product, zip }
 

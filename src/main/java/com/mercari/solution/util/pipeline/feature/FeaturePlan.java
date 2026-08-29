@@ -32,7 +32,7 @@ public class FeaturePlan implements Serializable {
     /**
      * A data audit query derived from the plan (work-feature.md §7): hot-key row counts per keyed stage so
      * the per-key memory budget (docs "Performance and sizing") can be checked before a run. {@code {input}}
-     * stands for the transform's input relation.
+     * stands for the transform's input relation; identifiers are emitted bare (quote them for your dialect if needed).
      */
     public record AuditQuery(String id, List<String> keys, List<String> stages, String sql, String note) implements Serializable {
         public String describe() {
@@ -125,7 +125,7 @@ public class FeaturePlan implements Serializable {
             if (keys.isEmpty()) {
                 queries.add(new AuditQuery(id, keys, e.getValue(),
                         "SELECT COUNT(1) AS row_count FROM {input}",
-                        "global level: every row is gathered on one worker; budget row_count × projected row size"));
+                        "global level: one key sorted on one worker (spilled to its local disk beyond the sorter buffer); row_count bounds the spill, memory holds only the retained history"));
                 continue;
             }
             final String keyList = String.join(", ", keys);
@@ -134,7 +134,7 @@ public class FeaturePlan implements Serializable {
                     + " GROUP BY " + keyList + " ORDER BY row_count DESC LIMIT " + AUDIT_TOP_KEYS;
             final List<String> derived = keys.stream().filter(k -> !inputFields.containsKey(k)).toList();
             final String note = derived.isEmpty()
-                    ? "rows of the top key are held in one worker's memory; budget row_count × (input row size + projected history fields)"
+                    ? "each key is sorted on one worker (spilled to local disk beyond the sorter buffer): the top row_count bounds the spill; memory holds the retained history (bounded by the longest window unless a column is unbounded)"
                     : "keys " + derived + " are intermediate columns: run on the relation as it stands before this stage (or on the expression that derives them)";
             queries.add(new AuditQuery(id, keys, e.getValue(), sql, note));
         }

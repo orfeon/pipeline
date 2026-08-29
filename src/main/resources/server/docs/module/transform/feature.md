@@ -322,8 +322,11 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail. Only `ewma`,
   `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` keep the key's
   full projected history; the stage logs which columns do at startup — give such windows a `maxAge` to
-  bound them. Local disk of the workers must have room for the largest key's rows. The hot-key audit
-  queries in the validate / dry-run report (above) give the per-key row counts to size that against.
+  bound them. Local disk of the workers must have room for the spilled keys: Beam's native sorter keeps
+  its spill files until the worker JVM exits (they are not deleted after the merge), so on a long-lived
+  worker the disk holds every spilled key of every keyed stage, not only the largest one. The 100 MB
+  sorter buffer is per key being processed (each concurrent bundle owns one). The hot-key audit queries
+  in the validate / dry-run report (above) give the per-key row counts to size that against.
 
 ## Limitations (current engine)
 

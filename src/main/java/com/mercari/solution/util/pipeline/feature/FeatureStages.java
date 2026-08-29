@@ -46,9 +46,18 @@ public final class FeatureStages {
         return Integer.getInteger(SORTER_MEMORY_PROPERTY, 100);
     }
 
+    /** Runners that execute on the launcher machine (the sorter's spill directory must exist there, Windows included). */
     private static boolean isLocalRunner(final PCollection<?> input) {
         final Class<?> runner = input.getPipeline().getOptions().getRunner();
-        return runner == null || runner.getSimpleName().startsWith("Direct") || runner.getSimpleName().startsWith("Test");
+        if (runner == null || runner.getSimpleName().startsWith("Test")) return true;
+        try {
+            return switch (com.mercari.solution.util.pipeline.OptionUtil.getRunner(input.getPipeline().getOptions())) {
+                case direct, prism, portable -> true;
+                case dataflow, flink, spark -> false;
+            };
+        } catch (final IllegalArgumentException e) {
+            return true; // unknown runner: assume local rather than a path that may not exist
+        }
     }
 
     /** Key used for rows whose key fields contain null: they bypass keyed evaluation (§3.2). */
@@ -170,6 +179,9 @@ public final class FeatureStages {
         if (streaming && keyed) {
             errors.add("sequence / population features are supported in batch only (time-sorted keyed state)");
         }
+        if (streaming && plan.getColumns().stream().anyMatch(c -> "fold".equals(c.getCoordinates().get("fit")))) {
+            errors.add("fit.mode fold is supported in batch only (out-of-fold statistics are fitted from the whole input); use static with an artifact for streaming");
+        }
         for (final OutputColumn c : plan.getColumns()) {
             if (c.isIntermediate()) continue;
             if (c.getStatus() == OutputColumn.Status.runtimeFilter) {
@@ -205,7 +217,7 @@ public final class FeatureStages {
         for (final OutputColumn c : stageColumns) names.add(c.getCanonicalName());
         for (final OutputColumn c : stageColumns) {
             final String fit = c.getCoordinates().get("fit");
-            if (c.getScope() != Scope.population || !"encoding".equals(c.getOperator()) || !("static".equals(fit) || "fold".equals(fit))) continue;
+            if (c.getScope() != Scope.population || !"encoding".equals(c.getOperator()) || !FeatureSpec.FitMode.isLookupToken(fit)) continue;
             final String name = c.getCanonicalName();
             final String base = name.substring(0, name.lastIndexOf("__"));
             final String id = base + "__n";
@@ -219,8 +231,8 @@ public final class FeatureStages {
                     keys.isEmpty() ? List.of() : List.of(keys.split(",")),
                     c.getCoordinates().get("field"), offset,
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
-                    "fold".equals(fit) ? List.of(foldKeys.split(",")) : null,
-                    "fold".equals(fit) ? Integer.parseInt(c.getCoordinates().get("folds")) : 0));
+                    foldKeys != null ? List.of(foldKeys.split(",")) : null,
+                    foldKeys != null ? Integer.parseInt(c.getCoordinates().get("folds")) : 0));
         }
         return new ArrayList<>(levels.values());
     }
@@ -240,12 +252,14 @@ public final class FeatureStages {
         for (final FitLevel level : levels) {
             final String uri = level.artifactUri();
             // fold levels are always fitted: the per-fold tags cannot come from an artifact (which holds totals)
-            if (uri != null && !level.refit() && !level.isFold() && FitArtifact.exists(uri, planHash, level.block())) {
+            final boolean exists = uri != null && !level.refit() && FitArtifact.exists(uri, planHash, level.block());
+            if (exists && !level.isFold()) {
                 loadBlocks.put(level.block(), uri);
                 continue;
             }
             fitted.add(level);
-            if (uri != null) writeBlocks.put(level.block(), uri);
+            // fold levels are re-fitted every run but respect refit: false for the (totals) artifact
+            if (uri != null && !exists) writeBlocks.put(level.block(), uri);
         }
         for (final Map.Entry<String, String> e : loadBlocks.entrySet()) {
             LOG.info("feature fit: block {} loads artifact {}", e.getKey(), FitArtifact.statsPath(e.getValue(), planHash, e.getKey()));

@@ -99,8 +99,9 @@ public class MPipeline {
 
         if(pipelineOptions.getDryRun()) {
             // assemble only: module validation, schema resolution and feature plan compilation run at
-            // assembly time, so a failing config fails here without launching a job
-            final Map<String, MCollection> outputs = apply(pipeline, config);
+            // assembly time, so a failing config fails here without launching a job (same path as a real
+            // run: system.failure.alterConfig fallback and the empty-pipeline short-circuit included)
+            final Map<String, MCollection> outputs = apply(pipeline, pipelineOptions, args, config);
             final StringBuilder report = new StringBuilder("dry run: pipeline assembled successfully (not run)\n");
             for(final Map.Entry<String, MCollection> entry : outputs.entrySet()) {
                 if(entry.getKey().endsWith(".failures")) {
@@ -134,7 +135,9 @@ public class MPipeline {
         if(Optional.ofNullable(config.getEmpty()).orElse(false)) {
             LOG.info("Empty pipeline");
             pipeline.apply("Empty", Create.of("").withCoder(StringUtf8Coder.of()));
-            pipeline.run();
+            if(!pipelineOptions.getDryRun()) {
+                pipeline.run();
+            }
             return new HashMap<>();
         }
 

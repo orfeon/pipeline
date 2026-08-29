@@ -387,6 +387,13 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("compose", column(plan, "enc__seller_id__e2__mean").getOperator());
         Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() == FeaturePlan.StageKind.fit), plan::describe);
 
+        // a block-level groupBy naming an unknown entity is an error (it must not fall back to row folds)
+        final FeaturePlan typo = compile(SOURCES, withEncoding(block.replace("groupBy: seller", "groupBy: sellr")));
+        Assertions.assertTrue(hasCode(typo, "fit.groupBy"), typo::describe);
+        // fold is batch-only: the engine rejects it in streaming even with an artifact
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, true).stream().anyMatch(m -> m.contains("fit.mode fold")));
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).stream().noneMatch(m -> m.contains("fit.mode fold")));
+
         // without groupBy the fold unit is the row identity: time.field + orderTieBreak
         final FeaturePlan rows = compile(SOURCES, withEncoding(block.replace(", groupBy: seller", "")));
         Assertions.assertFalse(rows.getDiagnostics().hasErrors(), rows::describe);
