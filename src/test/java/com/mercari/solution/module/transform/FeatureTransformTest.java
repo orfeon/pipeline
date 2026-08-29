@@ -330,6 +330,35 @@ public class FeatureTransformTest {
         second.run();
     }
 
+    /**
+     * A static fit is over the whole input even when the module declares a non-global windowing strategy:
+     * the statistics are computed in the global window, the artifact is still written, and the windowed rows
+     * see the same fitted values as under the default strategy.
+     */
+    @Test
+    public void testStaticFitUnderFixedWindows() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = staticConfig(dir)
+                .replace("    inputs: [create]\n    parameters:\n", "    inputs: [create]\n    strategy:\n      window: {type: fixed, unit: day, size: 1, offset: 0}\n    parameters:\n");
+        Assertions.assertTrue(config.contains("type: fixed"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // same values as testStaticFitWritesAndReusesArtifact: the fit ignores the daily windows
+            Assertions.assertEquals(4L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(0.7, byKey.get("A/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.7, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.75 + 2.0 / 3.0 * (0.5 - 0.75), byKey.get("A/s2").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(files[0], "enc.avro").exists());
+    }
+
     @Test
     public void testFactorization() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();

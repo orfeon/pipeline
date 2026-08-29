@@ -48,7 +48,7 @@ time; warnings and hints from the compiler are part of that report.
 | module     | required | String                            | Specified `feature`                                            |
 | inputs     | required | Array<String\>                    | Input step names (flattened into one relation).                |
 | waits      | optional | Array<String\>                    | Step names to wait for before processing.                      |
-| strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy (batch, global window recommended).         |
+| strategy   | optional | [Strategy](../common/strategy.md) | Windowing strategy (batch, global window recommended). Row / context features follow it; a static fit (and its artifact) is always computed over the whole input in the global window. |
 | parameters | required | Map<String,Object\>               | Specify the following individual parameters                    |
 
 ## Feature transform module parameters

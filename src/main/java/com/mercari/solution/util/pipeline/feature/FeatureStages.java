@@ -245,13 +245,14 @@ public final class FeatureStages {
             throw new IllegalStateException("fit.mode static in streaming requires an existing artifact for plan " + planHash
                     + " (fit the statistics with a batch run first)");
         }
-        // the artifact writer is triggered from a global-window Create: side-input mapping from a
-        // non-global module strategy would fail at runtime, so reject it up front
-        if (!writeBlocks.isEmpty()
-                && !(input.getWindowingStrategy().getWindowFn() instanceof org.apache.beam.sdk.transforms.windowing.GlobalWindows)) {
-            throw new IllegalStateException("fit.mode static with an artifact URI requires the default (global window) strategy; "
-                    + "remove the module's windowing strategy or fit the artifact in a separate batch run");
-        }
+        // a static fit is over the WHOLE input whatever the module's windowing strategy: the statistics
+        // are computed in the global window (single pane), which also lets the global-window artifact
+        // writer trigger and the windowed main input both map onto the side inputs
+        final boolean globalInput = input.getWindowingStrategy().getWindowFn() instanceof org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+        final PCollection<MElement> fitInput = globalInput ? input : input.apply(label + "_FitGlobal", org.apache.beam.sdk.transforms.windowing.Window.<MElement>into(new org.apache.beam.sdk.transforms.windowing.GlobalWindows())
+                .triggering(org.apache.beam.sdk.transforms.windowing.DefaultTrigger.of())
+                .withAllowedLateness(org.joda.time.Duration.ZERO)
+                .discardingFiredPanes());
 
         PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView = null;
         PCollectionView<Map<String, Double>> lambdasView = null;
@@ -259,7 +260,7 @@ public final class FeatureStages {
         if (!fitted.isEmpty()) {
             final List<VarianceComponents.LevelSpec> specs = new ArrayList<>();
             for (final FitLevel level : fitted) specs.add(level.spec());
-            final PCollection<KV<String, VarianceComponents.KeyStats>> perKey = VarianceComponents.perKeyStats(input, specs, label + "_Fit");
+            final PCollection<KV<String, VarianceComponents.KeyStats>> perKey = VarianceComponents.perKeyStats(fitInput, specs, label + "_Fit");
             statsView = perKey.apply(label + "_StatsView", View.asMap());
             sideInputs.add(statsView);
             if (evaluator.row.needsVarianceComponents()) {
@@ -289,7 +290,7 @@ public final class FeatureStages {
             if (com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
                 throw new IllegalStateException("factorization in streaming requires an existing artifact for plan " + planHash);
             }
-            final PCollectionView<List<Factorization.Model>> view = input
+            final PCollectionView<List<Factorization.Model>> view = fitInput
                     .apply(label + "_Fm_" + spec.block() + "_Examples", ParDo.of(new ExtractExamplesDoFn(spec)))
                     .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Example.class))
                     .apply(label + "_Fm_" + spec.block() + "_Gather", Combine.globally(new GatherFn()).withoutDefaults())
