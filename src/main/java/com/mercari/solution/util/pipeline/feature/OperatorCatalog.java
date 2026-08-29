@@ -46,6 +46,8 @@ public final class OperatorCatalog {
         register(Scope.row, "bin", InputKind.numeric, I64, false, "fixed-edge discretization");
         register(Scope.row, "cross", InputKind.categorical, Schema.FieldType.STRING, false, "categorical cross product");
         register(Scope.row, "residual", InputKind.numeric, F64, false, "difference to a named baseline on identity / logit / log scale");
+        register(Scope.row, "indicator", InputKind.categorical, I64, false, "one 0/1 column per listed value of a categorical field");
+        register(Scope.row, "equals", InputKind.any, I64, false, "1 when two fields are equal, 0 otherwise (null if either is null)");
 
         // context
         register(Scope.context, "rank", InputKind.numeric, I64, false, "rank within the group (1 = largest)");

@@ -94,6 +94,7 @@ public class FeatureSpec implements Serializable {
         public List<String> derive = new ArrayList<>();
         public boolean cyclical;
         public List<Double> edges = new ArrayList<>();
+        public List<String> values = new ArrayList<>();
         public String baseline;
         public String on;
 
@@ -164,6 +165,8 @@ public class FeatureSpec implements Serializable {
         public List<String> exclude = new ArrayList<>();
         public String groupBy;
         public List<String> parentFields = new ArrayList<>();
+        /** Field name of the child array in grouped output (default "rows"; rename to dodge reserved words). */
+        public String childName = "rows";
     }
 
     public List<LineageEntry> lineage = new ArrayList<>();
@@ -281,6 +284,7 @@ public class FeatureSpec implements Serializable {
             spec.output.exclude = Json.strings(out, "exclude");
             spec.output.groupBy = Json.string(out, "groupBy");
             spec.output.parentFields = Json.strings(out, "parentFields");
+            if (Json.string(out, "childName") != null) spec.output.childName = Json.string(out, "childName");
         }
         return spec;
     }
@@ -327,6 +331,7 @@ public class FeatureSpec implements Serializable {
         def.derive = Json.strings(o, "derive");
         def.cyclical = Json.bool(o, "cyclical", false);
         def.edges = doubles(o, "edges");
+        def.values = Json.strings(o, "values");
         def.baseline = Json.string(o, "baseline");
         def.on = Json.string(o, "on");
 

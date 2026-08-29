@@ -19,7 +19,7 @@ model that cannot be served.
 Supports:
 
 - **row** scope — expressions, calendar decomposition (optionally cyclical sin/cos), fixed-edge binning,
-  categorical crosses, residuals against a named baseline.
+  categorical crosses, per-value indicators, field equality, residuals against a named baseline.
 - **context** scope — statistics relative to the rows that co-occur in the same group (rank, z-score,
   share of total, gap to best, percentile, median difference, group size, value counts / ratios, entropy).
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
@@ -64,7 +64,7 @@ time; warnings and hints from the compiler are part of that report.
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static`; `fold` is not implemented yet), `groupBy` (entity name), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*). `minHistory` is accepted but not implemented yet (warning). |
-| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record). |
+| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream). |
 
 ### Sources contract
 
@@ -101,6 +101,8 @@ features:
   - {name: time_parts, scope: row, type: datetime, input: session_time, derive: [month, dayOfWeek], cyclical: true}
   - {name: price_bin, scope: row, type: bin, input: start_price, edges: [10, 50, 100]}
   - {name: cat_grade, scope: row, type: cross, inputs: [category, condition_grade]}
+  - {name: grade_is, scope: row, type: indicator, input: condition_grade, values: [good, fair]}   # grade_is_good, grade_is_fair (0/1)
+  - {name: kept_grade, scope: row, type: equals, inputs: [condition_grade, recent_all_condition_grade_lag1]}  # 1/0, null if either side is null
   - {name: vs_market, scope: row, type: residual, input: share, baseline: market, on: identity}
 
   - name: relative                  # context: inputs × ops, or ops with their own fields
@@ -132,6 +134,7 @@ features:
       - {type: sinceEvent, predicate: "sold = 1", unit: [events, days]}
       - {type: countMatch, predicate: "sold = 1"}
       - {type: aggregate, field: start_price, funcs: [count, mean, max]}
+      - {type: aggregate, funcs: [count]}        # COUNT(1): every visible past row, nulls included
 
   - name: enc                       # population: expanding encoding, keySets × windows × targets × stats
     scope: population
@@ -260,6 +263,17 @@ The same compiler is exposed without a pipeline run:
 - MCP tool `validate-feature` (arguments `config` or `parameters`, optional `name`, `inputSchema`, `args`,
   `streaming`, `format: text`).
 - Pipeline Builder agent tool `validateFeature`.
+
+## Performance and sizing
+
+- Keyed statistics (sequence `aggregate`, population encodings) are evaluated incrementally (O(n) per
+  key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
+  an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass
+  the stage (their columns are null). Other filters are evaluated per row over the window.
+- Each key's rows are gathered and sorted in one worker's memory. Budget roughly
+  `rows_of_largest_key × (input row size + projected history fields)`; a shrinkage encoding's global
+  level holds **every** row of the dataset on one worker (projected to the target fields only). For
+  datasets in the millions of rows prefer high-memory workers for the feature step.
 
 ## Limitations (current engine)
 

@@ -201,6 +201,11 @@ public class SequenceEvaluator implements Serializable {
 
     /** How one past row changes the running statistics; overridden by the population evaluator. */
     void contribute(final ColumnPlan plan, final Accumulator acc, final Past p, final int sign) {
+        if (plan.field == null) {
+            // field-less count: every visible past row counts, nulls included
+            acc.n += sign;
+            return;
+        }
         final Double v = FeatureValues.toDouble(p.values().get(plan.field));
         if (v == null) return;
         acc.n += sign;
@@ -354,6 +359,9 @@ public class SequenceEvaluator implements Serializable {
     }
 
     static Object aggregate(final String func, final List<Past> window, final String field, final OutputColumn c) {
+        if (field == null) {
+            return (long) window.size();
+        }
         final List<Double> values = new ArrayList<>();
         Object first = null, last = null;
         for (final Past p : window) {

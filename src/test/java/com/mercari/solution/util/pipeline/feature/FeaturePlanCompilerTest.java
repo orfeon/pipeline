@@ -271,7 +271,8 @@ public class FeaturePlanCompilerTest {
 
         final String cyclic = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / vs_market\"");
         final FeaturePlan plan = compile(SOURCES, cyclic);
-        Assertions.assertTrue(hasCode(plan, "reference.unresolved"), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "reference.cycle"), plan::describe);
+        Assertions.assertTrue(plan.getDiagnostics().hasErrors());
     }
 
     @Test
@@ -287,7 +288,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
         final OutputColumn lag = column(plan, "recent_n5_start_price_lag1");
         Assertions.assertTrue(lag.getInputs().contains("condition_grade"));
-        Assertions.assertEquals("condition_grade = $self.condition_grade", lag.getCoordinates().get("filter"));
+        // same-field equality filters are reduced to an additional partition key (kept as a filter otherwise)
+        Assertions.assertNull(lag.getCoordinates().get("filter"));
+        Assertions.assertEquals("seller_id,condition_grade", lag.getCoordinates().get("stageKeys"));
     }
 
     @Test
@@ -601,6 +604,68 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan pinned = compile(SOURCES, base.replace("refit: false", "refit: false, id: v42"));
         Assertions.assertEquals("v42", pinned.getArtifactVersion());
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "fit: {minHistory: P30D}\noutput:\n  prefix: f_")), "fit.minHistory"));
+    }
+
+    @Test
+    public void testEqualityFilterReducesToStageKey() {
+        final String spec = SPEC.replace("- {maxEvents: 5}", "- {filter: \"condition_grade = $self.condition_grade\"}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "sequence.filter.reduced"));
+        final OutputColumn lag = column(plan, "recent_all_start_price_lag1");
+        Assertions.assertEquals("seller_id,condition_grade", lag.getCoordinates().get("stageKeys"));
+        Assertions.assertNull(lag.getCoordinates().get("filter"));
+        Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.keys().equals(List.of("seller_id", "condition_grade"))), plan::describe);
+
+        // an outcome-derived filter field must NOT become a key (its value is unknown at the past row's key time)
+        final String outcomeFilter = SPEC.replace("- {maxEvents: 5}", "- {filter: \"sold = $self.sold\"}");
+        final FeaturePlan kept = compile(SOURCES, outcomeFilter);
+        Assertions.assertEquals("sold = $self.sold", column(kept, "recent_all_start_price_lag1").getCoordinates().get("filter"));
+    }
+
+    @Test
+    public void testFieldlessCountAndRowStringOps() {
+        final String spec = SPEC
+                .replace("- {type: lag, fields: [sold, start_price], k: 2}", "- {type: lag, fields: [sold, start_price], k: 2}\n      - {type: aggregate, funcs: [count]}")
+                .replace("- name: price_per_unit\n    scope: row\n    expr: \"start_price / quantity\"",
+                        "- name: price_per_unit\n    scope: row\n    expr: \"start_price / quantity\"\n  - {name: grade_is, scope: row, type: indicator, input: condition_grade, values: [good, fair]}\n  - {name: same_grade, scope: row, type: equals, inputs: [condition_grade, category]}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        // COUNT(1): counts every visible row (keys as past inputs → no shift for pre-event keys)
+        final OutputColumn countAll = column(plan, "recent_n5_count");
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, countAll.getStatus());
+        Assertions.assertNull(countAll.getCoordinates().get("field"));
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "grade_is_good").getFieldType().getType());
+        column(plan, "grade_is_fair");
+        column(plan, "same_grade");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("values: [good, fair]", "values: []")), "row.indicator.values"));
+    }
+
+    @Test
+    public void testCascadedDiagnosticsAndDeferredViolation() {
+        // paceX is not declared in any source: the lineage error is the root cause
+        final String spec = SPEC
+                .replace("- {fields: [sold, final_price], from: auction_results}", "- {fields: [sold, final_price, paceX], from: auction_results}")
+                .replace("expr: \"start_price / quantity\"", "expr: \"paceX * 2\"");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertTrue(hasCode(plan, "lineage.field"));
+        // the dependent block is reported as caused-by info, not as another error
+        final long unresolvedErrors = plan.getDiagnostics().get(Diagnostics.Level.error).stream()
+                .filter(m -> m.code().equals("reference.unresolved")).count();
+        Assertions.assertEquals(0, unresolvedErrors, plan::describe);
+        Assertions.assertTrue(plan.getDiagnostics().get(Diagnostics.Level.info).stream()
+                .anyMatch(m -> m.code().equals("reference.unresolved") && m.message().contains("paceX")), plan::describe);
+        // availability verdicts are deferred while blocks are unresolved (no misleading violation errors)
+        Assertions.assertFalse(hasCode(plan, "availability.violation"), plan::describe);
+    }
+
+    @Test
+    public void testGroupedChildName() {
+        final String spec = SPEC.replace("prefix: f_", "prefix: f_\n  groupBy: session\n  childName: entries");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals("entries", plan.getSpec().output.childName);
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("childName: entries", "childName: quantity")), "output.childName"));
     }
 
     @Test

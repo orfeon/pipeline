@@ -96,6 +96,17 @@ public class RowEvaluator implements Serializable {
                 }
                 yield sb.toString();
             }
+            case "indicator" -> {
+                final Object v = row.get(inputs.get(0));
+                yield v == null ? null : (c.coordinates.get("value").equals(v.toString()) ? 1L : 0L);
+            }
+            case "equals" -> {
+                final Object a = row.get(inputs.get(0));
+                final Object b = row.get(inputs.get(1));
+                if (a == null || b == null) yield null;
+                if (a instanceof Number x && b instanceof Number y) yield x.doubleValue() == y.doubleValue() ? 1L : 0L;
+                yield a.toString().equals(b.toString()) ? 1L : 0L;
+            }
             case "residual" -> residual(c, row);
             case "isnull" -> row.get(c.coordinates.get("indicatorOf")) == null;
             case "share" -> {

@@ -124,7 +124,7 @@ public final class FeatureStages {
                     .apply("Finalize_Group", GroupByKey.create())
                     .apply("Finalize", ParDo
                             .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, plan.getSpec().output.nullPolicy,
-                                    groupBy.keys(), plan.getSpec().output.parentFields, loggings, failFast, failureTag))
+                                    groupBy.keys(), plan.getSpec().output.parentFields, plan.getSpec().output.childName, loggings, failFast, failureTag))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
         }
         failures.add(finalized.get(failureTag));
@@ -553,7 +553,7 @@ public final class FeatureStages {
         for (final OutputColumn c : plan.getEmittedColumns()) {
             (c.getPlacement() == OutputColumn.Placement.parent ? parent : child).withField(c.toField());
         }
-        parent.withField(ROWS_FIELD, Schema.FieldType.array(Schema.FieldType.element(child.build())));
+        parent.withField(plan.getSpec().output.childName, Schema.FieldType.array(Schema.FieldType.element(child.build())));
         return parent.withType(outputType).build();
     }
 
@@ -940,17 +940,19 @@ public final class FeatureStages {
         private final Schema outputSchema;
         private final List<String> keys;
         private final List<String> parentFields;
+        private final String childName;
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
         GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
-                            final List<String> keys, final List<String> parentFields,
+                            final List<String> keys, final List<String> parentFields, final String childName,
                             final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy);
             this.outputSchema = outputSchema;
             this.keys = keys;
             this.parentFields = parentFields;
+            this.childName = childName;
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
@@ -985,7 +987,7 @@ public final class FeatureStages {
                     children.add(finalizer.outputValues(e.asPrimitiveMap(), childInputs, OutputColumn.Placement.child));
                     if (e.getTimestamp().isAfter(ts)) ts = e.getTimestamp();
                 }
-                parent.put(ROWS_FIELD, children);
+                parent.put(childName, children);
                 final MElement output = MElement.of(outputSchema, parent, ts).convert(outputSchema);
                 c.outputWithTimestamp(output, ts);
                 Logging.log(LOG, logs, "output", output);

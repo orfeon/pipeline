@@ -46,6 +46,10 @@ public final class FeaturePlanCompiler {
     private final Map<String, EntityDef> entities = new LinkedHashMap<>();
     private final Map<String, ContextDef> contexts = new LinkedHashMap<>();
     private final Map<String, String> baselineColumns = new LinkedHashMap<>();
+    /** Input fields whose lineage declaration failed: references to them are secondary errors. */
+    private final Set<String> lineageMissing = new LinkedHashSet<>();
+    /** True when at least one block could not be expanded (availability verdicts are then deferred). */
+    private boolean unresolvedBlocks = false;
     private int anonymousCounter = 0;
 
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
@@ -88,6 +92,7 @@ public final class FeaturePlanCompiler {
             final SourceContract source = sources.get(entry.from());
             if (source == null) {
                 diagnostics.error("lineage.source", "lineage", "unknown source: " + entry.from());
+                lineageMissing.addAll(entry.fields());
                 continue;
             }
             final String eventTime = entry.eventTime() != null ? entry.eventTime() : source.getEventTime();
@@ -100,6 +105,7 @@ public final class FeaturePlanCompiler {
                 final FieldContract field = source.getField(fieldName);
                 if (field == null) {
                     diagnostics.error("lineage.field", "lineage." + entry.from(), "field not declared in source: " + fieldName);
+                    lineageMissing.add(fieldName);
                     continue;
                 }
                 if (inputFields.containsKey(fieldName)) {
@@ -150,6 +156,9 @@ public final class FeaturePlanCompiler {
             diagnostics.error("output.groupBy", "output", "output.groupBy must reference a context: " + spec.output.groupBy);
         }
         for (final String f : spec.output.parentFields) requireInputField(f, "output.parentFields");
+        if (spec.output.groupBy != null && inputFields.containsKey(spec.output.childName)) {
+            diagnostics.error("output.childName", "output", "output.childName collides with input field: " + spec.output.childName);
+        }
         final Set<String> names = new HashSet<>();
         for (final FeatureDef def : spec.features) {
             if (!names.add(def.name)) diagnostics.error("features.duplicate", def.location(), "duplicate feature name");
@@ -198,10 +207,36 @@ public final class FeaturePlanCompiler {
                 }
             }
         }
+        // a reference into another failed block is also a secondary failure, not a fresh error
+        final Set<String> failedBlocks = new LinkedHashSet<>();
         for (final Pending p : pending) {
-            final List<String> unresolved = p.references.stream().filter(r -> !resolves(r)).sorted().toList();
+            final int dot = p.name.indexOf('.');
+            if (dot > 0) failedBlocks.add(p.name.substring(dot + 1));
+        }
+        for (final Pending p : pending) {
+            unresolvedBlocks = true;
+            final List<String> unresolved = new ArrayList<>();
+            final List<String> causedByLineage = new ArrayList<>();
+            for (final String r : p.references.stream().filter(r -> !resolves(r)).sorted().toList()) {
+                final boolean secondary = lineageMissing.contains(r)
+                        || failedBlocks.stream().anyMatch(b -> r.equals(b) || r.startsWith(b + "_") || r.startsWith(b + "."));
+                (secondary ? causedByLineage : unresolved).add(r);
+            }
+            if (!causedByLineage.isEmpty() && unresolved.isEmpty() && !lineageMissing.isEmpty()) {
+                // secondary failure: the root cause is the lineage error already reported
+                diagnostics.info("reference.unresolved", p.name,
+                        "not expanded (caused by earlier errors on: " + causedByLineage + ")");
+                continue;
+            }
+            if (unresolved.isEmpty()) {
+                // no root cause elsewhere: this is a dependency cycle between the failed blocks
+                diagnostics.error("reference.cycle", p.name,
+                        "dependency cycle with " + causedByLineage);
+                continue;
+            }
             diagnostics.error("reference.unresolved", p.name,
-                    "unresolved references (unknown name or dependency cycle): " + unresolved);
+                    "unresolved references (unknown name or dependency cycle): " + unresolved
+                            + (causedByLineage.isEmpty() ? "" : "; caused by: " + causedByLineage));
         }
     }
 
@@ -497,6 +532,29 @@ public final class FeaturePlanCompiler {
                 for (final String in : def.inputs) addSelfInput(c, in);
                 finishRow(c, def);
             }
+            case "indicator" -> {
+                final String input = singleInput(def);
+                if (input == null) return;
+                if (def.values.isEmpty()) {
+                    diagnostics.error("row.indicator.values", loc, "indicator requires 'values' (the categories to flag)");
+                    return;
+                }
+                for (final String value : def.values) {
+                    final OutputColumn c = newColumn(def.name, Scope.row, "indicator", def.name + "_" + value, Schema.FieldType.INT64, computeAt);
+                    c.coordinates.put("value", value);
+                    addSelfInput(c, input);
+                    finishRow(c, def);
+                }
+            }
+            case "equals" -> {
+                if (def.inputs.size() != 2) {
+                    diagnostics.error("row.equals.inputs", loc, "equals requires exactly two 'inputs'");
+                    return;
+                }
+                final OutputColumn c = newColumn(def.name, Scope.row, "equals", def.name, Schema.FieldType.INT64, computeAt);
+                for (final String in : def.inputs) addSelfInput(c, in);
+                finishRow(c, def);
+            }
             case "residual" -> {
                 final String input = singleInput(def);
                 if (input == null) return;
@@ -634,7 +692,14 @@ public final class FeaturePlanCompiler {
         }
         final List<Window> windows = def.windows.isEmpty() ? List.of(new Window()) : def.windows;
         for (final Window window : windows) {
-            final References filterRefs = window.filter == null ? null : expressionReferences(window.filter);
+            // a same-field $self equality filter is a partition of the entity: reduce it to a stage key
+            // so hot entities are split across workers (rows whose field is null bypass the stage → null)
+            final String reducedKey = reducibleFilterField(window, computeAt);
+            final References filterRefs = window.filter == null || reducedKey != null ? null : expressionReferences(window.filter);
+            if (reducedKey != null) {
+                diagnostics.info("sequence.filter.reduced", loc,
+                        "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")");
+            }
             for (final Op op : def.ops) {
                 final Operator operator = OperatorCatalog.get(Scope.sequence, op.type);
                 if (operator == null) {
@@ -661,12 +726,21 @@ public final class FeaturePlanCompiler {
                         c.coordinates.put("predicate", op.predicate);
                         if (!unit.isEmpty()) c.coordinates.put("unit", unit);
                         for (final String r : refs.others) addPastInput(c, r);
-                        finishSequence(c, def, entity, window, filterRefs, op);
+                        finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                     }
                     continue;
                 }
                 if (fields.isEmpty()) {
-                    diagnostics.error("sequence.fields", loc, "op " + op.type + " requires 'field' / 'fields' / 'expr'");
+                    // COUNT(1): a field-less aggregate counts every visible past row, nulls included
+                    if ("aggregate".equals(op.type) && (op.funcs.isEmpty() || op.funcs.equals(List.of("count")))) {
+                        final OutputColumn c = newColumn(def.name, Scope.sequence, op.type,
+                                def.name + "_" + window.token() + "_count", Schema.FieldType.INT64, computeAt);
+                        c.coordinates.put("func", "count");
+                        for (final String key : entity.keys()) addPastInput(c, key);
+                        finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
+                        continue;
+                    }
+                    diagnostics.error("sequence.fields", loc, "op " + op.type + " requires 'field' / 'fields' / 'expr' (only 'aggregate' with funcs: [count] may omit them)");
                     continue;
                 }
                 for (final String field : fields) {
@@ -684,7 +758,7 @@ public final class FeaturePlanCompiler {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "lag" + i, ref.type(), computeAt);
                                 c.coordinates.put("k", Integer.toString(i));
                                 c.coordinates.put("field", field); addPastInput(c, field);
-                                finishSequence(c, def, entity, window, filterRefs, op);
+                                finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
                         case "delta" -> {
@@ -692,14 +766,14 @@ public final class FeaturePlanCompiler {
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "delta" + k, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("k", Integer.toString(k));
                             c.coordinates.put("field", field); addPastInput(c, field);
-                            finishSequence(c, def, entity, window, filterRefs, op);
+                            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "trend" -> {
                             final int k = op.k == null ? 5 : op.k;
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "trend" + k, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("k", Integer.toString(k));
                             c.coordinates.put("field", field); addPastInput(c, field);
-                            finishSequence(c, def, entity, window, filterRefs, op);
+                            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "ewma" -> {
                             if (op.halflife.isEmpty()) {
@@ -713,7 +787,7 @@ public final class FeaturePlanCompiler {
                                 c.coordinates.put("halflife", number(h));
                                 c.coordinates.put("decayBy", decayBy);
                                 c.coordinates.put("field", field); addPastInput(c, field);
-                                finishSequence(c, def, entity, window, filterRefs, op);
+                                finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
                         case "runLength" -> {
@@ -721,7 +795,7 @@ public final class FeaturePlanCompiler {
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "runlength", Schema.FieldType.INT64, computeAt);
                             c.coordinates.put("value", String.valueOf(op.value));
                             c.coordinates.put("field", field); addPastInput(c, field);
-                            finishSequence(c, def, entity, window, filterRefs, op);
+                            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "aggregate" -> {
                             final List<String> funcs = op.funcs.isEmpty() ? List.of("count", "mean") : op.funcs;
@@ -738,7 +812,7 @@ public final class FeaturePlanCompiler {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 c.coordinates.put("func", func);
                                 c.coordinates.put("field", field); addPastInput(c, field);
-                                finishSequence(c, def, entity, window, filterRefs, op);
+                                finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
                         default -> diagnostics.error("sequence.op", loc, "unsupported sequence op: " + op.type);
@@ -746,6 +820,19 @@ public final class FeaturePlanCompiler {
                 }
             }
         }
+    }
+
+    /** The filter field when the window filter is a same-field {@code $self} equality over a safe field. */
+    private String reducibleFilterField(final Window window, final AvailableAt computeAt) {
+        if (window.filter == null) return null;
+        final java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\\$self\\.([A-Za-z_][A-Za-z0-9_]*)\\s*$")
+                .matcher(window.filter);
+        if (!m.matches() || !m.group(1).equals(m.group(2))) return null;
+        final Ref ref = resolve(m.group(1));
+        // keying reads the past row's value at its own time: only safe for fields already available then
+        if (ref == null || isOutcomeLike(ref) || !ref.availableAt().isStaticallyAtOrBefore(computeAt)) return null;
+        return m.group(1);
     }
 
     private boolean isOutcomeLike(final Ref ref) {
@@ -795,12 +882,19 @@ public final class FeaturePlanCompiler {
      * by δ' − computeOffset (or prove safety via minInterval); otherwise the engine filters per row.
      */
     private void finishSequence(final OutputColumn c, final FeatureDef def, final EntityDef entity,
-                                final Window window, final References filterRefs, final Op op) {
+                                final Window window, final References filterRefs, final String reducedKey, final Op op) {
         c.coordinates.put("entity", entity.name());
         c.coordinates.put("window", window.token());
         if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
         if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
-        if (window.filter != null) c.coordinates.put("filter", window.filter);
+        if (reducedKey != null) {
+            final List<String> stageKeys = new ArrayList<>(entity.keys());
+            stageKeys.add(reducedKey);
+            c.coordinates.put("stageKeys", String.join(",", stageKeys));
+            addSelfInput(c, reducedKey);
+        } else if (window.filter != null) {
+            c.coordinates.put("filter", window.filter);
+        }
         // self-side inputs: entity keys and $self fields of the filter
         for (final String key : entity.keys()) addSelfInput(c, key);
         if (filterRefs != null) {
@@ -1452,6 +1546,12 @@ public final class FeaturePlanCompiler {
                     c.intermediate = true;
                     diagnostics.info("availability.intermediate", loc,
                             c.canonicalName + " is available at " + c.availableAt.describe() + " > computeAt " + c.computeAt.describe() + "; kept as intermediate '_' column only");
+                } else if (unresolvedBlocks) {
+                    // a failed block may have been this column's consumer: defer the verdict to the next compile
+                    lint = true;
+                    c.intermediate = true;
+                    diagnostics.info("availability.deferred", loc,
+                            c.canonicalName + " is available after computeAt; the check is deferred because other blocks failed to expand (they may consume it as an intermediate)");
                 } else {
                     diagnostics.error("availability.violation", loc,
                             "output column " + c.canonicalName + " is available at " + c.availableAt.describe() + ", after computeAt " + c.computeAt.describe());
@@ -1552,8 +1652,12 @@ public final class FeaturePlanCompiler {
                 stageKeys = context == null ? List.of() : context.keys();
             } else if (c.scope == Scope.sequence) {
                 k = FeaturePlan.StageKind.sequence;
-                final EntityDef entity = entities.get(c.coordinates.get("entity"));
-                stageKeys = entity == null ? List.of() : entity.keys();
+                if (c.coordinates.containsKey("stageKeys")) {
+                    stageKeys = List.of(c.coordinates.get("stageKeys").split(","));
+                } else {
+                    final EntityDef entity = entities.get(c.coordinates.get("entity"));
+                    stageKeys = entity == null ? List.of() : entity.keys();
+                }
             } else if ("static".equals(c.coordinates.get("fit"))) {
                 // fitted statistics are applied by lookup: no key change
                 k = FeaturePlan.StageKind.fit;
