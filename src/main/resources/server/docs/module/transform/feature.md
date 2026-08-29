@@ -63,7 +63,7 @@ time; warnings and hints from the compiler are part of that report.
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
-| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static`; `fold` is not implemented yet), `groupBy` (entity name), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*). `minHistory` is accepted but not implemented yet (warning). |
+| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
 | output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream). |
 
 ### Sources contract
@@ -170,6 +170,30 @@ for the current plan hash already exists it is loaded at worker setup instead of
 forces a new fit) — this is the serving path: the same config, run on request data, applies the fitted
 statistics without any history. Streaming runs require an existing artifact. Paths use the Beam
 filesystems (`gs://`, `s3://`, relative local paths).
+
+### Out-of-fold fits (fit.mode fold)
+
+```yaml
+  fit:
+    mode: fold
+    folds: 5                                      # default 5
+    groupBy: seller                               # fold unit = this entity's keys (optional)
+    artifact: {uri: "gs://bucket/features"}       # optional: the whole-input statistics, for a static serving run
+```
+
+`fold` fits the same lattice statistics as `static` over the whole input but applies to every row the
+statistics **without the row's own fold** (cross-fitting): the row's fold is a deterministic hash of
+its fold unit — the `groupBy` entity's keys, or, without `groupBy`, the row identity
+(`time.field` + `time.orderTieBreak`; `time.field` alone when no tie-break is declared, with a warning —
+rows sharing a timestamp then share a fold).
+Rows whose fold-unit fields are null get the full statistics. Unlike `expanding`, the other folds contain
+rows *after* the current one, so this is the classic target-encoding cross-fit for i.i.d. training data,
+not a time-ordered backfill; when a key set's key derives from a past outcome, `fit.groupBy` is
+required so that an entity's own rows never leak across folds. Windows are ignored as in `static`.
+With `artifact.uri` the whole-input (not out-of-fold) statistics are persisted exactly as `static`
+would; pin the version with `artifact.id` so a serving config with `mode: static` (a different plan
+hash) loads them. A fold run itself always re-fits (it needs the per-fold tags, which an artifact does
+not hold).
 
 ### Factorization (population, type: factorization)
 
@@ -305,7 +329,7 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
 
 - Batch only for sequence / population features (per-key time-ordered replay). Row / context features also
   run in streaming within the configured window.
-- `fit.mode: fold`, key set `structure: sequence`, nested encoding targets, the `quantile` stat (and
+- Key set `structure: sequence`, nested encoding targets, the `quantile` stat (and
   `distribution` in static mode), and population types other than `encoding` / `factorization` are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`, and non-static fits. In `shrinkage`,
   `estimator: joint`, `weights: heldOut` and an `offset` on a logit / log scale are rejected;

@@ -139,6 +139,8 @@ public class FeatureSpec implements Serializable {
         public FitMode mode = FitMode.expanding;
         public Duration minHistory;
         public String groupBy;
+        /** Number of folds for {@code fit.mode: fold} (out-of-fold statistics). */
+        public Integer folds = 5;
         /** Root URI of fit artifacts ({@code <uri>/<planHash>/<block>.avro}); null = fit in-pipeline only. */
         public String artifactUri;
         /** Re-fit and overwrite even when an artifact for the plan hash exists. */
@@ -267,6 +269,7 @@ public class FeatureSpec implements Serializable {
             spec.fit.mode = parseFitMode(Json.string(fit, "mode"), diagnostics, "fit");
             spec.fit.minHistory = Json.duration(fit, "minHistory", null, diagnostics, "fit");
             spec.fit.groupBy = Json.string(fit, "groupBy");
+            if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
             FitSpec.parseArtifact(fit, spec.fit);
         }
 

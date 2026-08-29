@@ -1120,14 +1120,29 @@ public final class FeaturePlanCompiler {
             if (SourceContract.Json.string(defFit, "groupBy") != null) groupBy = SourceContract.Json.string(defFit, "groupBy");
             FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
         }
-        if (mode == FitMode.fold) {
-            diagnostics.error("fit.mode.unsupported", loc, "fit.mode fold is not implemented yet (expanding | static)");
+        Integer folds = spec.fit.folds;
+        if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
+        if (mode == FitMode.fold && folds < 2) {
+            diagnostics.error("fit.folds", loc, "fit.folds must be at least 2: " + folds);
+            folds = 2;
         }
-        final boolean isStatic = mode == FitMode.statik;
-        if (isStatic) {
+        fitSpec.groupBy = groupBy;
+        fitSpec.folds = folds;
+        // static and fold both fit sufficient statistics over the input and apply them by lookup; fold
+        // subtracts the row's own fold so a row never sees its own contribution (out-of-fold statistics)
+        final boolean isStatic = mode == FitMode.statik || mode == FitMode.fold;
+        if (mode == FitMode.statik) {
             diagnostics.info("fit.mode.static", loc, "fit.mode static fits the statistics on the whole input"
                     + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persists them under " + fitSpec.artifactUri + "/<planHash>/")
                     + "; training rows include their own outcome, so use expanding for leak-safe backfill and static for serving / offline analysis");
+        } else if (mode == FitMode.fold) {
+            diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
+                    + (groupBy == null ? "row identity (time.field + orderTieBreak)" : "entity " + groupBy) + "): a row never sees its own fold, "
+                    + "but the other folds include rows AFTER it (cross-fit, not time-ordered)"
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+            if (groupBy == null && spec.orderTieBreak.isEmpty()) {
+                diagnostics.warning("fit.fold.identity", loc, "fit.mode fold without fit.groupBy or time.orderTieBreak assigns folds by time.field alone (rows sharing a timestamp share a fold); declare time.orderTieBreak for a row identity");
+            }
         }
         if (isStatic && def.keySets.stream().anyMatch(ks -> !ks.windows.isEmpty())) {
             diagnostics.warning("fit.mode.static.windows", loc, "keySet windows are ignored in fit.mode static (statistics cover the whole input)");
@@ -1461,9 +1476,9 @@ public final class FeaturePlanCompiler {
                 "block", def.name, "keys", token, "window", window == null ? "" : window.token(), "target", targetName));
         final String nName = base + "__n";
         final String sumName = base + "__sum";
-        final boolean isStatic = mode == FitMode.statik;
+        final boolean isStatic = mode == FitMode.statik || mode == FitMode.fold;
         if (!columnsByCanonical.containsKey(nName)) {
-            // static fits also keep Σy² so std can be derived from the artifact
+            // static / fold fits also keep Σy² so std can be derived from the artifact
             for (final String stat : isStatic ? new String[]{"count", "sum", "sumsq"} : new String[]{"count", "sum"}) {
                 final String name = switch (stat) { case "count" -> nName; case "sum" -> sumName; default -> base + "__sumsq"; };
                 if (!"count".equals(stat) && targetReference == null) continue;
@@ -1485,9 +1500,24 @@ public final class FeaturePlanCompiler {
                                   final String stat, final String offsetColumn, final FitMode mode, final FeatureDef def,
                                   final FeatureSpec.FitSpec fitSpec) {
         c.fitted = true;
-        if (mode == FitMode.statik) {
+        final boolean lookup = mode == FitMode.statik || mode == FitMode.fold;
+        if (lookup) {
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
+        }
+        if (mode == FitMode.fold) {
+            // fold unit: the groupBy entity's keys, else the row identity (time.field + orderTieBreak; time.field
+            // alone without a tie-break, so rows sharing a timestamp share a fold). Read at apply time only —
+            // not a lineage input of the column (hashing must never involve outcome fields)
+            final List<String> foldKeys = new ArrayList<>();
+            if (fitSpec.groupBy != null && entities.containsKey(fitSpec.groupBy)) {
+                foldKeys.addAll(entities.get(fitSpec.groupBy).keys());
+            } else {
+                foldKeys.add(spec.timeField);
+                foldKeys.addAll(spec.orderTieBreak);
+            }
+            c.coordinates.put("foldKeys", String.join(",", foldKeys));
+            c.coordinates.put("folds", String.valueOf(fitSpec.folds));
         }
         c.coordinates.put("keys", String.join(",", ks.keys));
         if (window != null) {
@@ -1516,7 +1546,7 @@ public final class FeaturePlanCompiler {
             for (final String sf : fr.self) addSelfInput(c, sf);
             for (final String o : fr.others) addPastInput(c, o);
         }
-        if (mode == FitMode.statik) {
+        if (lookup) {
             // the fitted statistics are an artifact available at computeAt by declaration (§6.1 fit boundary)
             final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
             c.availableAt = AvailableAt.max(selfSide, c.computeAt);
@@ -1676,7 +1706,7 @@ public final class FeaturePlanCompiler {
                     final EntityDef entity = entities.get(c.coordinates.get("entity"));
                     stageKeys = entity == null ? List.of() : entity.keys();
                 }
-            } else if ("static".equals(c.coordinates.get("fit"))) {
+            } else if (("static".equals(c.coordinates.get("fit")) || "fold".equals(c.coordinates.get("fit")))) {
                 // fitted statistics are applied by lookup: no key change
                 k = FeaturePlan.StageKind.fit;
                 stageKeys = List.of();

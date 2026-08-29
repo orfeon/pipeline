@@ -189,9 +189,13 @@ public final class FeatureStages {
 
     /** One fitted lattice level of a static block: hidden columns it fills and how its statistics are keyed. */
     record FitLevel(String block, String id, String sumColumn, String sumSqColumn, List<String> keys, String field,
-                    String offsetColumn, String artifactUri, boolean refit) implements Serializable {
+                    String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds) implements Serializable {
         VarianceComponents.LevelSpec spec() {
-            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn);
+            return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds);
+        }
+        /** fit.mode fold: out-of-fold statistics, always fitted in-pipeline (an artifact only holds the totals). */
+        boolean isFold() {
+            return foldKeys != null;
         }
     }
 
@@ -200,19 +204,23 @@ public final class FeatureStages {
         final Set<String> names = new HashSet<>();
         for (final OutputColumn c : stageColumns) names.add(c.getCanonicalName());
         for (final OutputColumn c : stageColumns) {
-            if (c.getScope() != Scope.population || !"encoding".equals(c.getOperator()) || !"static".equals(c.getCoordinates().get("fit"))) continue;
+            final String fit = c.getCoordinates().get("fit");
+            if (c.getScope() != Scope.population || !"encoding".equals(c.getOperator()) || !("static".equals(fit) || "fold".equals(fit))) continue;
             final String name = c.getCanonicalName();
             final String base = name.substring(0, name.lastIndexOf("__"));
             final String id = base + "__n";
             if (levels.containsKey(id)) continue;
             final String keys = c.getCoordinates().getOrDefault("keys", "");
             final String offset = c.getCoordinates().containsKey("offset") ? "__baseline_" + c.getCoordinates().get("offset") : null;
+            final String foldKeys = c.getCoordinates().get("foldKeys");
             levels.put(id, new FitLevel(c.getBlock(), id,
                     names.contains(base + "__sum") ? base + "__sum" : null,
                     names.contains(base + "__sumsq") ? base + "__sumsq" : null,
                     keys.isEmpty() ? List.of() : List.of(keys.split(",")),
                     c.getCoordinates().get("field"), offset,
-                    c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit"))));
+                    c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
+                    "fold".equals(fit) ? List.of(foldKeys.split(",")) : null,
+                    "fold".equals(fit) ? Integer.parseInt(c.getCoordinates().get("folds")) : 0));
         }
         return new ArrayList<>(levels.values());
     }
@@ -231,7 +239,8 @@ public final class FeatureStages {
         final Map<String, String> writeBlocks = new LinkedHashMap<>();
         for (final FitLevel level : levels) {
             final String uri = level.artifactUri();
-            if (uri != null && !level.refit() && FitArtifact.exists(uri, planHash, level.block())) {
+            // fold levels are always fitted: the per-fold tags cannot come from an artifact (which holds totals)
+            if (uri != null && !level.refit() && !level.isFold() && FitArtifact.exists(uri, planHash, level.block())) {
                 loadBlocks.put(level.block(), uri);
                 continue;
             }
@@ -571,6 +580,14 @@ public final class FeatureStages {
                         final String entry = FitArtifact.entryKey(level.id(), key);
                         stats = loaded.get(entry);
                         if (stats == null) stats = fitted.get(entry);
+                        if (level.isFold() && stats != null) {
+                            // out-of-fold: remove the row's own fold from the totals
+                            final String unit = FeatureValues.key(values, level.foldKeys());
+                            if (unit != null) {
+                                stats = VarianceComponents.subtract(stats,
+                                        fitted.get(VarianceComponents.foldEntry(VarianceComponents.foldOf(unit, level.folds()), entry)));
+                            }
+                        }
                     }
                     values.put(level.id(), stats == null ? 0d : stats.n);
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);

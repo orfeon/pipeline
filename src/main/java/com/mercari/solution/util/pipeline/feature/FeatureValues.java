@@ -13,7 +13,7 @@ import java.util.Map;
  * Value helpers shared by the stage evaluators. Rows are primitive maps ({@code MElement.asPrimitiveMap()}
  * convention: timestamps are epoch microseconds) keyed by canonical column names.
  */
-final class FeatureValues {
+public final class FeatureValues {
 
     static final String SELF_PREFIX = "__self_";
 
@@ -106,7 +106,7 @@ final class FeatureValues {
     }
 
     /** Group key from key field values; null when any component is null (the row skips keyed processing). */
-    static String key(final Map<String, Object> row, final List<String> keys) {
+    public static String key(final Map<String, Object> row, final List<String> keys) {
         final StringBuilder sb = new StringBuilder();
         for (final String k : keys) {
             final Object v = row.get(k);
