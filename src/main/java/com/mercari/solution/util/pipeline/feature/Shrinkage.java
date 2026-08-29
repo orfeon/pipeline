@@ -83,7 +83,11 @@ public final class Shrinkage implements Serializable {
             if (type != null && !"bayesian".equals(type)) {
                 diagnostics.error("encoding.smoothing.type", location, "smoothing.type must be bayesian (use shrinkage for the general form)");
             }
-            if (Json.string(legacySmoothing, "priorWeight") != null) priorWeight = Double.parseDouble(Json.string(legacySmoothing, "priorWeight"));
+            try {
+                if (Json.string(legacySmoothing, "priorWeight") != null) priorWeight = Double.parseDouble(Json.string(legacySmoothing, "priorWeight"));
+            } catch (final NumberFormatException e) {
+                diagnostics.error("encoding.smoothing.priorWeight", location, "smoothing.priorWeight must be numeric");
+            }
         }
         for (final JsonObject o : new JsonObject[]{block, override}) {
             if (o == null) continue;
@@ -110,7 +114,11 @@ public final class Shrinkage implements Serializable {
                 }
             }
             if (Json.string(o, "priorWeight") != null) {
-                priorWeight = Double.parseDouble(Json.string(o, "priorWeight"));
+                try {
+                    priorWeight = Double.parseDouble(Json.string(o, "priorWeight"));
+                } catch (final NumberFormatException e) {
+                    diagnostics.error("encoding.shrinkage.priorWeight", location, "priorWeight must be numeric");
+                }
                 if (priorWeight < 0) diagnostics.error("encoding.shrinkage.priorWeight", location, "priorWeight must be >= 0");
             }
             final String s = Json.string(o, "scale");
@@ -204,7 +212,7 @@ public final class Shrinkage implements Serializable {
         final double leafN = n(row, levels.get(0).nColumn());
         final double leafSum = n(row, levels.get(0).sumColumn());
         final double[] effectiveN = new double[1];
-        final Double est = estimate(row, levels, 0, leafN, leafSum, deviations, effectiveN, lambdas);
+        final Double est = estimate(row, levels, 0, leafN, leafSum, deviations, effectiveN, lambdas, false);
         return new Composition(est == null ? null : inverse(est), deviations, est == null ? null : effectiveN[0]);
     }
 
@@ -216,17 +224,19 @@ public final class Shrinkage implements Serializable {
 
     private Double estimate(final Map<String, Object> row, final List<Level> levels, final int index,
                             final double looN, final double looSum, final Double[] deviations, final double[] effectiveN,
-                            final Map<String, Double> lambdas) {
+                            final Map<String, Double> lambdas, final boolean subtractLeaf) {
         final Level level = levels.get(index);
         if (level.isAdditive()) {
-            // sequential estimator: parent of the cell is the additive prediction of the main effects
-            final Double root = estimate(row, levels, index + 1, looN, looSum, deviations, effectiveN, lambdas);
+            // sequential estimator: parent of the cell is the additive prediction of the main effects.
+            // every main-effect level also contains the cell's rows, so leave-node-out subtracts the leaf
+            // statistics at every level of the main chains (subtractLeaf = true).
+            final Double root = estimate(row, levels, index + 1, looN, looSum, deviations, effectiveN, lambdas, false);
             if (root == null) return null;
             double sum = root;
             for (final List<Level> main : level.mainEffects()) {
                 final Double[] mainDev = new Double[main.size()];
                 final double[] ignored = new double[1];
-                final Double mainEst = estimate(row, main, 0, 0, 0, mainDev, ignored, lambdas);
+                final Double mainEst = estimate(row, main, 0, looN, looSum, mainDev, ignored, lambdas, true);
                 if (mainEst != null) sum += mainEst - root;
             }
             deviations[index] = sum - root;
@@ -234,7 +244,7 @@ public final class Shrinkage implements Serializable {
         }
         double n = n(row, level.nColumn());
         double s = n(row, level.sumColumn());
-        if (index > 0 && leaveNodeOut) {
+        if ((index > 0 || subtractLeaf) && leaveNodeOut) {
             n -= looN;
             s -= looSum;
         }
@@ -243,7 +253,7 @@ public final class Shrinkage implements Serializable {
             effectiveN[0] = n;
             return own;
         }
-        final Double parent = estimate(row, levels, index + 1, looN, looSum, deviations, effectiveN, lambdas);
+        final Double parent = estimate(row, levels, index + 1, looN, looSum, deviations, effectiveN, lambdas, subtractLeaf);
         if (own == null) {
             deviations[index] = 0d;
             return parent;

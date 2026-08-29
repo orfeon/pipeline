@@ -48,6 +48,11 @@ public class PopulationEvaluator extends SequenceEvaluator {
             acc.n += sign;
             return;
         }
+        if ("count".equals(plan.stat)) {
+            // count matches the scan path: non-null target values, regardless of type or offset
+            if (p.values().get(plan.field) != null) acc.n += sign;
+            return;
+        }
         if ("distribution".equals(plan.stat)) {
             final Object v = p.values().get(plan.field);
             if (v == null) return;
@@ -73,7 +78,7 @@ public class PopulationEvaluator extends SequenceEvaluator {
         final double n = acc == null ? 0 : acc.n;
         return switch (plan.stat) {
             case "count" -> (long) n;
-            case "sum" -> acc == null ? 0d : acc.sum;
+            case "sum" -> acc == null || acc.n == 0 ? 0d : acc.sum;
             case "mean", "rate" -> n == 0 ? null : acc.sum / n;
             case "std" -> {
                 if (n < 2) yield null;

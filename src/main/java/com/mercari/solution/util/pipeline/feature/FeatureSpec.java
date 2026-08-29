@@ -412,9 +412,13 @@ public class FeatureSpec implements Serializable {
         }
         if (o.has("als") && o.get("als").isJsonObject()) {
             final JsonObject als = o.getAsJsonObject("als");
-            def.epochs = Json.integer(als, "epochs");
-            def.reg = Json.string(als, "reg") == null ? null : Double.parseDouble(Json.string(als, "reg"));
-            def.seed = Json.string(als, "seed") == null ? null : Long.parseLong(Json.string(als, "seed"));
+            try {
+                def.epochs = Json.integer(als, "epochs");
+                def.reg = Json.string(als, "reg") == null ? null : Double.parseDouble(Json.string(als, "reg"));
+                def.seed = Json.string(als, "seed") == null ? null : Long.parseLong(Json.string(als, "seed"));
+            } catch (final RuntimeException e) {
+                diagnostics.error("factorization.als", loc, "als.epochs / reg / seed must be numeric: " + als);
+            }
         }
         def.fitJson = o.has("fit") && o.get("fit").isJsonObject() ? o.get("fit").toString() : null;
         return def;

@@ -137,7 +137,8 @@ public class ContextEvaluator implements Serializable {
                 return x - others.stream().mapToDouble(d -> d).max().orElse(Double.NaN);
             }
             case "shareOfTotal", "share" -> {
-                final double sum = others.stream().mapToDouble(d -> d).sum() + (excludeSelf ? x : 0);
+                // excludeSelf: share relative to the OTHER rows' total (otherwise the group total incl. self)
+                final double sum = others.stream().mapToDouble(d -> d).sum();
                 return sum == 0 ? null : x / sum;
             }
             case "percentile" -> {

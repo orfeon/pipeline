@@ -32,7 +32,10 @@ public final class FeaturePlanService {
         final JsonObject copy = parameters.deepCopy();
         final JsonElement sources = loadDocument(copy, "sources", templateArgs);
         final JsonElement features = loadDocument(copy, "features", templateArgs);
-        if (features != null && features.isJsonArray()) {
+        if (features != null) {
+            if (!features.isJsonArray()) {
+                throw new IllegalArgumentException("the referenced features document must be a list (or contain a top-level features list)");
+            }
             copy.add("features", features);
         }
         return new Documents(sources, copy);
@@ -75,17 +78,23 @@ public final class FeaturePlanService {
         if (request.has("parameters") && request.get("parameters").isJsonObject()) {
             parameters = request.getAsJsonObject("parameters");
         } else if (request.has("transforms") && request.get("transforms").isJsonArray()) {
+            // a whole config also carries the PIPELINE name at the top level: use `name` as a step selector
+            // only when it actually names a feature transform, otherwise take the first feature step
             final String name = request.has("name") && request.get("name").isJsonPrimitive() ? request.get("name").getAsString() : null;
+            JsonObject first = null;
+            JsonObject named = null;
             for (final JsonElement e : request.getAsJsonArray("transforms")) {
                 if (!e.isJsonObject()) continue;
                 final JsonObject step = e.getAsJsonObject();
                 final boolean isFeature = step.has("module") && "feature".equals(step.get("module").getAsString());
-                final boolean matches = name == null || (step.has("name") && name.equals(step.get("name").getAsString()));
-                if (isFeature && matches && step.has("parameters")) {
-                    parameters = step.getAsJsonObject("parameters");
+                if (!isFeature || !step.has("parameters")) continue;
+                if (first == null) first = step.getAsJsonObject("parameters");
+                if (name != null && step.has("name") && name.equals(step.get("name").getAsString())) {
+                    named = step.getAsJsonObject("parameters");
                     break;
                 }
             }
+            parameters = named != null ? named : first;
         }
         if (parameters == null) {
             response.addProperty("ok", false);

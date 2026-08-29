@@ -60,7 +60,7 @@ public class SequenceIncrementalTest {
                 targets:
                   - {stats: [count]}
                   - {field: sold, stats: [mean, std]}
-                  - {field: condition_grade, stats: [distribution]}
+                  - {field: condition_grade, stats: [distribution, count]}
             """;
 
     @Test

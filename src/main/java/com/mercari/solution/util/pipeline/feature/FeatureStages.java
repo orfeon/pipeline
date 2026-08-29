@@ -66,8 +66,10 @@ public final class FeatureStages {
         // the time axis of all keyed stages (strictly-past windows, maxAge, ordering)
         final TupleTag<MElement> elementTag = new TupleTag<>() {};
         final TupleTag<BadRecord> elementFailureTag = new TupleTag<>() {};
+        final SourceContract.FieldContract timeContract = plan.getInputFields().get(plan.getSpec().timeField);
+        final String timeFieldType = timeContract == null || timeContract.getType() == null ? "timestamp" : timeContract.getType().getType().name();
         final PCollectionTuple elements = input.apply("ToElement", ParDo
-                .of(new ToElementDoFn(plan.getSpec().timeField, failFast, elementFailureTag))
+                .of(new ToElementDoFn(plan.getSpec().timeField, timeFieldType, failFast, elementFailureTag))
                 .withOutputTags(elementTag, TupleTagList.of(elementFailureTag)));
         failures.add(elements.get(elementFailureTag));
         PCollection<MElement> current = elements.get(elementTag).setCoder(elementCoder);
@@ -270,6 +272,24 @@ public final class FeatureStages {
         }
         final List<OutputColumn> fmColumns = new ArrayList<>();
         for (final OutputColumn c : stageColumns) if ("fm".equals(c.getOperator())) fmColumns.add(c);
+
+        // fitted statistics are extracted from the stage INPUT: a target / offset produced by a column of
+        // this same stage would read null for every row, so reject the fusion explicitly
+        final Set<String> stageProduced = new HashSet<>();
+        for (final OutputColumn c : stageColumns) stageProduced.add(c.getCanonicalName());
+        final List<String> sameStageDeps = new ArrayList<>();
+        for (final FitLevel level : levels) {
+            if (level.field() != null && stageProduced.contains(level.field())) sameStageDeps.add(level.field());
+            if (level.offsetColumn() != null && stageProduced.contains(level.offsetColumn())) sameStageDeps.add(level.offsetColumn());
+        }
+        for (final FmSpec spec : fmSpecs) {
+            if (stageProduced.contains(spec.target())) sameStageDeps.add(spec.target());
+            if (spec.offsetColumn() != null && stageProduced.contains(spec.offsetColumn())) sameStageDeps.add(spec.offsetColumn());
+        }
+        if (!sameStageDeps.isEmpty()) {
+            throw new IllegalStateException("fit.mode static targets/offsets " + sameStageDeps
+                    + " are computed in the same fit stage and would read null; split them into a separate feature step");
+        }
 
         return input.apply(label, ParDo
                 .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, loadBlocks, planHash,
@@ -674,11 +694,13 @@ public final class FeatureStages {
     /** Converts any input element to the ELEMENT map form and sets its timestamp from {@code time.field}. */
     static class ToElementDoFn extends DoFn<MElement, MElement> {
         private final String timeField;
+        private final String timeFieldType;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
-        ToElementDoFn(final String timeField, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+        ToElementDoFn(final String timeField, final String timeFieldType, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             this.timeField = timeField;
+            this.timeFieldType = timeFieldType;
             this.failFast = failFast;
             this.failureTag = failureTag;
         }
@@ -694,7 +716,7 @@ public final class FeatureStages {
             if (input == null) return;
             try {
                 final Map<String, Object> values = input.asPrimitiveMap();
-                final Long millis = FeatureValues.toEpochMillis(values.get(timeField));
+                final Long millis = FeatureValues.toEpochMillis(values.get(timeField), timeFieldType);
                 if (millis == null) {
                     throw new IllegalArgumentException("time.field '" + timeField + "' is null or not a timestamp; rows cannot be ordered");
                 }
@@ -724,8 +746,7 @@ public final class FeatureStages {
                     c.output(KV.of(NULL_KEY, element));
                     return;
                 }
-                if (!sb.isEmpty()) sb.append(KEY_SEPARATOR);
-                sb.append(v);
+                FeatureValues.appendKeyComponent(sb, v);
             }
             c.output(KV.of(sb.toString(), element));
         }
@@ -982,6 +1003,17 @@ public final class FeatureStages {
             final List<MElement> elements = new ArrayList<>();
             kv.getValue().forEach(elements::add);
             if (elements.isEmpty()) return;
+            if (NULL_KEY.equals(kv.getKey())) {
+                // rows with a null groupBy key cannot be grouped: each becomes its own single-child record
+                for (final MElement element : elements) {
+                    emit(c, List.of(element));
+                }
+                return;
+            }
+            emit(c, elements);
+        }
+
+        private void emit(final ProcessContext c, final List<MElement> elements) {
             try {
                 final Set<String> parentInputs = new LinkedHashSet<>(keys);
                 parentInputs.addAll(parentFields);

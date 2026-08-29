@@ -669,6 +669,69 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testReviewRegressions() {
+        // a numeric time.field is rejected (a date field would otherwise be read as microseconds)
+        final String numericTime = SPEC.replace("time: {field: session_time, orderTieBreak: [session_id]}", "time: {field: start_price}");
+        Assertions.assertTrue(hasCode(compile(SOURCES, numericTime), "time.field.type"));
+        // date-typed time values are epoch days
+        Assertions.assertEquals(20692L * 86_400_000L, FeatureValues.toEpochMillis(20692, "date"));
+        Assertions.assertEquals(1_000L, FeatureValues.toEpochMillis(1_000_000L, "timestamp"));
+
+        // composite keys are length-prefixed: values containing the separator cannot collide
+        final java.util.Map<String, Object> r1 = java.util.Map.of("a", "1:x", "b", "y");
+        final java.util.Map<String, Object> r2 = java.util.Map.of("a", "1", "b", "x:y");
+        Assertions.assertNotEquals(FeatureValues.key(r1, List.of("a", "b")), FeatureValues.key(r2, List.of("a", "b")));
+
+        // shareOfTotal with excludeSelf uses the others' total
+        Assertions.assertEquals(0.25, (Double) ContextEvaluator.apply("shareOfTotal", List.of(2.0, 3.0, 5.0), 0, true), 1e-9);
+        Assertions.assertEquals(0.2, (Double) ContextEvaluator.apply("shareOfTotal", List.of(2.0, 3.0, 5.0), 0, false), 1e-9);
+
+        // quantile is not implemented: compile error rather than a runtime crash
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("stats: [mean]", "stats: [quantile]")), "encoding.stat.unsupported"));
+
+        // parent placement requires the grouping context: a non-groupBy context stays on the children
+        final String twoContexts = SPEC
+                .replace("contexts:\n  - {name: session, keys: [session_id]}", "contexts:\n  - {name: session, keys: [session_id]}\n  - {name: cat, keys: [category]}")
+                .replace("prefix: f_", "prefix: f_\n  groupBy: session");
+        final FeaturePlan grouped = compile(SOURCES, twoContexts.replace("context: session\n    ops:\n      - {type: countByValue", "context: cat\n    ops:\n      - {type: countByValue"));
+        Assertions.assertFalse(grouped.getDiagnostics().hasErrors(), grouped::describe);
+        Assertions.assertEquals(OutputColumn.Placement.child, column(grouped, "composition_condition_grade_countByValue").getPlacement());
+
+        // the pipeline-level name must not disable step selection in validate()
+        final com.google.gson.JsonObject request = new com.google.gson.JsonObject();
+        request.addProperty("name", "my-pipeline");
+        final com.google.gson.JsonArray transforms = new com.google.gson.JsonArray();
+        final com.google.gson.JsonObject step = new com.google.gson.JsonObject();
+        step.addProperty("name", "features");
+        step.addProperty("module", "feature");
+        final com.google.gson.JsonObject parameters = Config.convertConfigJson(SPEC, Config.Format.yaml);
+        parameters.add("sources", Config.convertConfigJson(SOURCES, Config.Format.yaml));
+        step.add("parameters", parameters);
+        transforms.add(step);
+        request.add("transforms", transforms);
+        final com.google.gson.JsonObject response = FeaturePlanService.validate(request);
+        Assertions.assertTrue(response.get("ok").getAsBoolean(), response::toString);
+    }
+
+    @Test
+    public void testAdditiveLeaveNodeOutSubtractsLeafFromMainEffects() {
+        // cell (n=2, Σ=2) inside main effect A (n=4, Σ=2) and root (n=8, Σ=2), λ=2, identity scale:
+        // with leave-node-out the cell's rows leave A and the root, so the additive parent is 0 and the
+        // composed estimate is 0 + 0.5 · (1 − 0) = 0.5 (without the fix the leaked parent gives ~0.708)
+        final Shrinkage shrinkage = Shrinkage.of(Shrinkage.Scale.identity, 2, true);
+        final List<Shrinkage.Level> main = List.of(
+                new Shrinkage.Level("A", "a_n", "a_sum", null),
+                new Shrinkage.Level("global", "g_n", "g_sum", null));
+        final List<Shrinkage.Level> levels = List.of(
+                new Shrinkage.Level("cell", "c_n", "c_sum", null),
+                new Shrinkage.Level(Shrinkage.ADDITIVE, null, null, List.of(main)),
+                new Shrinkage.Level("global", "g_n", "g_sum", null));
+        final java.util.Map<String, Object> row = java.util.Map.of(
+                "c_n", 2.0, "c_sum", 2.0, "a_n", 4.0, "a_sum", 2.0, "g_n", 8.0, "g_sum", 2.0);
+        Assertions.assertEquals(0.5, shrinkage.compose(row, levels).value(), 1e-9);
+    }
+
+    @Test
     public void testLambdaFromMoments() {
         // keys A: [1,1,1,0], B: [0,0,0,1] → σ² = 0.25, τ² = 0.0625 → λ = 4
         Assertions.assertEquals(4.0, Shrinkage.lambdaFromMoments(2, 8, 4, 4, 2.5, 32), 1e-9);

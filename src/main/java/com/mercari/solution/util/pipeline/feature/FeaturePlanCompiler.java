@@ -117,6 +117,13 @@ public final class FeaturePlanCompiler {
         if (spec.timeField != null && !inputFields.containsKey(spec.timeField)) {
             inputFields.put(spec.timeField, FieldContract.synthetic(spec.timeField, Schema.FieldType.TIMESTAMP, AvailableAt.atEventTime()));
         }
+        if (spec.timeField != null && inputFields.get(spec.timeField).getType() != null) {
+            final String timeType = inputFields.get(spec.timeField).getType().getType().name();
+            if (!List.of("timestamp", "datetime", "date", "string").contains(timeType)) {
+                diagnostics.error("time.field.type", "time",
+                        "time.field '" + spec.timeField + "' must be a timestamp / datetime / date field (is " + timeType + ")");
+            }
+        }
         if (inputSchemaFields != null) {
             final Set<String> schemaNames = new LinkedHashSet<>();
             for (final Schema.Field f : inputSchemaFields) {
@@ -314,6 +321,11 @@ public final class FeaturePlanCompiler {
             if (t.field != null) refs.add(t.field);
             if (t.expr != null) refs.addAll(expressionReferences(t.expr).others);
         }
+        // factorization dependencies (block-order independence)
+        refs.addAll(def.fields);
+        if (def.taskTarget != null) refs.add(def.taskTarget);
+        if (def.taskTargetExpr != null) refs.addAll(expressionReferences(def.taskTargetExpr).others);
+        if (def.taskOffset != null) refs.add(def.taskOffset);
         return refs;
     }
 
@@ -627,7 +639,7 @@ public final class FeaturePlanCompiler {
                 final Ref ref = resolve(field);
                 if (ref == null) continue;
                 if (!accepts(operator, ref.type())) {
-                    diagnostics.error("context.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + ref.type().getType());
+                    diagnostics.error("context.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
                     continue;
                 }
                 final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + field + "_" + op.type, operator.outputFor(ref.type()), computeAt);
@@ -647,7 +659,10 @@ public final class FeaturePlanCompiler {
         c.validFor = def.validFor;
         c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
                 : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
-        if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type)) c.placement = Placement.parent;
+        if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
+            // group-constant only within its own context: parent placement requires the grouping context
+            c.placement = Placement.parent;
+        }
         register(c);
     }
 
@@ -747,7 +762,7 @@ public final class FeaturePlanCompiler {
                     final Ref ref = resolve(field);
                     if (ref == null) continue;
                     if (!accepts(operator, ref.type())) {
-                        diagnostics.error("sequence.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + ref.type().getType());
+                        diagnostics.error("sequence.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
                         continue;
                     }
                     final String base = def.name + "_" + window.token() + "_" + displayName(field) + "_";
@@ -1153,6 +1168,9 @@ public final class FeaturePlanCompiler {
                 final OperatorCatalog.Stat s = OperatorCatalog.stat(stat);
                 if (s == null) {
                     diagnostics.error("encoding.stat", loc, "unknown stat: " + stat);
+                } else if (!PopulationEvaluator.isSupported(stat) && !"share".equals(stat)) {
+                    diagnostics.error("encoding.stat.unsupported", loc,
+                            "stat " + stat + " is not implemented yet (available: count | share | mean | rate | std | distribution)");
                 } else if (s.requiresTarget() && reference == null) {
                     diagnostics.error("encoding.stat.target", loc, "stat " + stat + " requires a target field or expr");
                 }
@@ -1169,7 +1187,7 @@ public final class FeaturePlanCompiler {
         // keySets: shrinkage config and generalization lattice (§5.3.1)
         record Lattice(KeySet keySet, Shrinkage shrinkage, List<List<String>> levels, int additiveAt) {}
         final Map<String, KeySet> singleKeySets = new HashMap<>();
-        for (final KeySet ks : def.keySets) if (ks.keys.size() == 1) singleKeySets.put(ks.keys.get(0), ks);
+        for (final KeySet ks : def.keySets) if (ks.keys.size() == 1) singleKeySets.putIfAbsent(ks.keys.get(0), ks);
         final List<Lattice> lattices = new ArrayList<>();
         for (final KeySet ks : def.keySets) {
             if (ks.keys.isEmpty()) {

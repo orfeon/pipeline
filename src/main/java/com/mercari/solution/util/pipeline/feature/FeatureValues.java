@@ -41,6 +41,29 @@ final class FeatureValues {
 
     /** Epoch millis of a timestamp-like primitive (micros Long, Instant, ISO or framework-accepted string). */
     static Long toEpochMillis(final Object value) {
+        return toEpochMillis(value, null);
+    }
+
+    /**
+     * @param type schema type name of the field: {@code date} values are epoch days (Integer/Long) in the
+     *             primitive-map convention; everything else numeric is epoch microseconds
+     */
+    static Long toEpochMillis(final Object value, final String type) {
+        if ("date".equals(type)) {
+            if (value instanceof Number n) return n.longValue() * 86_400_000L;
+            if (value instanceof String s) {
+                try {
+                    return java.time.LocalDate.parse(s).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli();
+                } catch (final RuntimeException e) {
+                    return null;
+                }
+            }
+            return null;
+        }
+        return toEpochMillisDefault(value);
+    }
+
+    private static Long toEpochMillisDefault(final Object value) {
         if (value == null) return null;
         if (value instanceof Long l) return l / 1000L;
         if (value instanceof Integer i) return i.longValue() / 1000L;
@@ -67,18 +90,7 @@ final class FeatureValues {
      */
     static LocalDateTime toDateTime(final Object value, final String inputType) {
         if (value == null) return null;
-        if ("date".equals(inputType)) {
-            if (value instanceof Number n) return java.time.LocalDate.ofEpochDay(n.longValue()).atStartOfDay();
-            if (value instanceof String s) {
-                try {
-                    return java.time.LocalDate.parse(s).atStartOfDay();
-                } catch (final RuntimeException e) {
-                    return null;
-                }
-            }
-            return null;
-        }
-        final Long millis = toEpochMillis(value);
+        final Long millis = toEpochMillis(value, inputType);
         return millis == null ? null : LocalDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneOffset.UTC);
     }
 
@@ -99,10 +111,15 @@ final class FeatureValues {
         for (final String k : keys) {
             final Object v = row.get(k);
             if (v == null) return null;
-            if (!sb.isEmpty()) sb.append('\u0001');
-            sb.append(v);
+            appendKeyComponent(sb, v);
         }
         return sb.toString();
+    }
+
+    /** Length-prefixed component encoding: values containing the separator cannot collide across fields. */
+    static void appendKeyComponent(final StringBuilder sb, final Object value) {
+        final String s = value.toString();
+        sb.append(s.length()).append(':').append(s).append('\u0001');
     }
 
     static Object cast(final Double value, final com.mercari.solution.module.Schema.FieldType type) {
