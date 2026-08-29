@@ -294,11 +294,12 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   encoding's global level, which is a single key holding **every** row — is never materialised in memory.
   What stays in memory per key is the running statistics plus the *projected* history (only the fields the
   windows read) behind the longest window: a `maxAge` window, or any incremental statistic, lets rows be
-  dropped once they leave every window. Only scan-path operators without `maxAge` (`lag` / `delta` /
-  `trend` / `ewma` / general `filter` / `maxEvents`-only windows over the whole past) keep the key's full
-  projected history; the stage logs which columns do at startup. Local disk of the workers must have room
-  for the largest key's rows. The hot-key audit queries in the validate / dry-run report (above) give the
-  per-key row counts to size that against.
+  dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
+  `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail. Only `ewma`,
+  `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` keep the key's
+  full projected history; the stage logs which columns do at startup — give such windows a `maxAge` to
+  bound them. Local disk of the workers must have room for the largest key's rows. The hot-key audit
+  queries in the validate / dry-run report (above) give the per-key row counts to size that against.
 
 ## Limitations (current engine)
 

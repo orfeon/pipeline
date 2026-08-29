@@ -122,14 +122,32 @@ public class SequenceEvaluator implements Serializable {
     /**
      * First absolute history index a future row may still read (the trim watermark): every column's
      * evict pointer (or fold pointer for an unbounded window) on the incremental path, the {@code maxAge}
-     * far edge on the scan path; {@code 0} when some scan-path column has no {@code maxAge} (unbounded).
+     * far edge on the scan path (or the near edge minus the {@link #tailSize bounded tail} without maxAge);
+     * {@code 0} when some scan-path column is unbounded.
      */
-    /** Columns that pin the whole history (scan path without maxAge): the keyed stage cannot trim with these. */
+    /**
+     * How many rows before the near edge a scan-path column without {@code maxAge} can need, or null when
+     * unbounded. Without a filter the window is a suffix of the history, so {@code maxEvents} bounds it, and
+     * {@code lag} / {@code delta} / {@code trend} read only their last {@code k} (+1) rows. A filter (equality
+     * included) may skip arbitrarily many rows, so it is unbounded on this path.
+     */
+    static Integer tailSize(final ColumnPlan plan, final OutputColumn c) {
+        if (plan.filterText != null) return null;
+        if (plan.maxEvents != null) return plan.maxEvents;
+        final String k = c.coordinates.get("k");
+        return switch (c.operator) {
+            case "lag", "trend" -> k == null ? null : Integer.parseInt(k);
+            case "delta" -> k == null ? null : Integer.parseInt(k) + 1;
+            default -> null;
+        };
+    }
+
+    /** Columns that pin the whole history (scan path, no maxAge, no bounded tail): the keyed stage cannot trim with these. */
     public List<String> unboundedColumns() {
         final List<String> names = new ArrayList<>();
         for (final OutputColumn c : columns) {
             final ColumnPlan plan = plans.get(c.canonicalName);
-            if (!plan.incremental && plan.maxAgeMillis == null) names.add(c.canonicalName);
+            if (!plan.incremental && plan.maxAgeMillis == null && tailSize(plan, c) == null) names.add(c.canonicalName);
         }
         return names;
     }
@@ -143,7 +161,11 @@ public class SequenceEvaluator implements Serializable {
                 final ColumnState cs = state.columns.get(c.canonicalName);
                 from = cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
             } else if (plan.maxAgeMillis == null) {
-                return 0;
+                final Integer tail = tailSize(plan, c);
+                if (tail == null) return 0;
+                // the window is the suffix of the history before the near edge; the near edge only moves
+                // forward, so rows more than `tail` behind it are never read again
+                from = Math.max(0, upperBound(history, nowMillis - plan.shiftMillis) - tail);
             } else {
                 from = lowerBound(history, nowMillis - plan.maxAgeMillis);
             }
