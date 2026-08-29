@@ -29,6 +29,20 @@ public class FeaturePlan implements Serializable {
         }
     }
 
+    /**
+     * A data audit query derived from the plan (work-feature.md §7): hot-key row counts per keyed stage so
+     * the per-key memory budget (docs "Performance and sizing") can be checked before a run. {@code {input}}
+     * stands for the transform's input relation.
+     */
+    public record AuditQuery(String id, List<String> keys, List<String> stages, String sql, String note) implements Serializable {
+        public String describe() {
+            return id + (keys.isEmpty() ? "" : " keys=" + keys) + " stages=" + stages
+                    + "\n    " + sql + (note == null ? "" : "\n    -- " + note);
+        }
+    }
+
+    private static final int AUDIT_TOP_KEYS = 20;
+
     private final FeatureSpec spec;
     private final Map<String, SourceContract> sources;
     private final Map<String, SourceContract.FieldContract> inputFields;
@@ -92,6 +106,41 @@ public class FeaturePlan implements Serializable {
         return count;
     }
 
+    /**
+     * Hot-key audit queries: one per distinct key set of the keyed stages (context / sequence / population /
+     * groupBy), plus the row count for a global (single key) level. Keys that are not input fields are
+     * intermediate columns; their query must be run on the relation as it stands before that stage.
+     */
+    public List<AuditQuery> getAuditQueries() {
+        final Map<List<String>, List<String>> byKeys = new java.util.LinkedHashMap<>();
+        for (final Stage s : stages) {
+            if (s.kind == StageKind.row || s.kind == StageKind.fit) continue;
+            byKeys.computeIfAbsent(s.keys, k -> new ArrayList<>()).add("#" + s.index + " " + s.kind);
+        }
+        final List<AuditQuery> queries = new ArrayList<>();
+        int n = 0;
+        for (final Map.Entry<List<String>, List<String>> e : byKeys.entrySet()) {
+            final List<String> keys = e.getKey();
+            final String id = "audit" + (n++);
+            if (keys.isEmpty()) {
+                queries.add(new AuditQuery(id, keys, e.getValue(),
+                        "SELECT COUNT(1) AS row_count FROM {input}",
+                        "global level: every row is gathered on one worker; budget row_count × projected row size"));
+                continue;
+            }
+            final String keyList = String.join(", ", keys);
+            final String notNull = keys.stream().map(k -> k + " IS NOT NULL").collect(java.util.stream.Collectors.joining(" AND "));
+            final String sql = "SELECT " + keyList + ", COUNT(1) AS row_count FROM {input} WHERE " + notNull
+                    + " GROUP BY " + keyList + " ORDER BY row_count DESC LIMIT " + AUDIT_TOP_KEYS;
+            final List<String> derived = keys.stream().filter(k -> !inputFields.containsKey(k)).toList();
+            final String note = derived.isEmpty()
+                    ? "rows of the top key are held in one worker's memory; budget row_count × (input row size + projected history fields)"
+                    : "keys " + derived + " are intermediate columns: run on the relation as it stands before this stage (or on the expression that derives them)";
+            queries.add(new AuditQuery(id, keys, e.getValue(), sql, note));
+        }
+        return queries;
+    }
+
     /** Human readable dry-run report ({@code validate --expand}). */
     public String describe() {
         final StringBuilder sb = new StringBuilder();
@@ -105,6 +154,11 @@ public class FeaturePlan implements Serializable {
         for (final Stage s : stages) sb.append("  ").append(s.describe()).append('\n');
         sb.append("-- columns\n");
         for (final OutputColumn c : columns) sb.append("  ").append(c.describe()).append('\n');
+        final List<AuditQuery> audit = getAuditQueries();
+        if (!audit.isEmpty()) {
+            sb.append("-- audit (hot keys; {input} = the transform input relation)\n");
+            for (final AuditQuery q : audit) sb.append("  ").append(q.describe()).append('\n');
+        }
         if (!diagnostics.getMessages().isEmpty()) {
             sb.append("-- diagnostics\n");
             for (final Diagnostics.Message m : diagnostics.getMessages()) sb.append("  ").append(m).append('\n');
@@ -148,6 +202,21 @@ public class FeaturePlan implements Serializable {
             columnArray.add(o);
         }
         json.add("columns", columnArray);
+        final JsonArray auditArray = new JsonArray();
+        for (final AuditQuery q : getAuditQueries()) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("id", q.id());
+            final JsonArray keys = new JsonArray();
+            q.keys().forEach(keys::add);
+            o.add("keys", keys);
+            final JsonArray st = new JsonArray();
+            q.stages().forEach(st::add);
+            o.add("stages", st);
+            o.addProperty("sql", q.sql());
+            o.addProperty("note", q.note());
+            auditArray.add(o);
+        }
+        json.add("audit", auditArray);
         final JsonArray messages = new JsonArray();
         for (final Diagnostics.Message m : diagnostics.getMessages()) {
             final JsonObject o = new JsonObject();

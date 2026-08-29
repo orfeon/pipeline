@@ -108,6 +108,26 @@ docker run ^
   * If you use BigQuery module locally, you will need to specify the `tempLocation` argument.
   * If the pipeline is to access an emulator running on a local machine, such as Cloud Spanner, the `--net=host` option is required.
 
+## Validate a config without running it (dry run)
+
+Add `--dryRun=true` to any of the commands above. The config is loaded (including `system.imports` and
+`${args.*}`), every module is validated and the pipeline is assembled — schemas are resolved and
+declarative plans such as the `feature` transform's are compiled against the real input schema — but
+no job is launched. The resolved output schemas and the feature plan reports (with hot-key audit SQL) are
+printed to stdout; an invalid config exits with the assembly error.
+
+```sh
+docker run \
+  -v ~/.config/gcloud:/mnt/gcloud:ro \
+  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
+  --dryRun=true \
+  --config="$(cat path/to/config.yaml)"
+```
+
+* Note:
+  * Assembly may still call external services that a module needs for schema resolution (for example a
+    BigQuery dry-run query or a Spanner schema read), so the same credentials as a real run are required.
+
 ## Run on Apache Flink / Apache Spark
 
 Build the bundled jar with the `flink` or `spark` Maven profile

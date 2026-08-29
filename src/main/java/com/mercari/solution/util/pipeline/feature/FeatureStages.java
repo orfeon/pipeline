@@ -7,9 +7,13 @@ import com.mercari.solution.util.pipeline.feature.FeaturePlan.Stage;
 import com.mercari.solution.util.pipeline.feature.FeaturePlan.StageKind;
 import com.mercari.solution.util.pipeline.feature.FeatureSpec.Scope;
 import com.mercari.solution.util.pipeline.feature.SequenceEvaluator.Past;
+import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.extensions.sorter.BufferedExternalSorter;
+import org.apache.beam.sdk.extensions.sorter.ExternalSorter;
+import org.apache.beam.sdk.extensions.sorter.SortValues;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -36,6 +40,17 @@ public final class FeatureStages {
 
     private static final Logger LOG = LoggerFactory.getLogger(FeatureStages.class);
 
+    /** In-memory buffer (MB) of the per-key external sorter before it spills to local disk; system property for tests. */
+    public static final String SORTER_MEMORY_PROPERTY = "mpipeline.feature.sorterMemoryMB";
+    static int sorterMemoryMB() {
+        return Integer.getInteger(SORTER_MEMORY_PROPERTY, 100);
+    }
+
+    private static boolean isLocalRunner(final PCollection<?> input) {
+        final Class<?> runner = input.getPipeline().getOptions().getRunner();
+        return runner == null || runner.getSimpleName().startsWith("Direct") || runner.getSimpleName().startsWith("Test");
+    }
+
     /** Key used for rows whose key fields contain null: they bypass keyed evaluation (§3.2). */
     static final String NULL_KEY = "\u0000";
 
@@ -58,6 +73,15 @@ public final class FeatureStages {
         final Schema elementSchema = Schema.builder(inputSchema).withType(DataType.ELEMENT).build();
         final Coder<MElement> elementCoder = ElementCoder.of(elementSchema);
         final KvCoder<String, MElement> kvCoder = KvCoder.of(StringUtf8Coder.of(), elementCoder);
+        // keyed stages carry (key, (sortable event time, row)) so SortValues can order each key's rows by
+        // the big-endian encoded secondary key
+        final KvCoder<String, KV<Long, MElement>> sortKvCoder = KvCoder.of(StringUtf8Coder.of(), KvCoder.of(BigEndianLongCoder.of(), elementCoder));
+        final BufferedExternalSorter.Options sorterOptions = BufferedExternalSorter.options()
+                .withExternalSorterType(ExternalSorter.Options.SorterType.NATIVE) // no Hadoop on the classpath
+                .withMemoryMB(sorterMemoryMB())
+                // the spill directory is resolved on the launcher: a remote runner's workers are Linux
+                // (/tmp), while the direct runner sorts where it was launched (Windows included)
+                .withTempLocation(isLocalRunner(input) ? System.getProperty("java.io.tmpdir") : "/tmp");
         final List<PCollection<BadRecord>> failures = new ArrayList<>();
         final Map<String, OutputColumn> columns = new HashMap<>();
         for (final OutputColumn c : plan.getColumns()) columns.put(c.getCanonicalName(), c);
@@ -98,9 +122,14 @@ public final class FeatureStages {
                                 .of(new ContextStageDoFn(evaluator, lambdas, loggings, failFast, failureTag))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                // keyed replay: group by key, then sort each key's rows by event time with the external sorter
+                // (in memory up to sorterMemoryMB, spilled to worker-local disk beyond) so a hot key — or the
+                // global level of a shrinkage lattice, which is ONE key holding every row — is never
+                // materialised as a list; the replay then streams the sorted rows and trims its history
                 case sequence, population -> current
-                        .apply(label + "_Key", ParDo.of(new KeyDoFn(stage.keys()))).setCoder(kvCoder)
+                        .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys()))).setCoder(sortKvCoder)
                         .apply(label + "_Group", GroupByKey.create())
+                        .apply(label + "_Sort", SortValues.create(sorterOptions))
                         .apply(label, ParDo
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag))
                                 .withSideInputs(sideInputs)
@@ -680,6 +709,18 @@ public final class FeatureStages {
             }
         }
 
+        List<String> unboundedColumns() {
+            final List<String> names = new ArrayList<>(sequence.unboundedColumns());
+            names.addAll(population.unboundedColumns());
+            return names;
+        }
+
+        /** Trim watermark of the shared history: the smaller of both evaluators' (see {@link SequenceEvaluator#retainFrom}). */
+        int retainFrom(final long nowMillis, final List<Past> history,
+                       final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
+            return Math.min(sequence.retainFrom(sequenceState, nowMillis, history), population.retainFrom(populationState, nowMillis, history));
+        }
+
         Map<String, Object> project(final Map<String, Object> values) {
             final Map<String, Object> projected = new HashMap<>();
             for (final String f : bufferedFields) projected.put(f, values.get(f));
@@ -749,6 +790,37 @@ public final class FeatureStages {
                 FeatureValues.appendKeyComponent(sb, v);
             }
             c.output(KV.of(sb.toString(), element));
+        }
+    }
+
+    /** Keys like {@link KeyDoFn} and pairs each row with a byte-sortable event time for {@link SortValues}. */
+    static class SortKeyDoFn extends DoFn<MElement, KV<String, KV<Long, MElement>>> {
+        private final List<String> keys;
+
+        SortKeyDoFn(final List<String> keys) {
+            this.keys = keys;
+        }
+
+        /** Flips the sign bit so the big-endian encoding orders negative epoch millis before positive ones. */
+        static long sortable(final long millis) {
+            return millis ^ Long.MIN_VALUE;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final KV<Long, MElement> value = KV.of(sortable(element.getEpochMillis()), element);
+            final StringBuilder sb = new StringBuilder();
+            for (final String k : keys) {
+                final Object v = element.getPrimitiveValue(k);
+                if (v == null) {
+                    c.output(KV.of(NULL_KEY, value));
+                    return;
+                }
+                FeatureValues.appendKeyComponent(sb, v);
+            }
+            c.output(KV.of(sb.toString(), value));
         }
     }
 
@@ -846,7 +918,7 @@ public final class FeatureStages {
      * used because upstream GroupByKey stages re-emit rows at their event time, which that annotation
      * treats as late data and drops; a stateful variant is the streaming follow-up (engine doc §6).
      */
-    static class KeyedHistoryDoFn extends StageDoFn<KV<String, Iterable<MElement>>> {
+    static class KeyedHistoryDoFn extends StageDoFn<KV<String, Iterable<KV<Long, MElement>>>> {
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
@@ -858,26 +930,37 @@ public final class FeatureStages {
             return org.joda.time.Duration.millis(Long.MAX_VALUE);
         }
 
+        @Setup
+        @Override
+        public void setup() {
+            super.setup();
+            final List<String> unbounded = evaluator.unboundedColumns();
+            if (!unbounded.isEmpty()) {
+                LOG.info("keyed stage keeps the whole projected history per key (no maxAge on scan-path columns): {}", unbounded);
+            }
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final KV<String, Iterable<MElement>> kv = c.element();
+            final KV<String, Iterable<KV<Long, MElement>>> kv = c.element();
             if (kv == null) return;
-            final List<MElement> elements = new ArrayList<>();
-            kv.getValue().forEach(elements::add);
-            elements.sort(Comparator.comparingLong(MElement::getEpochMillis));
             prepare(c);
-            final List<Past> history = new ArrayList<>();
+            // the rows arrive sorted by event time (SortValues, spilled to disk for large keys) and are
+            // streamed: only the trimmable projected history and the running statistics stay in memory
+            final SequenceEvaluator.History history = new SequenceEvaluator.History();
             final SequenceEvaluator.KeyState sequenceState = new SequenceEvaluator.KeyState();
             final SequenceEvaluator.KeyState populationState = new SequenceEvaluator.KeyState();
             // rows sharing a timestamp are not visible to each other: their (evaluated) projections join the
             // history only once the timestamp advances
             final List<Past> pending = new ArrayList<>();
             long pendingMillis = Long.MIN_VALUE;
-            for (final MElement input : elements) {
+            final boolean nullKey = NULL_KEY.equals(kv.getKey());
+            for (final KV<Long, MElement> sorted : kv.getValue()) {
+                final MElement input = sorted.getValue();
                 try {
                     final Map<String, Object> values = input.asPrimitiveMap();
                     final Instant now = input.getTimestamp();
-                    if (NULL_KEY.equals(kv.getKey())) {
+                    if (nullKey) {
                         evaluator.evaluateRow(values);
                         c.outputWithTimestamp(MElement.of(values, now), now);
                         continue;
@@ -886,11 +969,12 @@ public final class FeatureStages {
                         history.addAll(pending);
                         pending.clear();
                         pendingMillis = now.getMillis();
-                        // no structural trimming: the incremental fold / evict pointers index into this list
                     }
                     evaluator.evaluateKeyed(values, now.getMillis(), history, sequenceState, populationState);
                     c.outputWithTimestamp(MElement.of(values, now), now);
                     pending.add(new Past(now.getMillis(), evaluator.project(values)));
+                    // absolute indices: the fold / evict pointers stay valid across trims
+                    history.trimBefore(evaluator.retainFrom(now.getMillis(), history, sequenceState, populationState));
                 } catch (final Throwable e) {
                     c.output(failureTag, Module.processError("Failed to evaluate keyed features", input, e, failFast));
                 }

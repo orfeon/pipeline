@@ -263,6 +263,25 @@ The same compiler is exposed without a pipeline run:
 - MCP tool `validate-feature` (arguments `config` or `parameters`, optional `name`, `inputSchema`, `args`,
   `streaming`, `format: text`).
 - Pipeline Builder agent tool `validateFeature`.
+- CLI: `--dryRun=true` together with the usual `--config=...` loads the config and assembles the whole
+  pipeline (every module's validation, schema resolution and the feature plan compilation against the real
+  input schema) without running it. The feature plan report is printed to stdout; an invalid spec exits
+  with the compile errors. Works with any runner build (e.g. the `direct` image in
+  [Run Pipeline locally](../../exec/README.md#run-pipeline-locally-directrunner)).
+
+The report (the `describe` text and the `plan.audit` array) also contains **hot-key audit queries**: for every
+distinct key set of the keyed stages (context / sequence / population / groupBy) an SQL that lists the top
+keys by row count, and a plain row count for a global (single key) level:
+
+```sql
+SELECT seller_id, COUNT(1) AS row_count FROM {input} WHERE seller_id IS NOT NULL
+GROUP BY seller_id ORDER BY row_count DESC LIMIT 20
+```
+
+Replace `{input}` with the relation that feeds the transform and run it on your warehouse before a large
+backfill: the top `row_count` is the number of rows one worker gathers in memory for that stage (see
+[Performance and sizing](#performance-and-sizing)). Keys that are intermediate columns (derived by an earlier
+stage) are flagged in the query's `note` — evaluate those on the relation as it stands before that stage.
 
 ## Performance and sizing
 
@@ -270,10 +289,16 @@ The same compiler is exposed without a pipeline run:
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass
   the stage (their columns are null). Other filters are evaluated per row over the window.
-- Each key's rows are gathered and sorted in one worker's memory. Budget roughly
-  `rows_of_largest_key × (input row size + projected history fields)`; a shrinkage encoding's global
-  level holds **every** row of the dataset on one worker (projected to the target fields only). For
-  datasets in the millions of rows prefer high-memory workers for the feature step.
+- Each key's rows are sorted by event time with an external sort (in memory up to 100 MB per key, then
+  spilled to the worker's local disk) and replayed as a stream, so a hot key — including a shrinkage
+  encoding's global level, which is a single key holding **every** row — is never materialised in memory.
+  What stays in memory per key is the running statistics plus the *projected* history (only the fields the
+  windows read) behind the longest window: a `maxAge` window, or any incremental statistic, lets rows be
+  dropped once they leave every window. Only scan-path operators without `maxAge` (`lag` / `delta` /
+  `trend` / `ewma` / general `filter` / `maxEvents`-only windows over the whole past) keep the key's full
+  projected history; the stage logs which columns do at startup. Local disk of the workers must have room
+  for the largest key's rows. The hot-key audit queries in the validate / dry-run report (above) give the
+  per-key row counts to size that against.
 
 ## Limitations (current engine)
 

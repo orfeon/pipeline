@@ -72,6 +72,86 @@ public class SequenceEvaluator implements Serializable {
         }
     }
 
+    /**
+     * A key's strictly-past history with a droppable prefix. Indices are absolute (they never shift), so the
+     * fold / evict pointers in {@link ColumnState} stay valid after {@link #trimBefore(int)} discards the
+     * entries no column will read again; the memory held per key is then bounded by the longest window
+     * instead of the key's whole past. Reading a trimmed index is a programming error.
+     */
+    public static final class History extends java.util.AbstractList<Past> {
+        private final ArrayList<Past> entries = new ArrayList<>();
+        private int base;
+
+        @Override
+        public Past get(final int index) {
+            if (index < base) throw new IndexOutOfBoundsException("history index " + index + " was trimmed (base " + base + ")");
+            return entries.get(index - base);
+        }
+
+        /** Absolute size: trimmed prefix included. */
+        @Override
+        public int size() {
+            return base + entries.size();
+        }
+
+        @Override
+        public boolean add(final Past p) {
+            return entries.add(p);
+        }
+
+        /** Entries currently held in memory. */
+        public int retained() {
+            return entries.size();
+        }
+
+        public int base() {
+            return base;
+        }
+
+        /** Drops entries below {@code absoluteIndex}; amortised so a caller may invoke it per row. */
+        public void trimBefore(final int absoluteIndex) {
+            final int drop = Math.min(absoluteIndex, size()) - base;
+            if (drop <= 0) return;
+            // shifting the ArrayList is O(retained); only pay it once the droppable prefix is a good share
+            if (drop < 1024 && drop * 2 < entries.size()) return;
+            entries.subList(0, drop).clear();
+            base += drop;
+        }
+    }
+
+    /**
+     * First absolute history index a future row may still read (the trim watermark): every column's
+     * evict pointer (or fold pointer for an unbounded window) on the incremental path, the {@code maxAge}
+     * far edge on the scan path; {@code 0} when some scan-path column has no {@code maxAge} (unbounded).
+     */
+    /** Columns that pin the whole history (scan path without maxAge): the keyed stage cannot trim with these. */
+    public List<String> unboundedColumns() {
+        final List<String> names = new ArrayList<>();
+        for (final OutputColumn c : columns) {
+            final ColumnPlan plan = plans.get(c.canonicalName);
+            if (!plan.incremental && plan.maxAgeMillis == null) names.add(c.canonicalName);
+        }
+        return names;
+    }
+
+    public int retainFrom(final KeyState state, final long nowMillis, final List<Past> history) {
+        int retain = history.size();
+        for (final OutputColumn c : columns) {
+            final ColumnPlan plan = plans.get(c.canonicalName);
+            final int from;
+            if (plan.incremental) {
+                final ColumnState cs = state.columns.get(c.canonicalName);
+                from = cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
+            } else if (plan.maxAgeMillis == null) {
+                return 0;
+            } else {
+                from = lowerBound(history, nowMillis - plan.maxAgeMillis);
+            }
+            retain = Math.min(retain, from);
+        }
+        return retain;
+    }
+
     private final List<OutputColumn> columns;
     private final boolean forceScan;
     private transient Map<String, Filter.ConditionNode> conditions;
@@ -338,7 +418,7 @@ public class SequenceEvaluator implements Serializable {
 
     /** First index whose millis >= bound. */
     static int lowerBound(final List<Past> history, final long bound) {
-        int lo = 0, hi = history.size();
+        int lo = history instanceof History h ? h.base() : 0, hi = history.size();
         while (lo < hi) {
             final int mid = (lo + hi) >>> 1;
             if (history.get(mid).millis() < bound) lo = mid + 1;
@@ -349,7 +429,7 @@ public class SequenceEvaluator implements Serializable {
 
     /** First index whose millis > bound. */
     static int upperBound(final List<Past> history, final long bound) {
-        int lo = 0, hi = history.size();
+        int lo = history instanceof History h ? h.base() : 0, hi = history.size();
         while (lo < hi) {
             final int mid = (lo + hi) >>> 1;
             if (history.get(mid).millis() <= bound) lo = mid + 1;

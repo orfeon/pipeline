@@ -744,6 +744,40 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testHotKeyAuditQueries() {
+        final FeaturePlan plan = compile(SOURCES, SPEC);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<FeaturePlan.AuditQuery> audit = plan.getAuditQueries();
+        // one query per distinct key set of the keyed stages, in stage order; row / fit stages contribute nothing
+        final List<List<String>> keySets = audit.stream().map(FeaturePlan.AuditQuery::keys).toList();
+        Assertions.assertEquals(keySets.size(), keySets.stream().distinct().count());
+        Assertions.assertTrue(keySets.contains(List.of("session_id")), keySets::toString);
+        Assertions.assertTrue(keySets.contains(List.of("seller_id")), keySets::toString);
+        Assertions.assertTrue(keySets.contains(List.of()), keySets::toString); // global level (share / shrinkage prior)
+        final FeaturePlan.AuditQuery seller = audit.stream().filter(q -> q.keys().equals(List.of("seller_id"))).findFirst().orElseThrow();
+        Assertions.assertEquals("SELECT seller_id, COUNT(1) AS row_count FROM {input} WHERE seller_id IS NOT NULL"
+                + " GROUP BY seller_id ORDER BY row_count DESC LIMIT 20", seller.sql());
+        Assertions.assertFalse(seller.stages().isEmpty());
+        Assertions.assertFalse(seller.note().contains("intermediate"));
+        final FeaturePlan.AuditQuery global = audit.stream().filter(q -> q.keys().isEmpty()).findFirst().orElseThrow();
+        Assertions.assertEquals("SELECT COUNT(1) AS row_count FROM {input}", global.sql());
+        Assertions.assertTrue(plan.describe().contains("-- audit"));
+        Assertions.assertEquals(audit.size(), plan.toJson().getAsJsonArray("audit").size());
+        // row-only plans have no keyed stage → no audit queries
+        final FeaturePlan rowOnly = compile(SOURCES, """
+                lineage:
+                  - {fields: [session_id, seller_id, category, quantity, start_price], from: listings}
+                time: {field: session_time}
+                predictAt: "event_time - PT8M"
+                features:
+                  - {name: unit, scope: row, expr: "start_price / quantity"}
+                """);
+        Assertions.assertFalse(rowOnly.getDiagnostics().hasErrors(), rowOnly::describe);
+        Assertions.assertTrue(rowOnly.getAuditQueries().isEmpty());
+        Assertions.assertFalse(rowOnly.describe().contains("-- audit"));
+    }
+
+    @Test
     public void testAvailableAtAlgebra() {
         final AvailableAt a = AvailableAt.parse("event_time - PT10M", null);
         final AvailableAt b = AvailableAt.parse("after(event)", Duration.ofMinutes(30));

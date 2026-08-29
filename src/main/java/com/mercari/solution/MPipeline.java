@@ -49,6 +49,11 @@ public class MPipeline {
         Boolean getServe();
         void setServe(Boolean serve);
 
+        @Description("Load the config and assemble the pipeline (module validation, schema resolution, feature plan compilation) without running it.")
+        @Default.Boolean(false)
+        boolean getDryRun();
+        void setDryRun(boolean dryRun);
+
     }
 
     public interface MPipelineServerOptions extends MPipelineOptions {
@@ -91,6 +96,22 @@ public class MPipeline {
         Options.setOptions(pipelineOptions, config.getOptions());
 
         final Pipeline pipeline = Pipeline.create(pipelineOptions);
+
+        if(pipelineOptions.getDryRun()) {
+            // assemble only: module validation, schema resolution and feature plan compilation run at
+            // assembly time, so a failing config fails here without launching a job
+            final Map<String, MCollection> outputs = apply(pipeline, config);
+            final StringBuilder report = new StringBuilder("dry run: pipeline assembled successfully (not run)\n");
+            for(final Map.Entry<String, MCollection> entry : outputs.entrySet()) {
+                if(entry.getKey().endsWith(".failures")) {
+                    continue;
+                }
+                report.append("  output ").append(entry.getKey()).append(": ").append(entry.getValue().getSchema()).append('\n');
+            }
+            LOG.info(report.toString());
+            System.out.println(report);
+            return;
+        }
 
         final Map<String, MCollection> outputs = apply(pipeline, pipelineOptions, args, config);
 

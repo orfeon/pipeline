@@ -1,6 +1,7 @@
 package com.mercari.solution.module.transform;
 
 import com.google.gson.JsonObject;
+import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
 import com.mercari.solution.module.Module;
@@ -50,6 +51,10 @@ public class FeatureTransform extends Transform {
             throw new IllegalModuleException(getName(), "feature", errors);
         }
         LOG.info("feature plan for {}:\n{}", getName(), plan.describe());
+        if (inputs.getPipeline().getOptions().as(MPipeline.MPipelineOptions.class).getDryRun()) {
+            // --dryRun: the plan report (stages, columns, hot-key audit SQL, diagnostics) is the deliverable
+            System.out.println("feature plan for " + getName() + ":\n" + plan.describe());
+        }
 
         final DataType outputType = Optional.ofNullable(getOutputType()).orElse(DataType.AVRO);
         final Schema outputSchema = FeatureStages.createOutputSchema(plan, inputSchema, outputType);
