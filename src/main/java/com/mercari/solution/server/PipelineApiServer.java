@@ -1,6 +1,7 @@
 package com.mercari.solution.server;
 
 import com.mercari.solution.server.api.AgentService;
+import com.mercari.solution.server.api.FeatureService;
 import com.mercari.solution.server.api.LaunchService;
 import com.mercari.solution.server.api.PipelineService;
 import com.mercari.solution.server.api.SpecService;
@@ -44,6 +45,7 @@ public class PipelineApiServer extends HttpServlet {
             case "/pipeline" -> PipelineService.serve(request, response);
             case "/launch" -> LaunchService.serve(request, response);
             case "/agent" -> AgentService.serve(request, response);
+            case "/feature" -> FeatureService.serve(request, response);
             default -> {
                 // Handle dynamic paths like /api/spec/{type}/{name}
                 final String pathInfo = request.getPathInfo();

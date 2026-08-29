@@ -145,6 +145,18 @@ Usage:
   `snippets` (they are for verification, not the user's pipeline).
 - When a run fails, use `getModule` to re-check parameter specs, fix the config, and run again.
 
+### validateFeature
+
+Compile a `feature` transform (declarative ML feature generation with leak checking) without running
+the pipeline. Pass the config (or just the step's `parameters`) and optionally the step `name`.
+
+- Returns the expanded output columns with their availability status (`staticSafe`, `windowShift`,
+  `runtimeFilter`, `violation`), lineage, the evaluation stages, and the compiler diagnostics.
+- Use it whenever you write or edit a `module: feature` step: fix every reported error (an
+  `availability.violation` means the feature would use information unknown at `predictAt`), and read
+  the hints (e.g. a suggestion to move an outcome mean from `sequence` to `population` encoding).
+- `run` (dryRun) performs the same compile, but `validateFeature` is cheaper and shows the full report.
+
 ### listModules
 
 List available module documentation by type.

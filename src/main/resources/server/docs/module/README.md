@@ -39,6 +39,7 @@ This page lists the modules registered in the current codebase.
 | [select](transform/select.md)           | Filter rows and transform field values with a rich set of select functions                                              |
 | [aggregation](transform/aggregation.md) | Perform aggregation with grouping, filtering, and field selection in both batch and streaming                           |
 | [beamsql](transform/beamsql.md)         | Process and combine input data using SQL queries based on Apache Beam SQL (Calcite)                                     |
+| [feature](transform/feature.md)         | Generate ML features declaratively (row / context / sequence / population scopes) with built-in leakage checking        |
 | [query](transform/query.md)             | Run a Calcite SQL query over each input element inside a DoFn (no shuffle), with lookup joins to external sources       |
 | [partition](transform/partition.md)     | Split input data into multiple named outputs based on filter conditions                                                 |
 | [compare](transform/compare.md)                                                          | Compare records across multiple inputs by primary key and output differences                                            |

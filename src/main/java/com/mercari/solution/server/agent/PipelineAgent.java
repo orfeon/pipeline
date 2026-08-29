@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.server.agent.tool.CodeReader;
 import com.mercari.solution.server.agent.tool.DataflowReader;
 import com.mercari.solution.server.agent.tool.DocsReader;
+import com.mercari.solution.server.agent.tool.FeatureValidator;
 import com.mercari.solution.server.agent.tool.PipelineExecutor;
 import dev.langchain4j.agent.tool.*;
 import dev.langchain4j.data.message.AiMessage;
@@ -49,7 +50,8 @@ public interface PipelineAgent {
                         PipelineExecutor.create(),
                         DocsReader.create(),
                         CodeReader.create(),
-                        DataflowReader.create()
+                        DataflowReader.create(),
+                        FeatureValidator.create()
                 )
                 .afterToolExecution(interactionLog::toolExecution)
                 .build()
