@@ -106,3 +106,107 @@ The pipeline images themselves (not the server) read `MPIPELINE_CONFIG`,
 | config staging | `roles/storage.objectAdmin` (or objectCreator) on the staging bucket |
 
 The diagnosis tools additionally need the roles listed in [diagnosis.md](diagnosis.md#3-configure-the-server).
+
+## Connecting an MCP client
+
+The MCP server is the same deployment: Streamable HTTP at `https://<service>/mcp`
+(`web.xml` maps `/mcp`; the legacy SSE transport is at `/mcp/sse`). It exposes the tools
+`list-modules` / `describe-module` / `read-docs`, `validate-pipeline` / `validate-feature`,
+`run-pipeline` (in-server DirectRunner run, or `dryRun: true`), `launch-pipeline`,
+`get-dataflow-job` / `list-job-errors` / `list-failed-jobs` / `resolve-stack-trace` and
+`get-cloud-run-execution`, plus the docs as `docs://` resources. Three ways to reach it:
+
+### Cloud Run through `gcloud run services proxy` (recommended for developers)
+
+The service is deployed with `--no-allow-unauthenticated`, so every request needs a Google
+identity token. The proxy adds it for you and keeps it fresh, so the client talks plain HTTP to
+localhost:
+
+```sh
+gcloud run services proxy <service> --project=<project> --region=<region> --port=8080
+```
+
+Then register `http://localhost:8080/mcp` in the client. Claude Code:
+
+```sh
+claude mcp add --transport http mercari-pipeline http://localhost:8080/mcp
+```
+
+JSON-configured clients (Claude Desktop `claude_desktop_config.json`, Cursor `.cursor/mcp.json`, ...):
+
+```json
+{
+  "mcpServers": {
+    "mercari-pipeline": {
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+
+A client that only supports stdio servers can bridge with `mcp-remote`:
+
+```json
+{
+  "mcpServers": {
+    "mercari-pipeline": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"]
+    }
+  }
+}
+```
+
+The user running the proxy needs `roles/run.invoker` on the service (and, if the server is behind
+IAP, access to the IAP resource). Actions the tools perform — launching jobs, reading Dataflow /
+Cloud Run state — run with the **server's** service account, not the user's.
+
+### Cloud Run directly with an identity token
+
+Without the proxy, send the token yourself. It expires after an hour, so wrap it in a shell
+expansion the client re-evaluates at start-up:
+
+```sh
+claude mcp add --transport http mercari-pipeline https://<service>.run.app/mcp \
+  --header "Authorization: Bearer $(gcloud auth print-identity-token)"
+```
+
+```json
+{
+  "mcpServers": {
+    "mercari-pipeline": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://<service>.run.app/mcp",
+               "--header", "Authorization: Bearer ${ID_TOKEN}"],
+      "env": { "ID_TOKEN": "<output of: gcloud auth print-identity-token>" }
+    }
+  }
+}
+```
+
+### Local server (`mvn jetty:run -Pserver`)
+
+For development, run the server from the repository (no authentication):
+
+```sh
+gcloud auth application-default login   # credentials the launch / job tools use
+export MERCARI_PIPELINE_LAUNCH_PROJECT=<project>
+export MERCARI_PIPELINE_LAUNCH_REGION=<region>
+export MERCARI_PIPELINE_LAUNCH_DATAFLOW_TEMPLATE_LOCATION=gs://<bucket>/templates/dataflow.json
+export MERCARI_PIPELINE_LAUNCH_DIRECT_JOB=<cloud run job>
+mvn jetty:run -Pserver
+```
+
+and register `http://localhost:8080/mcp` exactly as in the proxy case. Everything the tools do
+(Dataflow / Cloud Run API calls, GCS staging) then uses your application-default credentials,
+so `run-pipeline` without `dryRun` executes the pipeline on your machine with DirectRunner.
+
+### A typical session
+
+1. `validate-feature` on the feature step (or `run-pipeline` with `dryRun: true` on the whole
+   config — it also returns every step's resolved schema and the feature plans with their hot-key
+   audit SQL).
+2. `launch-pipeline` with `runner: dataflow` (Flex Template) or `runner: direct` (a pre-created
+   Cloud Run Job, quicker to iterate on), passing template arguments in `args`.
+3. Poll with `get-dataflow-job` or `get-cloud-run-execution`; on failure `list-job-errors` and
+   `resolve-stack-trace` (Dataflow) or the execution's `logUri` (Cloud Run).
