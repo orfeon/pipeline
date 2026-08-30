@@ -67,6 +67,22 @@ public class JobTools {
                 "contains", contains, "limit", limit, "project", project, "region", region));
     }
 
+    @Tool(name = "getJobProgress", value = """
+        Progress and performance picture of a Dataflow job: current / target workers with the autoscaler's
+        decisions and reasons, the stages in completion order with how long each took, the stage running
+        now (its transforms and the element counts of its inputs / outputs — few groups read but most rows
+        already emitted means a tail of hot keys), and the feature plan's stages / keys mapped to the
+        Dataflow stages when the job runs a feature transform. Use it for "slow / stays on one worker /
+        seems stuck" questions; listJobErrors is for failures, getJobLogs for log context.
+    """)
+    public String getJobProgress(
+            @P(name = "job", description = "Dataflow job id / exact job name (or a Cloud Run execution name).") String job,
+            @P(name = "runner", description = "dataflow | direct (default: inferred from the job reference)", required = false) String runner,
+            @P(name = "project", description = "GCP project id. Defaults to the server's configured project.", required = false) String project,
+            @P(name = "region", description = "Region. Defaults to the server's configured region.", required = false) String region) {
+        return McpToolBridge.call("get-job-progress", McpToolBridge.args("job", job, "runner", runner, "project", project, "region", region));
+    }
+
     public static JobTools create() {
         return new JobTools();
     }

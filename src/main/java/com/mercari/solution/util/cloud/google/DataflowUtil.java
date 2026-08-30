@@ -170,6 +170,44 @@ public class DataflowUtil {
         return messages;
     }
 
+    /** The job's autoscaling events (worker pool size changes with the service's reason), oldest first. */
+    public static List<AutoscalingEvent> listAutoscalingEvents(
+            final String project,
+            final String region,
+            final String jobId,
+            final int limit) throws IOException {
+
+        final List<AutoscalingEvent> events = new ArrayList<>();
+        try(final MessagesV1Beta3Client client = MessagesV1Beta3Client.create()) {
+            String pageToken = "";
+            do {
+                final ListJobMessagesRequest request = ListJobMessagesRequest.newBuilder()
+                        .setProjectId(project)
+                        .setLocation(region)
+                        .setJobId(jobId)
+                        .setMinimumImportance(JobMessageImportance.JOB_MESSAGE_DETAILED)
+                        .setPageSize(100)
+                        .setPageToken(pageToken)
+                        .build();
+                final ListJobMessagesResponse response = client.listJobMessagesCallable().call(request);
+                events.addAll(response.getAutoscalingEventsList());
+                pageToken = response.getNextPageToken();
+            } while(pageToken != null && !pageToken.isEmpty() && events.size() < limit);
+        }
+        return events.size() > limit ? events.subList(events.size() - limit, events.size()) : events;
+    }
+
+    /** The job's current metric updates (ElementCount, ExecutionStepProgress, ... per step). */
+    public static JobMetrics getJobMetrics(final String project, final String region, final String jobId) throws IOException {
+        try(final MetricsV1Beta3Client client = MetricsV1Beta3Client.create()) {
+            return client.getJobMetrics(GetJobMetricsRequest.newBuilder()
+                    .setProjectId(project)
+                    .setLocation(region)
+                    .setJobId(jobId)
+                    .build());
+        }
+    }
+
     /**
      * Extract a pipeline option value (e.g. the flex-template 'config' parameter) from a job
      * fetched with JOB_VIEW_ALL. The Java SDK records options in environment.sdkPipelineOptions

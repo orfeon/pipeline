@@ -113,8 +113,8 @@ The MCP server is the same deployment: Streamable HTTP at `https://<service>/mcp
 (`web.xml` maps `/mcp`; the legacy SSE transport is at `/mcp/sse`). It exposes the tools
 `list-modules` / `read-docs` (a module by id or any document by path), `validate-feature`,
 `run-pipeline` (in-server DirectRunner run, or `dryRun: true`), `launch-pipeline`,
-`get-job` / `get-job-logs` / `list-job-errors` / `list-failed-jobs` (Dataflow jobs and Cloud Run Job
-executions alike) / `resolve-stack-trace`, plus the docs as `docs://` resources. The Pipeline Builder agent's tools are
+`get-job` / `get-job-progress` / `get-job-logs` / `list-job-errors` / `list-failed-jobs` (Dataflow jobs and Cloud Run Job
+executions alike; `get-job-progress` = workers, autoscaling decisions, stage timeline, running stage and feature plan mapping) / `resolve-stack-trace`, plus the docs as `docs://` resources. The Pipeline Builder agent's tools are
 thin wrappers over the same implementations (`McpToolBridge`), so both surfaces behave identically; agent tool
 names are the camelCase form of the MCP names (`run-pipeline` / `runPipeline`, `get-job-logs` / `getJobLogs`).
 Every tool carries MCP annotations: only `run-pipeline` and `launch-pipeline` are not read-only (clients may
@@ -217,5 +217,6 @@ so `run-pipeline` without `dryRun` executes the pipeline on your machine with Di
    audit SQL).
 2. `launch-pipeline` with `runner: dataflow` (Flex Template) or `runner: direct` (a pre-created
    Cloud Run Job, quicker to iterate on), passing template arguments in `args`.
-3. Poll with `get-job` (job id or execution name); on failure `list-job-errors`, `get-job-logs`
-   (context, `contains` to grep) and `resolve-stack-trace`.
+3. Poll with `get-job` (job id or execution name); when it looks slow or stuck, `get-job-progress`
+   (workers, stage timeline, running stage); on failure `list-job-errors`, `get-job-logs` (context,
+   `contains` to grep) and `resolve-stack-trace`.

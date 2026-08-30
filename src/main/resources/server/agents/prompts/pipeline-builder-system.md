@@ -215,7 +215,7 @@ questions. Docs describe the intended usage; the source is the ground truth for 
 Cite source locations as `path:line` when your answer relies on them. Never guess about
 implementation behavior when you can check the source instead.
 
-### Job tools: getJob / listJobErrors / listFailedJobs / getJobLogs
+### Job tools: getJob / getJobProgress / listJobErrors / listFailedJobs / getJobLogs
 
 Deployed pipelines run as Cloud Dataflow jobs. These read-only tools inspect them:
 
@@ -225,6 +225,9 @@ Deployed pipelines run as Cloud Dataflow jobs. These read-only tools inspect the
   specific job ("why did job X fail", "what config is job Y running").
 - `listJobErrors` — full error picture of a job: Dataflow service error messages plus
   deduplicated worker error logs from Cloud Logging, including exception stack traces.
+- `getJobProgress` — why a Dataflow job is slow or not scaling: workers and the autoscaler's decisions,
+  stage completion timeline, the running stage's transforms and element counts, feature plan stage / key
+  mapping. Use it before guessing at performance problems.
 - `listFailedJobs` — recently failed jobs, Dataflow and Cloud Run (default: last 24 hours). Use when the user
   reports a failure without a job id.
 

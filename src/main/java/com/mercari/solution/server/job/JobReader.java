@@ -251,6 +251,62 @@ public final class JobReader {
         return sb.toString();
     }
 
+    // ---- get-job-progress ----
+
+    /**
+     * Why a job is slow or not scaling: worker counts and autoscaling decisions, stage completion timeline,
+     * the running fused stage's transforms and element counts, and the feature plan's stage / key mapping.
+     * Cloud Run executions have no stages: the execution summary is returned instead.
+     */
+    public static String getJobProgress(final String job, final String runnerArg, final String projectArg, final String regionArg) {
+        final Ref ref;
+        try {
+            ref = resolve(job, runnerArg, projectArg, regionArg);
+        } catch (final IllegalArgumentException e) {
+            return "ERROR: " + e.getMessage();
+        }
+        if (ref.runner() == Runner.direct) {
+            return getJob(job, runnerArg, projectArg, regionArg, null);
+        }
+        try {
+            final String project = DataflowJobReader.resolveProject(ref.project());
+            final String region = DataflowJobReader.resolveRegion(ref.region());
+            final com.google.dataflow.v1beta3.Job dataflowJob = DataflowJobReader.resolve(ref.id(), project, region);
+            if (dataflowJob == null) {
+                return "ERROR: Dataflow job not found: '" + ref.id() + "' (project=" + project + ", region=" + region + ")";
+            }
+            com.google.dataflow.v1beta3.JobMetrics metrics = null;
+            List<com.google.dataflow.v1beta3.AutoscalingEvent> events = List.of();
+            String warnings = "";
+            try {
+                metrics = com.mercari.solution.util.cloud.google.DataflowUtil.getJobMetrics(project, region, dataflowJob.getId());
+            } catch (final Exception e) {
+                warnings += "(metrics unavailable: " + e.getMessage() + ")\n";
+            }
+            try {
+                events = com.mercari.solution.util.cloud.google.DataflowUtil.listAutoscalingEvents(project, region, dataflowJob.getId(), 200);
+            } catch (final Exception e) {
+                warnings += "(autoscaling events unavailable: " + e.getMessage() + ")\n";
+            }
+            JsonArray planStages = null;
+            final String config = com.mercari.solution.util.cloud.google.DataflowUtil.getPipelineOption(dataflowJob, "config");
+            if (config != null && config.contains("feature")) {
+                try {
+                    final JsonObject request = com.mercari.solution.config.Config.convertConfigJson(config, com.mercari.solution.config.Config.Format.unknown);
+                    final JsonObject result = com.mercari.solution.util.pipeline.feature.FeaturePlanService.validate(request);
+                    if (result.has("plan") && result.getAsJsonObject("plan").has("stages")) {
+                        planStages = result.getAsJsonObject("plan").getAsJsonArray("stages");
+                    }
+                } catch (final Exception e) {
+                    warnings += "(feature plan not compiled: " + e.getMessage() + ")\n";
+                }
+            }
+            return JobProgress.report(dataflowJob, metrics, events, planStages) + (warnings.isEmpty() ? "" : "\n" + warnings);
+        } catch (final Throwable e) {
+            return "ERROR: failed to read job progress: " + e.getMessage();
+        }
+    }
+
     // ---- Cloud Run execution summary ----
 
     private static final List<String> COPIED = List.of(

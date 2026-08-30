@@ -22,7 +22,7 @@ import jakarta.servlet.ServletContext;
         runner 'direct' launches a pre-created Cloud Run Job ('cloudRunJob', default) or creates a Cloud Run
         Worker Pool ('cloudRunWorkerPool'); runner 'spark' submits a Dataproc Serverless batch.
         Validate first (run-pipeline with dryRun=true), then launch; afterwards follow the job with
-        get-job / get-job-logs / list-job-errors (pass the returned job id, or the execution name for Cloud Run).
+        get-job / get-job-progress / get-job-logs / list-job-errors (pass the returned job id, or the execution name for Cloud Run).
         Launch parameters not given are resolved from the config's options, then the server's
         MERCARI_PIPELINE_LAUNCH[_<RUNNER>]_<KEY> environment, then the server's own project / region.
         Returns the job object {runner, environment, id, name, project, location, state, consoleUrl, ...}.
