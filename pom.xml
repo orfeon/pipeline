@@ -638,12 +638,6 @@
       <artifactId>beam-sdks-java-extensions-sql</artifactId>
     </dependency>
 
-    <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-extensions-sorter (feature transform: external sort of keyed histories) -->
-    <dependency>
-      <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-extensions-sorter</artifactId>
-    </dependency>
-
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-expansion-service -->
     <dependency>
       <groupId>org.apache.beam</groupId>

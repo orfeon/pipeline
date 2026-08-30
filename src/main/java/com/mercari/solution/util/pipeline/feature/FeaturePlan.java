@@ -125,7 +125,7 @@ public class FeaturePlan implements Serializable {
             if (keys.isEmpty()) {
                 queries.add(new AuditQuery(id, keys, e.getValue(),
                         "SELECT COUNT(1) AS row_count FROM {input}",
-                        "global level: one key sorted on one worker (spilled to its local disk beyond the sorter buffer); row_count bounds the spill, memory holds only the retained history"));
+                        "global level: one key sorted on one worker (sorted chunks spilled to its local disk beyond the spill budget, deleted after the key); row_count bounds the spill, memory holds only the retained history"));
                 continue;
             }
             final String keyList = String.join(", ", keys);
@@ -134,7 +134,7 @@ public class FeaturePlan implements Serializable {
                     + " GROUP BY " + keyList + " ORDER BY row_count DESC LIMIT " + AUDIT_TOP_KEYS;
             final List<String> derived = keys.stream().filter(k -> !inputFields.containsKey(k)).toList();
             final String note = derived.isEmpty()
-                    ? "each key is sorted on one worker (spilled to local disk beyond the sorter buffer): the top row_count bounds the spill; memory holds the retained history (bounded by the longest window unless a column is unbounded)"
+                    ? "each key is sorted on one worker (sorted chunks spilled to local disk beyond the spill budget, deleted after the key): the top row_count bounds the spill; memory holds the retained history (bounded by the longest window unless a column is unbounded)"
                     : "keys " + derived + " are intermediate columns: run on the relation as it stands before this stage (or on the expression that derives them)";
             queries.add(new AuditQuery(id, keys, e.getValue(), sql, note));
         }

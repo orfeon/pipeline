@@ -189,7 +189,18 @@ public class FeatureSpec implements Serializable {
         public String passThrough = "all";
     }
 
+    /** Engine (runtime) knobs that do not change the plan: {@code engine.spill} of the keyed stages' sorter. */
+    public static class EngineSpec implements Serializable {
+        /** In-memory sort buffer per key (MB); null = derived from the worker heap. */
+        public Integer spillMemoryMB;
+        /** Spill directory on the worker; null = java.io.tmpdir. */
+        public String spillDirectory;
+        /** Deflate the spilled chunk files. */
+        public boolean spillCompress = false;
+    }
+
     public List<LineageEntry> lineage = new ArrayList<>();
+    public EngineSpec engine = new EngineSpec();
     public String timeField;
     public List<String> orderTieBreak = new ArrayList<>();
     public String predictAtExpression;
@@ -313,6 +324,22 @@ public class FeatureSpec implements Serializable {
                 } else {
                     spec.output.passThrough = passThrough;
                 }
+            }
+        }
+        if (parameters.has("engine") && parameters.get("engine").isJsonObject()) {
+            final JsonObject engine = parameters.getAsJsonObject("engine");
+            if (engine.has("spill") && engine.get("spill").isJsonObject()) {
+                final JsonObject spill = engine.getAsJsonObject("spill");
+                final Integer memoryMB = Json.integer(spill, "memoryMB");
+                if (memoryMB != null) {
+                    if (memoryMB < 1) {
+                        diagnostics.error("engine.spill.memoryMB", "engine.spill", "engine.spill.memoryMB must be >= 1: " + memoryMB);
+                    } else {
+                        spec.engine.spillMemoryMB = memoryMB;
+                    }
+                }
+                spec.engine.spillDirectory = Json.string(spill, "directory");
+                spec.engine.spillCompress = Json.bool(spill, "compress", false);
             }
         }
         return spec;

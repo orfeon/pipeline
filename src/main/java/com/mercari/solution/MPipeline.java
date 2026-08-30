@@ -54,6 +54,10 @@ public class MPipeline {
         boolean getDryRun();
         void setDryRun(boolean dryRun);
 
+        @Description("feature transform: in-memory sort buffer (MB) per key of the keyed stages before spilling to worker-local disk. Default: derived from the worker heap (16-256 MB). The transform parameter engine.spill.memoryMB takes precedence.")
+        Integer getFeatureSpillMemoryMB();
+        void setFeatureSpillMemoryMB(Integer featureSpillMemoryMB);
+
     }
 
     public interface MPipelineServerOptions extends MPipelineOptions {

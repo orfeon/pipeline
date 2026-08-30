@@ -146,10 +146,24 @@ public class SequenceEvaluator implements Serializable {
     public List<String> unboundedColumns() {
         final List<String> names = new ArrayList<>();
         for (final OutputColumn c : columns) {
-            final ColumnPlan plan = plans.get(c.canonicalName);
-            if (!plan.incremental && plan.maxAgeMillis == null && tailSize(plan, c) == null) names.add(c.canonicalName);
+            if (unbounded(plans.get(c.canonicalName), c)) names.add(c.canonicalName);
         }
         return names;
+    }
+
+    private static boolean unbounded(final ColumnPlan plan, final OutputColumn c) {
+        return !plan.incremental && plan.maxAgeMillis == null && tailSize(plan, c) == null;
+    }
+
+    /**
+     * Whether a sequence column keeps the whole projected history of its key (compile-time view of
+     * {@link #unboundedColumns()}), or null when it is bounded: the reason to show in a diagnostic.
+     */
+    public static String unboundedReason(final OutputColumn c) {
+        final ColumnPlan plan = new SequenceEvaluator(List.of(c)).plan(c);
+        if (!unbounded(plan, c)) return null;
+        if (plan.filterText != null) return "a window with a filter and no maxAge";
+        return c.operator + " without maxAge";
     }
 
     public int retainFrom(final KeyState state, final long nowMillis, final List<Past> history) {

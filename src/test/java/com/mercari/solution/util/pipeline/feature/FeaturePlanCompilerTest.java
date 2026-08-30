@@ -871,6 +871,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("`score` > 1 AND `rank` <= 3", column(plan, "recent_n10_top3").getCoordinates().get("filter"));
         column(plan, "recent_n5_since_win");
         Assertions.assertEquals("`rank` = 1", column(plan, "recent_n5_since_win").getCoordinates().get("predicate"));
+        // the n10 window has a filter and no maxAge: its columns pin the whole history of a key (S5 hint);
+        // the n5 window without a filter is bounded by maxEvents
+        final List<String> unbounded = plan.getDiagnostics().getMessages().stream()
+                .filter(m -> m.code().equals("sequence.window.unbounded")).map(m -> m.message()).toList();
+        Assertions.assertEquals(2, unbounded.size(), plan::describe);
+        Assertions.assertTrue(unbounded.stream().allMatch(m -> m.contains("recent_n10_")), unbounded::toString);
         // the evaluator parses the rewritten text
         Assertions.assertDoesNotThrow(() -> com.mercari.solution.util.pipeline.Filter.parse(top3.getCoordinates().get("predicate")));
         // a condition that cannot be parsed even when quoted is a compile error, not a worker failure
