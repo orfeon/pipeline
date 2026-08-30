@@ -169,14 +169,8 @@ Submit a validated config to an execution target and return the created job.
   `args` (optional JSON object of template arguments).
 - Only call it when the user explicitly asks to launch / run on Dataflow or Cloud Run, and only after
   `run` with `dryRun: true` succeeded on the same config. Never launch speculatively.
-- Report the returned job id and `consoleUrl`. For Cloud Run Jobs (`direct`) the Cloud Run Job must
+- Report the returned job id and `consoleUrl`; follow the job with `getJob` / `getJobLogs` / `listJobErrors`. For Cloud Run Jobs (`direct`) the Cloud Run Job must
   already exist; a missing one is reported as an error with the `gcloud` command to create it.
-
-### getCloudRunExecution
-
-Status of a Cloud Run Job execution (`executionName` from the launch result) or the latest executions of a
-job (`jobName`, optional `project` / `region` / `limit`). Use it to follow a `direct` launch; for Dataflow
-use `getDataflowJob` / `listJobErrors`. A FAILED execution's `logUri` points at its Cloud Logging entries.
 
 ### listModules
 
@@ -259,16 +253,17 @@ questions. Docs describe the intended usage; the source is the ground truth for 
 Cite source locations as `path:line` when your answer relies on them. Never guess about
 implementation behavior when you can check the source instead.
 
-### Dataflow job tools: getDataflowJob / listJobErrors / listRecentFailedJobs
+### Job tools: getJob / listJobErrors / listFailedJobs / getJobLogs
 
 Deployed pipelines run as Cloud Dataflow jobs. These read-only tools inspect them:
 
-- `getDataflowJob` — job status plus the pipeline config recovered from the job's launch
+- `getJob` — job status (a Dataflow job by id / name, or a Cloud Run Job execution by its execution
+  name; `runner: direct` with no job lists the latest executions) plus, for Dataflow, the pipeline config recovered from the job's launch
   parameters. Accepts a job id or an exact job name. Use this first when the user asks about a
   specific job ("why did job X fail", "what config is job Y running").
 - `listJobErrors` — full error picture of a job: Dataflow service error messages plus
   deduplicated worker error logs from Cloud Logging, including exception stack traces.
-- `listRecentFailedJobs` — recently failed jobs (default: last 24 hours). Use when the user
+- `listFailedJobs` — recently failed jobs, Dataflow and Cloud Run (default: last 24 hours). Use when the user
   reports a failure without a job id.
 
 `project`/`region` default to the server's configuration; pass them only when the user names a
@@ -276,12 +271,13 @@ different project or region.
 
 **Diagnosis workflow for a failed Dataflow job:**
 
-1. Identify the job: from the user's job id/name, or `listRecentFailedJobs`.
-2. Call `listJobErrors` to collect the facts (it includes the job status and config context).
+1. Identify the job: from the user's job id/name/execution name, or `listFailedJobs`.
+2. Call `listJobErrors` to collect the facts (it includes the job status and config context);
+   `getJobLogs` (optionally with `contains`) shows the INFO / WARNING context around an error.
 3. If the output contains stack traces, call `resolveStackTrace` to see the failing source code.
 4. Classify the cause explicitly in your answer: config mistake / data issue / infrastructure
    (quota, OOM, permissions) / framework bug — and cite the evidence (error text, `path:line`).
-5. For config mistakes, propose the fix against the config recovered by `getDataflowJob` and
+5. For config mistakes, propose the fix against the config recovered by `getJob` and
    validate it with `run` (`dryRun: true`). For framework bugs, say so and suggest a workaround.
 6. If the tool output notes a version mismatch between the job and this server, mention that
    source line numbers may be approximate.

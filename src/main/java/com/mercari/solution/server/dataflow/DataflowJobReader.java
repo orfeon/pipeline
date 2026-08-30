@@ -145,6 +145,11 @@ public class DataflowJobReader {
         }
     }
 
+    /** The job for an id or exact name (active jobs first), full view; null when not found. */
+    public static Job resolve(final String jobIdOrName, final String project, final String region) throws Exception {
+        return resolveJob(jobIdOrName, project, region);
+    }
+
     private static Job resolveJob(final String jobIdOrName, final String project, final String region)
             throws Exception {
 
@@ -181,11 +186,11 @@ public class DataflowJobReader {
 
     private static String jobNotFoundMessage(final String jobIdOrName, final String project, final String region) {
         return String.format("Dataflow job not found: '%s' (project=%s, region=%s). "
-                        + "Specify a job id or exact job name; use listRecentFailedJobs to discover jobs.",
+                        + "Specify a job id or exact job name; use listFailedJobs to discover jobs.",
                 jobIdOrName, project, region);
     }
 
-    private static String resolveProject(final String projectArg) {
+    public static String resolveProject(final String projectArg) {
         if (projectArg != null && !projectArg.isBlank()) {
             return projectArg.trim();
         }
@@ -202,7 +207,7 @@ public class DataflowJobReader {
                         + LaunchDefaults.envName(RUNNER, LaunchDefaults.KEY_PROJECT));
     }
 
-    private static String resolveRegion(final String regionArg) {
+    public static String resolveRegion(final String regionArg) {
         if (regionArg != null && !regionArg.isBlank()) {
             return regionArg.trim();
         }

@@ -40,8 +40,8 @@ project/region configuration at all.
 The same launch is available to AI clients: the MCP tool `launch-pipeline` (`config`, `runner`,
 `environment`, `parameters`, `args`) and the Pipeline Builder agent tool `launchPipeline` call this
 resolution; `run-pipeline` with `dryRun: true` validates a config beforehand (returning every step's
-resolved schema and the feature transforms' plans), and `get-dataflow-job` / `list-job-errors` /
-`get-cloud-run-execution` follow the launched job. The server's service account needs the launch
+resolved schema and the feature transforms' plans), and `get-job` / `get-job-logs` / `list-job-errors`
+follow the launched job whatever the runner. The server's service account needs the launch
 permissions listed below for every target the clients may use.
 
 ## Environment variables
@@ -113,8 +113,8 @@ The MCP server is the same deployment: Streamable HTTP at `https://<service>/mcp
 (`web.xml` maps `/mcp`; the legacy SSE transport is at `/mcp/sse`). It exposes the tools
 `list-modules` / `read-docs` (a module by id or any document by path), `validate-feature`,
 `run-pipeline` (in-server DirectRunner run, or `dryRun: true`), `launch-pipeline`,
-`get-dataflow-job` / `list-job-errors` / `list-failed-jobs` / `resolve-stack-trace` and
-`get-cloud-run-execution`, plus the docs as `docs://` resources. The Pipeline Builder agent's tools are
+`get-job` / `get-job-logs` / `list-job-errors` / `list-failed-jobs` (Dataflow jobs and Cloud Run Job
+executions alike) / `resolve-stack-trace`, plus the docs as `docs://` resources. The Pipeline Builder agent's tools are
 thin wrappers over the same implementations (`McpToolBridge`), so both surfaces behave identically. Three ways to reach it:
 
 ### Cloud Run through `gcloud run services proxy` (recommended for developers)
@@ -209,5 +209,5 @@ so `run-pipeline` without `dryRun` executes the pipeline on your machine with Di
    audit SQL).
 2. `launch-pipeline` with `runner: dataflow` (Flex Template) or `runner: direct` (a pre-created
    Cloud Run Job, quicker to iterate on), passing template arguments in `args`.
-3. Poll with `get-dataflow-job` or `get-cloud-run-execution`; on failure `list-job-errors` and
-   `resolve-stack-trace` (Dataflow) or the execution's `logUri` (Cloud Run).
+3. Poll with `get-job` (job id or execution name); on failure `list-job-errors`, `get-job-logs`
+   (context, `contains` to grep) and `resolve-stack-trace`.

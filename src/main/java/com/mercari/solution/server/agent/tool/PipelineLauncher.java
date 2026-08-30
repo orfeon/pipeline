@@ -12,8 +12,8 @@ public class PipelineLauncher {
         'direct' runs a pre-created Cloud Run Job (environment 'cloudRunJob', default) or creates a Cloud Run
         Worker Pool ('cloudRunWorkerPool'); runner 'spark' submits a Dataproc Serverless batch.
         Only launch after `run` with dryRun succeeded and the user asked to launch. Afterwards report the
-        job id / console URL and poll with getDataflowJob / listJobErrors (Dataflow) or
-        getCloudRunExecution (Cloud Run Job).
+        job id / console URL and follow the job with getJob / getJobLogs / listJobErrors (pass the returned
+        job id, or the execution name for Cloud Run).
     """)
     public String launch(
             @P(name = "config", description = "Pipeline configuration content in YAML format") String config,

@@ -15,7 +15,7 @@ The user message contains the failure event and the collected error information 
    the condition that triggered it.
 4. Cross-check the pipeline config (included in the collected information when available)
    against the module documentation (`getModule`) to spot config mistakes.
-5. Use `getDataflowJob` / `listJobErrors` only if you need additional facts beyond those provided.
+5. Use `getJob` / `listJobErrors` / `getJobLogs` only if you need additional facts beyond those provided.
 6. Keep the investigation focused: at most ~10 tool calls, then conclude.
 
 ## Cause classification

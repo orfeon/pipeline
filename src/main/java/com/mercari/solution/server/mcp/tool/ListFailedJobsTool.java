@@ -1,19 +1,19 @@
 package com.mercari.solution.server.mcp.tool;
 
-import com.mercari.solution.server.dataflow.DataflowJobReader;
+import com.mercari.solution.server.job.JobReader;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
 
-
+/** Recently failed jobs: Dataflow jobs and, when the server has a configured Cloud Run Job, its failed executions. */
 @Tool.Module(
     name = "list-failed-jobs",
-    title = "List Recently Failed Dataflow Jobs",
+    title = "List Recently Failed Jobs",
     description = """
-        List Dataflow jobs that failed recently.
-        Parameters: 'hours' (optional look-back window, default 24), 'project' (optional),
-        'region' (optional). Use this to discover job ids when a failure is reported without one,
-        then inspect a job with tool: 'list-job-errors'.
+        List the pipeline jobs that failed recently: Dataflow jobs in the project / region, plus the
+        failed executions of the server's configured Cloud Run Job (direct launches) when there is one.
+        Use this when the user mentions a failure but does not know the job id, or to check whether
+        anything failed lately; then list-job-errors with the job id / execution name.
         """,
     inputSchema = """
         {
@@ -21,21 +21,17 @@ import jakarta.servlet.ServletContext;
           "properties": {
             "hours": {
               "type": "integer",
-              "title": "Hours",
               "description": "Look-back window in hours. Defaults to 24."
             },
             "project": {
               "type": "string",
-              "title": "Project",
               "description": "GCP project id. Defaults to the server's configured project."
             },
             "region": {
               "type": "string",
-              "title": "Region",
-              "description": "Dataflow region. Defaults to the server's configured region."
+              "description": "Region. Defaults to the server's configured region."
             }
-          },
-          "required": []
+          }
         }
         """,
     outputSchema = """
@@ -47,30 +43,18 @@ import jakarta.servlet.ServletContext;
 public class ListFailedJobsTool implements Tool {
 
     @Override
-    public void init(ServletContext servletContext) {
+    public void init(final ServletContext servletContext) {
     }
 
     @Override
     public McpSchema.CallToolResult sync(
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
-
-        final Object hours = request.arguments().get("hours");
-        Integer hoursValue = null;
-        if (hours instanceof Number number) {
-            hoursValue = number.intValue();
-        } else if (hours != null) {
-            try {
-                hoursValue = Integer.parseInt(hours.toString().trim());
-            } catch (final NumberFormatException e) {
-                // fall back to the default window
-            }
-        }
-        final String result = DataflowJobReader.listRecentFailedJobs(
-                hoursValue,
-                GetDataflowJobTool.optionalString(request, "project"),
-                GetDataflowJobTool.optionalString(request, "region"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(false).build();
+        final String result = JobReader.listFailedJobs(
+                GetJobTool.optionalInt(request, "hours"),
+                GetJobTool.optionalString(request, "project"),
+                GetJobTool.optionalString(request, "region"));
+        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
     }
 
 }

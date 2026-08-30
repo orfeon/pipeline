@@ -11,8 +11,8 @@ public class McpToolBridgeTest {
     @Test
     public void testWrappedToolsExist() {
         for (final String name : new String[]{"list-modules", "read-docs", "search-code", "read-source", "resolve-stack-trace",
-                "find-module-source", "get-dataflow-job", "list-job-errors", "list-failed-jobs", "run-pipeline",
-                "validate-feature", "launch-pipeline", "get-cloud-run-execution"}) {
+                "find-module-source", "get-job", "get-job-logs", "list-job-errors", "list-failed-jobs", "run-pipeline",
+                "validate-feature", "launch-pipeline"}) {
             Assertions.assertDoesNotThrow(() -> com.mercari.solution.server.mcp.tool.Tool.find(name), name);
         }
         Assertions.assertThrows(IllegalArgumentException.class, () -> com.mercari.solution.server.mcp.tool.Tool.find("no-such-tool"));

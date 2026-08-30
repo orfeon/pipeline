@@ -311,9 +311,9 @@ The same compiler is exposed without a pipeline run:
 - Pipeline Builder agent tool `validateFeature`.
 - MCP tool `run-pipeline` with `dryRun: true`: assembles the whole config in the server and returns, besides
   every step's resolved schema, `featurePlans` — this report compiled against the real input schemas.
-  From there `launch-pipeline` submits the config to Dataflow / a Cloud Run Job and `get-dataflow-job` /
-  `get-cloud-run-execution` follow it, so the validate → dry run → launch → inspect loop closes over MCP
-  (the Pipeline Builder agent has the same tools: `run`, `launchPipeline`, `getCloudRunExecution`).
+  From there `launch-pipeline` submits the config to Dataflow / a Cloud Run Job and `get-job` /
+  `get-job-logs` / `list-job-errors` follow it, so the validate → dry run → launch → inspect loop closes over MCP
+  (the Pipeline Builder agent has the same tools: `run`, `launchPipeline`, `getJob`, `getJobLogs`).
 - CLI: `--dryRun=true` together with the usual `--config=...` loads the config and assembles the whole
   pipeline (every module's validation, schema resolution and the feature plan compilation against the real
   input schema) without running it. The feature plan report is printed to stdout; an invalid spec exits
