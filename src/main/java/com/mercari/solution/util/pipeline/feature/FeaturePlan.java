@@ -19,7 +19,11 @@ public class FeaturePlan implements Serializable {
 
     public enum StageKind { row, context, sequence, population, fit, groupBy }
 
-    /** One evaluation stage: consecutive blocks that share a key (work-feature-engine-beam.md §3.1). */
+    /**
+     * One evaluation stage: the columns evaluated under one key in one pass (work-feature-engine-beam.md §3.1).
+     * Columns are scheduled by key affinity, so a stage may gather blocks from anywhere in the config, and
+     * two stages may share a key when a dependency forces the split.
+     */
     public record Stage(int index, StageKind kind, List<String> keys, List<String> blocks, List<String> columnNames) implements Serializable {
         public int columns() {
             return columnNames.size();
@@ -95,13 +99,11 @@ public class FeaturePlan implements Serializable {
         return null;
     }
 
+    /** Every keyed stage (context / sequence / population / groupBy) is one GroupByKey in the engine. */
     public int getShuffleCount() {
         int count = 0;
-        List<String> previous = List.of();
         for (final Stage s : stages) {
-            if (s.kind == StageKind.row || s.kind == StageKind.fit) continue;
-            if (!s.keys.equals(previous)) count++;
-            previous = s.keys;
+            if (s.kind != StageKind.row && s.kind != StageKind.fit) count++;
         }
         return count;
     }

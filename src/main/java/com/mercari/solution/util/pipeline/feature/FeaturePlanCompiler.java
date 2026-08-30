@@ -1532,12 +1532,10 @@ public final class FeaturePlanCompiler {
     }
 
     private void addLevelInputs(final OutputColumn c, final Shrinkage.Level level) {
-        if (level.isAdditive()) {
-            for (final List<Shrinkage.Level> main : level.mainEffects()) for (final Shrinkage.Level l : main) addLevelInputs(c, l);
-            return;
+        for (final Shrinkage.Level l : Shrinkage.leaves(List.of(level))) {
+            addSelfInput(c, l.nColumn());
+            addSelfInput(c, l.sumColumn());
         }
-        addSelfInput(c, level.nColumn());
-        addSelfInput(c, level.sumColumn());
     }
 
     private void finishComposed(final OutputColumn c, final FeatureDef def) {
@@ -1779,54 +1777,233 @@ public final class FeaturePlanCompiler {
     }
 
     private List<FeaturePlan.Stage> buildStages() {
-        final List<FeaturePlan.Stage> stages = new ArrayList<>();
-        FeaturePlan.StageKind kind = null;
-        List<String> keys = null;
-        List<String> blocks = new ArrayList<>();
-        List<String> names = new ArrayList<>();
-        for (final OutputColumn c : columns) {
+        final StageScheduler scheduler = new StageScheduler();
+        for (final OutputColumn c : columns) scheduler.add(c);
+        final List<FeaturePlan.Stage> stages = scheduler.build();
+        if (spec.output.groupBy != null && contexts.containsKey(spec.output.groupBy)) {
+            stages.add(new FeaturePlan.Stage(stages.size(), FeaturePlan.StageKind.groupBy, contexts.get(spec.output.groupBy).keys(), List.of("output"), List.of()));
+        }
+        return stages;
+    }
+
+    /** The comma-joined key list of a {@code keys} / {@code stageKeys} coordinate (empty = global level). */
+    static List<String> keyList(final String joined) {
+        return joined == null || joined.isEmpty() ? List.of() : List.of(joined.split(","));
+    }
+
+    static boolean isRowColumn(final OutputColumn c) {
+        return c.scope == Scope.row || "isnull".equals(c.operator);
+    }
+
+    /**
+     * Stage scheduling (engine doc §3.1 / §9.2 S2): columns are placed by key affinity, not by their position in
+     * the config. A keyed column goes to the earliest stage that evaluates its kind under the same key and comes
+     * after the stages its dependencies are evaluated in, so two blocks keyed by the same entity share one
+     * GroupByKey even when a block with another key sits between them, and sequence and population columns of
+     * one key share the same keyed replay. Row columns are placed as late as possible: in the stage of their
+     * first consumer (the stage before it when the consumer reads them before its DoFn), or in the last stage
+     * when only the output reads them — so a row value is not carried through shuffles that do not need it.
+     * <p>Rules: a dependency read inside the evaluating DoFn (the row, the history) may live in the same stage;
+     * one read before the DoFn — stage keys, fit / variance-components statistics computed over the stage input —
+     * must come from an earlier stage. The hidden levels of a static-fit block, and the row columns that read
+     * them, stay in the block's single fit stage (its artifact and lambdas are written / read there). A column
+     * that pins the whole history of its key (no maxAge on a scan-path window) fuses only with its own block,
+     * so it does not extend the retention of other blocks' projections. Inside a stage the columns keep the
+     * expansion order, which lists dependencies first.
+     */
+    private final class StageScheduler {
+
+        private final class Slot {
+            final FeaturePlan.StageKind kind;
+            final List<String> keys;
+            final Set<String> names = new LinkedHashSet<>();
+            /** blocks with keyed (sequence / population) columns in this slot */
+            final Set<String> keyedBlocks = new LinkedHashSet<>();
+            /** holds a column that keeps the whole history of each key */
+            boolean pinned;
+            boolean population;
+
+            Slot(final FeaturePlan.StageKind kind, final List<String> keys) {
+                this.kind = kind;
+                this.keys = keys;
+            }
+
+            boolean accepts(final FeaturePlan.StageKind k, final List<String> stageKeys, final boolean unbounded, final String block) {
+                if (kind != k || !keys.equals(stageKeys)) return false;
+                if (!pinned && !unbounded) return true;
+                // a pinned projection is shared within one block only
+                return keyedBlocks.isEmpty() || (keyedBlocks.size() == 1 && keyedBlocks.contains(block));
+            }
+
+            FeaturePlan.Stage build(final int index) {
+                // inside a stage the columns keep the expansion order (dependencies first)
+                final List<String> ordered = new ArrayList<>(names);
+                ordered.sort(Comparator.comparingInt(order::get));
+                final List<String> blocks = new ArrayList<>();
+                for (final String name : ordered) {
+                    final String block = columnsByCanonical.get(name).block;
+                    if (!blocks.contains(block)) blocks.add(block);
+                }
+                // a keyed stage replays sequence and population columns together: its kind names the heavier one
+                final FeaturePlan.StageKind k = kind == FeaturePlan.StageKind.sequence && population ? FeaturePlan.StageKind.population : kind;
+                return new FeaturePlan.Stage(index, k, keys, blocks, ordered);
+            }
+        }
+
+        private final List<Slot> slots = new ArrayList<>();
+        /** expansion index of every column */
+        private final Map<String, Integer> order = new HashMap<>();
+        private final Map<String, Integer> stageOf = new HashMap<>();
+        /** row columns → the earliest stage their own dependencies allow (they may move earlier down to it) */
+        private final Map<String, Integer> rowEarliest = new HashMap<>();
+        private final Map<String, Integer> fitStageOf = new HashMap<>();
+
+        StageScheduler() {
+            for (final OutputColumn c : columns) order.put(c.canonicalName, order.size());
+        }
+
+        void add(final OutputColumn c) {
+            if (isRowColumn(c)) {
+                // placed when a consumer needs it (or in the last stage): see placeRow
+                rowEarliest.put(c.canonicalName, earliest(c, strictInputs(c)));
+                return;
+            }
             final FeaturePlan.StageKind k;
             final List<String> stageKeys;
-            if (c.scope == Scope.row || "isnull".equals(c.operator)) {
-                k = FeaturePlan.StageKind.row;
-                stageKeys = keys == null ? List.of() : keys;
-            } else if (c.scope == Scope.context) {
+            boolean unbounded = false;
+            if (c.scope == Scope.context) {
                 k = FeaturePlan.StageKind.context;
                 final ContextDef context = contexts.get(c.coordinates.get("context"));
                 stageKeys = context == null ? List.of() : context.keys();
             } else if (c.scope == Scope.sequence) {
                 k = FeaturePlan.StageKind.sequence;
                 if (c.coordinates.containsKey("stageKeys")) {
-                    stageKeys = List.of(c.coordinates.get("stageKeys").split(","));
+                    stageKeys = keyList(c.coordinates.get("stageKeys"));
                 } else {
                     final EntityDef entity = entities.get(c.coordinates.get("entity"));
                     stageKeys = entity == null ? List.of() : entity.keys();
                 }
+                unbounded = SequenceEvaluator.unboundedReason(c) != null;
             } else if (FitMode.isLookupToken(c.coordinates.get("fit"))) {
-                // fitted statistics are applied by lookup: no key change
                 k = FeaturePlan.StageKind.fit;
                 stageKeys = List.of();
             } else {
-                k = FeaturePlan.StageKind.population;
-                final String keyList = c.coordinates.get("keys");
-                stageKeys = keyList == null || keyList.isEmpty() ? List.of() : List.of(keyList.split(","));
+                k = FeaturePlan.StageKind.sequence;
+                stageKeys = keyList(c.coordinates.get("keys"));
+                unbounded = SequenceEvaluator.unboundedReason(c) != null;
             }
-            final boolean fuse = kind != null && (k == FeaturePlan.StageKind.row || (k == kind && stageKeys.equals(keys)));
-            if (!fuse) {
-                if (kind != null) stages.add(new FeaturePlan.Stage(stages.size(), kind, keys, List.copyOf(blocks), List.copyOf(names)));
-                kind = k;
-                keys = stageKeys;
-                blocks = new ArrayList<>();
-                names = new ArrayList<>();
+            final Set<String> strict = strictInputs(c);
+            strict.addAll(stageKeys);
+            final int target = k == FeaturePlan.StageKind.fit
+                    ? fitStage(c)
+                    : slotFor(k, stageKeys, earliest(c, strict), unbounded, c.block);
+            place(c, target, strict);
+            final Slot slot = slots.get(target);
+            if (k == FeaturePlan.StageKind.sequence) {
+                slot.keyedBlocks.add(c.block);
+                if (unbounded) slot.pinned = true;
+                if (c.scope == Scope.population) slot.population = true;
             }
-            if (!blocks.contains(c.block)) blocks.add(c.block);
-            names.add(c.canonicalName);
         }
-        if (kind != null) stages.add(new FeaturePlan.Stage(stages.size(), kind, keys, List.copyOf(blocks), List.copyOf(names)));
-        if (spec.output.groupBy != null && contexts.containsKey(spec.output.groupBy)) {
-            stages.add(new FeaturePlan.Stage(stages.size(), FeaturePlan.StageKind.groupBy, contexts.get(spec.output.groupBy).keys(), List.of("output"), List.of()));
+
+        /** Inputs read before the stage's DoFn (from the stage input), which must come from an earlier stage. */
+        private Set<String> strictInputs(final OutputColumn c) {
+            final Set<String> strict = new LinkedHashSet<>();
+            if (FitMode.isLookupToken(c.coordinates.get("fit"))) strict.addAll(c.inputs);
+            if ("varianceComponents".equals(c.coordinates.get("weights")) && c.coordinates.containsKey("levels")) {
+                // the pseudo-counts are estimated over the stage input from the levels' keys / target / offset
+                for (final Shrinkage.Level level : Shrinkage.leaves(Shrinkage.parseLevels(c.coordinates.get("levels")))) {
+                    final OutputColumn hidden = columnsByCanonical.get(level.nColumn());
+                    if (hidden != null) strict.addAll(hidden.inputs);
+                }
+            }
+            return strict;
         }
-        return stages;
+
+        /** Lower bound of the stage a dependency is evaluated in (-1 for an input field); a row column can move down to it. */
+        private int boundOf(final String dep) {
+            final Integer row = rowEarliest.get(dep);
+            if (row != null) return row;
+            final Integer placed = stageOf.get(dep);
+            return placed != null ? placed : -1;
+        }
+
+        private int earliest(final OutputColumn c, final Set<String> strict) {
+            int earliest = 0;
+            for (final String dep : c.inputs) earliest = Math.max(earliest, boundOf(dep));
+            for (final String dep : c.pastInputs) earliest = Math.max(earliest, boundOf(dep));
+            for (final String dep : strict) earliest = Math.max(earliest, boundOf(dep) + 1);
+            return earliest;
+        }
+
+        private int slotFor(final FeaturePlan.StageKind k, final List<String> keys, final int earliest, final boolean unbounded, final String block) {
+            for (int i = earliest; i < slots.size(); i++) {
+                if (slots.get(i).accepts(k, keys, unbounded, block)) return i;
+            }
+            slots.add(new Slot(k, keys));
+            return slots.size() - 1;
+        }
+
+        /**
+         * The single fit stage of a static-fit block: chosen when its first fitted column arrives, after every
+         * fitted column of the block (they expand together, and their inputs are all placed by then).
+         */
+        private int fitStage(final OutputColumn c) {
+            final Integer existing = fitStageOf.get(c.block);
+            if (existing != null) return existing;
+            int earliest = 0;
+            for (final OutputColumn x : columns) {
+                if (x.block.equals(c.block) && FitMode.isLookupToken(x.coordinates.get("fit"))) earliest = Math.max(earliest, earliest(x, strictInputs(x)));
+            }
+            final int target = slotFor(FeaturePlan.StageKind.fit, List.of(), earliest, false, c.block);
+            fitStageOf.put(c.block, target);
+            return target;
+        }
+
+        /** Puts a column in a stage after pulling the row columns it reads into that stage (or the one before). */
+        private void place(final OutputColumn c, final int target, final Set<String> strict) {
+            for (final String dep : c.inputs) if (!strict.contains(dep)) placeRow(dep, target);
+            for (final String dep : c.pastInputs) if (!strict.contains(dep)) placeRow(dep, target);
+            for (final String dep : strict) placeRow(dep, target - 1);
+            final Integer previous = stageOf.put(c.canonicalName, target);
+            if (previous != null) slots.get(previous).names.remove(c.canonicalName);
+            slots.get(target).names.add(c.canonicalName);
+        }
+
+        /**
+         * A row column is evaluated in the stage of its earliest consumer: placed there when first needed and
+         * moved earlier (with the row columns it reads) when a consumer in an earlier stage appears.
+         */
+        private void placeRow(final String name, final int at) {
+            final Integer earliest = rowEarliest.get(name);
+            if (earliest == null) return; // not a row column
+            final Integer current = stageOf.get(name);
+            if (current != null && current <= at) return;
+            final OutputColumn r = columnsByCanonical.get(name);
+            int target = at;
+            // a row column over fitted statistics is evaluated in the block's fit stage (artifact / lambdas live there)
+            for (final String dep : r.inputs) {
+                final OutputColumn d = columnsByCanonical.get(dep);
+                if (d != null && FitMode.isLookupToken(d.coordinates.get("fit")) && fitStageOf.containsKey(d.block)) {
+                    target = Math.min(target, fitStageOf.get(d.block));
+                }
+            }
+            if (target < earliest) {
+                throw new IllegalStateException("feature stage scheduling: " + name + " needs stage " + earliest + " but is required at stage " + target);
+            }
+            place(r, target, strictInputs(r));
+        }
+
+        List<FeaturePlan.Stage> build() {
+            // row columns nobody else reads: the last stage (no shuffle either way)
+            if (slots.isEmpty() && !rowEarliest.isEmpty()) slots.add(new Slot(FeaturePlan.StageKind.row, List.of()));
+            for (final OutputColumn c : columns) {
+                if (rowEarliest.containsKey(c.canonicalName) && !stageOf.containsKey(c.canonicalName)) placeRow(c.canonicalName, slots.size() - 1);
+            }
+            final List<FeaturePlan.Stage> stages = new ArrayList<>();
+            for (final Slot slot : slots) stages.add(slot.build(stages.size()));
+            return stages;
+        }
     }
 
     // ------------------------------------------------------------------------------------------
