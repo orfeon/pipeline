@@ -344,13 +344,12 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   as `population` when it holds any population column). Row columns are evaluated as late as possible —
   in the stage of their first consumer, or in the last stage when only the output reads them — so their
   values are not carried through shuffles that do not need them. The hidden statistics of a `fit.mode:
-  static` / `fold` block always share one fit stage. A column that pins the whole history of its key (a
-  scan-path window without `maxAge`, reported by the `sequence.window.unbounded` hint) is fused only with
-  its own block, so it does not extend the retention of other blocks' projections. The plan report lists
-  the resulting stages (`#n kind key=[...] blocks=[...]`) and the shuffle count (one per keyed stage). A
-  fused stage keeps the union of its columns' projected fields per key, trimmed to the longest bounded
-  window among them: with several bounded windows on one entity the per-key memory is the largest
-  window's projection, not their sum.
+  static` / `fold` block always share one fit stage. The plan report lists the resulting stages
+  (`#n kind key=[...] blocks=[...]`) and the shuffle count (one per keyed stage). A fused stage keeps one
+  history per key, **trimmed per field**: each projected field stays only as far back as the longest window
+  of the columns reading it, so fusing blocks does not extend any field's retention — a column that reads
+  the whole history of its key (a scan-path window without `maxAge`, reported by the
+  `sequence.window.unbounded` hint) keeps only its own inputs for every row, not the other columns' fields.
 - Keyed statistics (sequence `aggregate`, population encodings) are evaluated incrementally (O(n) per
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass
@@ -364,9 +363,10 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   windows read) behind the longest window: a `maxAge` window, or any incremental statistic, lets rows be
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail. Only `ewma`,
-  `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` keep the key's
-  full projected history; the stage logs which columns do at startup — give such windows a `maxAge` to
-  bound them. Local disk of the workers must have room for the keys being sorted concurrently: the chunk
+  `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` read the key's
+  full history, and they keep only the fields they read for it (the history is trimmed per field, so the
+  other columns' fields still leave with their own windows); the stage logs which columns do at startup —
+  give such windows a `maxAge` to bound them. Local disk of the workers must have room for the keys being sorted concurrently: the chunk
   files of a key are deleted as soon as its replay ends (and the stage's directory when the worker tears the
   stage down), so the disk holds at most one key per concurrent bundle, each up to the key's encoded size
   (`compress: true` trades CPU for a smaller footprint). The spill budget is per key being processed (each
@@ -374,8 +374,8 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   audit queries in the validate / dry-run report (above) give the per-key row counts to size that against.
   Every spilled key logs `keyed spill sorter Stage<N>_<kind> key=<key>: <chunks> chunk(s) / <MB> MB on disk +
   <rows> rows in memory; live spill on this worker <MB> MB (peak <MB> MB)` — the peak over a job is the
-  worker disk the keyed stages need. Columns that pin the whole history of a key are reported at compile
-  time by the `sequence.window.unbounded` hint.
+  worker disk the keyed stages need. Columns that read the whole history of a key are reported at compile
+  time by the `sequence.window.unbounded` hint (with the fields they keep).
 
 ## Limitations (current engine)
 

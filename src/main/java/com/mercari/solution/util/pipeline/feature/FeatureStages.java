@@ -738,10 +738,10 @@ public final class FeatureStages {
             return names;
         }
 
-        /** Trim watermark of the shared history: the smaller of both evaluators' (see {@link SequenceEvaluator#retainFrom}). */
-        int retainFrom(final long nowMillis, final List<Past> history,
-                       final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
-            return Math.min(sequence.retainFrom(sequenceState, nowMillis, history), population.retainFrom(populationState, nowMillis, history));
+        /** Trim watermarks of the shared history, per field the smaller of both evaluators' (see {@link SequenceEvaluator#retention}). */
+        SequenceEvaluator.Retention retention(final long nowMillis, final List<Past> history,
+                                              final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
+            return SequenceEvaluator.Retention.of(sequence.retention(sequenceState, nowMillis, history), population.retention(populationState, nowMillis, history));
         }
 
         Map<String, Object> project(final Map<String, Object> values) {
@@ -982,7 +982,7 @@ public final class FeatureStages {
             }
             final List<String> unbounded = evaluator.unboundedColumns();
             if (!unbounded.isEmpty()) {
-                LOG.info("keyed stage keeps the whole projected history per key (no maxAge on scan-path columns): {}", unbounded);
+                LOG.info("keyed stage keeps the inputs of these columns for the whole history of each key (no maxAge on scan-path columns): {}", unbounded);
             }
         }
 
@@ -1055,8 +1055,9 @@ public final class FeatureStages {
                 evaluator.evaluateKeyed(values, now.getMillis(), history, sequenceState, populationState);
                 c.outputWithTimestamp(MElement.of(values, now), now);
                 pending.add(new Past(now.getMillis(), evaluator.project(values)));
-                // absolute indices: the fold / evict pointers stay valid across trims
-                history.trimBefore(evaluator.retainFrom(now.getMillis(), history, sequenceState, populationState));
+                // absolute indices: the fold / evict pointers stay valid across trims; fields are dropped per
+                // column window, so an unbounded column keeps only its own inputs for the whole history
+                history.trim(evaluator.retention(now.getMillis(), history, sequenceState, populationState));
             } catch (final Throwable e) {
                 c.output(failureTag, Module.processError("Failed to evaluate keyed features", input, e, failFast));
             }

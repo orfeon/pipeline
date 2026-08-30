@@ -1679,7 +1679,7 @@ public final class FeaturePlanCompiler {
                 final String reason = SequenceEvaluator.unboundedReason(c);
                 if (reason != null) {
                     diagnostics.hint("sequence.window.unbounded", loc,
-                            c.canonicalName + " keeps the whole projected history of each key on the worker (" + reason + "); give the window a maxAge to bound it");
+                            c.canonicalName + " keeps its inputs " + c.pastInputs + " for the whole history of each key on the worker (" + reason + "); give the window a maxAge to bound it");
                 }
             }
             if (c.status == Status.violation) {
@@ -1807,9 +1807,9 @@ public final class FeaturePlanCompiler {
      * one read before the DoFn — stage keys, fit / variance-components statistics computed over the stage input —
      * must come from an earlier stage. The hidden levels of a static-fit block, and the row columns that read
      * them, stay in the block's single fit stage (its artifact and lambdas are written / read there). A column
-     * that pins the whole history of its key (no maxAge on a scan-path window) fuses only with its own block,
-     * so it does not extend the retention of other blocks' projections. Inside a stage the columns keep the
-     * expansion order, which lists dependencies first.
+     * that reads the whole history of its key (no maxAge on a scan-path window) does not extend the retention
+     * of the other columns' fields: the history is trimmed per field ({@link SequenceEvaluator.History#trim}).
+     * Inside a stage the columns keep the expansion order, which lists dependencies first.
      */
     private final class StageScheduler {
 
@@ -1817,10 +1817,6 @@ public final class FeaturePlanCompiler {
             final FeaturePlan.StageKind kind;
             final List<String> keys;
             final Set<String> names = new LinkedHashSet<>();
-            /** blocks with keyed (sequence / population) columns in this slot */
-            final Set<String> keyedBlocks = new LinkedHashSet<>();
-            /** holds a column that keeps the whole history of each key */
-            boolean pinned;
             boolean population;
 
             Slot(final FeaturePlan.StageKind kind, final List<String> keys) {
@@ -1828,11 +1824,8 @@ public final class FeaturePlanCompiler {
                 this.keys = keys;
             }
 
-            boolean accepts(final FeaturePlan.StageKind k, final List<String> stageKeys, final boolean unbounded, final String block) {
-                if (kind != k || !keys.equals(stageKeys)) return false;
-                if (!pinned && !unbounded) return true;
-                // a pinned projection is shared within one block only
-                return keyedBlocks.isEmpty() || (keyedBlocks.size() == 1 && keyedBlocks.contains(block));
+            boolean accepts(final FeaturePlan.StageKind k, final List<String> stageKeys) {
+                return kind == k && keys.equals(stageKeys);
             }
 
             FeaturePlan.Stage build(final int index) {
@@ -1870,7 +1863,6 @@ public final class FeaturePlanCompiler {
             }
             final FeaturePlan.StageKind k;
             final List<String> stageKeys;
-            boolean unbounded = false;
             if (c.scope == Scope.context) {
                 k = FeaturePlan.StageKind.context;
                 final ContextDef context = contexts.get(c.coordinates.get("context"));
@@ -1883,27 +1875,18 @@ public final class FeaturePlanCompiler {
                     final EntityDef entity = entities.get(c.coordinates.get("entity"));
                     stageKeys = entity == null ? List.of() : entity.keys();
                 }
-                unbounded = SequenceEvaluator.unboundedReason(c) != null;
             } else if (FitMode.isLookupToken(c.coordinates.get("fit"))) {
                 k = FeaturePlan.StageKind.fit;
                 stageKeys = List.of();
             } else {
                 k = FeaturePlan.StageKind.sequence;
                 stageKeys = keyList(c.coordinates.get("keys"));
-                unbounded = SequenceEvaluator.unboundedReason(c) != null;
             }
             final Set<String> strict = strictInputs(c);
             strict.addAll(stageKeys);
-            final int target = k == FeaturePlan.StageKind.fit
-                    ? fitStage(c)
-                    : slotFor(k, stageKeys, earliest(c, strict), unbounded, c.block);
+            final int target = k == FeaturePlan.StageKind.fit ? fitStage(c) : slotFor(k, stageKeys, earliest(c, strict));
             place(c, target, strict);
-            final Slot slot = slots.get(target);
-            if (k == FeaturePlan.StageKind.sequence) {
-                slot.keyedBlocks.add(c.block);
-                if (unbounded) slot.pinned = true;
-                if (c.scope == Scope.population) slot.population = true;
-            }
+            if (c.scope == Scope.population && k == FeaturePlan.StageKind.sequence) slots.get(target).population = true;
         }
 
         /** Inputs read before the stage's DoFn (from the stage input), which must come from an earlier stage. */
@@ -1936,9 +1919,9 @@ public final class FeaturePlanCompiler {
             return earliest;
         }
 
-        private int slotFor(final FeaturePlan.StageKind k, final List<String> keys, final int earliest, final boolean unbounded, final String block) {
+        private int slotFor(final FeaturePlan.StageKind k, final List<String> keys, final int earliest) {
             for (int i = earliest; i < slots.size(); i++) {
-                if (slots.get(i).accepts(k, keys, unbounded, block)) return i;
+                if (slots.get(i).accepts(k, keys)) return i;
             }
             slots.add(new Slot(k, keys));
             return slots.size() - 1;
@@ -1955,7 +1938,7 @@ public final class FeaturePlanCompiler {
             for (final OutputColumn x : columns) {
                 if (x.block.equals(c.block) && FitMode.isLookupToken(x.coordinates.get("fit"))) earliest = Math.max(earliest, earliest(x, strictInputs(x)));
             }
-            final int target = slotFor(FeaturePlan.StageKind.fit, List.of(), earliest, false, c.block);
+            final int target = slotFor(FeaturePlan.StageKind.fit, List.of(), earliest);
             fitStageOf.put(c.block, target);
             return target;
         }

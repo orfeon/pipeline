@@ -560,9 +560,9 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
-    public void testUnboundedColumnFusesOnlyWithinItsBlock() {
-        // a scan-path window without maxAge pins the whole history of its key: it must not extend the
-        // retention of another block's projection, so it gets its own stage under the same key
+    public void testUnboundedColumnFusesWithItsKey() {
+        // a scan-path window without maxAge keeps its own inputs for the whole history of its key; the history
+        // is trimmed per field, so it shares the key's stage without extending the other columns' retention
         final String enc = """
                   - name: pinned
                     scope: sequence
@@ -582,10 +582,8 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
         Assertions.assertTrue(hasCode(plan, "sequence.window.unbounded"), plan::describe);
         final List<FeaturePlan.Stage> seller = plan.getStages().stream().filter(s -> s.keys().equals(List.of("seller_id"))).toList();
-        Assertions.assertEquals(2, seller.size(), plan::describe);
-        Assertions.assertEquals(List.of("recent", "enc"), seller.get(0).blocks(), plan::describe);
-        Assertions.assertTrue(seller.get(1).blocks().contains("pinned"), plan::describe);
-        Assertions.assertFalse(seller.get(1).blocks().contains("recent") || seller.get(1).blocks().contains("enc"), plan::describe);
+        Assertions.assertEquals(1, seller.size(), plan::describe);
+        Assertions.assertTrue(seller.get(0).blocks().containsAll(List.of("recent", "enc", "pinned")), plan::describe);
     }
 
     @Test

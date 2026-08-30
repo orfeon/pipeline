@@ -117,6 +117,42 @@ public class SequenceEvaluator implements Serializable {
             entries.subList(0, drop).clear();
             base += drop;
         }
+
+        private final Map<String, Integer> cleared = new HashMap<>();
+
+        /**
+         * Per-field retention: drops entries below {@link Retention#all()} and removes every field from the
+         * entries below its own watermark, so a column that reads the whole history of a key keeps only the
+         * fields it reads there while the other fields are trimmed to their own windows. Each field's pointer
+         * only moves forward: amortised O(1) per row.
+         */
+        public void trim(final Retention retention) {
+            for (final Map.Entry<String, Integer> e : retention.byField().entrySet()) {
+                final String field = e.getKey();
+                final int to = Math.min(e.getValue(), size());
+                int from = Math.max(cleared.getOrDefault(field, 0), base);
+                if (to <= from) continue;
+                for (int i = from; i < to; i++) {
+                    final Map<String, Object> values = entries.get(i - base).values();
+                    if (!values.isEmpty()) values.remove(field);
+                }
+                cleared.put(field, to);
+            }
+            trimBefore(retention.all());
+        }
+    }
+
+    /**
+     * Trim watermarks of a key's history: {@code all} = first absolute index any column may still read (entries
+     * below it are dropped); {@code byField} = per projected field, the first index a column reading that field
+     * may still read (the field is removed from older entries).
+     */
+    public record Retention(int all, Map<String, Integer> byField) {
+        public static Retention of(final Retention a, final Retention b) {
+            final Map<String, Integer> byField = new HashMap<>(a.byField);
+            for (final Map.Entry<String, Integer> e : b.byField.entrySet()) byField.merge(e.getKey(), e.getValue(), Math::min);
+            return new Retention(Math.min(a.all, b.all), byField);
+        }
     }
 
     /**
@@ -142,7 +178,7 @@ public class SequenceEvaluator implements Serializable {
         };
     }
 
-    /** Columns that pin the whole history (scan path, no maxAge, no bounded tail): the keyed stage cannot trim with these. */
+    /** Columns that read the whole history (scan path, no maxAge, no bounded tail): their past inputs are kept for every row of the key. */
     public List<String> unboundedColumns() {
         final List<String> names = new ArrayList<>();
         for (final OutputColumn c : columns) {
@@ -169,25 +205,35 @@ public class SequenceEvaluator implements Serializable {
     }
 
     public int retainFrom(final KeyState state, final long nowMillis, final List<Past> history) {
+        return retention(state, nowMillis, history).all();
+    }
+
+    /** {@link #retainFrom} per column and per projected field (a field is kept as long as any column reading it needs it). */
+    public Retention retention(final KeyState state, final long nowMillis, final List<Past> history) {
         int retain = history.size();
+        final Map<String, Integer> byField = new HashMap<>();
         for (final OutputColumn c : columns) {
-            final ColumnPlan plan = plans.get(c.canonicalName);
-            final int from;
-            if (plan.incremental) {
-                final ColumnState cs = state.columns.get(c.canonicalName);
-                from = cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
-            } else if (plan.maxAgeMillis == null) {
-                final Integer tail = tailSize(plan, c);
-                if (tail == null) return 0;
-                // the window is the suffix of the history before the near edge; the near edge only moves
-                // forward, so rows more than `tail` behind it are never read again
-                from = Math.max(0, upperBound(history, nowMillis - plan.shiftMillis) - tail);
-            } else {
-                from = lowerBound(history, nowMillis - plan.maxAgeMillis);
-            }
+            final int from = columnRetainFrom(c, state, nowMillis, history);
             retain = Math.min(retain, from);
+            for (final String field : c.pastInputs) byField.merge(field, from, Math::min);
         }
-        return retain;
+        return new Retention(retain, byField);
+    }
+
+    private int columnRetainFrom(final OutputColumn c, final KeyState state, final long nowMillis, final List<Past> history) {
+        final ColumnPlan plan = plans.get(c.canonicalName);
+        if (plan.incremental) {
+            final ColumnState cs = state.columns.get(c.canonicalName);
+            return cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
+        }
+        if (plan.maxAgeMillis == null) {
+            final Integer tail = tailSize(plan, c);
+            if (tail == null) return 0;
+            // the window is the suffix of the history before the near edge; the near edge only moves
+            // forward, so rows more than `tail` behind it are never read again
+            return Math.max(0, upperBound(history, nowMillis - plan.shiftMillis) - tail);
+        }
+        return lowerBound(history, nowMillis - plan.maxAgeMillis);
     }
 
     private final List<OutputColumn> columns;
