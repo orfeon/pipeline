@@ -66,7 +66,10 @@ public class DataflowFlexTemplateLauncher implements Launcher {
 
         final LaunchFlexTemplateParameter original = DataflowOptions
                 .createLaunchFlexTemplateParameter(template, parameters, options);
-        final LaunchFlexTemplateParameter launchParameter = withEnvironment(original, request, dataflow);
+        final LaunchFlexTemplateParameter launchParameter = LaunchFlexTemplateParameter
+                .newBuilder(withEnvironment(original, request, dataflow))
+                .setJobName(jobName(request.param("jobName"), options == null ? null : options.getJobName(), request.config().getName()))
+                .build();
 
         final LaunchFlexTemplateResponse resp = DataflowUtil.launchFlexTemplate(project, region, launchParameter, false);
         if(!resp.hasJob()) {
@@ -82,6 +85,42 @@ public class DataflowFlexTemplateLauncher implements Launcher {
                 .state(job.getCurrentState().name())
                 .consoleUrl(DataflowUtil.consoleUrl(job))
                 .build();
+    }
+
+    /** Dataflow job names: {@code [-a-z0-9]}, starting with a letter, ending with a letter or digit. */
+    private static final java.util.regex.Pattern INVALID_JOB_NAME_CHARS = java.util.regex.Pattern.compile("[^a-z0-9-]+");
+    private static final int MAX_JOB_NAME_LENGTH = 63;
+
+    /**
+     * The Flex Template launch requires a job name. Explicit launch parameter first, then the config's
+     * {@code options.jobName}, then the config name (with a timestamp suffix so repeated launches do not
+     * collide with a still-active job); every source is normalised to Dataflow's rules
+     * ({@code my_Feature Job} → {@code my-feature-job}).
+     */
+    static String jobName(final String parameter, final String optionsJobName, final String configName) {
+        if(parameter != null && !parameter.isBlank()) {
+            return sanitizeJobName(parameter);
+        }
+        if(optionsJobName != null && !optionsJobName.isBlank()) {
+            return sanitizeJobName(optionsJobName);
+        }
+        final String base = configName == null || configName.isBlank() ? "mercari-pipeline" : configName;
+        final String suffix = "-" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+                .withZone(java.time.ZoneOffset.UTC).format(Instant.now());
+        final String sanitized = sanitizeJobName(base);
+        return sanitized.substring(0, Math.min(sanitized.length(), MAX_JOB_NAME_LENGTH - suffix.length())).replaceAll("-+$", "") + suffix;
+    }
+
+    static String sanitizeJobName(final String name) {
+        String s = INVALID_JOB_NAME_CHARS.matcher(name.trim().toLowerCase(java.util.Locale.ROOT)).replaceAll("-");
+        s = s.replaceAll("^[^a-z]+", "");          // must start with a letter
+        if(s.isEmpty()) {
+            s = "job";
+        }
+        if(s.length() > MAX_JOB_NAME_LENGTH) {
+            s = s.substring(0, MAX_JOB_NAME_LENGTH);
+        }
+        return s.replaceAll("-+$", "");             // must end with a letter or digit
     }
 
     /**

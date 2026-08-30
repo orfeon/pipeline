@@ -32,6 +32,11 @@
           "title": "Flex Template",
           "description": "Launch the deployed dataflow image as a Flex Template job",
           "properties": {
+            "jobName": {
+              "type": "string",
+              "title": "Job name",
+              "description": "Dataflow job name ([-a-z0-9], starting with a letter; other characters are normalised). Default: config options.jobName, then the config name with a timestamp suffix"
+            },
             "templateLocation": {
               "type": "string",
               "title": "Template location",
