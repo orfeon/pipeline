@@ -121,15 +121,45 @@ public class KeyedSpillSorterTest {
     @Test
     public void testSweepRemovesDeadPidDirectories(@TempDir final Path dir) throws IOException {
         // a directory named for a pid that cannot be alive: sweep removes it; one for this pid stays
-        final Path dead = Files.createDirectories(dir.resolve(KeyedSpillSorter.DIR_PREFIX + Long.MAX_VALUE + "-old"));
+        final Path dead = Files.createDirectories(dir.resolve(KeyedSpillSorter.DIR_PREFIX + Long.MAX_VALUE + "-" + KeyedSpillSorter.hostToken() + "-old"));
         Files.writeString(dead.resolve("chunk-0.bin"), "stale");
-        final Path alive = Files.createDirectories(dir.resolve(KeyedSpillSorter.DIR_PREFIX + ProcessHandle.current().pid() + "-live"));
+        final Path alive = Files.createDirectories(dir.resolve(KeyedSpillSorter.DIR_PREFIX + ProcessHandle.current().pid() + "-" + KeyedSpillSorter.hostToken() + "-live"));
         final KeyedSpillSorter sorter = new KeyedSpillSorter(new KeyedSpillSorter.Options(8, dir.toString(), false), CODER);
         sorter.setup();
         Assertions.assertFalse(Files.exists(dead));
         Assertions.assertTrue(Files.exists(alive));
         sorter.teardown();
         Assertions.assertTrue(Files.exists(alive), "teardown only removes its own directory");
+    }
+
+    @Test
+    public void testOrderAcrossTheEpoch(@TempDir final Path dir) throws IOException {
+        // the sort key is compared as a signed long: 1969 rows come before 1970 rows
+        final KeyedSpillSorter sorter = new KeyedSpillSorter(new KeyedSpillSorter.Options(1, dir.toString(), false), CODER);
+        sorter.setup();
+        try (KeyedSpillSorter.Sorted sorted = sorter.sort(List.of(row(5, 1), row(-5, 2), row(0, 3), row(Long.MIN_VALUE + 1, 4)))) {
+            Assertions.assertEquals(List.of(4L, 2L, 3L, 1L), ids(sorted));
+        }
+        final List<KV<Long, MElement>> rows = new ArrayList<>();
+        for (int i = 0; i < 20_000; i++) rows.add(row(i % 2 == 0 ? i : -i, i));
+        try (KeyedSpillSorter.Sorted sorted = sorter.sort(rows)) {
+            Assertions.assertTrue(sorted.spilled());
+            long previous = Long.MIN_VALUE;
+            for (final KV<Long, MElement> kv : sorted) {
+                Assertions.assertTrue(kv.getValue().getEpochMillis() >= previous);
+                previous = kv.getValue().getEpochMillis();
+            }
+        }
+        sorter.teardown();
+    }
+
+    @Test
+    public void testSweepIgnoresOtherHosts(@TempDir final Path dir) throws IOException {
+        final Path other = Files.createDirectories(dir.resolve(KeyedSpillSorter.DIR_PREFIX + Long.MAX_VALUE + "-otherhost-1"));
+        final KeyedSpillSorter sorter = new KeyedSpillSorter(new KeyedSpillSorter.Options(8, dir.toString(), false), CODER);
+        sorter.setup();
+        Assertions.assertTrue(Files.exists(other), "a directory of another host (pid not visible here) is kept");
+        sorter.teardown();
     }
 
     @Test

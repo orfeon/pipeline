@@ -160,7 +160,9 @@ public class SequenceEvaluator implements Serializable {
      * {@link #unboundedColumns()}), or null when it is bounded: the reason to show in a diagnostic.
      */
     public static String unboundedReason(final OutputColumn c) {
-        final ColumnPlan plan = new SequenceEvaluator(List.of(c)).plan(c);
+        final SequenceEvaluator evaluator = c.scope == FeatureSpec.Scope.population
+                ? new PopulationEvaluator(List.of(c)) : new SequenceEvaluator(List.of(c));
+        final ColumnPlan plan = evaluator.plan(c);
         if (!unbounded(plan, c)) return null;
         if (plan.filterText != null) return "a window with a filter and no maxAge";
         return c.operator + " without maxAge";

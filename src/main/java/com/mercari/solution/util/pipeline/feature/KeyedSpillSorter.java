@@ -89,7 +89,7 @@ public final class KeyedSpillSorter implements Serializable {
         final Path base = Paths.get(options.directory() != null ? options.directory() : System.getProperty("java.io.tmpdir"));
         Files.createDirectories(base);
         sweepStale(base);
-        this.tempDir = Files.createTempDirectory(base, DIR_PREFIX + ProcessHandle.current().pid() + "-");
+        this.tempDir = Files.createTempDirectory(base, DIR_PREFIX + ProcessHandle.current().pid() + "-" + hostToken() + "-");
         if (BUDGET_LOGGED.compareAndSet(false, true)) {
             LOG.info("keyed spill sorter: budget {} MB per key, chunks under {} (compress={})", mb, base, options.compress());
         } else {
@@ -105,7 +105,7 @@ public final class KeyedSpillSorter implements Serializable {
         }
     }
 
-    /** Sorts the rows by their sort key (the sign-flipped event millis), stable within equal keys. */
+    /** Sorts the rows by their sort key (the event millis), stable within equal keys. */
     public Sorted sort(final Iterable<KV<Long, MElement>> rows) throws IOException {
         return sort(rows, "");
     }
@@ -137,21 +137,23 @@ public final class KeyedSpillSorter implements Serializable {
         }
         sortBuffer(buffer);
         if (chunks.isEmpty()) return new Sorted(buffer, List.of(), List.of(), 0L);
-        long bytes = 0;
-        for (final Path p : chunks) bytes += Files.size(p);
-        final long live = LIVE_BYTES.addAndGet(bytes);
-        final long peak = PEAK_BYTES.accumulateAndGet(live, Math::max);
-        LOG.info("keyed spill sorter {}: {} chunk(s) / {} MB on disk + {} rows in memory; live spill on this worker {} MB (peak {} MB)",
-                context, chunks.size(), bytes >> 20, buffer.size(), live >> 20, peak >> 20);
         final List<Source> sources = new ArrayList<>();
+        long bytes = 0;
         try {
-            for (final Path p : chunks) sources.add(new ChunkReader(p, coder, options.compress()));
-        } catch (final IOException e) {
+            for (final Path p : chunks) {
+                bytes += Files.size(p);
+                sources.add(new ChunkReader(p, coder, options.compress()));
+            }
+        } catch (final IOException | RuntimeException e) {
             for (final Source s : sources) s.close();
             for (final Path p : chunks) deleteQuietly(p);
             throw e;
         }
         sources.add(new MemorySource(buffer));
+        final long live = LIVE_BYTES.addAndGet(bytes);
+        final long peak = PEAK_BYTES.accumulateAndGet(live, Math::max);
+        LOG.info("keyed spill sorter {}: {} chunk(s) / {} MB on disk + {} rows in memory; live spill on this worker {} MB (peak {} MB)",
+                context, chunks.size(), bytes >> 20, buffer.size(), live >> 20, peak >> 20);
         return new Sorted(null, sources, chunks, bytes);
     }
 
@@ -173,7 +175,14 @@ public final class KeyedSpillSorter implements Serializable {
     private Path writeChunk(final List<KV<Long, MElement>> sorted, final int index) throws IOException {
         final Path path = tempDir.resolve("chunk-" + index + ".bin");
         OutputStream raw = new BufferedOutputStream(Files.newOutputStream(path), 1 << 16);
-        if (options.compress()) raw = new DeflaterOutputStream(raw, new Deflater(Deflater.BEST_SPEED), 1 << 16);
+        if (options.compress()) {
+            final Deflater deflater = new Deflater(Deflater.BEST_SPEED);
+            raw = new DeflaterOutputStream(raw, deflater, 1 << 16) {
+                @Override public void close() throws IOException {
+                    try { super.close(); } finally { deflater.end(); } // an explicit deflater is not ended by the stream
+                }
+            };
+        }
         try (DataOutputStream out = new DataOutputStream(raw)) {
             out.writeInt(sorted.size());
             for (final KV<Long, MElement> row : sorted) {
@@ -240,10 +249,22 @@ public final class KeyedSpillSorter implements Serializable {
 
         ChunkReader(final Path path, final Coder<MElement> coder, final boolean compressed) throws IOException {
             InputStream raw = new BufferedInputStream(Files.newInputStream(path), 1 << 16);
-            if (compressed) raw = new InflaterInputStream(raw, new java.util.zip.Inflater(), 1 << 16);
+            if (compressed) {
+                final java.util.zip.Inflater inflater = new java.util.zip.Inflater();
+                raw = new InflaterInputStream(raw, inflater, 1 << 16) {
+                    @Override public void close() throws IOException {
+                        try { super.close(); } finally { inflater.end(); }
+                    }
+                };
+            }
             this.in = new DataInputStream(raw);
             this.coder = coder;
-            this.remaining = in.readInt();
+            try {
+                this.remaining = in.readInt();
+            } catch (final IOException | RuntimeException e) {
+                close(); // the object is never constructed: release the handle here
+                throw e;
+            }
         }
 
         @Override
@@ -260,26 +281,26 @@ public final class KeyedSpillSorter implements Serializable {
         }
     }
 
-    /** k-way merge over the chunk readers and the in-memory tail; ties keep (chunk, sequence) order. */
+    /**
+     * k-way merge over the chunk readers and the in-memory tail. Each source holds one queued entry at a
+     * time and is itself sorted, so ties resolve by source index: earlier chunks (earlier arrivals) first.
+     */
     static final class MergeIterator implements Iterator<KV<Long, MElement>> {
-        private record Entry(long key, int source, long seq, KV<Long, MElement> row) {}
-        private static final Comparator<Entry> ORDER = Comparator.comparingLong(Entry::key)
-                .thenComparingInt(Entry::source).thenComparingLong(Entry::seq);
+        private record Entry(long key, int source, KV<Long, MElement> row) {}
+        private static final Comparator<Entry> ORDER = Comparator.comparingLong(Entry::key).thenComparingInt(Entry::source);
 
         private final List<Source> sources;
         private final PriorityQueue<Entry> queue = new PriorityQueue<>(ORDER);
-        private final long[] seqs;
 
         MergeIterator(final List<Source> sources) {
             this.sources = sources;
-            this.seqs = new long[sources.size()];
             for (int i = 0; i < sources.size(); i++) advance(i);
         }
 
         private void advance(final int i) {
             try {
                 final KV<Long, MElement> row = sources.get(i).next();
-                if (row != null) queue.add(new Entry(row.getKey(), i, seqs[i]++, row));
+                if (row != null) queue.add(new Entry(row.getKey(), i, row));
             } catch (final IOException e) {
                 throw new UncheckedIOException("failed to read spill chunk " + i, e);
             }
@@ -302,15 +323,27 @@ public final class KeyedSpillSorter implements Serializable {
         @Override public void write(final byte[] b, final int off, final int len) { count += len; }
     }
 
-    /** Removes spill directories of this JVM's prefix whose owning process is gone (a crashed worker JVM). */
+    /** The host name with the directory-name separators removed (a shared volume may hold other hosts' directories). */
+    static String hostToken() {
+        String host;
+        try { host = java.net.InetAddress.getLocalHost().getHostName(); } catch (final Exception e) { host = "host"; }
+        final String token = host.replaceAll("[^A-Za-z0-9]", "");
+        return token.isEmpty() ? "host" : token;
+    }
+
+    /**
+     * Removes spill directories ({@code feature-spill-<pid>-<host>-<random>}) left on this host by JVMs that are
+     * gone. Directories of other hosts (a spill directory on a shared volume) are left alone: their pids are
+     * not visible here.
+     */
     static void sweepStale(final Path base) {
+        final String host = hostToken();
         try (DirectoryStream<Path> dirs = Files.newDirectoryStream(base, DIR_PREFIX + "*")) {
             for (final Path dir : dirs) {
-                final String rest = dir.getFileName().toString().substring(DIR_PREFIX.length());
-                final int dash = rest.indexOf('-');
-                if (dash <= 0) continue;
+                final String[] parts = dir.getFileName().toString().substring(DIR_PREFIX.length()).split("-");
+                if (parts.length < 3 || !parts[1].equals(host)) continue;
                 final long pid;
-                try { pid = Long.parseLong(rest.substring(0, dash)); } catch (final NumberFormatException e) { continue; }
+                try { pid = Long.parseLong(parts[0]); } catch (final NumberFormatException e) { continue; }
                 if (pid == ProcessHandle.current().pid() || ProcessHandle.of(pid).isPresent()) continue;
                 LOG.info("removing stale spill directory {}", dir);
                 deleteRecursively(dir);

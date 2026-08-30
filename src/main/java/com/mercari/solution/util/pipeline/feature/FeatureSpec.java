@@ -330,12 +330,12 @@ public class FeatureSpec implements Serializable {
             final JsonObject engine = parameters.getAsJsonObject("engine");
             if (engine.has("spill") && engine.get("spill").isJsonObject()) {
                 final JsonObject spill = engine.getAsJsonObject("spill");
-                final Integer memoryMB = Json.integer(spill, "memoryMB");
-                if (memoryMB != null) {
-                    if (memoryMB < 1) {
-                        diagnostics.error("engine.spill.memoryMB", "engine.spill", "engine.spill.memoryMB must be >= 1: " + memoryMB);
+                if (spill.has("memoryMB") && !spill.get("memoryMB").isJsonNull()) {
+                    final JsonElement memoryMB = spill.get("memoryMB");
+                    if (!memoryMB.isJsonPrimitive() || !memoryMB.getAsJsonPrimitive().isNumber() || memoryMB.getAsInt() < 1) {
+                        diagnostics.error("engine.spill.memoryMB", "engine.spill", "engine.spill.memoryMB must be an integer >= 1: " + memoryMB);
                     } else {
-                        spec.engine.spillMemoryMB = memoryMB;
+                        spec.engine.spillMemoryMB = memoryMB.getAsInt();
                     }
                 }
                 spec.engine.spillDirectory = Json.string(spill, "directory");

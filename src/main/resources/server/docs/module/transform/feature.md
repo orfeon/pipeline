@@ -345,7 +345,7 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `engine.spill.memoryMB`, by default 16-256 MB derived from the worker heap — and beyond it as sorted chunks
   on the worker's local disk that are merged on read) and replayed as a stream, so a hot key — including a
   shrinkage encoding's global level, which is a single key holding **every** row — is never materialised in
-  memory. Keys that fit the budget never touch the disk or the coder.
+  memory. Keys that fit the budget never touch the disk (only a small sample is encoded to size the buffer).
   What stays in memory per key is the running statistics plus the *projected* history (only the fields the
   windows read) behind the longest window: a `maxAge` window, or any incremental statistic, lets rows be
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /

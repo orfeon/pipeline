@@ -41,20 +41,16 @@ public final class FeatureStages {
 
     private static final Logger LOG = LoggerFactory.getLogger(FeatureStages.class);
 
-    /** In-memory sort buffer (MB) per key of the keyed stages; system property override for tests. */
-    public static final String SORTER_MEMORY_PROPERTY = "mpipeline.feature.sorterMemoryMB";
-
     /**
      * Spill options of the keyed stages: {@code engine.spill} of the feature parameters, then the
-     * {@code --featureSpillMemoryMB} pipeline option, then the system property; the memory default (null) is
-     * derived from the worker heap at setup ({@link KeyedSpillSorter#defaultMemoryMB()}).
+     * {@code --featureSpillMemoryMB} pipeline option; the memory default (null) is derived from the worker
+     * heap at setup ({@link KeyedSpillSorter#defaultMemoryMB()}).
      */
     static KeyedSpillSorter.Options spillOptions(final FeatureSpec spec, final PipelineOptions options) {
         Integer memoryMB = spec.engine.spillMemoryMB;
         if (memoryMB == null && options != null) {
             memoryMB = options.as(MPipeline.MPipelineOptions.class).getFeatureSpillMemoryMB();
         }
-        if (memoryMB == null) memoryMB = Integer.getInteger(SORTER_MEMORY_PROPERTY);
         return new KeyedSpillSorter.Options(memoryMB, spec.engine.spillDirectory, spec.engine.spillCompress);
     }
 
@@ -80,8 +76,7 @@ public final class FeatureStages {
         final Schema elementSchema = Schema.builder(inputSchema).withType(DataType.ELEMENT).build();
         final Coder<MElement> elementCoder = ElementCoder.of(elementSchema);
         final KvCoder<String, MElement> kvCoder = KvCoder.of(StringUtf8Coder.of(), elementCoder);
-        // keyed stages carry (key, (sortable event time, row)) so KeyedSpillSorter can order the rows of each key by
-        // the big-endian encoded secondary key
+        // keyed stages carry (key, (event millis, row)) so KeyedSpillSorter can order the rows of each key
         final KvCoder<String, KV<Long, MElement>> sortKvCoder = KvCoder.of(StringUtf8Coder.of(), KvCoder.of(BigEndianLongCoder.of(), elementCoder));
         final KeyedSpillSorter sorter = new KeyedSpillSorter(spillOptions(plan.getSpec(), input.getPipeline().getOptions()), elementCoder);
         final List<PCollection<BadRecord>> failures = new ArrayList<>();
@@ -829,9 +824,9 @@ public final class FeatureStages {
             this.keys = keys;
         }
 
-        /** Flips the sign bit so the big-endian encoding orders negative epoch millis before positive ones. */
+        /** The sort key: the epoch millis themselves (compared as a signed long by {@link KeyedSpillSorter}). */
         static long sortable(final long millis) {
-            return millis ^ Long.MIN_VALUE;
+            return millis;
         }
 
         @ProcessElement
@@ -1007,11 +1002,22 @@ public final class FeatureStages {
             try {
                 sorted = sorter.sort(kv.getValue(), spillContext(label, kv.getKey()));
             } catch (final IOException | RuntimeException e) {
-                c.output(failureTag, Module.processError("Failed to sort keyed rows", MElement.of(Map.of("key", kv.getKey()), c.timestamp()), e, failFast));
+                failKey(c, kv.getValue(), "Failed to sort keyed rows", e);
                 return;
             }
             try (sorted) {
                 replay(c, sorted);
+            } catch (final UncheckedIOException e) {
+                // a chunk could not be read back mid-merge: the rows already emitted stand, the key is failed
+                // row by row like every other failure path (the grouped iterable is re-iterable)
+                failKey(c, kv.getValue(), "Failed to read the spilled rows of a key", e);
+            }
+        }
+
+        /** Routes every row of the key to the failure output (one BadRecord per input row). */
+        private void failKey(final ProcessContext c, final Iterable<KV<Long, MElement>> rows, final String message, final Exception e) {
+            for (final KV<Long, MElement> row : rows) {
+                c.output(failureTag, Module.processError(message, row.getValue(), e, failFast));
             }
         }
 

@@ -656,6 +656,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(a.getHash(), a.getArtifactVersion());
         final FeaturePlan pinned = compile(SOURCES, base.replace("refit: false", "refit: false, id: v42"));
         Assertions.assertEquals("v42", pinned.getArtifactVersion());
+        // engine knobs do not change the plan either: tuning the spill budget must not invalidate an artifact
+        final FeaturePlan tuned = compile(SOURCES, base + "engine: {spill: {memoryMB: 8, compress: true}}\n");
+        Assertions.assertEquals(a.getHash(), tuned.getHash(), tuned::describe);
+        Assertions.assertEquals(8, tuned.getSpec().engine.spillMemoryMB);
+        Assertions.assertTrue(hasCode(compile(SOURCES, base + "engine: {spill: {memoryMB: '64MB'}}\n"), "engine.spill.memoryMB"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, base + "engine: {spill: {memoryMB: 0}}\n"), "engine.spill.memoryMB"));
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "fit: {minHistory: P30D}\noutput:\n  prefix: f_")), "fit.minHistory"));
     }
 
