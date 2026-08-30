@@ -4,6 +4,7 @@ import com.mercari.solution.server.code.CodeRepository;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 
+/** Agent tools over the framework sources: wrappers of the MCP code tools. */
 public class CodeReader {
 
     @Tool("""
@@ -15,7 +16,7 @@ public class CodeReader {
     public String searchCode(
             @P(name = "pattern", description = "Java regular expression to search for. Invalid regex is searched as a literal string.") String pattern,
             @P(name = "pathFilter", description = "Optional substring filter on file paths, e.g. 'module/sink' or 'StorageSink'.", required = false) String pathFilter) {
-        return CodeRepository.search(pattern, pathFilter);
+        return McpToolBridge.call("search-code", McpToolBridge.args("pattern", pattern, "pathFilter", pathFilter));
     }
 
     @Tool("""
@@ -28,7 +29,7 @@ public class CodeReader {
             @P(name = "path", description = "Source file path, e.g. 'src/main/java/com/mercari/solution/MPipeline.java'.") String path,
             @P(name = "startLine", description = "First line to read (1-based). Defaults to 1.", required = false) Integer startLine,
             @P(name = "endLine", description = "Last line to read (inclusive). Defaults to startLine+499.", required = false) Integer endLine) {
-        return CodeRepository.read(path, startLine, endLine);
+        return McpToolBridge.call("read-source", McpToolBridge.args("path", path, "startLine", startLine, "endLine", endLine));
     }
 
     @Tool("""
@@ -39,7 +40,7 @@ public class CodeReader {
     """)
     public String resolveStackTrace(
             @P(name = "stackTrace", description = "The stack trace text, including 'at package.Class.method(File.java:line)' frames.") String stackTrace) {
-        return CodeRepository.resolveStackTrace(stackTrace);
+        return McpToolBridge.call("resolve-stack-trace", McpToolBridge.args("stackTrace", stackTrace));
     }
 
     @Tool("""
@@ -50,7 +51,7 @@ public class CodeReader {
     public String findModuleSource(
             @P(name = "type", description = "Module type: source, transform, sink, or failure.") CodeRepository.ModuleType type,
             @P(name = "name", description = "Module name as written in the config's 'module' field (e.g. 'bigquery', 'select', 'storage').") String name) {
-        return CodeRepository.findModuleSource(type, name);
+        return McpToolBridge.call("find-module-source", McpToolBridge.args("type", type == null ? null : type.name(), "name", name));
     }
 
     public static CodeReader create() {

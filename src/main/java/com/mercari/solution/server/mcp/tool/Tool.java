@@ -34,6 +34,60 @@ public interface Tool {
 
     void init(ServletContext servletContext);
 
+    /**
+     * Registry of the tool implementations by their published name, for callers other than the MCP
+     * server (the Pipeline Builder agent's tools are thin wrappers over these). Instances are created and
+     * initialised once, without a servlet context (every tool tolerates that).
+     */
+    static java.util.Map<String, Tool> registry() {
+        return Registry.TOOLS;
+    }
+
+    static Tool find(final String name) {
+        final Tool tool = Registry.TOOLS.get(name);
+        if (tool == null) {
+            throw new IllegalArgumentException("unknown mcp tool: " + name + " (available: " + Registry.TOOLS.keySet() + ")");
+        }
+        return tool;
+    }
+
+    final class Registry {
+        private static final java.util.Map<String, Tool> TOOLS = load();
+
+        private Registry() {}
+
+        private static java.util.Map<String, Tool> load() {
+            final java.util.Map<String, Tool> tools = new java.util.TreeMap<>();
+            for (final Class<Tool> clazz : toolClasses()) {
+                try {
+                    final Tool tool = clazz.getDeclaredConstructor().newInstance();
+                    tool.init(null);
+                    tools.put(clazz.getAnnotation(Module.class).name(), tool);
+                } catch (final ReflectiveOperationException e) {
+                    throw new RuntimeException("Failed to instantiate mcp.tool: " + clazz, e);
+                }
+            }
+            return java.util.Collections.unmodifiableMap(tools);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static List<Class<Tool>> toolClasses() {
+        final ClassPath classPath;
+        try {
+            classPath = ClassPath.from(Tool.class.getClassLoader());
+        } catch (IOException ioe) {
+            throw new RuntimeException("Reading classpath resource failed", ioe);
+        }
+        return classPath.getTopLevelClassesRecursive(Tool.class.getPackageName())
+                .stream()
+                .map(ClassPath.ClassInfo::load)
+                .filter(Tool.class::isAssignableFrom)
+                .map(clazz -> (Class<Tool>) clazz.asSubclass(Tool.class))
+                .filter(clazz -> clazz.isAnnotationPresent(Module.class))
+                .collect(Collectors.toList());
+    }
+
     static List<McpServerFeatures.SyncToolSpecification> syncTools(ServletContext servletContext) {
         final ClassPath classPath;
         try {

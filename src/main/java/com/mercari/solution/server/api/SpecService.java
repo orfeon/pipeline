@@ -433,7 +433,7 @@ public class SpecService {
      * (server/docs/module/index.yaml). The `title` field of each entry is the
      * registered module name (matches @Source/@Transform/@Sink.Module(name=...)).
      */
-    private static class ModuleIndex {
+    public static class ModuleIndex {
 
         private static final String RESOURCES_MODULE_INDEX = "server/docs/module/index.yaml";
 

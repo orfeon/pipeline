@@ -1,9 +1,9 @@
 package com.mercari.solution.server.agent.tool;
 
-import com.mercari.solution.server.dataflow.DataflowJobReader;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 
+/** Agent tools over Dataflow jobs: wrappers of the MCP tools {@code get-dataflow-job} / {@code list-job-errors} / {@code list-failed-jobs}. */
 public class DataflowReader {
 
     @Tool("""
@@ -16,7 +16,7 @@ public class DataflowReader {
             @P(name = "jobIdOrName", description = "Dataflow job id or exact job name.") String jobIdOrName,
             @P(name = "project", description = "GCP project id. Defaults to the server's configured project.", required = false) String project,
             @P(name = "region", description = "Dataflow region (e.g. 'asia-northeast1'). Defaults to the server's configured region.", required = false) String region) {
-        return DataflowJobReader.getJob(jobIdOrName, project, region);
+        return McpToolBridge.call("get-dataflow-job", McpToolBridge.args("jobIdOrName", jobIdOrName, "project", project, "region", region));
     }
 
     @Tool("""
@@ -29,7 +29,7 @@ public class DataflowReader {
             @P(name = "jobIdOrName", description = "Dataflow job id or exact job name.") String jobIdOrName,
             @P(name = "project", description = "GCP project id. Defaults to the server's configured project.", required = false) String project,
             @P(name = "region", description = "Dataflow region. Defaults to the server's configured region.", required = false) String region) {
-        return DataflowJobReader.listJobErrors(jobIdOrName, project, region);
+        return McpToolBridge.call("list-job-errors", McpToolBridge.args("jobIdOrName", jobIdOrName, "project", project, "region", region));
     }
 
     @Tool("""
@@ -40,7 +40,7 @@ public class DataflowReader {
             @P(name = "hours", description = "Look-back window in hours. Defaults to 24.", required = false) Integer hours,
             @P(name = "project", description = "GCP project id. Defaults to the server's configured project.", required = false) String project,
             @P(name = "region", description = "Dataflow region. Defaults to the server's configured region.", required = false) String region) {
-        return DataflowJobReader.listRecentFailedJobs(hours, project, region);
+        return McpToolBridge.call("list-failed-jobs", McpToolBridge.args("hours", hours, "project", project, "region", region));
     }
 
     public static DataflowReader create() {

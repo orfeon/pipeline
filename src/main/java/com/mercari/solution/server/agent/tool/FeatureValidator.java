@@ -2,11 +2,10 @@ package com.mercari.solution.server.agent.tool;
 
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
-import com.mercari.solution.util.pipeline.feature.FeaturePlanService;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 
-/** Agent tool: compile a {@code feature} transform spec and return the expansion report. */
+/** Agent tool: compile a {@code feature} transform spec — wrapper of the MCP tool {@code validate-feature}. */
 public class FeatureValidator {
 
     @Tool(name = "validateFeature", value = """
@@ -21,21 +20,11 @@ public class FeatureValidator {
 
         try {
             final JsonObject body = Config.convertConfigJson(config, Config.Format.unknown);
-            final JsonObject request = new JsonObject();
-            if (body.has("transforms")) {
-                for (final var e : body.entrySet()) request.add(e.getKey(), e.getValue());
-            } else if (body.has("parameters")) {
-                request.add("parameters", body.get("parameters"));
-            } else {
-                request.add("parameters", body);
-            }
-            if (name != null && !name.isBlank()) request.addProperty("name", name);
-            final JsonObject result = FeaturePlanService.validate(request);
-            if (!result.has("describe")) {
-                return "ERROR: " + (result.has("error") ? result.get("error").getAsString() : result.toString());
-            }
-            final boolean ok = result.get("ok").getAsBoolean();
-            return (ok ? "SUCCESS\n" : "ERROR: the feature spec has errors\n") + result.get("describe").getAsString();
+            final java.util.Map<String, Object> args = body.has("transforms")
+                    ? McpToolBridge.args("config", body.toString(), "name", name, "format", "text")
+                    : McpToolBridge.args("parameters", (body.has("parameters") ? body.get("parameters") : body).toString(), "format", "text");
+            final String result = McpToolBridge.call("validate-feature", args);
+            return result.startsWith("ERROR") ? "ERROR: the feature spec has errors\n" + result.replaceFirst("^ERROR:?\\s*", "") : "SUCCESS\n" + result;
         } catch (final Exception e) {
             return "ERROR: " + e.getMessage();
         }

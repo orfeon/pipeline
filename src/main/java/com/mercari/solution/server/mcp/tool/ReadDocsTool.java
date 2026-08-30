@@ -1,6 +1,5 @@
 package com.mercari.solution.server.mcp.tool;
 
-import com.mercari.solution.server.agent.tool.DocsReader;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
@@ -50,6 +49,38 @@ public class ReadDocsTool implements Tool {
     private static final String DOCS_ROOT_PATH = "/server/docs/";
     private static final java.util.Set<String> MODULE_TYPES = java.util.Set.of("source", "transform", "sink", "action");
 
+    /**
+     * Normalize a docs-root-relative path: resolves '.'/'..' segments and rejects paths that escape the
+     * docs root or do not point at a markdown file.
+     */
+    public static String normalizeDocPath(final String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        String p = path.trim().replace('\\', '/');
+        while (p.startsWith("/")) {
+            p = p.substring(1);
+        }
+        final java.util.Deque<String> segments = new java.util.ArrayDeque<>();
+        for (final String segment : p.split("/")) {
+            switch (segment) {
+                case "", "." -> { }
+                case ".." -> {
+                    if (segments.isEmpty()) {
+                        return null;
+                    }
+                    segments.removeLast();
+                }
+                default -> segments.addLast(segment);
+            }
+        }
+        if (segments.isEmpty()) {
+            return null;
+        }
+        final String normalized = String.join("/", segments);
+        return normalized.endsWith(".md") ? normalized : null;
+    }
+
     @Override
     public void init(ServletContext servletContext) {
     }
@@ -74,7 +105,7 @@ public class ReadDocsTool implements Tool {
             }
             normalized = "module/" + parts[0] + "/" + parts[1].toLowerCase() + ".md";
         } else {
-            normalized = DocsReader.normalizeDocPath(pathObj == null ? null : pathObj.toString());
+            normalized = normalizeDocPath(pathObj == null ? null : pathObj.toString());
         }
         if(normalized == null) {
             return McpSchema.CallToolResult.builder()

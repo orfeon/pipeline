@@ -114,7 +114,8 @@ The MCP server is the same deployment: Streamable HTTP at `https://<service>/mcp
 `list-modules` / `read-docs` (a module by id or any document by path), `validate-feature`,
 `run-pipeline` (in-server DirectRunner run, or `dryRun: true`), `launch-pipeline`,
 `get-dataflow-job` / `list-job-errors` / `list-failed-jobs` / `resolve-stack-trace` and
-`get-cloud-run-execution`, plus the docs as `docs://` resources. Three ways to reach it:
+`get-cloud-run-execution`, plus the docs as `docs://` resources. The Pipeline Builder agent's tools are
+thin wrappers over the same implementations (`McpToolBridge`), so both surfaces behave identically. Three ways to reach it:
 
 ### Cloud Run through `gcloud run services proxy` (recommended for developers)
 

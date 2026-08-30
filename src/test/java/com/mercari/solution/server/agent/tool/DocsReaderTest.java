@@ -9,27 +9,27 @@ public class DocsReaderTest {
 
     @Test
     public void testNormalizeDocPath() {
-        Assertions.assertEquals("module/common/filter.md", DocsReader.normalizeDocPath("module/common/filter.md"));
-        Assertions.assertEquals("module/common/filter.md", DocsReader.normalizeDocPath("/module/common/filter.md"));
-        Assertions.assertEquals("module/common/filter.md", DocsReader.normalizeDocPath("./module/common/filter.md"));
-        Assertions.assertEquals("module/common/filter.md", DocsReader.normalizeDocPath("module\\common\\filter.md"));
-        Assertions.assertEquals("system.md", DocsReader.normalizeDocPath("system.md"));
+        Assertions.assertEquals("module/common/filter.md", com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("module/common/filter.md"));
+        Assertions.assertEquals("module/common/filter.md", com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("/module/common/filter.md"));
+        Assertions.assertEquals("module/common/filter.md", com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("./module/common/filter.md"));
+        Assertions.assertEquals("module/common/filter.md", com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("module\\common\\filter.md"));
+        Assertions.assertEquals("system.md", com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("system.md"));
 
         // '..' segments resolve within the docs root
         Assertions.assertEquals(
                 "module/common/filter.md",
-                DocsReader.normalizeDocPath("module/transform/../common/filter.md"));
+                com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("module/transform/../common/filter.md"));
 
         // paths escaping the docs root are rejected
-        Assertions.assertNull(DocsReader.normalizeDocPath("../secrets.md"));
-        Assertions.assertNull(DocsReader.normalizeDocPath("module/../../secrets.md"));
+        Assertions.assertNull(com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("../secrets.md"));
+        Assertions.assertNull(com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("module/../../secrets.md"));
 
         // only markdown files are allowed
-        Assertions.assertNull(DocsReader.normalizeDocPath("module/index.yaml"));
-        Assertions.assertNull(DocsReader.normalizeDocPath("module/common"));
+        Assertions.assertNull(com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("module/index.yaml"));
+        Assertions.assertNull(com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("module/common"));
 
-        Assertions.assertNull(DocsReader.normalizeDocPath(null));
-        Assertions.assertNull(DocsReader.normalizeDocPath("  "));
+        Assertions.assertNull(com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath(null));
+        Assertions.assertNull(com.mercari.solution.server.mcp.tool.ReadDocsTool.normalizeDocPath("  "));
     }
 
     @Test
@@ -44,7 +44,7 @@ public class DocsReaderTest {
                 "module/common/template.md",
                 "system.md"}) {
             final String content = docsReader.getDocument(path);
-            Assertions.assertFalse(content.startsWith("Error:"), path + " -> " + content);
+            Assertions.assertFalse(content.startsWith("ERROR"), path + " -> " + content);
             Assertions.assertFalse(content.startsWith("Document not found"), path + " -> " + content);
             Assertions.assertFalse(content.isBlank(), path);
         }
@@ -53,13 +53,13 @@ public class DocsReaderTest {
     @Test
     public void testGetDocumentNotFound() {
         final String content = docsReader.getDocument("module/common/no-such-doc.md");
-        Assertions.assertTrue(content.startsWith("Document not found"), content);
+        Assertions.assertTrue(content.contains("Document not found"), content);
     }
 
     @Test
     public void testGetDocumentInvalidPath() {
-        Assertions.assertTrue(docsReader.getDocument("../outside.md").startsWith("Error:"));
-        Assertions.assertTrue(docsReader.getDocument("module/index.yaml").startsWith("Error:"));
+        Assertions.assertTrue(docsReader.getDocument("../outside.md").startsWith("ERROR"));
+        Assertions.assertTrue(docsReader.getDocument("module/index.yaml").startsWith("ERROR"));
     }
 
 }
