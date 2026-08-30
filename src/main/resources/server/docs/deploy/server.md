@@ -136,19 +136,24 @@ Then register `http://localhost:8080/mcp` in the client. Claude Code:
 claude mcp add --transport http mercari-pipeline http://localhost:8080/mcp
 ```
 
-JSON-configured clients (Claude Desktop `claude_desktop_config.json`, Cursor `.cursor/mcp.json`, ...):
+JSON-configured clients that speak Streamable HTTP themselves (Claude Code `.mcp.json`, Cursor
+`.cursor/mcp.json`, VS Code `mcp.json`, ...). Keep `"type": "http"`: Claude Code and VS Code treat an
+entry without `type` as a stdio server (`command`) and fail to start it, while Cursor infers the
+transport from `url` — the explicit type works everywhere:
 
 ```json
 {
   "mcpServers": {
     "mercari-pipeline": {
+      "type": "http",
       "url": "http://localhost:8080/mcp"
     }
   }
 }
 ```
 
-A client that only supports stdio servers can bridge with `mcp-remote`:
+A client that only supports stdio servers (Claude Desktop's `claude_desktop_config.json`, older
+clients) bridges with `mcp-remote`:
 
 ```json
 {
