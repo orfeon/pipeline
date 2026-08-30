@@ -16,11 +16,11 @@
 
     <snakeyaml.version>2.6</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
-    <lucene.version>10.5.0</lucene.version>
-    <pdfbox.version>3.0.7</pdfbox.version>
-    <jsoup.version>1.22.2</jsoup.version>
+    <lucene.version>10.5.1</lucene.version>
+    <pdfbox.version>3.0.8</pdfbox.version>
+    <jsoup.version>1.23.2</jsoup.version>
     <djl.version>0.36.0</djl.version>
-    <ojalgo.version>57.0.0</ojalgo.version>
+    <ojalgo.version>57.1.1</ojalgo.version>
 
     <hbase.version>2.6.6</hbase.version>
     <hadoop.version>3.4.2</hadoop.version>
@@ -37,7 +37,7 @@
     <slides.version>v1-rev20260408-2.0.0</slides.version>
     <forms.version>v1-rev20250422-2.0.0</forms.version>
 
-    <onnxruntime.version>1.27.0</onnxruntime.version>
+    <onnxruntime.version>1.29.0</onnxruntime.version>
     <onnx.version>1.20.1-1.5.13</onnx.version>
 
     <slf4j.version>2.0.16</slf4j.version>
@@ -59,8 +59,8 @@
     <skipITs>true</skipITs>
 
     <jetty.version>12.1.10</jetty.version>
-    <mcp.version>2.0.0</mcp.version>
-    <langchain4j.version>1.18.0</langchain4j.version>
+    <mcp.version>2.0.1</mcp.version>
+    <langchain4j.version>1.19.0</langchain4j.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -994,7 +994,7 @@
     <dependency>
       <groupId>dev.langchain4j</groupId>
       <artifactId>langchain4j-google-genai</artifactId>
-      <version>${langchain4j.version}-beta28</version>
+      <version>${langchain4j.version}-beta29</version>
     </dependency>
 
     <!-- Experimental LLM -->
