@@ -74,18 +74,15 @@ public interface Tool {
      * from the client).
      */
     static McpSchema.Tool toolSchema(final Module properties) {
-        final McpSchema.Tool.Builder builder = McpSchema.Tool.builder()
+        // outputSchema is deliberately NOT published: with an output schema the SDK requires every result to
+        // carry structuredContent (validated against it) and turns a text-only result into an error. The
+        // tools return their JSON as text content; the annotation's outputSchema documents that shape.
+        return McpSchema.Tool.builder()
                 .name(properties.name())
                 .title(properties.title())
                 .description(properties.description())
-                .inputSchema(schemaMap(properties.name(), "inputSchema", properties.inputSchema()));
-        final java.util.Map<String, Object> output = properties.outputSchema() == null || properties.outputSchema().isBlank()
-                ? null : schemaMap(properties.name(), "outputSchema", properties.outputSchema());
-        // only object output schemas are valid for structured content; scalar ones are documentation only
-        if (output != null && "object".equals(output.get("type"))) {
-            builder.outputSchema(output);
-        }
-        return builder.build();
+                .inputSchema(schemaMap(properties.name(), "inputSchema", properties.inputSchema()))
+                .build();
     }
 
     @SuppressWarnings("unchecked")

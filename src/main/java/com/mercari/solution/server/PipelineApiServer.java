@@ -40,7 +40,15 @@ public class PipelineApiServer extends HttpServlet {
             final HttpServletRequest request,
             final HttpServletResponse response) throws ServletException, IOException {
 
-        switch (request.getPathInfo()) {
+        final String path = request.getPathInfo();
+        if (path == null || path.isBlank() || "/".equals(path)) {
+            // GET /api without a sub-path (e.g. a browser or health probe): not a route
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            response.setContentType("application/json");
+            response.getWriter().println("{\"status\":\"error\",\"error\":\"unknown api path; use /api/spec, /api/pipeline, /api/launch, /api/agent or /api/feature\"}");
+            return;
+        }
+        switch (path) {
             case "/spec" -> SpecService.serve(request, response);
             case "/pipeline" -> PipelineService.serve(request, response);
             case "/launch" -> LaunchService.serve(request, response);

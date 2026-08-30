@@ -32,6 +32,8 @@ public class McpServerDefinitionsTest {
             final Tool.Module properties = clazz.getAnnotation(Tool.Module.class);
             final McpSchema.Tool tool = (McpSchema.Tool) toolSchema.invoke(null, properties);
             Assertions.assertEquals(properties.name(), tool.name());
+            // no output schema: results are text content; an output schema would make the SDK demand structuredContent
+            Assertions.assertNull(tool.outputSchema(), properties.name() + " must not publish an output schema");
             final Map<String, Object> schema = tool.inputSchema();
             Assertions.assertNotNull(schema, properties.name() + " input schema");
             Assertions.assertEquals("object", schema.get("type"), properties.name() + " input schema type");
