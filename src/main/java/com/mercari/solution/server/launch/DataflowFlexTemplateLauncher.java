@@ -153,6 +153,23 @@ public class DataflowFlexTemplateLauncher implements Launcher {
             defaults.resolve(runner, LaunchDefaults.KEY_SUBNETWORK,
                     dataflow == null ? null : dataflow.getSubnetwork()).ifPresent(builder::setSubnetwork);
         }
+        // sizing parameters advertised by the launch spec / MCP tool: explicit values win over the config options
+        final String machineType = request.param("workerMachineType") != null ? request.param("workerMachineType") : request.param("machineType");
+        if(machineType != null) {
+            builder.setMachineType(machineType);
+        }
+        if(request.paramInt("numWorkers") != null) {
+            builder.setNumWorkers(request.paramInt("numWorkers"));
+        }
+        if(request.paramInt("maxNumWorkers") != null) {
+            builder.setMaxWorkers(request.paramInt("maxNumWorkers"));
+        }
+        if(request.paramInt("diskSizeGb") != null) {
+            builder.setDiskSizeGb(request.paramInt("diskSizeGb"));
+        }
+        if(request.param("workerZone") != null) {
+            builder.setWorkerZone(request.param("workerZone"));
+        }
         if(builder.getStagingLocation().isEmpty()) {
             defaults.resolve(runner, LaunchDefaults.KEY_STAGING_LOCATION,
                     dataflow == null ? null : dataflow.getStagingLocation()).ifPresent(builder::setStagingLocation);

@@ -69,8 +69,15 @@ public class ContextEvaluator implements Serializable {
                 values.add(null);
             }
         }
+        final String value = c.coordinates.get("value");
         for (int i = 0; i < rows.size(); i++) {
-            rows.get(i).put(c.canonicalName, apply(op, values, i, excludeSelf));
+            Object result = apply(op, values, i, excludeSelf);
+            if (value != null && result instanceof Map<?, ?> map) {
+                // per-value column of countByValue / ratioByValue: absent value = 0 count / null ratio
+                final Object picked = map.get(value);
+                result = picked != null ? picked : "countByValue".equals(op) ? 0L : null;
+            }
+            rows.get(i).put(c.canonicalName, result);
         }
     }
 

@@ -181,7 +181,7 @@ public final class VarianceComponents {
             final Map<String, Object> row = element.asPrimitiveMap();
             for (final LevelSpec spec : specs) {
                 // a level without a target counts rows: contribute y = 0 so n is tracked
-                Double y = spec.field() == null ? 0d : FeatureValues.toDouble(row.get(spec.field()));
+                Double y = spec.field() == null ? Double.valueOf(0d) : FeatureValues.toDouble(row.get(spec.field())); // boxed: a primitive branch would unbox a null target
                 if (y == null) continue;
                 if (spec.offsetColumn() != null) {
                     final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));

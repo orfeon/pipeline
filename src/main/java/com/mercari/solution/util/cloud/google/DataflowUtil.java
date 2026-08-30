@@ -121,9 +121,18 @@ public class DataflowUtil {
             final String region,
             final String jobName,
             final int searchLimit) throws IOException {
+        return findJobByName(project, region, jobName, ListJobsRequest.Filter.ALL, searchLimit);
+    }
+
+    public static Job findJobByName(
+            final String project,
+            final String region,
+            final String jobName,
+            final ListJobsRequest.Filter filter,
+            final int searchLimit) throws IOException {
 
         Job latest = null;
-        for(final Job job : listJobs(project, region, ListJobsRequest.Filter.ALL, searchLimit)) {
+        for(final Job job : listJobs(project, region, filter, searchLimit)) {
             if(!job.getName().equals(jobName)) {
                 continue;
             }

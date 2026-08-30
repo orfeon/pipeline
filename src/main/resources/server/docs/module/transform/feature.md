@@ -64,7 +64,7 @@ time; warnings and hints from the compiler are part of that report.
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
-| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream). |
+| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`). |
 
 ### Sources contract
 
@@ -115,7 +115,8 @@ features:
     scope: context
     context: session
     ops:
-      - {type: countByValue, fields: [condition_grade]}
+      - {type: countByValue, fields: [condition_grade]}                      # map<value, count> column
+      - {type: countByValue, fields: [condition_grade], values: [good, fair]}  # one INT64 column per value (sink / model friendly)
       - {type: entropy, fields: [condition_grade]}
       - {type: groupSize}
 
@@ -133,6 +134,8 @@ features:
       - {type: runLength, field: condition_grade, value: good}
       - {type: sinceEvent, predicate: "sold = 1", unit: [events, days]}
       - {type: countMatch, predicate: "sold = 1"}
+      - {type: countMatch, predicate: "sold = 0", as: losses}   # as: names the column (two predicates of one op type need it)
+      - {type: ewma, expr: "start_price / quantity", halflife: [3], as: unit_price}  # as: replaces the anonymous __e{n} segment
       - {type: aggregate, field: start_price, funcs: [count, mean, max]}
       - {type: aggregate, funcs: [count]}        # COUNT(1): every visible past row, nulls included
 
@@ -165,7 +168,8 @@ over the whole input (windows are ignored) and applies it to every row as a pure
 their own outcome, so use it for serving / offline analysis, not for training. With `artifact.uri` the
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
 hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
-produces a new directory. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
+produces a new directory. The manifest also records the `varianceComponents` pseudo-counts (`lambdas`,
+per level) derived from the persisted statistics, so a run's shrinkage can be audited. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
 for the current plan hash already exists it is loaded at worker setup instead of re-fitting (`refit: true`
 forces a new fit) — this is the serving path: the same config, run on request data, applies the fitted
 statistics without any history. Streaming runs require an existing artifact. Paths use the Beam
@@ -262,6 +266,24 @@ that are only usable offline get a leading `_` and are not emitted.
 Inline `expr` in sequence ops and encoding targets is evaluated per past row (no `$self`); expressions are
 numeric (Lucene expression syntax), predicates and window filters use the SQL-like
 [Filter](../common/filter.md) syntax.
+
+### Naming, conditions and placement notes
+
+- `as:` on a sequence / context op names the output column segment: for `sinceEvent` / `countMatch` it replaces
+  the op suffix (`<block>_<window>_<as>[_<unit>]`), otherwise the field segment — which is how an inline
+  `expr` avoids the anonymous `<block>__e{n}` name. On an encoding target `as:` replaces the target name
+  (`<block>__<keys>__<as>__<stat>`).
+- `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
+  numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
+  `values` when the output goes to a sink such as BigQuery or straight into a model.
+- Window `filter` and op `predicate` texts are parsed at compile time. A column whose name is a keyword of
+  the condition grammar (`rank`, `order`, ...) is quoted automatically with backticks (reported as
+  `predicate.quoted` / `filter.quoted`); you can also write `` `rank` <= 3 `` yourself. A condition that
+  does not parse is a compile error (`predicate.parse` / `filter.parse`), not a worker failure.
+- With `output.groupBy`, group-constant context columns (`countByValue`, `ratioByValue`, `entropy`,
+  `groupSize` without `excludeSelf`) are placed on the **parent** record, not in the child array — look for
+  them next to the group keys (`placement: parent` in the plan's column list).
+- Hints such as `sequence.aggregate.encoding` are reported once per block.
 
 ### Availability check
 

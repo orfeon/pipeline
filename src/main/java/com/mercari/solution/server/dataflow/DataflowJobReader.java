@@ -59,6 +59,10 @@ public class DataflowJobReader {
                     result.append(config).append("\n");
                 }
                 result.append("```\n");
+            } else if (job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_QUEUED
+                    || job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_PENDING) {
+                result.append("\n(the job has not started yet: its pipeline parameters, including the config, appear once it leaves the ")
+                        .append(job.getCurrentState().name()).append(" state)\n");
             } else {
                 result.append("\nNo 'config' parameter found on the job "
                         + "(the job may not have been launched from a mercari/pipeline flex template).\n");
@@ -151,7 +155,12 @@ public class DataflowJobReader {
         if (JOB_ID_PATTERN.matcher(key).matches()) {
             return DataflowUtil.getJob(project, region, key, JobView.JOB_VIEW_ALL);
         }
-        final Job byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
+        // active jobs first (running / queued / pending): a job launched a moment ago is found even when the
+        // project has more terminated jobs than the search limit covers
+        Job byName = DataflowUtil.findJobByName(project, region, key, com.google.dataflow.v1beta3.ListJobsRequest.Filter.ACTIVE, NAME_SEARCH_LIMIT);
+        if (byName == null) {
+            byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
+        }
         if (byName == null) {
             return null;
         }

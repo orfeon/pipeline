@@ -128,6 +128,15 @@ docker run \
   * Assembly may still call external services that a module needs for schema resolution (for example a
     BigQuery dry-run query or a Spanner schema read), so the same credentials as a real run are required.
 
+## Notes on Flex Template launches
+
+* The Flex Template launcher VM pulls the pipeline image with the **execution project's Compute Engine
+  default service account** (`<project-number>-compute@developer.gserviceaccount.com`), not with the
+  credentials of whoever launched the job. When the image lives in another project's Artifact Registry,
+  grant that account `roles/artifactregistry.reader` on the repository, or the launch fails with
+  `artifactregistry.repositories.downloadArtifacts denied` (running the launcher locally with `docker`
+  hides this because your own credentials are used).
+
 ## Run on Apache Flink / Apache Spark
 
 Build the bundled jar with the `flink` or `spark` Maven profile

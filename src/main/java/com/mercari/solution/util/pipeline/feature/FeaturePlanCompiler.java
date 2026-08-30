@@ -50,6 +50,8 @@ public final class FeaturePlanCompiler {
     private final Set<String> lineageMissing = new LinkedHashSet<>();
     /** True when at least one block could not be expanded (availability verdicts are then deferred). */
     private boolean unresolvedBlocks = false;
+    /** Hint codes already reported per block (some hints are per block, not per column). */
+    private final Set<String> hintedBlocks = new HashSet<>();
     private int anonymousCounter = 0;
 
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
@@ -642,7 +644,19 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("context.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
                     continue;
                 }
-                final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + field + "_" + op.type, operator.outputFor(ref.type()), computeAt);
+                if (!op.values.isEmpty() && List.of("countByValue", "ratioByValue").contains(op.type)) {
+                    // one column per listed value (like indicator) instead of a map column
+                    for (final String value : op.values) {
+                        final Schema.FieldType type = "countByValue".equals(op.type) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64;
+                        final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type + "_" + value, type, computeAt);
+                        c.coordinates.put("field", field);
+                        c.coordinates.put("value", value);
+                        addSelfInput(c, field);
+                        finishContext(c, def, context, op);
+                    }
+                    continue;
+                }
+                final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type, operator.outputFor(ref.type()), computeAt);
                 c.coordinates.put("field", field);
                 addSelfInput(c, field);
                 finishContext(c, def, context, op);
@@ -735,10 +749,12 @@ public final class FeaturePlanCompiler {
                     if (refs.usesSelf) diagnostics.error("sequence.self", loc, "op " + op.type + ": $self is not allowed in sequence ops (past rows only); use window.filter or a lag + row expr");
                     final List<String> units = "sinceEvent".equals(op.type) ? (op.unit.isEmpty() ? List.of("events") : op.unit) : List.of("");
                     for (final String unit : units) {
-                        final String suffix = "sinceEvent".equals(op.type) ? "since_" + unit : op.type.toLowerCase();
+                        final String suffix = op.as != null ? op.as + (units.size() > 1 ? "_" + unit : "")
+                                : "sinceEvent".equals(op.type) ? "since_" + unit : op.type.toLowerCase();
                         final Schema.FieldType type = "sinceEvent".equals(op.type) && !"events".equals(unit) ? Schema.FieldType.FLOAT64 : Schema.FieldType.INT64;
                         final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, def.name + "_" + window.token() + "_" + suffix, type, computeAt);
-                        c.coordinates.put("predicate", op.predicate);
+                        final String predicate = conditionText(op.predicate, loc, "predicate");
+                        if (predicate != null) c.coordinates.put("predicate", predicate);
                         if (!unit.isEmpty()) c.coordinates.put("unit", unit);
                         for (final String r : refs.others) addPastInput(c, r);
                         finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -765,7 +781,8 @@ public final class FeaturePlanCompiler {
                         diagnostics.error("sequence.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
                         continue;
                     }
-                    final String base = def.name + "_" + window.token() + "_" + displayName(field) + "_";
+                    // `as` names the field segment (an inline expr would otherwise show as the anonymous __e{n})
+                    final String base = def.name + "_" + window.token() + "_" + (op.as != null && fields.size() == 1 ? op.as : displayName(field)) + "_";
                     switch (op.type) {
                         case "lag" -> {
                             final int k = op.k == null ? 1 : op.k;
@@ -820,9 +837,10 @@ public final class FeaturePlanCompiler {
                                     diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func);
                                     continue;
                                 }
-                                if (List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref)) {
+                                if (List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {
+                                    // once per block: the same hint for every window × field × func would drown the report
                                     diagnostics.hint("sequence.aggregate.encoding", loc,
-                                            "aggregate " + func + " over outcome field '" + field + "' has no shrinkage; consider population encoding with a windowed keySet (§4.3 役割分担)");
+                                            "aggregate " + func + " over outcome field '" + field + "' (and other outcome means in this block) has no shrinkage; consider population encoding with a windowed keySet (§4.3 役割分担)");
                                 }
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 c.coordinates.put("func", func);
@@ -853,6 +871,65 @@ public final class FeaturePlanCompiler {
     private boolean isOutcomeLike(final Ref ref) {
         if (ref.derivedFrom().contains("outcome")) return true;
         return ref.worldAvailableAt().isProvablyAfter(spec.predictAt);
+    }
+
+    /**
+     * A window filter / op predicate as the evaluator will parse it. Parsed here so a syntax error is a
+     * compile diagnostic instead of a worker-setup failure; when the bare text fails only because a column
+     * name is a reserved word of the condition grammar ({@code rank <= 3}), the referenced identifiers are
+     * quoted with backticks ({@code `rank` <= 3}) and the rewritten text is what the column carries.
+     * Returns null (after reporting) when the condition cannot be parsed either way.
+     */
+    private final Map<String, String> conditionCache = new HashMap<>();
+
+    private String conditionText(final String text, final String loc, final String kind) {
+        if (text == null) return null;
+        if (conditionCache.containsKey(kind + ":" + text)) return conditionCache.get(kind + ":" + text);
+        final String result = conditionTextUncached(text, loc, kind);
+        conditionCache.put(kind + ":" + text, result);
+        return result;
+    }
+
+    private String conditionTextUncached(final String text, final String loc, final String kind) {
+        final String runtime = text.replace("$self.", FeatureValues.SELF_PREFIX);
+        try {
+            com.mercari.solution.util.pipeline.Filter.parse(runtime);
+            return text;
+        } catch (final RuntimeException bare) {
+            final String quoted = quoteIdentifiers(text);
+            if (!quoted.equals(text)) {
+                try {
+                    com.mercari.solution.util.pipeline.Filter.parse(quoted.replace("$self.", FeatureValues.SELF_PREFIX));
+                    diagnostics.info(kind + ".quoted", loc, kind + " '" + text + "' uses a reserved word as a column name; evaluated as " + quoted);
+                    return quoted;
+                } catch (final RuntimeException ignored) {
+                    // fall through to the original error
+                }
+            }
+            diagnostics.error(kind + ".parse", loc, "cannot parse " + kind + " '" + text + "': "
+                    + (bare.getMessage() == null ? bare.toString() : bare.getMessage()) + " (quote column names with backticks if they are SQL keywords)");
+            return null;
+        }
+    }
+
+    private static final java.util.regex.Pattern CONDITION_IDENTIFIER =
+            java.util.regex.Pattern.compile("(?<![A-Za-z0-9_.`'\"$])(\\$self\\.)?([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_.`'\"(])");
+    private static final Set<String> CONDITION_KEYWORDS = Set.of(
+            "and", "or", "not", "is", "null", "in", "like", "between", "true", "false", "exists", "case", "when", "then", "else", "end");
+
+    /** Backtick-quotes every bare identifier that refers to a known column (leaves keywords, literals, functions). */
+    private String quoteIdentifiers(final String text) {
+        final java.util.regex.Matcher m = CONDITION_IDENTIFIER.matcher(text);
+        final StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            final String self = m.group(1) == null ? "" : m.group(1);
+            final String name = m.group(2);
+            final String replacement = !CONDITION_KEYWORDS.contains(name.toLowerCase()) && resolves(name)
+                    ? "`" + self + name + "`" : self + name;
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 
     private static String displayName(final String reference) {
@@ -908,7 +985,8 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("stageKeys", String.join(",", stageKeys));
             addSelfInput(c, reducedKey);
         } else if (window.filter != null) {
-            c.coordinates.put("filter", window.filter);
+            final String filterText = conditionText(window.filter, def.location(), "filter");
+            if (filterText != null) c.coordinates.put("filter", filterText);
         }
         // self-side inputs: entity keys and $self fields of the filter
         for (final String key : entity.keys()) addSelfInput(c, key);
@@ -1178,12 +1256,12 @@ public final class FeaturePlanCompiler {
                 continue;
             }
             String reference = t.field;
-            String name = t.field == null ? "" : displayName(t.field);
+            String name = t.as != null ? t.as : t.field == null ? "" : displayName(t.field);
             if (t.expr != null) {
                 final OutputColumn anonymous = desugarExpression(def, t.expr, computeAt);
                 if (anonymous == null) continue;
                 reference = anonymous.canonicalName;
-                name = "e" + targetIndex;
+                if (t.as == null) name = "e" + targetIndex;
             }
             final List<String> stats = t.stats.isEmpty() ? List.of(reference == null ? "count" : "mean") : t.stats;
             for (final String stat : stats) {
@@ -1531,7 +1609,10 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("window", window.token());
             if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
             if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
-            if (window.filter != null) c.coordinates.put("filter", window.filter);
+            if (window.filter != null) {
+                final String filterText = conditionText(window.filter, def.location(), "filter");
+                if (filterText != null) c.coordinates.put("filter", filterText);
+            }
         }
         if (targetReference != null) c.coordinates.put("field", targetReference);
         c.coordinates.put("stat", stat);
