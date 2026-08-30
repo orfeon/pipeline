@@ -55,7 +55,7 @@ public class McpServerDefinitionsTest {
             Assertions.assertDoesNotThrow(() -> validator.assertConforms(properties.name(), schema), properties.name() + " input schema");
             count++;
         }
-        Assertions.assertTrue(count >= 15, "tools found: " + count);
+        Assertions.assertTrue(count >= 13, "tools found: " + count);
     }
 
     @Test

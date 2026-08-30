@@ -111,7 +111,7 @@ The diagnosis tools additionally need the roles listed in [diagnosis.md](diagnos
 
 The MCP server is the same deployment: Streamable HTTP at `https://<service>/mcp`
 (`web.xml` maps `/mcp`; the legacy SSE transport is at `/mcp/sse`). It exposes the tools
-`list-modules` / `describe-module` / `read-docs`, `validate-pipeline` / `validate-feature`,
+`list-modules` / `read-docs` (a module by id or any document by path), `validate-feature`,
 `run-pipeline` (in-server DirectRunner run, or `dryRun: true`), `launch-pipeline`,
 `get-dataflow-job` / `list-job-errors` / `list-failed-jobs` / `resolve-stack-trace` and
 `get-cloud-run-execution`, plus the docs as `docs://` resources. Three ways to reach it:

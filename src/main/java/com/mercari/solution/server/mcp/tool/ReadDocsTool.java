@@ -12,8 +12,9 @@ import java.nio.charset.StandardCharsets;
     name="read-docs",
     title="Read Pipeline Documentation",
     description= """
-        Read any bundled documentation file by its path relative to the docs root.
-        Module documentation (tool 'describe-module') may reference shared documents,
+        Read bundled documentation: a module's reference by 'module' ('{type}/{name}', e.g. 'source/bigquery',
+        'transform/feature' - parameters, examples; use 'list-modules' to discover names), or any document by
+        'path' relative to the docs root. Module documentation may reference shared documents,
         e.g. a link "../common/filter.md" inside "module/transform/select.md" resolves to
         "module/common/filter.md". Use this tool to follow such references.
         Available documents include: README.md (the config file structure reference),
@@ -28,12 +29,16 @@ import java.nio.charset.StandardCharsets;
         {
           "type": "object",
           "properties": {
+            "module": {
+              "type": "string",
+              "description": "Module id in '{type}/{name}' format (type: source | transform | sink | action), e.g. 'source/bigquery'. Alternative to 'path'."
+            },
             "path": {
               "type": "string",
               "description": "Document path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md'."
             }
           },
-          "required": ["path"]
+          "required": []
         }
         """,
     outputSchema = """
@@ -43,6 +48,7 @@ public class ReadDocsTool implements Tool {
 
     // Same docs tree as the agent's DocsReader (src/main/resources/server/docs)
     private static final String DOCS_ROOT_PATH = "/server/docs/";
+    private static final java.util.Set<String> MODULE_TYPES = java.util.Set.of("source", "transform", "sink", "action");
 
     @Override
     public void init(ServletContext servletContext) {
@@ -53,11 +59,26 @@ public class ReadDocsTool implements Tool {
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
 
+        final Object moduleObj = request.arguments().get("module");
         final Object pathObj = request.arguments().get("path");
-        final String normalized = DocsReader.normalizeDocPath(pathObj == null ? null : pathObj.toString());
+        final String normalized;
+        if(moduleObj != null && !moduleObj.toString().isBlank()) {
+            // module id '{type}/{name}' → module/{type}/{name}.md (the former describe-module tool)
+            final String id = moduleObj.toString().trim();
+            final String[] parts = id.split("/");
+            if(parts.length != 2 || !MODULE_TYPES.contains(parts[0]) || parts[1].isBlank()) {
+                return McpSchema.CallToolResult.builder()
+                        .addTextContent("Invalid module id: '" + id + "'. Specify '{type}/{name}' where type is one of source, transform, sink, action (e.g. 'source/bigquery', 'action/bigquery'); use tool 'list-modules' to discover names.")
+                        .isError(true)
+                        .build();
+            }
+            normalized = "module/" + parts[0] + "/" + parts[1].toLowerCase() + ".md";
+        } else {
+            normalized = DocsReader.normalizeDocPath(pathObj == null ? null : pathObj.toString());
+        }
         if(normalized == null) {
             return McpSchema.CallToolResult.builder()
-                    .addTextContent("read-docs mcp tool requires a .md path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md'")
+                    .addTextContent("read-docs mcp tool requires 'module' ('{type}/{name}', e.g. 'source/bigquery') or 'path' (a .md path relative to the docs root, e.g. 'module/common/filter.md' or 'system.md')")
                     .isError(true)
                     .build();
         }
@@ -65,8 +86,11 @@ public class ReadDocsTool implements Tool {
         final String resourcePath = DOCS_ROOT_PATH + normalized;
         try (final InputStream is = getClass().getResourceAsStream(resourcePath)) {
             if(is == null) {
+                final String message = moduleObj != null && !moduleObj.toString().isBlank()
+                        ? "Not found module: " + moduleObj.toString().trim() + ". Use tool 'list-modules' to see available modules."
+                        : "Document not found: '" + normalized + "'. Relative links resolve against the referencing document's directory (e.g. '../common/filter.md' in 'module/transform/select.md' is 'module/common/filter.md').";
                 return McpSchema.CallToolResult.builder()
-                        .addTextContent("Document not found: '" + normalized + "'. Relative links resolve against the referencing document's directory (e.g. '../common/filter.md' in 'module/transform/select.md' is 'module/common/filter.md').")
+                        .addTextContent(message)
                         .isError(true)
                         .build();
             }

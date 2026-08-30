@@ -8,7 +8,7 @@ import java.util.Map;
 
 public class McpDocsToolsTest {
 
-    private final DescribeModuleTool describeModuleTool = new DescribeModuleTool();
+    private final ReadDocsTool describeModuleTool = new ReadDocsTool();
     private final ReadDocsTool readDocsTool = new ReadDocsTool();
 
     private static String text(final McpSchema.CallToolResult result) {
@@ -19,7 +19,7 @@ public class McpDocsToolsTest {
     public void testDescribeModule() {
         for (final String id : new String[]{"source/bigquery", "transform/select", "sink/spanner", "sink/localH2"}) {
             final McpSchema.CallToolResult result = describeModuleTool.sync(
-                    null, new McpSchema.CallToolRequest("describe-module", Map.of("id", id)));
+                    null, new McpSchema.CallToolRequest("read-docs", Map.of("module", id)));
             Assertions.assertFalse(result.isError(), id + " -> " + text(result));
             Assertions.assertFalse(text(result).isBlank(), id);
         }
@@ -29,7 +29,7 @@ public class McpDocsToolsTest {
     public void testDescribeModuleInvalidId() {
         for (final String id : new String[]{"bigquery", "failure/pubsub", "source/../../secret", ""}) {
             final McpSchema.CallToolResult result = describeModuleTool.sync(
-                    null, new McpSchema.CallToolRequest("describe-module", Map.of("id", id)));
+                    null, new McpSchema.CallToolRequest("read-docs", Map.of("module", id)));
             Assertions.assertTrue(result.isError(), id + " -> " + text(result));
         }
     }
@@ -37,7 +37,7 @@ public class McpDocsToolsTest {
     @Test
     public void testDescribeModuleNotFound() {
         final McpSchema.CallToolResult result = describeModuleTool.sync(
-                null, new McpSchema.CallToolRequest("describe-module", Map.of("id", "source/nosuchmodule")));
+                null, new McpSchema.CallToolRequest("read-docs", Map.of("module", "source/nosuchmodule")));
         Assertions.assertTrue(result.isError());
         Assertions.assertTrue(text(result).contains("Not found module"), text(result));
     }

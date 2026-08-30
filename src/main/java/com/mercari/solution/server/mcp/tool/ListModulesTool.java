@@ -20,7 +20,7 @@ import java.util.List;
     description= """
         List of pipeline modules available in mercari/pipeline.
         The response is in JSON format and includes the id and specs as well as the name of the module.
-        By specifying '{type}/{name}' (e.g. 'source/bigquery') in the 'id' parameter of tool: 'describe-module',
+        By specifying '{type}/{name}' (e.g. 'source/bigquery') in the 'module' parameter of tool: 'read-docs',
         you can check the detailed specification of the module.
         """,
     inputSchema = """
