@@ -1676,6 +1676,14 @@ public final class FeaturePlanCompiler {
             if (!c.intermediate && isExcluded(c)) c.intermediate = true;
             final String loc = "features." + c.block;
             boolean lint = false;
+            if (c.scope == FeatureSpec.Scope.sequence || (c.scope == FeatureSpec.Scope.population && !FitMode.isLookupToken(c.coordinates.get("fit")))) {
+                // S5: the keyed stage cannot trim the history of a key while such a column exists (worker memory)
+                final String reason = SequenceEvaluator.unboundedReason(c);
+                if (reason != null) {
+                    diagnostics.hint("sequence.window.unbounded", loc,
+                            c.canonicalName + " keeps the whole projected history of each key on the worker (" + reason + "); give the window a maxAge to bound it");
+                }
+            }
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;
@@ -1841,8 +1849,10 @@ public final class FeaturePlanCompiler {
         }
     }
 
+    /** The parameters without what does not change the plan: artifact locations and the engine knobs. */
     static JsonObject withoutArtifact(final JsonObject parameters) {
         final JsonObject copy = parameters.deepCopy();
+        copy.remove("engine");
         if (copy.has("fit") && copy.get("fit").isJsonObject()) copy.getAsJsonObject("fit").remove("artifact");
         if (copy.has("features") && copy.get("features").isJsonArray()) {
             for (final JsonElement f : copy.getAsJsonArray("features")) {

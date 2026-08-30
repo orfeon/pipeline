@@ -656,6 +656,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(a.getHash(), a.getArtifactVersion());
         final FeaturePlan pinned = compile(SOURCES, base.replace("refit: false", "refit: false, id: v42"));
         Assertions.assertEquals("v42", pinned.getArtifactVersion());
+        // engine knobs do not change the plan either: tuning the spill budget must not invalidate an artifact
+        final FeaturePlan tuned = compile(SOURCES, base + "engine: {spill: {memoryMB: 8, compress: true}}\n");
+        Assertions.assertEquals(a.getHash(), tuned.getHash(), tuned::describe);
+        Assertions.assertEquals(8, tuned.getSpec().engine.spillMemoryMB);
+        Assertions.assertTrue(hasCode(compile(SOURCES, base + "engine: {spill: {memoryMB: '64MB'}}\n"), "engine.spill.memoryMB"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, base + "engine: {spill: {memoryMB: 0}}\n"), "engine.spill.memoryMB"));
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "fit: {minHistory: P30D}\noutput:\n  prefix: f_")), "fit.minHistory"));
     }
 
@@ -871,6 +877,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("`score` > 1 AND `rank` <= 3", column(plan, "recent_n10_top3").getCoordinates().get("filter"));
         column(plan, "recent_n5_since_win");
         Assertions.assertEquals("`rank` = 1", column(plan, "recent_n5_since_win").getCoordinates().get("predicate"));
+        // the n10 window has a filter and no maxAge: its columns pin the whole history of a key (S5 hint);
+        // the n5 window without a filter is bounded by maxEvents
+        final List<String> unbounded = plan.getDiagnostics().getMessages().stream()
+                .filter(m -> m.code().equals("sequence.window.unbounded")).map(m -> m.message()).toList();
+        Assertions.assertEquals(2, unbounded.size(), plan::describe);
+        Assertions.assertTrue(unbounded.stream().allMatch(m -> m.contains("recent_n10_")), unbounded::toString);
         // the evaluator parses the rewritten text
         Assertions.assertDoesNotThrow(() -> com.mercari.solution.util.pipeline.Filter.parse(top3.getCoordinates().get("predicate")));
         // a condition that cannot be parsed even when quoted is a compile error, not a worker failure

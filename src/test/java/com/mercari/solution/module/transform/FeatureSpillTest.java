@@ -4,24 +4,25 @@ import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
-import com.mercari.solution.util.pipeline.feature.FeatureStages;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.parallel.Execution;
-import org.junit.jupiter.api.parallel.ExecutionMode;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * The keyed stages sort each key's rows with Beam's external sorter and stream them: a hot key (here one
+ * The keyed stages sort the rows of each key with {@code KeyedSpillSorter} and stream them: a hot key (here one
  * seller with every row, i.e. the shape of a shrinkage lattice's global level) must not need the whole key in
- * memory. The sorter buffer is forced to 1 MB so the rows actually spill to local disk, and the values are
- * checked against the closed form of the replay (running count / mean over strictly-past rows).
+ * memory. The sort budget is forced to 1 MB ({@code engine.spill.memoryMB}) so the rows actually spill to local
+ * disk, the values are checked against the closed form of the replay (running count / mean over strictly-past
+ * rows), and the spill directory must be empty once the pipeline is done (chunks deleted per key, instance
+ * directories on teardown).
  */
-@Execution(ExecutionMode.SAME_THREAD) // sets a JVM-wide system property while assembling
 public class FeatureSpillTest {
+
+    private static final String SPILL_DIR = "target/feature-spill-test";
 
     private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
 
@@ -86,24 +87,17 @@ public class FeatureSpillTest {
                          "keySets": [{"keys": ["seller_id"]}],
                          "targets": [{"stats": ["count"]}]}
                       ],
-                      "output": {"prefix": "f_"}
+                      "output": {"prefix": "f_"},
+                      "engine": {"spill": {"memoryMB": 1, "directory": "%s"}}
                     }
                   }]
                 }
-                """.formatted(elements);
+                """.formatted(elements, SPILL_DIR);
     }
 
     @Test
     public void testHotKeySpillsToDiskAndReplaysInOrder() throws Exception {
-        final String previous = System.getProperty(FeatureStages.SORTER_MEMORY_PROPERTY);
-        System.setProperty(FeatureStages.SORTER_MEMORY_PROPERTY, "1");
-        final Map<String, MCollection> outputs;
-        try {
-            outputs = MPipeline.apply(pipeline, Config.load(config()));
-        } finally {
-            if (previous == null) System.clearProperty(FeatureStages.SORTER_MEMORY_PROPERTY);
-            else System.setProperty(FeatureStages.SORTER_MEMORY_PROPERTY, previous);
-        }
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config()));
         PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
             int n = 0;
             for (final MElement row : rows) {
@@ -124,6 +118,9 @@ public class FeatureSpillTest {
             return null;
         });
         pipeline.run();
+        try (java.util.stream.Stream<java.nio.file.Path> left = java.nio.file.Files.list(java.nio.file.Paths.get(SPILL_DIR))) {
+            Assertions.assertEquals(List.of(), left.toList(), "spill directory must be empty after the run");
+        }
     }
 
 }

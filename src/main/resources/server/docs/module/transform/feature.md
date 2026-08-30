@@ -64,6 +64,7 @@ time; warnings and hints from the compiler are part of that report.
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
+| engine     | optional | Object                         | Runtime knobs that do not change the plan. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
 | output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`). |
 
 ### Sources contract
@@ -340,20 +341,27 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass
   the stage (their columns are null). Other filters are evaluated per row over the window.
-- Each key's rows are sorted by event time with an external sort (in memory up to 100 MB per key, then
-  spilled to the worker's local disk) and replayed as a stream, so a hot key — including a shrinkage
-  encoding's global level, which is a single key holding **every** row — is never materialised in memory.
+- The rows of each key are sorted by event time inside the stage (in memory up to the spill budget —
+  `engine.spill.memoryMB`, by default 16-256 MB derived from the worker heap — and beyond it as sorted chunks
+  on the worker's local disk that are merged on read) and replayed as a stream, so a hot key — including a
+  shrinkage encoding's global level, which is a single key holding **every** row — is never materialised in
+  memory. Keys that fit the budget never touch the disk (only a small sample is encoded to size the buffer).
   What stays in memory per key is the running statistics plus the *projected* history (only the fields the
   windows read) behind the longest window: a `maxAge` window, or any incremental statistic, lets rows be
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail. Only `ewma`,
   `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` keep the key's
   full projected history; the stage logs which columns do at startup — give such windows a `maxAge` to
-  bound them. Local disk of the workers must have room for the spilled keys: Beam's native sorter keeps
-  its spill files until the worker JVM exits (they are not deleted after the merge), so on a long-lived
-  worker the disk holds every spilled key of every keyed stage, not only the largest one. The 100 MB
-  sorter buffer is per key being processed (each concurrent bundle owns one). The hot-key audit queries
-  in the validate / dry-run report (above) give the per-key row counts to size that against.
+  bound them. Local disk of the workers must have room for the keys being sorted concurrently: the chunk
+  files of a key are deleted as soon as its replay ends (and the stage's directory when the worker tears the
+  stage down), so the disk holds at most one key per concurrent bundle, each up to the key's encoded size
+  (`compress: true` trades CPU for a smaller footprint). The spill budget is per key being processed (each
+  concurrent bundle owns one), which is why the default divides the heap by the core count. The hot-key
+  audit queries in the validate / dry-run report (above) give the per-key row counts to size that against.
+  Every spilled key logs `keyed spill sorter Stage<N>_<kind> key=<key>: <chunks> chunk(s) / <MB> MB on disk +
+  <rows> rows in memory; live spill on this worker <MB> MB (peak <MB> MB)` — the peak over a job is the
+  worker disk the keyed stages need. Columns that pin the whole history of a key are reported at compile
+  time by the `sequence.window.unbounded` hint.
 
 ## Limitations (current engine)
 
