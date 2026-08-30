@@ -102,7 +102,7 @@ The Pipeline server is an auxiliary tool for creating, debugging, and deploying 
 
 * **Web UI (Pipeline Builder)** — build and edit pipeline configs in a GUI editor
 * **REST API** — validate config files and launch jobs programmatically
-* **MCP server & built-in AI agent** — AI integration that references the bundled module documentation to help you design pipelines
+* **MCP server & built-in AI agent** — AI integration that references the bundled module documentation to help you design, validate, launch and diagnose pipelines (tools, workflows and client setup: [MCP server](src/main/resources/server/docs/deploy/mcp.md))
 
 Build and run it locally as follows, then open `http://localhost:8080/` in your browser.
 
