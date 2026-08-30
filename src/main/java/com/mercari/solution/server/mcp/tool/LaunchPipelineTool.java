@@ -14,6 +14,7 @@ import jakarta.servlet.ServletContext;
  */
 @Tool.Module(
     name = "launch-pipeline",
+    readOnly = false, idempotent = false, openWorld = true,
     title = "Launch Pipeline",
     description = """
         Submit a pipeline config to an execution target and return the created job:

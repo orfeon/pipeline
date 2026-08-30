@@ -3,10 +3,10 @@ package com.mercari.solution.server.agent.tool;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
 
-/** Agent tool {@code run}: wrapper of the MCP tool {@code run-pipeline}. */
+/** Agent tool {@code runPipeline}: wrapper of the MCP tool {@code run-pipeline}. */
 public class PipelineExecutor {
 
-    @Tool(name = "run", value = """
+    @Tool(name = "runPipeline", value = """
         Validate and dry-run a pipeline configuration.
         Use this tool to check if a pipeline config is valid.
         The tool returns the validation result including any errors.

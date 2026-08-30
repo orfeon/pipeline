@@ -26,6 +26,13 @@ public interface Tool {
         String description();
         String inputSchema();
         String outputSchema();
+        /** MCP tool annotations (hints for clients: confirmation prompts, caching). Defaults describe a read-only lookup. */
+        boolean readOnly() default true;
+        /** Only meaningful when not read-only: may the tool delete / overwrite existing state? */
+        boolean destructive() default false;
+        boolean idempotent() default true;
+        /** Interacts with systems outside the server (cloud APIs, launched jobs). */
+        boolean openWorld() default false;
     }
 
     McpSchema.CallToolResult sync(
@@ -136,6 +143,13 @@ public interface Tool {
                 .title(properties.title())
                 .description(properties.description())
                 .inputSchema(schemaMap(properties.name(), "inputSchema", properties.inputSchema()))
+                .annotations(McpSchema.ToolAnnotations.builder()
+                        .title(properties.title())
+                        .readOnlyHint(properties.readOnly())
+                        .destructiveHint(!properties.readOnly() && properties.destructive())
+                        .idempotentHint(properties.idempotent())
+                        .openWorldHint(properties.openWorld())
+                        .build())
                 .build();
     }
 

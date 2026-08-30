@@ -8,6 +8,7 @@ import jakarta.servlet.ServletContext;
 /** Cloud Logging entries of a job (Dataflow workers / launcher, or a Cloud Run Job execution). */
 @Tool.Module(
     name = "get-job-logs",
+    openWorld = true,
     title = "Get Job Logs",
     description = """
         Read the Cloud Logging entries of a launched job: the worker / harness / launcher logs of a

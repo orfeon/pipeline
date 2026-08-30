@@ -43,7 +43,7 @@ public class DocsReaderTest {
                 "module/common/logging.md",
                 "module/common/template.md",
                 "system.md"}) {
-            final String content = docsReader.getDocument(path);
+            final String content = docsReader.readDocs(null, path);
             Assertions.assertFalse(content.startsWith("ERROR"), path + " -> " + content);
             Assertions.assertFalse(content.startsWith("Document not found"), path + " -> " + content);
             Assertions.assertFalse(content.isBlank(), path);
@@ -52,14 +52,14 @@ public class DocsReaderTest {
 
     @Test
     public void testGetDocumentNotFound() {
-        final String content = docsReader.getDocument("module/common/no-such-doc.md");
+        final String content = docsReader.readDocs(null, "module/common/no-such-doc.md");
         Assertions.assertTrue(content.contains("Document not found"), content);
     }
 
     @Test
     public void testGetDocumentInvalidPath() {
-        Assertions.assertTrue(docsReader.getDocument("../outside.md").startsWith("ERROR"));
-        Assertions.assertTrue(docsReader.getDocument("module/index.yaml").startsWith("ERROR"));
+        Assertions.assertTrue(docsReader.readDocs(null, "../outside.md").startsWith("ERROR"));
+        Assertions.assertTrue(docsReader.readDocs(null, "module/index.yaml").startsWith("ERROR"));
     }
 
 }

@@ -7,6 +7,7 @@ import jakarta.servlet.ServletContext;
 
 @Tool.Module(
     name="run-pipeline",
+    readOnly = false, idempotent = false,
     title="Run Pipeline",
     description= """
         Run the pipeline defined in config parameter in the server process (DirectRunner), or with

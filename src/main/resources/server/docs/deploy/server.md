@@ -115,7 +115,10 @@ The MCP server is the same deployment: Streamable HTTP at `https://<service>/mcp
 `run-pipeline` (in-server DirectRunner run, or `dryRun: true`), `launch-pipeline`,
 `get-job` / `get-job-logs` / `list-job-errors` / `list-failed-jobs` (Dataflow jobs and Cloud Run Job
 executions alike) / `resolve-stack-trace`, plus the docs as `docs://` resources. The Pipeline Builder agent's tools are
-thin wrappers over the same implementations (`McpToolBridge`), so both surfaces behave identically. Three ways to reach it:
+thin wrappers over the same implementations (`McpToolBridge`), so both surfaces behave identically; agent tool
+names are the camelCase form of the MCP names (`run-pipeline` / `runPipeline`, `get-job-logs` / `getJobLogs`).
+Every tool carries MCP annotations: only `run-pipeline` and `launch-pipeline` are not read-only (clients may
+ask for confirmation before calling them); the job tools are marked open-world. Three ways to reach it:
 
 ### Cloud Run through `gcloud run services proxy` (recommended for developers)
 

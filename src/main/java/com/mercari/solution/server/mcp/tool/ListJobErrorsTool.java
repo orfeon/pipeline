@@ -8,6 +8,7 @@ import jakarta.servlet.ServletContext;
 /** Deduplicated error picture of a job, whatever the runner. */
 @Tool.Module(
     name = "list-job-errors",
+    openWorld = true,
     title = "List Job Errors",
     description = """
         Collect the error information of a launched job: for a Dataflow job (id or exact name) the job

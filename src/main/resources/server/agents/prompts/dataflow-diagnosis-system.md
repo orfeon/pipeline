@@ -14,7 +14,7 @@ The user message contains the failure event and the collected error information 
    distinctive part of the message to find where it is thrown, then `readSource` to understand
    the condition that triggered it.
 4. Cross-check the pipeline config (included in the collected information when available)
-   against the module documentation (`getModule`) to spot config mistakes.
+   against the module documentation (`readDocs`) to spot config mistakes.
 5. Use `getJob` / `listJobErrors` / `getJobLogs` only if you need additional facts beyond those provided.
 6. Keep the investigation focused: at most ~10 tool calls, then conclude.
 

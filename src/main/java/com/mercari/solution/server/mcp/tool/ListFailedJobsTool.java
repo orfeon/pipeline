@@ -8,6 +8,7 @@ import jakarta.servlet.ServletContext;
 /** Recently failed jobs: Dataflow jobs and, when the server has a configured Cloud Run Job, its failed executions. */
 @Tool.Module(
     name = "list-failed-jobs",
+    openWorld = true,
     title = "List Recently Failed Jobs",
     description = """
         List the pipeline jobs that failed recently: Dataflow jobs in the project / region, plus the

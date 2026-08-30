@@ -8,6 +8,7 @@ import jakarta.servlet.ServletContext;
 /** Status of a launched job, whatever the runner: a Dataflow job or a Cloud Run Job execution. */
 @Tool.Module(
     name = "get-job",
+    openWorld = true,
     title = "Get Job",
     description = """
         Get the status of a launched pipeline job. Dataflow: pass the job id (e.g.

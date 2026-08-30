@@ -21,10 +21,10 @@ public class McpToolBridgeTest {
     @Test
     public void testDocsWrappers() {
         final DocsReader docs = DocsReader.create();
-        Assertions.assertTrue(docs.getModule(DocsReader.ModuleType.transform, "feature").contains("# Feature Transform Module"));
-        Assertions.assertTrue(docs.getModule(DocsReader.ModuleType.source, "nosuchmodule").startsWith("ERROR"));
-        Assertions.assertTrue(docs.getDocument("module/common/filter.md").length() > 100);
-        Assertions.assertTrue(docs.getDocument("../outside.md").startsWith("ERROR"));
+        Assertions.assertTrue(docs.readDocs("transform/feature", null).contains("# Feature Transform Module"));
+        Assertions.assertTrue(docs.readDocs("source/nosuchmodule", null).startsWith("ERROR"));
+        Assertions.assertTrue(docs.readDocs(null, "module/common/filter.md").length() > 100);
+        Assertions.assertTrue(docs.readDocs(null, "../outside.md").startsWith("ERROR"));
         final String listed = docs.listModules(DocsReader.ModuleType.transform);
         Assertions.assertTrue(listed.contains("## transform modules") && listed.contains("feature"), listed);
         Assertions.assertTrue(docs.listModules(null).contains("## source modules"));

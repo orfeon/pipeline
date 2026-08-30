@@ -11,7 +11,7 @@ public class PipelineLauncher {
         location, state, consoleUrl). runner 'dataflow' launches a Dataflow Flex Template job; runner
         'direct' runs a pre-created Cloud Run Job (environment 'cloudRunJob', default) or creates a Cloud Run
         Worker Pool ('cloudRunWorkerPool'); runner 'spark' submits a Dataproc Serverless batch.
-        Only launch after `run` with dryRun succeeded and the user asked to launch. Afterwards report the
+        Only launch after `runPipeline` with dryRun succeeded and the user asked to launch. Afterwards report the
         job id / console URL and follow the job with getJob / getJobLogs / listJobErrors (pass the returned
         job id, or the execution name for Cloud Run).
     """)

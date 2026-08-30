@@ -34,6 +34,11 @@ public class McpServerDefinitionsTest {
             Assertions.assertEquals(properties.name(), tool.name());
             // no output schema: results are text content; an output schema would make the SDK demand structuredContent
             Assertions.assertNull(tool.outputSchema(), properties.name() + " must not publish an output schema");
+            // annotations: clients use them for confirmation prompts, so side-effecting tools must not claim read-only
+            Assertions.assertNotNull(tool.annotations(), properties.name() + " annotations");
+            final boolean sideEffects = java.util.Set.of("run-pipeline", "launch-pipeline").contains(properties.name());
+            Assertions.assertEquals(!sideEffects, tool.annotations().readOnlyHint(), properties.name() + " readOnlyHint");
+            if (sideEffects) Assertions.assertFalse(tool.annotations().idempotentHint(), properties.name() + " idempotentHint");
             final Map<String, Object> schema = tool.inputSchema();
             Assertions.assertNotNull(schema, properties.name() + " input schema");
             Assertions.assertEquals("object", schema.get("type"), properties.name() + " input schema type");
