@@ -46,6 +46,11 @@ public class McpServerDefinitionsTest {
                     Assertions.assertTrue(props.containsKey(String.valueOf(r)), properties.name() + " requires undeclared parameter " + r);
                 }
             }
+            // the same check McpServer.build() runs (through the JSON provider on the classpath)
+            final io.modelcontextprotocol.json.schema.JsonSchemaValidator validator = java.util.ServiceLoader
+                    .load(io.modelcontextprotocol.json.schema.JsonSchemaValidatorSupplier.class)
+                    .findFirst().orElseThrow(() -> new AssertionError("no JsonSchemaValidatorSupplier on the classpath")).get();
+            Assertions.assertDoesNotThrow(() -> validator.assertConforms(properties.name(), schema), properties.name() + " input schema");
             count++;
         }
         Assertions.assertTrue(count >= 15, "tools found: " + count);

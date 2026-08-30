@@ -968,10 +968,18 @@
     </dependency>
 
     <!-- Pipeline Server for MCP -->
-    <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp -->
+    <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp-core -->
+    <!-- mcp-core + the Jackson 2 JSON provider instead of the `mcp` aggregate: the aggregate brings
+         mcp-json-jackson3 (Jackson 3 databind), whose schema validator needs jackson-annotations 3.x
+         while Beam / GCP pin 2.x (NoSuchFieldError JsonFormat$Shape.POJO at server start). -->
     <dependency>
       <groupId>io.modelcontextprotocol.sdk</groupId>
-      <artifactId>mcp</artifactId>
+      <artifactId>mcp-core</artifactId>
+      <version>${mcp.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-json-jackson2</artifactId>
       <version>${mcp.version}</version>
     </dependency>
 
