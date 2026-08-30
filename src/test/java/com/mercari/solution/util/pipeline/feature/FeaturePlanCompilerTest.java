@@ -201,11 +201,14 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(column(plan, "enc__global__n").isIntermediate());
         Assertions.assertTrue(share.getInputs().contains("enc__global__n"));
 
-        // stages: context(session) → sequence(seller_id) → global level → encoding(seller_id) → encoding(category)
-        Assertions.assertEquals(5, plan.getStages().size(), plan::describe);
-        Assertions.assertEquals(5, plan.getShuffleCount(), plan::describe);
+        // stages: context(session) → keyed(seller_id: sequence + encoding, one replay) → global level → encoding(category)
+        Assertions.assertEquals(4, plan.getStages().size(), plan::describe);
+        Assertions.assertEquals(4, plan.getShuffleCount(), plan::describe);
         Assertions.assertEquals(FeaturePlan.StageKind.context, plan.getStages().get(0).kind());
         Assertions.assertEquals(List.of("seller_id"), plan.getStages().get(1).keys());
+        Assertions.assertEquals(List.of("recent", "enc"), plan.getStages().get(1).blocks());
+        Assertions.assertTrue(plan.getStages().get(1).columnNames().contains("recent_n5_sold_lag1"), plan::describe);
+        Assertions.assertTrue(plan.getStages().get(1).columnNames().contains("enc__seller_id__count"), plan::describe);
         Assertions.assertEquals(List.of(), plan.getStages().get(2).keys());
         Assertions.assertEquals(16, plan.getHash().length());
     }
@@ -460,12 +463,107 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("category", column(plan, "enc__seller_id__e1__dev1").getCoordinates().get("levelKeys"));
         column(plan, "enc__seller_id__e1__mean__neff");
 
-        // stages: ... → global level → seller_id level → category level (+ fused compose rows)
+        // stages: ... → seller_id level (fused with the seller_id sequence block) → global level → category level
+        // (+ fused compose rows)
         final List<FeaturePlan.Stage> stages = plan.getStages();
         final FeaturePlan.Stage last = stages.get(stages.size() - 1);
         Assertions.assertEquals(List.of("category"), last.keys());
         Assertions.assertTrue(last.columnNames().contains("enc__seller_id__e1__mean"));
-        Assertions.assertEquals(List.of(), stages.get(stages.size() - 3).keys());
+        Assertions.assertEquals(List.of(), stages.get(stages.size() - 2).keys());
+        final FeaturePlan.Stage sellerStage = stages.stream().filter(s -> s.keys().equals(List.of("seller_id"))).findFirst().orElseThrow();
+        Assertions.assertTrue(sellerStage.blocks().containsAll(List.of("recent", "enc")), plan::describe);
+        Assertions.assertTrue(sellerStage.columnNames().contains("enc__seller_id__e1__n"), plan::describe);
+    }
+
+    @Test
+    public void testStageSchedulingByKeyAffinity() {
+        // blocks keyed by seller_id are separated by a category block in the config: they still share one stage,
+        // and the category encoding (no dependency on them) joins the earliest category stage
+        final String enc = """
+                  - name: enc_a
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: sold, stats: [count]}
+                  - name: enc_b
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [category]
+                    targets:
+                      - {field: sold, stats: [count]}
+                  - name: enc_c
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: sold, stats: [mean]}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(enc));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<FeaturePlan.Stage> keyed = plan.getStages().stream()
+                .filter(s -> s.kind() == FeaturePlan.StageKind.sequence || s.kind() == FeaturePlan.StageKind.population).toList();
+        Assertions.assertEquals(2, keyed.size(), plan::describe);
+        Assertions.assertEquals(List.of("seller_id"), keyed.get(0).keys());
+        Assertions.assertEquals(List.of("recent", "enc_a", "enc_c"), keyed.get(0).blocks(), plan::describe);
+        Assertions.assertEquals(List.of("category"), keyed.get(1).keys());
+        Assertions.assertEquals(List.of("enc_b"), keyed.get(1).blocks());
+        // the relative order inside the fused stage is the expansion order
+        final List<String> names = keyed.get(0).columnNames();
+        Assertions.assertTrue(names.indexOf("recent_n5_sold_lag1") < names.indexOf("enc_a__seller_id__sold__count"), plan::describe);
+        Assertions.assertTrue(names.indexOf("enc_a__seller_id__sold__count") < names.indexOf("enc_c__seller_id__sold__mean"), plan::describe);
+    }
+
+    @Test
+    public void testStageSchedulingKeepsKeyDependenciesInEarlierStages() {
+        // a keyed stage whose key is derived from another keyed stage's column must come strictly after it,
+        // even though a stage with the same key exists earlier
+        final String enc = """
+                  - name: enc_a
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [category]
+                    targets:
+                      - {field: sold, stats: [count]}
+                  - name: seller_bucket
+                    scope: row
+                    expr: "enc_a__category__sold__count > 5"
+                  - name: enc_b
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_bucket]
+                    targets:
+                      - {field: sold, stats: [count]}
+                  - name: enc_c
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [category]
+                    targets:
+                      - {field: sold, stats: [mean]}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(enc));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<FeaturePlan.Stage> stages = plan.getStages();
+        final int categoryStage = indexOfStage(stages, List.of("category"));
+        final int bucketStage = indexOfStage(stages, List.of("seller_bucket"));
+        Assertions.assertTrue(categoryStage >= 0 && bucketStage > categoryStage, plan::describe);
+        // enc_c has no dependency on the bucket: it joins the first category stage
+        Assertions.assertTrue(stages.get(categoryStage).blocks().containsAll(List.of("enc_a", "enc_c")), plan::describe);
+        // the derived key is a row column evaluated in the category stage itself (read inside the DoFn)
+        Assertions.assertTrue(stages.get(categoryStage).columnNames().contains("seller_bucket"), plan::describe);
+    }
+
+    private static int indexOfStage(final List<FeaturePlan.Stage> stages, final List<String> keys) {
+        for (final FeaturePlan.Stage s : stages) {
+            if (s.kind() != FeaturePlan.StageKind.row && s.kind() != FeaturePlan.StageKind.fit && s.keys().equals(keys)) return s.index();
+        }
+        return -1;
     }
 
     @Test

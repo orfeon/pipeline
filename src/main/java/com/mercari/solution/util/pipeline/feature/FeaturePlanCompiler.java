@@ -1778,22 +1778,51 @@ public final class FeaturePlanCompiler {
         return builder.build();
     }
 
+    /**
+     * Stage scheduling (engine doc §3.1 / §9.2 S2). Columns are placed by key affinity, not by their position in
+     * the config: every column goes to the earliest stage that (a) already holds its kind of evaluation under the
+     * same key and (b) comes after the stages its dependencies are evaluated in — so two blocks keyed by the same
+     * entity share one GroupByKey even when a block with another key sits between them in the config, and
+     * sequence and population columns of one key share the same keyed replay. Row columns join the earliest stage
+     * allowed by their dependencies (any stage kind evaluates row columns in place). A dependency read inside the
+     * evaluating DoFn (the row, the history) may live in the same stage; one read before the DoFn — stage keys,
+     * fit / variance-components statistics computed over the stage input — must come from an earlier stage.
+     * The relative order of the columns inside a stage is the expansion order, which lists dependencies first.
+     */
     private List<FeaturePlan.Stage> buildStages() {
-        final List<FeaturePlan.Stage> stages = new ArrayList<>();
-        FeaturePlan.StageKind kind = null;
-        List<String> keys = null;
-        List<String> blocks = new ArrayList<>();
-        List<String> names = new ArrayList<>();
+        final class MutableStage {
+            final FeaturePlan.StageKind kind;
+            final List<String> keys;
+            final List<String> blocks = new ArrayList<>();
+            final List<String> names = new ArrayList<>();
+            boolean population;
+            MutableStage(final FeaturePlan.StageKind kind, final List<String> keys) {
+                this.kind = kind;
+                this.keys = keys;
+            }
+            boolean accepts(final FeaturePlan.StageKind k, final List<String> stageKeys) {
+                return kind == k && keys.equals(stageKeys);
+            }
+            FeaturePlan.Stage build(final int index) {
+                // a keyed stage replays sequence and population columns together: its kind names the heavier one
+                final FeaturePlan.StageKind k = kind == FeaturePlan.StageKind.sequence && population ? FeaturePlan.StageKind.population : kind;
+                return new FeaturePlan.Stage(index, k, keys, List.copyOf(blocks), List.copyOf(names));
+            }
+        }
+        final List<MutableStage> stages = new ArrayList<>();
+        final Map<String, Integer> stageOf = new HashMap<>();
         for (final OutputColumn c : columns) {
             final FeaturePlan.StageKind k;
             final List<String> stageKeys;
+            final Set<String> strict = new LinkedHashSet<>();
             if (c.scope == Scope.row || "isnull".equals(c.operator)) {
                 k = FeaturePlan.StageKind.row;
-                stageKeys = keys == null ? List.of() : keys;
+                stageKeys = List.of();
             } else if (c.scope == Scope.context) {
                 k = FeaturePlan.StageKind.context;
                 final ContextDef context = contexts.get(c.coordinates.get("context"));
                 stageKeys = context == null ? List.of() : context.keys();
+                strict.addAll(stageKeys);
             } else if (c.scope == Scope.sequence) {
                 k = FeaturePlan.StageKind.sequence;
                 if (c.coordinates.containsKey("stageKeys")) {
@@ -1802,31 +1831,70 @@ public final class FeaturePlanCompiler {
                     final EntityDef entity = entities.get(c.coordinates.get("entity"));
                     stageKeys = entity == null ? List.of() : entity.keys();
                 }
+                strict.addAll(stageKeys);
             } else if (FitMode.isLookupToken(c.coordinates.get("fit"))) {
-                // fitted statistics are applied by lookup: no key change
+                // fitted statistics are computed over the stage input (Combine) and applied by lookup: no key change
                 k = FeaturePlan.StageKind.fit;
                 stageKeys = List.of();
+                strict.addAll(c.inputs);
             } else {
-                k = FeaturePlan.StageKind.population;
+                // sequence and population columns of one key share the keyed replay
+                k = FeaturePlan.StageKind.sequence;
                 final String keyList = c.coordinates.get("keys");
                 stageKeys = keyList == null || keyList.isEmpty() ? List.of() : List.of(keyList.split(","));
+                strict.addAll(stageKeys);
             }
-            final boolean fuse = kind != null && (k == FeaturePlan.StageKind.row || (k == kind && stageKeys.equals(keys)));
-            if (!fuse) {
-                if (kind != null) stages.add(new FeaturePlan.Stage(stages.size(), kind, keys, List.copyOf(blocks), List.copyOf(names)));
-                kind = k;
-                keys = stageKeys;
-                blocks = new ArrayList<>();
-                names = new ArrayList<>();
+            if ("varianceComponents".equals(c.coordinates.get("weights")) && c.coordinates.containsKey("levels")) {
+                // the pseudo-counts are estimated over the stage input from the levels' keys / target / offset
+                strict.addAll(varianceComponentInputs(Shrinkage.parseLevels(c.coordinates.get("levels"))));
             }
-            if (!blocks.contains(c.block)) blocks.add(c.block);
-            names.add(c.canonicalName);
+            int earliest = 0;
+            for (final String dep : c.inputs) {
+                final Integer s = stageOf.get(dep);
+                if (s != null) earliest = Math.max(earliest, s);
+            }
+            for (final String dep : c.pastInputs) {
+                final Integer s = stageOf.get(dep);
+                if (s != null) earliest = Math.max(earliest, s);
+            }
+            for (final String dep : strict) {
+                final Integer s = stageOf.get(dep);
+                if (s != null) earliest = Math.max(earliest, s + 1);
+            }
+            int target = -1;
+            for (int i = earliest; i < stages.size() && target < 0; i++) {
+                if (k == FeaturePlan.StageKind.row || stages.get(i).accepts(k, stageKeys)) target = i;
+            }
+            if (target < 0) {
+                stages.add(new MutableStage(k, stageKeys));
+                target = stages.size() - 1;
+            }
+            final MutableStage stage = stages.get(target);
+            if (!stage.blocks.contains(c.block)) stage.blocks.add(c.block);
+            stage.names.add(c.canonicalName);
+            if (c.scope == Scope.population && k == FeaturePlan.StageKind.sequence) stage.population = true;
+            stageOf.put(c.canonicalName, target);
         }
-        if (kind != null) stages.add(new FeaturePlan.Stage(stages.size(), kind, keys, List.copyOf(blocks), List.copyOf(names)));
+        final List<FeaturePlan.Stage> built = new ArrayList<>();
+        for (final MutableStage s : stages) built.add(s.build(built.size()));
         if (spec.output.groupBy != null && contexts.containsKey(spec.output.groupBy)) {
-            stages.add(new FeaturePlan.Stage(stages.size(), FeaturePlan.StageKind.groupBy, contexts.get(spec.output.groupBy).keys(), List.of("output"), List.of()));
+            built.add(new FeaturePlan.Stage(built.size(), FeaturePlan.StageKind.groupBy, contexts.get(spec.output.groupBy).keys(), List.of("output"), List.of()));
         }
-        return stages;
+        return built;
+    }
+
+    /** Columns read by the variance-components estimate of a lattice: the hidden levels' keys / target / offset. */
+    private Set<String> varianceComponentInputs(final List<Shrinkage.Level> levels) {
+        final Set<String> refs = new LinkedHashSet<>();
+        for (final Shrinkage.Level level : levels) {
+            if (level.mainEffects() != null) {
+                for (final List<Shrinkage.Level> main : level.mainEffects()) refs.addAll(varianceComponentInputs(main));
+                continue;
+            }
+            final OutputColumn hidden = columnsByCanonical.get(level.nColumn());
+            if (hidden != null) refs.addAll(hidden.inputs);
+        }
+        return refs;
     }
 
     // ------------------------------------------------------------------------------------------

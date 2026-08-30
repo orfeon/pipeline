@@ -337,6 +337,14 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
 
 ## Performance and sizing
 
+- **Stages are scheduled by key, not by config order.** Every column goes to the earliest stage that
+  evaluates its kind under the same key and comes after the stages its dependencies are computed in, so
+  two blocks keyed by the same entity share one shuffle even when a block with another key sits between
+  them, and sequence and population columns of one key share the same keyed replay (the stage is reported
+  as `population` when it holds any population column). Row columns join the earliest stage their inputs
+  allow. The plan report lists the resulting stages (`#n kind key=[...] blocks=[...]`) and the shuffle
+  count. A fused stage keeps the union of its columns' projected history per key: with several long
+  windows on one entity the per-key memory is the largest window's, not their sum.
 - Keyed statistics (sequence `aggregate`, population encodings) are evaluated incrementally (O(n) per
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass
