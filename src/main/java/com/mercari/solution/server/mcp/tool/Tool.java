@@ -60,16 +60,45 @@ public interface Tool {
                     }
                     final Module properties = tool.getClass().getAnnotation(Module.class);
                     return McpServerFeatures.SyncToolSpecification.builder()
-                            .tool(McpSchema.Tool.builder()
-                                    .name(properties.name())
-                                    .title(properties.title())
-                                    .description(properties.description())
-                                    //.inputSchema(McpJsonMapper.createDefault(), properties.inputSchema())
-                                    .build())
+                            .tool(toolSchema(properties))
                             .callHandler(tool::sync)
                             .build();
                 })
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * The tool definition published to clients. The annotation's schemas are JSON text; they are parsed
+     * into maps here (the SDK's {@code inputSchema(McpJsonMapper, String)} needs a JSON provider on the
+     * classpath, and an unset input schema is published as "no parameters", which hides every argument
+     * from the client).
+     */
+    static McpSchema.Tool toolSchema(final Module properties) {
+        final McpSchema.Tool.Builder builder = McpSchema.Tool.builder()
+                .name(properties.name())
+                .title(properties.title())
+                .description(properties.description())
+                .inputSchema(schemaMap(properties.name(), "inputSchema", properties.inputSchema()));
+        final java.util.Map<String, Object> output = properties.outputSchema() == null || properties.outputSchema().isBlank()
+                ? null : schemaMap(properties.name(), "outputSchema", properties.outputSchema());
+        // only object output schemas are valid for structured content; scalar ones are documentation only
+        if (output != null && "object".equals(output.get("type"))) {
+            builder.outputSchema(output);
+        }
+        return builder.build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static java.util.Map<String, Object> schemaMap(final String tool, final String kind, final String json) {
+        try {
+            final java.util.Map<String, Object> map = new com.google.gson.Gson().fromJson(json, java.util.Map.class);
+            if (map == null || !map.containsKey("type")) {
+                throw new IllegalArgumentException("schema must be a JSON object with a 'type'");
+            }
+            return map;
+        } catch (final RuntimeException e) {
+            throw new IllegalStateException("mcp.tool " + tool + " has an invalid " + kind + ": " + e.getMessage(), e);
+        }
     }
 
 }
