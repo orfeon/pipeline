@@ -43,10 +43,10 @@ public class DesignPipelinePrompt implements Prompt {
        
         For a list of modules, refer to the resource 'docs://module/README.md' or use tool 'list-modules'.
         Each module's detailed reference (parameters and examples) is available as resource 'docs://module/{source|transform|sink}/{module name}.md',
-        or via tool 'describe-module' with id '{type}/{name}' (e.g. 'source/bigquery').
+        or via tool 'read-docs' with module '{type}/{name}' (e.g. 'source/bigquery').
         Any other documentation page (system.md, options/, shared docs under module/common/) can be read with tool 'read-docs'.
        
-        To validate the pipeline you have defined, you can use tool 'validate-pipeline'.
+        To validate the pipeline you have defined, use tool 'run-pipeline' with dryRun=true (it also returns every step's resolved schema).
         You can check for syntax problems in the pipeline definition, execution permissions, and so on.
         If there is a problem, check the error messages in response 'errors' attribute and correct them.
         If there are no problems, response 'outputs' attribute contains the schema of the output of each module, so you can check if the output is what you expect.

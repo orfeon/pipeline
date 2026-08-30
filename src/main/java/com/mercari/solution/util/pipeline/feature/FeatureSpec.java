@@ -62,6 +62,10 @@ public class FeatureSpec implements Serializable {
         public String value;
         public List<String> unit = new ArrayList<>();
         public String decayBy;
+        /** Output name override (replaces the field / anonymous-expression segment, or the op suffix). */
+        public String as;
+        /** countByValue / ratioByValue: emit one column per listed value instead of a map. */
+        public List<String> values = new ArrayList<>();
     }
 
     public static class KeySet implements Serializable {
@@ -88,6 +92,8 @@ public class FeatureSpec implements Serializable {
         public String expr;
         public boolean ref;
         public List<String> stats = new ArrayList<>();
+        /** Target name override (replaces the field name or the anonymous e{n}). */
+        public String as;
     }
 
     public static class FeatureDef implements Serializable {
@@ -179,6 +185,8 @@ public class FeatureSpec implements Serializable {
         public List<String> parentFields = new ArrayList<>();
         /** Field name of the child array in grouped output (default "rows"; rename to dodge reserved words). */
         public String childName = "rows";
+        /** Which input fields pass through to the output: all (default) | keys (time.field, entity / context keys, parentFields) | none. */
+        public String passThrough = "all";
     }
 
     public List<LineageEntry> lineage = new ArrayList<>();
@@ -298,6 +306,14 @@ public class FeatureSpec implements Serializable {
             spec.output.groupBy = Json.string(out, "groupBy");
             spec.output.parentFields = Json.strings(out, "parentFields");
             if (Json.string(out, "childName") != null) spec.output.childName = Json.string(out, "childName");
+            if (Json.string(out, "passThrough") != null) {
+                final String passThrough = Json.string(out, "passThrough");
+                if (!List.of("all", "keys", "none").contains(passThrough)) {
+                    diagnostics.error("output.passThrough", "output", "output.passThrough must be all | keys | none: " + passThrough);
+                } else {
+                    spec.output.passThrough = passThrough;
+                }
+            }
         }
         return spec;
     }
@@ -380,6 +396,7 @@ public class FeatureSpec implements Serializable {
             }
             target.expr = Json.string(t, "expr");
             target.stats = Json.strings(t, "stats");
+            target.as = Json.string(t, "as");
             def.targets.add(target);
         }
         final String combine = Json.string(o, "combine");
@@ -496,6 +513,8 @@ public class FeatureSpec implements Serializable {
         op.value = Json.string(o, "value");
         op.unit = Json.strings(o, "unit");
         op.decayBy = Json.string(o, "decayBy");
+        op.as = Json.string(o, "as");
+        op.values = Json.strings(o, "values");
         return op;
     }
 

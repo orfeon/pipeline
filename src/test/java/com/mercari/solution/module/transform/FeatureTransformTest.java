@@ -400,6 +400,38 @@ public class FeatureTransformTest {
         Assertions.assertTrue(new java.io.File(files[0], "enc.avro").exists());
     }
 
+    /** countByValue with values: numeric per-value columns (sink-friendly); output.passThrough: keys keeps only join keys. */
+    @Test
+    public void testPerValueColumnsAndPassThroughKeys() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("- {type: countByValue, fields: [condition_grade]}", "- {type: countByValue, fields: [condition_grade], values: [good, fair]}")
+                .replace("      output:\n        prefix: f_", "      output:\n        prefix: f_\n        passThrough: keys");
+        Assertions.assertTrue(config.contains("passThrough: keys"));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        // keys pass through, other inputs (including outcomes) do not
+        Assertions.assertNotNull(schema.getField("session_id"));
+        Assertions.assertNotNull(schema.getField("seller_id"));
+        Assertions.assertNotNull(schema.getField("session_time"));
+        Assertions.assertNull(schema.getField("start_price"));
+        Assertions.assertNull(schema.getField("sold"));
+        Assertions.assertNull(schema.getField("f_composition_condition_grade_countByValue"));
+        Assertions.assertEquals(Schema.Type.int64, schema.getField("f_composition_condition_grade_countByValue_good").getFieldType().getType());
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // session A: s1 good + s2 fair
+            Assertions.assertEquals(1L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_composition_condition_grade_countByValue_good")).longValue());
+            Assertions.assertEquals(1L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_composition_condition_grade_countByValue_fair")).longValue());
+            // session B: s1 good only -> fair absent = 0
+            Assertions.assertEquals(1L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_composition_condition_grade_countByValue_good")).longValue());
+            Assertions.assertEquals(0L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_composition_condition_grade_countByValue_fair")).longValue());
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testFactorization() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();

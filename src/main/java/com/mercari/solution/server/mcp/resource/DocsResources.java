@@ -36,6 +36,7 @@ public class DocsResources implements Resources {
                     final McpServerFeatures.SyncResourceSpecification resource = new McpServerFeatures.SyncResourceSpecification(
                             McpSchema.Resource.builder()
                                     .uri("docs://" + name)
+                                    .name(name) // required by the MCP schema (programmatic id); title is the human-readable one
                                     .title(getTitle(lines, name))
                                     .description(getDescription(lines))
                                     .mimeType("text/plain")

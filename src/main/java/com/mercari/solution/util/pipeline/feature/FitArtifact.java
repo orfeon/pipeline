@@ -106,6 +106,13 @@ public final class FitArtifact {
             final JsonArray levelArray = new JsonArray();
             levels.forEach(levelArray::add);
             manifest.add("levels", levelArray);
+            // the variance-components pseudo-counts derived from these statistics (per level), for auditing
+            // what a run shrank with; absent for a level with too few keys
+            final JsonObject lambdas = new JsonObject();
+            for (final Map.Entry<String, Double> e : VarianceComponents.lambdasInMemory(stats).entrySet()) {
+                lambdas.addProperty(e.getKey(), e.getValue());
+            }
+            manifest.add("lambdas", lambdas);
             ResourceUtil.writeString(manifestPath(artifactUri, planHash, block), manifest.toString());
             LOG.info("wrote fit artifact {} ({} entries)", path, stats.size());
         } catch (final IOException e) {

@@ -81,7 +81,7 @@ output schema in the dry-run output. It is not carried into schemas derived by o
 description always refers to the module that read it.
 
 Field descriptions are metadata: they never affect how data is read, converted or written, but
-they travel with the schema so that the dry-run output (Pipeline Builder, `validate-pipeline` /
+they travel with the schema so that the dry-run output (Pipeline Builder, `run-pipeline` with `dryRun` /
 `run-pipeline` MCP tools) can show what each column means. They come from:
 
 - the `description` key of a declared `schema.fields` entry (any module);

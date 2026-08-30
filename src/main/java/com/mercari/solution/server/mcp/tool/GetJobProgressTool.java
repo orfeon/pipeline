@@ -5,18 +5,20 @@ import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
 
-/** Deduplicated error picture of a job, whatever the runner. */
+/** Why a job is slow or not scaling: workers, stage timeline, running stage composition, feature plan mapping. */
 @Tool.Module(
-    name = "list-job-errors",
+    name = "get-job-progress",
     openWorld = true,
-    title = "List Job Errors",
+    title = "Get Job Progress",
     description = """
-        Collect the error information of a launched job: for a Dataflow job (id or exact name) the job
-        status, the error job messages from the Dataflow service and the deduplicated worker error logs
-        (with exception stack traces) from Cloud Logging; for a Cloud Run Job execution (execution name,
-        runner 'direct') the execution status / conditions and its deduplicated error logs.
-        Use this first when diagnosing why a job failed. If the result contains Java stack traces, pass
-        them to resolve-stack-trace to see the failing source code; use get-job-logs for surrounding context.
+        Progress and performance picture of a Dataflow job (id or exact name): current / target workers
+        with the autoscaler's decisions and reasons, the execution stages in completion order with the
+        time each took, the stage currently running (its transforms and the element counts of its inputs /
+        outputs — a stage that read few groups but emitted most rows is stuck on a few hot keys), and,
+        when the job runs a feature transform, the feature plan's stages with their keys mapped to the
+        Dataflow stages. Use it for "the job is slow / stays on one worker / seems stuck" questions;
+        use list-job-errors for failures and get-job-logs for log context. For a Cloud Run Job execution
+        (runner 'direct') it returns the execution summary.
         """,
     inputSchema = """
         {
@@ -24,7 +26,7 @@ import jakarta.servlet.ServletContext;
           "properties": {
             "job": {
               "type": "string",
-              "description": "Dataflow job id / exact job name, or a Cloud Run execution name (projects/.../jobs/.../executions/...)."
+              "description": "Dataflow job id / exact job name (or a Cloud Run execution name)."
             },
             "runner": {
               "type": "string",
@@ -49,7 +51,7 @@ import jakarta.servlet.ServletContext;
         }
         """
 )
-public class ListJobErrorsTool implements Tool {
+public class GetJobProgressTool implements Tool {
 
     @Override
     public void init(final ServletContext servletContext) {
@@ -59,13 +61,11 @@ public class ListJobErrorsTool implements Tool {
     public McpSchema.CallToolResult sync(
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
-        // 'jobIdOrName' kept as an alias of 'job' for older clients
-        final String job = GetJobTool.optionalString(request, "job") != null
-                ? GetJobTool.optionalString(request, "job") : GetJobTool.optionalString(request, "jobIdOrName");
+        final String job = GetJobTool.optionalString(request, "job");
         if (job == null) {
-            return McpSchema.CallToolResult.builder().addTextContent("list-job-errors mcp tool requires job parameter").isError(true).build();
+            return McpSchema.CallToolResult.builder().addTextContent("get-job-progress mcp tool requires job parameter").isError(true).build();
         }
-        final String result = JobReader.listJobErrors(job,
+        final String result = JobReader.getJobProgress(job,
                 GetJobTool.optionalString(request, "runner"),
                 GetJobTool.optionalString(request, "project"),
                 GetJobTool.optionalString(request, "region"));

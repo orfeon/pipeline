@@ -69,8 +69,18 @@ public class ContextEvaluator implements Serializable {
                 values.add(null);
             }
         }
+        final String value = c.coordinates.get("value");
+        // group-constant ops (no excludeSelf) are evaluated once for the group, not once per row
+        final boolean groupConstant = !excludeSelf && (value != null || List.of("countByValue", "ratioByValue", "entropy", "groupSize").contains(op));
+        Object shared = groupConstant ? apply(op, values, 0, false) : null;
         for (int i = 0; i < rows.size(); i++) {
-            rows.get(i).put(c.canonicalName, apply(op, values, i, excludeSelf));
+            Object result = groupConstant ? shared : apply(op, values, i, excludeSelf);
+            if (value != null && result instanceof Map<?, ?> map) {
+                // per-value column of countByValue / ratioByValue: absent value = 0 count / null ratio
+                final Object picked = map.get(valueKey(value));
+                result = picked != null ? picked : "countByValue".equals(op) ? 0L : null;
+            }
+            rows.get(i).put(c.canonicalName, result);
         }
     }
 
@@ -100,13 +110,30 @@ public class ContextEvaluator implements Serializable {
         };
     }
 
+    /** Map key of a categorical value: integral numbers without a fractional part ("1", not "1.0"), so `values: [1]` matches int and double fields alike. */
+    static String valueKey(final Object v) {
+        if (v instanceof Number n && !(v instanceof Long) && !(v instanceof Integer)) {
+            final double d = n.doubleValue();
+            if (d == Math.rint(d) && !Double.isInfinite(d) && Math.abs(d) < 1e15) return Long.toString((long) d);
+        }
+        if (v instanceof String s) {
+            try {
+                final double d = Double.parseDouble(s);
+                if (d == Math.rint(d) && !Double.isInfinite(d) && Math.abs(d) < 1e15 && s.contains(".")) return Long.toString((long) d);
+            } catch (final NumberFormatException ignored) {
+                // not numeric
+            }
+        }
+        return v.toString();
+    }
+
     private static Map<String, Long> countByValue(final List<Object> values, final int self, final boolean excludeSelf) {
         final Map<String, Long> counts = new TreeMap<>();
         for (int i = 0; i < values.size(); i++) {
             if (excludeSelf && i == self) continue;
             final Object v = values.get(i);
             if (v == null) continue;
-            counts.merge(v.toString(), 1L, Long::sum);
+            counts.merge(valueKey(v), 1L, Long::sum);
         }
         return counts;
     }

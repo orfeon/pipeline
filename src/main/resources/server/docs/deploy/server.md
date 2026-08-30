@@ -37,6 +37,13 @@ match wins:
 So a server deployed on Cloud Run in the project and region you launch into needs no
 project/region configuration at all.
 
+The same launch is available to AI clients: the MCP tool `launch-pipeline` (`config`, `runner`,
+`environment`, `parameters`, `args`) and the Pipeline Builder agent tool `launchPipeline` call this
+resolution; `run-pipeline` with `dryRun: true` validates a config beforehand (returning every step's
+resolved schema and the feature transforms' plans), and `get-job` / `get-job-logs` / `list-job-errors`
+follow the launched job whatever the runner. The server's service account needs the launch
+permissions listed below for every target the clients may use.
+
 ## Environment variables
 
 ### Launch (`MERCARI_PIPELINE_LAUNCH[_<RUNNER>]_<KEY>`)
@@ -99,3 +106,9 @@ The pipeline images themselves (not the server) read `MPIPELINE_CONFIG`,
 | config staging | `roles/storage.objectAdmin` (or objectCreator) on the staging bucket |
 
 The diagnosis tools additionally need the roles listed in [diagnosis.md](diagnosis.md#3-configure-the-server).
+
+## Connecting an MCP client
+
+The MCP surface (tools, resources, prompt, recommended workflows) and the client setup — Cloud Run
+through `gcloud run services proxy`, an identity token, or a local `mvn jetty:run -Pserver` — are
+documented in [mcp.md](mcp.md).

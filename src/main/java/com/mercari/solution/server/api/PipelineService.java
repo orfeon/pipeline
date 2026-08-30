@@ -175,6 +175,12 @@ public class PipelineService {
                         .map(MetricQueryResults::toString)
                         .orElse("");
                 responseJson.addProperty("metrics", metricsJson);
+            } else {
+                // dry run: the feature transforms' validate --expand reports against the resolved input schemas
+                final JsonArray featurePlans = FeatureService.describePlans(config, outputs);
+                if(featurePlans.size() > 0) {
+                    responseJson.add("featurePlans", featurePlans);
+                }
             }
 
             final long endMillis = Instant.now().toEpochMilli();

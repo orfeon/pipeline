@@ -59,6 +59,10 @@ public class DataflowJobReader {
                     result.append(config).append("\n");
                 }
                 result.append("```\n");
+            } else if (job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_QUEUED
+                    || job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_PENDING) {
+                result.append("\n(the job has not started yet: its pipeline parameters, including the config, appear once it leaves the ")
+                        .append(job.getCurrentState().name()).append(" state)\n");
             } else {
                 result.append("\nNo 'config' parameter found on the job "
                         + "(the job may not have been launched from a mercari/pipeline flex template).\n");
@@ -141,6 +145,11 @@ public class DataflowJobReader {
         }
     }
 
+    /** The job for an id or exact name (active jobs first), full view; null when not found. */
+    public static Job resolve(final String jobIdOrName, final String project, final String region) throws Exception {
+        return resolveJob(jobIdOrName, project, region);
+    }
+
     private static Job resolveJob(final String jobIdOrName, final String project, final String region)
             throws Exception {
 
@@ -151,7 +160,12 @@ public class DataflowJobReader {
         if (JOB_ID_PATTERN.matcher(key).matches()) {
             return DataflowUtil.getJob(project, region, key, JobView.JOB_VIEW_ALL);
         }
-        final Job byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
+        // active jobs first (running / queued / pending): a job launched a moment ago is found even when the
+        // project has more terminated jobs than the search limit covers
+        Job byName = DataflowUtil.findJobByName(project, region, key, com.google.dataflow.v1beta3.ListJobsRequest.Filter.ACTIVE, NAME_SEARCH_LIMIT);
+        if (byName == null) {
+            byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
+        }
         if (byName == null) {
             return null;
         }
@@ -172,11 +186,11 @@ public class DataflowJobReader {
 
     private static String jobNotFoundMessage(final String jobIdOrName, final String project, final String region) {
         return String.format("Dataflow job not found: '%s' (project=%s, region=%s). "
-                        + "Specify a job id or exact job name; use listRecentFailedJobs to discover jobs.",
+                        + "Specify a job id or exact job name; use listFailedJobs to discover jobs.",
                 jobIdOrName, project, region);
     }
 
-    private static String resolveProject(final String projectArg) {
+    public static String resolveProject(final String projectArg) {
         if (projectArg != null && !projectArg.isBlank()) {
             return projectArg.trim();
         }
@@ -193,7 +207,7 @@ public class DataflowJobReader {
                         + LaunchDefaults.envName(RUNNER, LaunchDefaults.KEY_PROJECT));
     }
 
-    private static String resolveRegion(final String regionArg) {
+    public static String resolveRegion(final String regionArg) {
         if (regionArg != null && !regionArg.isBlank()) {
             return regionArg.trim();
         }

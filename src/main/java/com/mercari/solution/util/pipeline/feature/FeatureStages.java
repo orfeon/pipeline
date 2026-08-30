@@ -626,8 +626,10 @@ public final class FeatureStages {
     /** Output schema: input fields + emitted columns, or the grouped parent/children shape (§3.1). */
     public static Schema createOutputSchema(final FeaturePlan plan, final Schema inputSchema, final DataType outputType) {
         final FeatureSpec.ContextDef groupBy = groupByContext(plan);
+        final Set<String> passThrough = passThroughInputs(plan, inputSchema);
         if (groupBy == null) {
-            final Schema.Builder builder = Schema.builder(inputSchema);
+            final Schema.Builder builder = Schema.builder();
+            for (final Schema.Field f : inputSchema.getFields()) if (passThrough.contains(f.getName())) builder.withField(f.copy());
             for (final OutputColumn c : plan.getEmittedColumns()) builder.withField(c.toField());
             return builder.withType(outputType).build();
         }
@@ -636,6 +638,7 @@ public final class FeatureStages {
         final Schema.Builder parent = Schema.builder();
         final Schema.Builder child = Schema.builder();
         for (final Schema.Field f : inputSchema.getFields()) {
+            if (!passThrough.contains(f.getName())) continue;
             (parentInputs.contains(f.getName()) ? parent : child).withField(f.copy());
         }
         for (final OutputColumn c : plan.getEmittedColumns()) {
@@ -1016,15 +1019,55 @@ public final class FeatureStages {
     }
 
     /** Builds the output value map from the canonical row map (shared by both finalize DoFns). */
+    /**
+     * Input fields that pass through to the output ({@code output.passThrough}): {@code all} (default),
+     * {@code keys} (time.field, entity / context keys, groupBy keys, parentFields - what a consumer needs to
+     * join or group) or {@code none}. Outcome-like inputs are not availability-checked, so a downstream
+     * {@code SELECT *} over a full pass-through can pick up post-event columns; {@code keys} makes the
+     * feature table safe to consume wholesale.
+     */
+    static Set<String> passThroughInputs(final FeaturePlan plan, final Schema inputSchema) {
+        final FeatureSpec spec = plan.getSpec();
+        final Set<String> names = new LinkedHashSet<>();
+        final String mode = spec.output.passThrough == null ? "all" : spec.output.passThrough;
+        switch (mode) {
+            case "none" -> { }
+            case "keys" -> {
+                if (spec.timeField != null) names.add(spec.timeField);
+                for (final FeatureSpec.EntityDef e : spec.entities) names.addAll(e.keys());
+                for (final FeatureSpec.ContextDef c : spec.contexts) names.addAll(c.keys());
+                names.addAll(spec.orderTieBreak);
+                names.addAll(spec.output.parentFields);
+            }
+            default -> { for (final Schema.Field f : inputSchema.getFields()) names.add(f.getName()); }
+        }
+        final Set<String> present = new LinkedHashSet<>();
+        for (final Schema.Field f : inputSchema.getFields()) if (names.contains(f.getName())) present.add(f.getName());
+        return present;
+    }
+
     static class Finalizer implements Serializable {
         private final List<OutputColumn> emitted;
         private final List<String> inputNames;
         private final boolean fillZero;
 
-        Finalizer(final List<OutputColumn> emitted, final Schema inputSchema, final FeatureSpec.NullPolicy nullPolicy) {
+        Finalizer(final List<OutputColumn> emitted, final Schema inputSchema, final FeatureSpec.NullPolicy nullPolicy, final Set<String> passThrough) {
             this.emitted = emitted;
-            this.inputNames = inputSchema.getFields().stream().map(Schema.Field::getName).toList();
+            this.inputNames = inputSchema.getFields().stream().map(Schema.Field::getName).filter(passThrough::contains).toList();
             this.fillZero = nullPolicy == FeatureSpec.NullPolicy.fillZero;
+        }
+
+        /** Field names of the output schema (parent + child element fields for grouped output): the pass-through set. */
+        static Set<String> outputFieldNames(final Schema outputSchema, final String childName) {
+            final Set<String> names = new LinkedHashSet<>();
+            for (final Schema.Field f : outputSchema.getFields()) {
+                names.add(f.getName());
+                if (childName != null && f.getName().equals(childName) && f.getFieldType().getArrayValueType() != null
+                        && f.getFieldType().getArrayValueType().getElementSchema() != null) {
+                    for (final Schema.Field child : f.getFieldType().getArrayValueType().getElementSchema().getFields()) names.add(child.getName());
+                }
+            }
+            return names;
         }
 
         Map<String, Object> outputValues(final Map<String, Object> values, final Collection<String> names,
@@ -1052,7 +1095,7 @@ public final class FeatureStages {
 
         FinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
-            this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy);
+            this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy, Finalizer.outputFieldNames(outputSchema, null));
             this.outputSchema = outputSchema;
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
@@ -1092,7 +1135,7 @@ public final class FeatureStages {
         GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
                             final List<String> keys, final List<String> parentFields, final String childName,
                             final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
-            this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy);
+            this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy, Finalizer.outputFieldNames(outputSchema, childName));
             this.outputSchema = outputSchema;
             this.keys = keys;
             this.parentFields = parentFields;

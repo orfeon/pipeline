@@ -831,6 +831,92 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testReservedWordColumnsInConditionsAreQuoted() {
+        final String sources = """
+                sources:
+                  - name: results
+                    eventTime: event_time
+                    settlementLag: PT30M
+                    keys: [event_id, subject_id]
+                    fields:
+                      - {name: event_id, type: string}
+                      - {name: subject_id, type: string}
+                      - {name: rank, type: int32, availableAt: after(event), kind: outcome}
+                      - {name: score, type: float64}
+                """;
+        final String spec = """
+                lineage:
+                  - {fields: [event_id, subject_id, rank, score], from: results}
+                time: {field: event_time, orderTieBreak: [event_id]}
+                predictAt: "event_time - PT1H"
+                entities:
+                  - {name: subject, keys: [subject_id]}
+                features:
+                  - name: recent
+                    scope: sequence
+                    entity: subject
+                    windows: [{maxEvents: 5}, {maxEvents: 10, filter: "score > 1 AND rank <= 3"}]
+                    ops:
+                      - {type: countMatch, predicate: "rank <= 3", as: top3}
+                      - {type: sinceEvent, predicate: "rank = 1", unit: [days], as: since_win}
+                """;
+        final FeaturePlan plan = compile(sources, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        // `rank` is a keyword of the condition grammar: the compiler quotes it and records the rewrite
+        Assertions.assertTrue(hasCode(plan, "predicate.quoted"), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "filter.quoted"), plan::describe);
+        final OutputColumn top3 = column(plan, "recent_n5_top3");            // `as` replaces the op suffix
+        Assertions.assertEquals("`rank` <= 3", top3.getCoordinates().get("predicate"));
+        // every known column of the condition is quoted (harmless for non-keywords)
+        Assertions.assertEquals("`score` > 1 AND `rank` <= 3", column(plan, "recent_n10_top3").getCoordinates().get("filter"));
+        column(plan, "recent_n5_since_win");
+        Assertions.assertEquals("`rank` = 1", column(plan, "recent_n5_since_win").getCoordinates().get("predicate"));
+        // the evaluator parses the rewritten text
+        Assertions.assertDoesNotThrow(() -> com.mercari.solution.util.pipeline.Filter.parse(top3.getCoordinates().get("predicate")));
+        // a condition that cannot be parsed even when quoted is a compile error, not a worker failure
+        final FeaturePlan broken = compile(sources, spec.replace("predicate: \"rank <= 3\"", "predicate: \"rank <= = 3\""));
+        Assertions.assertTrue(hasCode(broken, "predicate.parse"), broken::describe);
+    }
+
+    @Test
+    public void testAliasesAndPerValueContextColumns() {
+        final String block = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean], as: win}
+                      - {field: sold, stats: [count]}
+            """;
+        final String spec = withEncoding(block)
+                .replace("- {type: countByValue, fields: [condition_grade]}", "- {type: countByValue, fields: [condition_grade], values: [good, fair]}\n      - {type: ratioByValue, fields: [condition_grade], values: [good], as: grade}")
+                .replace("ops:\n      - {type: lag, fields: [sold, start_price], k: 2}", "ops:\n      - {type: ewma, expr: \"start_price * 2\", halflife: [3], as: price2}\n      - {type: lag, fields: [sold, start_price], k: 2}");
+        Assertions.assertNotEquals(SPEC, spec);
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        // target alias replaces the anonymous e{n}
+        column(plan, "enc__seller_id__win__mean");
+        Assertions.assertNull(plan.getColumn("enc__seller_id__e1__mean"));
+        // op alias replaces the anonymous expression segment
+        column(plan, "recent_n5_price2_ewma3");
+        // countByValue with values: one INT64 column per value instead of a map; ratioByValue likewise (FLOAT64)
+        final OutputColumn good = column(plan, "composition_condition_grade_countByValue_good");
+        Assertions.assertEquals(Schema.Type.int64, good.getFieldType().getType());
+        Assertions.assertEquals("good", good.getCoordinates().get("value"));
+        column(plan, "composition_condition_grade_countByValue_fair");
+        Assertions.assertNull(plan.getColumn("composition_condition_grade_countByValue"));
+        Assertions.assertEquals(Schema.Type.float64, column(plan, "composition_grade_ratioByValue_good").getFieldType().getType());
+        // output.passThrough is validated (a typo must not silently pass every input column through)
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "output:\n  prefix: f_\n  passThrough: keysOnly")), "output.passThrough"));
+        Assertions.assertFalse(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "output:\n  prefix: f_\n  passThrough: keys")), "output.passThrough"));
+        // the outcome-mean hint is reported once per block, not once per window x field x func
+        final long hints = plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.aggregate.encoding")).count();
+        Assertions.assertTrue(hints <= 1, plan::describe);
+    }
+
+    @Test
     public void testAvailableAtAlgebra() {
         final AvailableAt a = AvailableAt.parse("event_time - PT10M", null);
         final AvailableAt b = AvailableAt.parse("after(event)", Duration.ofMinutes(30));

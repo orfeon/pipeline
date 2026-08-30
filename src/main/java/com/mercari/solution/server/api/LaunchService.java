@@ -132,8 +132,38 @@ public class LaunchService {
             final HttpServletResponse response,
             final String userEmail) throws IOException {
 
-        String configContent = null;
         final long startMillis = Instant.now().toEpochMilli();
+        try {
+            final JsonObject job = launchJob(configText, argsText, launch, userEmail);
+
+            final long endMillis = Instant.now().toEpochMilli();
+            final JsonObject responseJson = new JsonObject();
+            responseJson.addProperty("type", "launch");
+            responseJson.addProperty("status", "ok");
+            responseJson.addProperty("millis", (endMillis - startMillis));
+            responseJson.add("job", job);
+            response.getWriter().println(responseJson);
+        } catch (final Throwable e) {
+            final long endMillis = Instant.now().toEpochMilli();
+            response.getWriter().println(errorResponse("pipeline", endMillis - startMillis, e));
+        }
+    }
+
+    /**
+     * Submits a config to a launch target and returns the {@code job} object (see {@link LaunchResult#job}).
+     * Shared by the REST endpoint, the MCP {@code launch-pipeline} tool and the agent's {@code launchPipeline}.
+     *
+     * @param launch {@code {runner, environment?, parameters?: {...}, args?: {...}}}; {@code launch.args}
+     *               overrides {@code argsText}
+     * @throws IllegalArgumentException for user errors (unknown target, unresolved project / region / job, ...)
+     */
+    public static JsonObject launchJob(
+            final String configText,
+            final String argsText,
+            final JsonObject launch,
+            final String userEmail) throws Exception {
+
+        String configContent = null;
         try {
             // launch.args (JSON object from the modal) overrides the request-level args text.
             final JsonObject launchArgs = launch.has("args") && launch.get("args").isJsonObject()
@@ -142,6 +172,13 @@ public class LaunchService {
                     ? Config.load(configText, null, Config.Format.unknown, argsMap(launchArgs))
                     : Config.load(configText, null, Config.Format.unknown, argsText);
             configContent = config.getContent();
+            // a placeholder that survives substitution would reach the job as the literal text "${args.x}"
+            final java.util.List<String> unresolved = Config.unresolvedArgs(configContent);
+            if(!unresolved.isEmpty()) {
+                throw new IllegalArgumentException("unresolved template arguments " + unresolved
+                        + ": pass them in args (launch.args / --args.<name>) or define defaults under the config's args. "
+                        + "Placeholders must be written as ${args.<name>}; a bare ${<name>} is not substituted");
+            }
 
             final String runner = launch.has("runner") && !launch.get("runner").isJsonNull()
                     ? launch.get("runner").getAsString() : null;
@@ -155,22 +192,17 @@ public class LaunchService {
                     config, parameters, launchArgs, userEmail, LaunchDefaults.get());
 
             final JsonObject job = launcher.launch(launchRequest);
-
-            final long endMillis = Instant.now().toEpochMilli();
-            final JsonObject responseJson = new JsonObject();
-            responseJson.addProperty("type", "launch");
-            responseJson.addProperty("status", "ok");
-            responseJson.addProperty("millis", (endMillis - startMillis));
-            responseJson.add("job", job);
-
             log(userEmail, launcher.key(), true, configContent, null);
-
-            response.getWriter().println(responseJson);
+            return job;
         } catch (final Throwable e) {
-            final long endMillis = Instant.now().toEpochMilli();
             log(userEmail, "Launch", false, configContent, FailureUtil.convertThrowableMessage(e));
-            response.getWriter().println(errorResponse("pipeline", endMillis - startMillis, e));
+            throw e;
         }
+    }
+
+    /** The message a caller should show for a launch failure: user errors plainly, others with their cause chain. */
+    public static String launchErrorMessage(final Throwable e) {
+        return isUserError(e) ? userMessage(e) : FailureUtil.convertThrowableMessage(e);
     }
 
     /**
@@ -180,15 +212,7 @@ public class LaunchService {
      */
     /** JSON args as template args: string values as-is (not JSON-quoted), other values as their JSON text. */
     public static Map<String, String> argsMap(final JsonObject args) {
-        final Map<String, String> map = new java.util.HashMap<>();
-        for(final Map.Entry<String, JsonElement> entry : args.entrySet()) {
-            final JsonElement value = entry.getValue();
-            if(value == null || value.isJsonNull()) {
-                continue;
-            }
-            map.put(entry.getKey(), value.isJsonPrimitive() ? value.getAsString() : value.toString());
-        }
-        return map;
+        return Config.templateArgs(args);
     }
 
     private static JsonObject errorResponse(final String module, final long millis, final Throwable e) {

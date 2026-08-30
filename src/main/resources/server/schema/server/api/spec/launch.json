@@ -32,6 +32,11 @@
           "title": "Flex Template",
           "description": "Launch the deployed dataflow image as a Flex Template job",
           "properties": {
+            "jobName": {
+              "type": "string",
+              "title": "Job name",
+              "description": "Dataflow job name ([-a-z0-9], starting with a letter; other characters are normalised). Default: config options.jobName, then the config name with a timestamp suffix"
+            },
             "templateLocation": {
               "type": "string",
               "title": "Template location",
@@ -43,6 +48,31 @@
               "title": "Service account",
               "description": "Worker service account email (default: config options.dataflow.serviceAccount, then the server environment)",
               "x-launch-default": "SERVICE_ACCOUNT"
+            },
+            "workerMachineType": {
+              "type": "string",
+              "title": "Worker machine type",
+              "description": "Dataflow worker machine type (e.g. n1-highmem-8). Default: config options.dataflow.workerMachineType"
+            },
+            "numWorkers": {
+              "type": "integer",
+              "title": "Initial workers",
+              "description": "Initial number of workers. Default: config options.dataflow.numWorkers"
+            },
+            "maxNumWorkers": {
+              "type": "integer",
+              "title": "Max workers",
+              "description": "Autoscaling upper bound. Default: config options.dataflow.maxNumWorkers"
+            },
+            "diskSizeGb": {
+              "type": "integer",
+              "title": "Worker disk (GB)",
+              "description": "Worker boot disk size; feature transforms spill sorted keys to it. Default: config options.dataflow.diskSizeGb"
+            },
+            "workerZone": {
+              "type": "string",
+              "title": "Worker zone",
+              "description": "Worker zone (optional)"
             }
           }
         },
@@ -78,7 +108,9 @@
       "oneOf": [
         {
           "$id": "https://mercari.com/server/api/spec/launch/direct/cloudRunJob",
-          "required": ["jobName"],
+          "required": [
+            "jobName"
+          ],
           "type": "object",
           "title": "Cloud Run Job",
           "description": "Execute a pre-created Cloud Run Job (direct image) with this config as its container arguments. The job's image, service account, cpu and memory come from the job definition; see deploy/cloud-run-jobs.md",
@@ -115,7 +147,9 @@
         },
         {
           "$id": "https://mercari.com/server/api/spec/launch/direct/cloudRunWorkerPool",
-          "required": ["image"],
+          "required": [
+            "image"
+          ],
           "type": "object",
           "title": "Cloud Run Worker Pool",
           "description": "Deploy the direct image as a Cloud Run Worker Pool running this config (streaming / long-running pipelines). The pool keeps running until you delete it: gcloud run worker-pools delete <name>",
@@ -168,7 +202,9 @@
     },
     {
       "$id": "https://mercari.com/server/api/spec/launch/spark",
-          "required": ["jars"],
+      "required": [
+        "jars"
+      ],
       "type": "object",
       "title": "Spark",
       "description": "Run pipeline on Spark Runner",

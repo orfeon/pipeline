@@ -110,4 +110,4 @@ gcloud run deploy {service_name} \
 
 Everything the server reads from its environment — including what the Builder's **Launch**
 button needs for Dataflow, Cloud Run Jobs / Worker Pools and Dataproc — is listed in
-[server.md](server.md).
+[server.md](server.md); the MCP server it exposes (tools, workflows, client setup) in [mcp.md](mcp.md).

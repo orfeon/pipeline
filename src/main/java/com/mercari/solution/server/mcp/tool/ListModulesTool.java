@@ -1,6 +1,5 @@
 package com.mercari.solution.server.mcp.tool;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -9,19 +8,22 @@ import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
 
-import java.io.Serializable;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
-
+/**
+ * The module catalog ({@code server/docs/module/index.yaml}: title / description / tags per module), as a
+ * compact list per type. The full JSON schemas are served by {@code /api/spec}; the per-module reference
+ * by {@code read-docs}.
+ */
 @Tool.Module(
     name="list-modules",
     title="List Pipeline Modules",
     description= """
-        List of pipeline modules available in mercari/pipeline.
-        The response is in JSON format and includes the id and specs as well as the name of the module.
-        By specifying '{type}/{name}' (e.g. 'source/bigquery') in the 'id' parameter of tool: 'describe-module',
-        you can check the detailed specification of the module.
+        List the pipeline modules available in mercari/pipeline, per type (source, transform, sink,
+        action), each with a one-line description and tags. Pass 'type' to list one type only.
+        Read a module's full reference (parameters, examples) with tool 'read-docs' using
+        module '{type}/{name}' (e.g. 'source/bigquery').
         """,
     inputSchema = """
         {
@@ -30,8 +32,8 @@ import java.util.List;
             "type": {
               "type": "string",
               "title": "Module Type",
-              "enum": ["source", "transform", "sink"],
-              "description": "Specify module type (source, transform, or sink). If not specified, all types of modules are listed."
+              "enum": ["source", "transform", "sink", "action"],
+              "description": "Module type to list. If not specified, all types are listed."
             }
           },
           "required": []
@@ -39,69 +41,19 @@ import java.util.List;
         """,
     outputSchema = """
         {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-            },
-            "required": []
-          }
+          "type": "string"
         }
         """
-
 )
 public class ListModulesTool implements Tool {
 
-    public static class ModuleSpec implements Serializable {
-
-        public String uri;
-        public Type type;
-        public String name;
-        public String description;
-        public List<Mode> mode;
-
-        public enum Type {
-            source,
-            transform,
-            sink,
-            failure
-        }
-
-        public enum Mode {
-            batch,
-            streaming
-        }
-
-        public static ModuleSpec of(
-                final Gson gson,
-                final JsonElement jsonElement) {
-
-            final ModuleSpec spec = gson.fromJson(jsonElement, ModuleSpec.class);
-            if(spec == null) {
-                return null;
-            }
-            spec.uri = String.format("config/module/%s/%s", spec.type, spec.name);
-            return spec;
-        }
-
-        public static List<ModuleSpec> list(final String jsonText) {
-            final List<ModuleSpec> specs = new ArrayList<>();
-            final Gson gson = new Gson();
-            final JsonElement jsonElement = gson.fromJson(jsonText, JsonElement.class);
-            if(!jsonElement.isJsonArray()) {
-                return specs;
-            }
-            for(final JsonElement specElement : jsonElement.getAsJsonArray()) {
-                final ModuleSpec spec = of(gson, specElement);
-                if(spec == null) {
-                    continue;
-                }
-                specs.add(spec);
-            }
-
-            return specs;
-        }
-
+    /** index.yaml section per module type. */
+    private static final Map<String, String> SECTIONS = new java.util.LinkedHashMap<>(Map.of());
+    static {
+        SECTIONS.put("source", "sources");
+        SECTIONS.put("transform", "transforms");
+        SECTIONS.put("sink", "sinks");
+        SECTIONS.put("action", "actions");
     }
 
     @Override
@@ -114,42 +66,46 @@ public class ListModulesTool implements Tool {
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
 
-        if (!request.arguments().containsKey("type")) {
-            return McpSchema.CallToolResult.builder().addTextContent("list-module mcp tool requires type parameter").isError(true).build();
+        final Object typeValue = request.arguments().get("type");
+        final String type = typeValue == null || typeValue.toString().isBlank() ? null : typeValue.toString().trim();
+        if (type != null && !SECTIONS.containsKey(type)) {
+            return McpSchema.CallToolResult.builder()
+                    .addTextContent("Unknown module type: '" + type + "'. Specify one of " + SECTIONS.keySet() + ", or omit it to list every type.")
+                    .isError(true)
+                    .build();
+        }
+        final JsonObject modules = SpecService.ModuleIndex.getModules();
+        final StringBuilder sb = new StringBuilder();
+        for (final Map.Entry<String, String> section : SECTIONS.entrySet()) {
+            if (type != null && !type.equals(section.getKey())) continue;
+            final JsonElement list = modules == null ? null : modules.get(section.getValue());
+            if (list == null || !list.isJsonArray() || list.getAsJsonArray().isEmpty()) continue;
+            sb.append("## ").append(section.getKey()).append(" modules\n");
+            for (final JsonElement e : list.getAsJsonArray()) {
+                if (!e.isJsonObject()) continue;
+                final JsonObject m = e.getAsJsonObject();
+                final String name = m.has("name") && !m.get("name").getAsString().isBlank() ? m.get("name").getAsString() : null;
+                if (name == null) continue;
+                sb.append("- ").append(section.getKey()).append('/').append(name);
+                if (m.has("description")) sb.append(": ").append(m.get("description").getAsString());
+                if (m.has("tags") && m.get("tags").isJsonArray()) {
+                    final List<String> tags = new java.util.ArrayList<>();
+                    for (final JsonElement t : m.getAsJsonArray("tags")) tags.add(t.getAsString());
+                    sb.append(" [").append(String.join(", ", tags)).append(']');
+                }
+                sb.append('\n');
+            }
+            sb.append('\n');
+        }
+        if (sb.isEmpty()) {
+            return McpSchema.CallToolResult.builder().addTextContent("No modules found" + (type == null ? "." : " for type '" + type + "'.")).isError(true).build();
+        }
+        return McpSchema.CallToolResult.builder().addTextContent(sb.toString()).isError(false).build();
+    }
 
-        }
-        final String type = request.arguments().get("type").toString();
-        final JsonArray jsonArray = SpecService.getModuleAbstracts(type);
-        return McpSchema.CallToolResult.builder().addTextContent(jsonArray.toString()).isError(false).build();
-
-        /*
-        final JsonArray jsonArray = new JsonArray();
-        {
-            final JsonObject jsonObject = new JsonObject();
-            jsonObject.addProperty("id", "source/spanner");
-            jsonObject.addProperty("type", "source");
-            jsonObject.addProperty("name", "spanner");
-            jsonObject.addProperty("description", "spanner source module to get data from Cloud Spanner. The data can be retrieved from the specified table or query.");
-            jsonArray.add(jsonObject);
-        }
-        {
-            final JsonObject jsonObject = new JsonObject();
-            jsonObject.addProperty("id", "source/bigquery");
-            jsonObject.addProperty("type", "source");
-            jsonObject.addProperty("name", "bigquery");
-            jsonObject.addProperty("description", "bigquery source module to get data from BigQuery. The data can be retrieved from the specified table or query.");
-            jsonArray.add(jsonObject);
-        }
-        {
-            final JsonObject jsonObject = new JsonObject();
-            jsonObject.addProperty("id", "sink/storage");
-            jsonObject.addProperty("type", "sink");
-            jsonObject.addProperty("name", "storage");
-            jsonObject.addProperty("description", "storage sink module to write data to Storage such as Cloud Storage, S3, local storage.");
-            jsonArray.add(jsonObject);
-        }
-        return new McpSchema.CallToolResult(jsonArray.toString(), false);
-         */
+    /** Kept for callers of the previous JSON-schema list ({@code /api/spec} serves the same data). */
+    public static JsonArray schemaAbstracts(final String type) {
+        return SpecService.getModuleAbstracts(type);
     }
 
 }

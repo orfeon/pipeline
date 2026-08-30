@@ -149,14 +149,22 @@ Built with the `server` Maven profile (WAR, Jetty EE11 12). Surfaces:
 
 - **REST API** — `PipelineApiServer` + `api/` services: `PipelineService`, `SchemaService`, `SpecService`,
   `LaunchService`, `ProbeService`, `AgentService` (validate config, infer schema, launch jobs).
-- **MCP** — `PipelineMcpStreamableServer` / `PipelineMcpSseServer` with `mcp/tool` (list/describe/validate/run),
-  `mcp/resource` (docs), and `mcp/prompt`.
-- **Webhook / Agent** — `PipelineWebhookServer`, `agent/PipelineAgent` with `DocsReader` + `PipelineExecutor`.
+- **MCP** — `PipelineMcpStreamableServer` (Streamable HTTP at `/mcp`; `PipelineMcpSseServer` exists but is not
+  mapped) with `mcp/tool` (14 tools, one class per tool annotated `@Tool.Module`, discovered by package scan;
+  docs / source / validation / launch / job observation — user doc: `server/docs/deploy/mcp.md`),
+  `mcp/resource` (`docs://` documents) and `mcp/prompt` (`design-pipeline`). `Tool.Registry` holds one
+  instance per tool, shared with the agent. Runner-agnostic job observation lives in `server/job/`
+  (`JobReader` over `dataflow/DataflowJobReader`, Cloud Run and Cloud Logging; `JobProgress` = workers /
+  stage timeline / plan mapping); launch targets in `server/launch/` (`Launcher` SPI).
+- **Webhook / Agent** — `PipelineWebhookServer`, `agent/PipelineAgent` (langchain4j) whose tools
+  (`agent/tool/*`: `DocsReader`, `CodeReader`, `JobTools`, `PipelineExecutor`, `FeatureValidator`,
+  `PipelineLauncher`) are thin wrappers over the MCP tools through `McpToolBridge` — one implementation per
+  capability, agent names = camelCase of the MCP names.
 
-`src/main/resources/server/docs/` is the **canonical location for user-facing docs**: the agent's
-`DocsReader` tool reads `module/<type>/<name>.md` from the classpath (front-matter `title:` is used for
-listings), `module/index.yaml` is the module catalog, and MCP `DocsResources` exposes the files as
-`docs://` resources (read from the same classpath tree). All user-facing docs (config reference,
+`src/main/resources/server/docs/` is the **canonical location for user-facing docs**: the MCP
+`read-docs` tool (and the agent's `readDocs` wrapper) reads `module/<type>/<name>.md` from the classpath,
+`module/index.yaml` is the module catalog behind `list-modules` and the Builder UI, and MCP `DocsResources`
+exposes the files as `docs://` resources (read from the same classpath tree). All user-facing docs (config reference,
 `options/`, `deploy/`, `exec/`) live in this tree; `docs/` in the repo root keeps only developer docs.
 
 ## 7. Where to look

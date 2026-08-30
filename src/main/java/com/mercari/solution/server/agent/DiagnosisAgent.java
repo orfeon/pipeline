@@ -1,7 +1,7 @@
 package com.mercari.solution.server.agent;
 
 import com.mercari.solution.server.agent.tool.CodeReader;
-import com.mercari.solution.server.agent.tool.DataflowReader;
+import com.mercari.solution.server.agent.tool.JobTools;
 import com.mercari.solution.server.agent.tool.DocsReader;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
@@ -28,7 +28,7 @@ public interface DiagnosisAgent {
                 .tools(
                         DocsReader.create(),
                         CodeReader.create(),
-                        DataflowReader.create()
+                        JobTools.create()
                 )
                 .build()
                 .diagnose(facts);

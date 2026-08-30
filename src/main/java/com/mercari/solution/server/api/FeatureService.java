@@ -48,4 +48,41 @@ public class FeatureService {
         }
     }
 
+
+    /**
+     * Dry-run report of every {@code feature} transform in an assembled config: the validate --expand result
+     * compiled against the union schema of the step's resolved inputs ({@code outputs} of {@code MPipeline.apply}).
+     * Each entry: {@code {name, ok, describe, engineErrors?, error?}}.
+     */
+    public static com.google.gson.JsonArray describePlans(
+            final com.mercari.solution.config.Config config,
+            final java.util.Map<String, com.mercari.solution.module.MCollection> outputs) {
+        final com.google.gson.JsonArray plans = new com.google.gson.JsonArray();
+        if (config == null || config.getTransforms() == null) return plans;
+        for (final com.mercari.solution.config.TransformConfig step : config.getTransforms()) {
+            if (!"feature".equals(step.getModule()) || step.getParameters() == null) continue;
+            final JsonObject request = new JsonObject();
+            request.add("parameters", step.getParameters().deepCopy());
+            final java.util.List<com.mercari.solution.module.Schema> schemas = new java.util.ArrayList<>();
+            if (step.getInputs() != null) {
+                for (final String input : step.getInputs()) {
+                    final com.mercari.solution.module.MCollection c = outputs == null ? null : outputs.get(input);
+                    if (c != null && c.getSchema() != null) schemas.add(c.getSchema());
+                }
+            }
+            if (!schemas.isEmpty()) {
+                request.add("inputSchema", com.mercari.solution.util.pipeline.Union.createUnionSchema(schemas).toJsonObject());
+            }
+            final JsonObject result = FeaturePlanService.validate(request);
+            final JsonObject plan = new JsonObject();
+            plan.addProperty("name", step.getName());
+            plan.addProperty("ok", result.has("ok") && result.get("ok").getAsBoolean());
+            if (result.has("describe")) plan.addProperty("describe", result.get("describe").getAsString());
+            if (result.has("engineErrors")) plan.add("engineErrors", result.get("engineErrors"));
+            if (result.has("error")) plan.add("error", result.get("error"));
+            plans.add(plan);
+        }
+        return plans;
+    }
+
 }
