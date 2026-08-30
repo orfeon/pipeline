@@ -34,7 +34,7 @@ import jakarta.servlet.ServletContext;
             },
             "args": {
               "type": ["object", "string"],
-              "description": "Template arguments (${args.*}) as a JSON object or JSON text."
+              "description": "Template arguments as a JSON object or JSON text, referred to as ${args.<name>} in the config (defaults come from the config's own args block)."
             }
           },
           "required": ["config"]

@@ -172,6 +172,13 @@ public class LaunchService {
                     ? Config.load(configText, null, Config.Format.unknown, argsMap(launchArgs))
                     : Config.load(configText, null, Config.Format.unknown, argsText);
             configContent = config.getContent();
+            // a placeholder that survives substitution would reach the job as the literal text "${args.x}"
+            final java.util.List<String> unresolved = Config.unresolvedArgs(configContent);
+            if(!unresolved.isEmpty()) {
+                throw new IllegalArgumentException("unresolved template arguments " + unresolved
+                        + ": pass them in args (launch.args / --args.<name>) or define defaults under the config's args. "
+                        + "Placeholders must be written as ${args.<name>}; a bare ${<name>} is not substituted");
+            }
 
             final String runner = launch.has("runner") && !launch.get("runner").isJsonNull()
                     ? launch.get("runner").getAsString() : null;

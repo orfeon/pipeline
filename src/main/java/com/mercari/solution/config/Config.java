@@ -570,6 +570,22 @@ public class Config implements Serializable {
         return new LinkedHashMap<>(argsParameters.getOrDefault("args", new LinkedHashMap<>()));
     }
 
+    private static final Pattern UNRESOLVED_ARG = Pattern.compile("\\$\\{args\\.([A-Za-z0-9_]+)\\}");
+
+    /**
+     * Names of {@code ${args.<name>}} placeholders still present in a config text after substitution:
+     * arguments neither defined in the config's {@code args} / {@code system.args} nor passed at load time.
+     */
+    public static List<String> unresolvedArgs(final String content) {
+        final List<String> names = new ArrayList<>();
+        if(content == null) return names;
+        final java.util.regex.Matcher m = UNRESOLVED_ARG.matcher(content);
+        while(m.find()) {
+            if(!names.contains(m.group(1))) names.add(m.group(1));
+        }
+        return names;
+    }
+
     private static Map<String, String> parseArgs(String argsText) {
         if(argsText == null || argsText.isEmpty()) {
             return new HashMap<>();
