@@ -35,6 +35,9 @@ public final class JobReader {
     private static final int DEFAULT_LOG_ENTRIES = 100;
     private static final int MAX_LOG_TEXT = 600;
     private static final String KEY_JOB = "JOB";
+    private static final java.util.Set<String> SEVERITIES = java.util.Set.of("DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY");
+    /** One HTTP client for every Cloud Run call (token cached by the util). */
+    private static final CloudRunUtil CLOUD_RUN = new CloudRunUtil();
 
     private JobReader() {}
 
@@ -96,13 +99,13 @@ public final class JobReader {
             return DataflowJobReader.getJob(ref.id(), ref.project(), ref.region());
         }
         try {
-            final CloudRunUtil cloudRun = new CloudRunUtil();
+            final CloudRunUtil cloudRun = CLOUD_RUN;
             if (ref.id() != null) {
                 return "## Cloud Run Job execution\n" + formatExecution(summarizeExecution(cloudRun.getExecution(ref.id()), ref.project()));
             }
             final String jobName = LaunchDefaults.get().resolve("direct", KEY_JOB)
                     .orElseThrow(() -> new IllegalArgumentException("no Cloud Run Job to list: pass an execution name or set " + LaunchDefaults.envName("direct", KEY_JOB)));
-            final JsonObject list = cloudRun.listExecutions(CloudRunUtil.jobName(ref.project(), ref.region(), jobName), limit == null ? 5 : limit);
+            final JsonObject list = cloudRun.listExecutions(CloudRunUtil.jobName(ref.project(), ref.region(), jobName), limit == null || limit <= 0 ? 5 : Math.min(limit, 100));
             final StringBuilder sb = new StringBuilder("## Latest executions of Cloud Run Job " + jobName + " (" + ref.project() + "/" + ref.region() + ")\n");
             if (!list.has("executions") || !list.get("executions").isJsonArray() || list.getAsJsonArray("executions").isEmpty()) {
                 return sb.append("No executions.\n").toString();
@@ -132,7 +135,7 @@ public final class JobReader {
             return "ERROR: list-job-errors needs one execution: pass its execution name (get-job with runner: direct lists the latest ones)";
         }
         try {
-            final JsonObject execution = new CloudRunUtil().getExecution(ref.id());
+            final JsonObject execution = CLOUD_RUN.getExecution(ref.id());
             final JsonObject summary = summarizeExecution(execution, ref.project());
             final StringBuilder sb = new StringBuilder("## Cloud Run Job execution\n").append(formatExecution(summary)).append('\n');
             final Matcher m = EXECUTION_NAME.matcher(ref.id());
@@ -165,6 +168,9 @@ public final class JobReader {
         }
         final int max = limit == null || limit <= 0 ? DEFAULT_LOG_ENTRIES : Math.min(limit, MAX_LOG_ENTRIES);
         final String severity = minSeverity == null || minSeverity.isBlank() ? "INFO" : minSeverity.trim().toUpperCase();
+        if (!SEVERITIES.contains(severity)) {
+            return "ERROR: unknown minSeverity '" + minSeverity + "' (DEBUG | INFO | NOTICE | WARNING | ERROR | CRITICAL)";
+        }
         try {
             final String project;
             final String filter;
@@ -205,19 +211,22 @@ public final class JobReader {
     // ---- list-failed-jobs ----
 
     public static String listFailedJobs(final Integer hours, final String projectArg, final String regionArg) {
-        final StringBuilder sb = new StringBuilder(DataflowJobReader.listRecentFailedJobs(hours, projectArg, regionArg));
+        final String dataflow = DataflowJobReader.listRecentFailedJobs(hours, projectArg, regionArg);
         // the configured Cloud Run Job (direct launches), when there is one
         final LaunchDefaults defaults = LaunchDefaults.get();
         final Optional<String> jobName = defaults.resolve("direct", KEY_JOB);
         if (jobName.isEmpty()) {
-            return sb.toString();
+            return dataflow;
         }
+        // a Dataflow-side failure (e.g. no Dataflow project configured) must not hide the Cloud Run findings
+        final StringBuilder sb = new StringBuilder(dataflow.startsWith("ERROR")
+                ? "## Failed Dataflow jobs\n(not listed: " + dataflow.substring("ERROR:".length()).trim() + ")\n" : dataflow);
         try {
             final String project = defaults.require("direct", LaunchDefaults.KEY_PROJECT, projectArg);
             final String region = defaults.require("direct", LaunchDefaults.KEY_REGION, regionArg);
             final int windowHours = Optional.ofNullable(hours).filter(h -> h > 0).orElse(24);
             final Instant threshold = Instant.now().minus(windowHours, ChronoUnit.HOURS);
-            final JsonObject list = new CloudRunUtil().listExecutions(CloudRunUtil.jobName(project, region, jobName.get()), 50);
+            final JsonObject list = CLOUD_RUN.listExecutions(CloudRunUtil.jobName(project, region, jobName.get()), 50);
             final JsonArray failed = new JsonArray();
             if (list.has("executions") && list.get("executions").isJsonArray()) {
                 for (final JsonElement e : list.getAsJsonArray("executions")) {

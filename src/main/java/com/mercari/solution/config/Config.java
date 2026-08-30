@@ -400,7 +400,7 @@ public class Config implements Serializable {
             final Map<String, String> moduleArgs;
             try {
                 moduleArgs = resolveArgs(jsonObject, templateArgs);
-                jsonObject = processArgs(jsonObject, templateArgs);
+                jsonObject = substituteArgs(jsonObject, moduleArgs); // evaluated once: templated args (dates, uuids) stay consistent
             } catch (Throwable e) {
                 throw new IllegalModuleException("", "pipeline", e);
             }
@@ -574,7 +574,8 @@ public class Config implements Serializable {
         return new LinkedHashMap<>(argsParameters.getOrDefault("args", new LinkedHashMap<>()));
     }
 
-    private static final Pattern UNRESOLVED_ARG = Pattern.compile("\\$\\{args\\.([A-Za-z0-9_]+)\\}");
+    // anything written as ${args.<...>}: only exact names are ever substituted, so every other spelling stays literal
+    private static final Pattern UNRESOLVED_ARG = Pattern.compile("\\$\\{args\\.([^}]+)\\}");
 
     /**
      * Names of {@code ${args.<name>}} placeholders still present in a config text after substitution:
@@ -594,32 +595,50 @@ public class Config implements Serializable {
         if(argsText == null || argsText.isEmpty()) {
             return new HashMap<>();
         }
-
         try {
-            final Map<String, String> parsed = new HashMap<>();
-            final JsonObject jsonObject = JsonUtil.fromJson(argsText, JsonObject.class);
-            for(final Map.Entry<String, JsonElement> entry : jsonObject.entrySet()) {
-                // string values are substituted as-is (toString() would keep the JSON quotes and break the
-                // config text); other values as their JSON text — the same convention as system.args
-                final JsonElement value = entry.getValue();
-                parsed.put(entry.getKey(), value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
-                        ? value.getAsString() : value.toString());
-            }
-            return parsed;
+            return templateArgs(JsonUtil.fromJson(argsText, JsonObject.class));
         } catch (final Throwable t) {
             throw new IllegalArgumentException("Failed to parse pipeline args: " + argsText, t);
         }
     }
 
+    /**
+     * JSON args as template args: string values as-is (their JSON quotes would break the config text), other
+     * values as their JSON text, nulls skipped — the convention shared by every args entry point.
+     */
+    public static Map<String, String> templateArgs(final JsonObject args) {
+        final Map<String, String> parsed = new HashMap<>();
+        if(args == null) {
+            return parsed;
+        }
+        for(final Map.Entry<String, JsonElement> entry : args.entrySet()) {
+            final JsonElement value = entry.getValue();
+            if(value == null || value.isJsonNull()) {
+                continue;
+            }
+            parsed.put(entry.getKey(), value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+                    ? value.getAsString() : value.toString());
+        }
+        return parsed;
+    }
+
     /** Substitutes {@code ${args.*}} from {@code args} / {@code system.args} (+ extra params) over the whole config text. */
     public static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
-        final Map<String, String> resolved = resolveArgs(configJson, paramsArgs);
+        return substituteArgs(configJson, resolveArgs(configJson, paramsArgs));
+    }
+
+    /** Substitutes {@code ${args.<name>}} over the config text with already-resolved values. */
+    public static JsonObject substituteArgs(final JsonObject configJson, final Map<String, String> resolved) {
         if(resolved.isEmpty()) {
             return configJson;
         }
         String configText = configJson.toString();
         for(final Map.Entry<String, String> entry : resolved.entrySet()) {
-            configText = configText.replaceAll(Pattern.quote("${args." + entry.getKey() + "}"), entry.getValue());
+            // the placeholder sits inside JSON text: escape the value as JSON string content (quotes, backslashes,
+            // control characters) and neutralise regex replacement metacharacters ($, backslash)
+            final String json = new Gson().toJson(entry.getValue());
+            final String escaped = json.substring(1, json.length() - 1);
+            configText = configText.replaceAll(Pattern.quote("${args." + entry.getKey() + "}"), java.util.regex.Matcher.quoteReplacement(escaped));
         }
         return JsonUtil.fromJson(configText, JsonObject.class);
     }
@@ -631,16 +650,19 @@ public class Config implements Serializable {
      * arguments ({@code ${<name>}} inside module templates such as a BigQuery query).
      */
     public static Map<String, String> resolveArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
-        final JsonObject argsJsonObject;
-        if(configJson.has("args") && configJson.get("args").isJsonObject()) {
-            argsJsonObject = configJson.getAsJsonObject("args");
-        } else if(configJson.has("system") && configJson.get("system").isJsonObject()
+        // system.args and the (deprecated) top-level args are merged, top-level entries overriding
+        final JsonObject argsJsonObject = new JsonObject();
+        if(configJson.has("system") && configJson.get("system").isJsonObject()
                 && configJson.getAsJsonObject("system").has("args")
                 && configJson.getAsJsonObject("system").get("args").isJsonObject()) {
-
-            argsJsonObject = configJson.getAsJsonObject("system").getAsJsonObject("args");
-        } else {
-            argsJsonObject = new JsonObject();
+            for(final Map.Entry<String, JsonElement> e : configJson.getAsJsonObject("system").getAsJsonObject("args").entrySet()) {
+                argsJsonObject.add(e.getKey(), e.getValue());
+            }
+        }
+        if(configJson.has("args") && configJson.get("args").isJsonObject()) {
+            for(final Map.Entry<String, JsonElement> e : configJson.getAsJsonObject("args").entrySet()) {
+                argsJsonObject.add(e.getKey(), e.getValue());
+            }
         }
 
         final Map<String, String> args = new LinkedHashMap<>();
@@ -672,7 +694,7 @@ public class Config implements Serializable {
             if(TemplateUtil.isTemplateText(entry.getValue())) {
                 String entryValue = entry.getValue();
                 for(final Map.Entry<String, String> ventry : values.entrySet()) {
-                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), ventry.getValue());
+                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), java.util.regex.Matcher.quoteReplacement(ventry.getValue()));
                 }
                 value = TemplateUtil.executeStrictTemplate(entryValue, values);
             } else {

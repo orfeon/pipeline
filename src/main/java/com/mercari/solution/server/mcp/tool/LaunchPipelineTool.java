@@ -88,17 +88,16 @@ public class LaunchPipelineTool implements Tool {
                     .isError(true)
                     .build();
         }
-        final JsonObject launch = new JsonObject();
-        launch.addProperty("runner", runner.toString());
-        final Object environment = request.arguments().get("environment");
-        if (environment != null) launch.addProperty("environment", environment.toString());
-        final Object parameters = request.arguments().get("parameters");
-        if (parameters != null) launch.add("parameters", toJsonObject(parameters));
-        final Object args = request.arguments().get("args");
-        if (args != null) launch.add("args", toJsonObject(args));
-
         final JsonObject response = new JsonObject();
         try {
+            final JsonObject launch = new JsonObject();
+            launch.addProperty("runner", runner.toString());
+            final Object environment = request.arguments().get("environment");
+            if (environment != null) launch.addProperty("environment", environment.toString());
+            final Object parameters = request.arguments().get("parameters");
+            if (parameters != null) launch.add("parameters", toJsonObject(parameters, "parameters"));
+            final Object args = request.arguments().get("args");
+            if (args != null) launch.add("args", toJsonObject(args, "args"));
             final JsonObject job = LaunchService.launchJob(config.toString(), null, launch, null);
             response.addProperty("status", "ok");
             response.add("job", job);
@@ -110,11 +109,14 @@ public class LaunchPipelineTool implements Tool {
         }
     }
 
-    static JsonObject toJsonObject(final Object value) {
-        if (value instanceof String s) {
-            return JsonParser.parseString(s).getAsJsonObject();
+    static JsonObject toJsonObject(final Object value, final String name) {
+        try {
+            final com.google.gson.JsonElement element = value instanceof String s ? JsonParser.parseString(s) : JsonParser.parseString(GSON.toJson(value));
+            if (!element.isJsonObject()) throw new IllegalArgumentException("not a JSON object");
+            return element.getAsJsonObject();
+        } catch (final RuntimeException e) {
+            throw new IllegalArgumentException("launch parameter '" + name + "' must be a JSON object: " + e.getMessage());
         }
-        return JsonParser.parseString(GSON.toJson(value)).getAsJsonObject();
     }
 
 }

@@ -131,14 +131,7 @@ public class LoggingUtil {
      * Covers worker, harness and launcher logs, which all use resource.type dataflow_step.
      */
     public static String createDataflowErrorLogFilter(final String jobId, final Instant startTime) {
-        final StringBuilder filter = new StringBuilder();
-        filter.append("resource.type=\"dataflow_step\"");
-        filter.append(" AND resource.labels.job_id=\"").append(jobId).append("\"");
-        filter.append(" AND severity>=ERROR");
-        if(startTime != null) {
-            filter.append(" AND timestamp>=\"").append(startTime).append("\"");
-        }
-        return filter.toString();
+        return createDataflowLogFilter(jobId, "ERROR", startTime, null);
     }
 
     /**

@@ -212,15 +212,7 @@ public class LaunchService {
      */
     /** JSON args as template args: string values as-is (not JSON-quoted), other values as their JSON text. */
     public static Map<String, String> argsMap(final JsonObject args) {
-        final Map<String, String> map = new java.util.HashMap<>();
-        for(final Map.Entry<String, JsonElement> entry : args.entrySet()) {
-            final JsonElement value = entry.getValue();
-            if(value == null || value.isJsonNull()) {
-                continue;
-            }
-            map.put(entry.getKey(), value.isJsonPrimitive() ? value.getAsString() : value.toString());
-        }
-        return map;
+        return Config.templateArgs(args);
     }
 
     private static JsonObject errorResponse(final String module, final long millis, final Throwable e) {

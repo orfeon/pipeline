@@ -69,6 +69,12 @@ public class JobReaderTest {
     }
 
     @Test
+    public void testLogsRejectUnknownSeverity() {
+        final String result = JobReader.getJobLogs("projects/p/locations/r/jobs/j/executions/e", null, null, null, "WARN", 10, null);
+        Assertions.assertTrue(result.startsWith("ERROR: unknown minSeverity 'WARN'"), result);
+    }
+
+    @Test
     public void testLogFilters() {
         Assertions.assertEquals("resource.type=\"dataflow_step\" AND resource.labels.job_id=\"j1\" AND severity>=WARNING",
                 LoggingUtil.createDataflowLogFilter("j1", "warning", null, null));

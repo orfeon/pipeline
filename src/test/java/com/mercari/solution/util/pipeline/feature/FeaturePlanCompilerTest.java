@@ -908,6 +908,9 @@ public class FeaturePlanCompilerTest {
         column(plan, "composition_condition_grade_countByValue_fair");
         Assertions.assertNull(plan.getColumn("composition_condition_grade_countByValue"));
         Assertions.assertEquals(Schema.Type.float64, column(plan, "composition_grade_ratioByValue_good").getFieldType().getType());
+        // output.passThrough is validated (a typo must not silently pass every input column through)
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "output:\n  prefix: f_\n  passThrough: keysOnly")), "output.passThrough"));
+        Assertions.assertFalse(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_", "output:\n  prefix: f_\n  passThrough: keys")), "output.passThrough"));
         // the outcome-mean hint is reported once per block, not once per window x field x func
         final long hints = plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.aggregate.encoding")).count();
         Assertions.assertTrue(hints <= 1, plan::describe);

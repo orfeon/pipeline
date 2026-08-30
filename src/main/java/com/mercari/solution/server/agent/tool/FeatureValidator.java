@@ -24,7 +24,10 @@ public class FeatureValidator {
                     ? McpToolBridge.args("config", body.toString(), "name", name, "format", "text")
                     : McpToolBridge.args("parameters", (body.has("parameters") ? body.get("parameters") : body).toString(), "format", "text");
             final String result = McpToolBridge.call("validate-feature", args);
-            return result.startsWith("ERROR") ? "ERROR: the feature spec has errors\n" + result.replaceFirst("^ERROR:?\\s*", "") : "SUCCESS\n" + result;
+            if (!result.startsWith("ERROR")) return "SUCCESS\n" + result;
+            final String detail = result.replaceFirst("^ERROR:?\\s*", "");
+            // a compile report (describe text) means the spec has errors; anything else is a failure to compile at all
+            return detail.startsWith("feature plan ") ? "ERROR: the feature spec has errors\n" + detail : "ERROR: " + detail;
         } catch (final Exception e) {
             return "ERROR: " + e.getMessage();
         }

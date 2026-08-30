@@ -306,7 +306,14 @@ public class FeatureSpec implements Serializable {
             spec.output.groupBy = Json.string(out, "groupBy");
             spec.output.parentFields = Json.strings(out, "parentFields");
             if (Json.string(out, "childName") != null) spec.output.childName = Json.string(out, "childName");
-            if (Json.string(out, "passThrough") != null) spec.output.passThrough = Json.string(out, "passThrough");
+            if (Json.string(out, "passThrough") != null) {
+                final String passThrough = Json.string(out, "passThrough");
+                if (!List.of("all", "keys", "none").contains(passThrough)) {
+                    diagnostics.error("output.passThrough", "output", "output.passThrough must be all | keys | none: " + passThrough);
+                } else {
+                    spec.output.passThrough = passThrough;
+                }
+            }
         }
         return spec;
     }

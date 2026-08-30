@@ -44,6 +44,33 @@ public class ConfigArgsTest {
     }
 
     @Test
+    public void testValuesAreEscapedForJsonAndRegex() throws Exception {
+        // '$' and backslashes would be regex group references / escapes in a raw replaceAll; quotes would break the JSON text
+        final Config config = Config.load(CONFIG, null, Config.Format.unknown,
+                Map.of("dateFrom", "cost $5 \\ C:\\Users\\me \"quoted\""));
+        Assertions.assertEquals("cost $5 \\ C:\\Users\\me \"quoted\"",
+                config.getSources().get(0).getParameters().getAsJsonArray("elements").get(0).getAsJsonObject().get("id").getAsString());
+        Assertions.assertEquals("run-cost $5 \\ C:\\Users\\me \"quoted\"", config.getSources().get(0).getArgs().get("label"));
+    }
+
+    @Test
+    public void testSystemArgsAndTopLevelArgsAreMerged() throws Exception {
+        final String both = CONFIG.replace("args:\n  dateFrom: \"2026-01-01\"\n", "system:\n  args:\n    dateFrom: \"2025-12-31\"\n    region: asia\nargs:\n  dateFrom: \"2026-01-01\"\n");
+        final Config config = Config.load(both, null, Config.Format.unknown, (String) null);
+        final Map<String, String> args = config.getSources().get(0).getArgs();
+        Assertions.assertEquals("2026-01-01", args.get("dateFrom")); // top-level overrides system.args
+        Assertions.assertEquals("asia", args.get("region"));         // system.args entries are kept
+        Assertions.assertTrue(config.getContent().contains("\"id\":\"2026-01-01\""));
+    }
+
+    @Test
+    public void testUnresolvedArgsCoverEverySpelling() {
+        Assertions.assertEquals(java.util.List.of("dateFrom", "my-arg", "x?string"),
+                Config.unresolvedArgs("a ${args.dateFrom} b ${args.my-arg} c ${args.x?string} d ${dateFrom} ${args.dateFrom}"));
+        Assertions.assertTrue(Config.unresolvedArgs("nothing here ${other.x}").isEmpty());
+    }
+
+    @Test
     public void testLoadTimeArgsOverrideConfigDefaults() throws Exception {
         final Config config = Config.load(CONFIG, null, Config.Format.unknown, Map.of("dateFrom", "2027-05-05"));
         Assertions.assertTrue(config.getContent().contains("\"id\":\"2027-05-05\""), config.getContent());
