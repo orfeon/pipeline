@@ -168,6 +168,19 @@ public final class Shrinkage implements Serializable {
         }
     }
 
+    /** The statistics-carrying levels of a chain, additive entries expanded to their main-effect chains. */
+    public static List<Level> leaves(final List<Level> levels) {
+        final List<Level> leaves = new ArrayList<>();
+        for (final Level level : levels) {
+            if (level.isAdditive()) {
+                for (final List<Level> main : level.mainEffects()) leaves.addAll(leaves(main));
+            } else {
+                leaves.add(level);
+            }
+        }
+        return leaves;
+    }
+
     /** Result of one composition: value on the original scale plus the per-level deviations (transform scale). */
     public record Composition(Double value, Double[] deviations, Double effectiveN) {}
 

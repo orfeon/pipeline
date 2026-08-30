@@ -337,14 +337,20 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
 
 ## Performance and sizing
 
-- **Stages are scheduled by key, not by config order.** Every column goes to the earliest stage that
+- **Stages are scheduled by key, not by config order.** Every keyed column goes to the earliest stage that
   evaluates its kind under the same key and comes after the stages its dependencies are computed in, so
   two blocks keyed by the same entity share one shuffle even when a block with another key sits between
   them, and sequence and population columns of one key share the same keyed replay (the stage is reported
-  as `population` when it holds any population column). Row columns join the earliest stage their inputs
-  allow. The plan report lists the resulting stages (`#n kind key=[...] blocks=[...]`) and the shuffle
-  count. A fused stage keeps the union of its columns' projected history per key: with several long
-  windows on one entity the per-key memory is the largest window's, not their sum.
+  as `population` when it holds any population column). Row columns are evaluated as late as possible —
+  in the stage of their first consumer, or in the last stage when only the output reads them — so their
+  values are not carried through shuffles that do not need them. The hidden statistics of a `fit.mode:
+  static` / `fold` block always share one fit stage. A column that pins the whole history of its key (a
+  scan-path window without `maxAge`, reported by the `sequence.window.unbounded` hint) is fused only with
+  its own block, so it does not extend the retention of other blocks' projections. The plan report lists
+  the resulting stages (`#n kind key=[...] blocks=[...]`) and the shuffle count (one per keyed stage). A
+  fused stage keeps the union of its columns' projected fields per key, trimmed to the longest bounded
+  window among them: with several bounded windows on one entity the per-key memory is the largest
+  window's projection, not their sum.
 - Keyed statistics (sequence `aggregate`, population encodings) are evaluated incrementally (O(n) per
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass

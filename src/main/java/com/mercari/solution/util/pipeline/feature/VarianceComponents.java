@@ -88,11 +88,7 @@ public final class VarianceComponents {
 
     private static void collect(final List<Shrinkage.Level> levels, final Map<String, OutputColumn> allColumns,
                                 final Map<String, LevelSpec> specs) {
-        for (final Shrinkage.Level level : levels) {
-            if (level.mainEffects() != null) {
-                for (final List<Shrinkage.Level> main : level.mainEffects()) collect(main, allColumns, specs);
-                continue;
-            }
+        for (final Shrinkage.Level level : Shrinkage.leaves(levels)) {
             final OutputColumn hidden = allColumns.get(level.nColumn());
             if (hidden == null || specs.containsKey(level.nColumn())) continue;
             final String keys = hidden.getCoordinates().get("keys");
