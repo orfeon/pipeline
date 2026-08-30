@@ -411,6 +411,12 @@ public final class FeaturePlanCompiler {
         columns.add(c);
     }
 
+    /** The canonical name of a reference (as projected into history / row maps), or the raw text when unresolved. */
+    private String canonicalOf(final String reference) {
+        final Ref ref = resolve(reference);
+        return ref != null ? ref.canonical() : reference;
+    }
+
     /** Adds a row-side input (self row): availability max, lineage union. */
     private void addSelfInput(final OutputColumn c, final String reference) {
         final Ref ref = resolve(reference);
@@ -649,7 +655,7 @@ public final class FeaturePlanCompiler {
                     for (final String value : op.values) {
                         final Schema.FieldType type = "countByValue".equals(op.type) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64;
                         final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type + "_" + value, type, computeAt);
-                        c.coordinates.put("field", field);
+                        c.coordinates.put("field", canonicalOf(field));
                         c.coordinates.put("value", value);
                         addSelfInput(c, field);
                         finishContext(c, def, context, op);
@@ -657,7 +663,7 @@ public final class FeaturePlanCompiler {
                     continue;
                 }
                 final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type, operator.outputFor(ref.type()), computeAt);
-                c.coordinates.put("field", field);
+                c.coordinates.put("field", canonicalOf(field));
                 addSelfInput(c, field);
                 finishContext(c, def, context, op);
             }
@@ -767,7 +773,8 @@ public final class FeaturePlanCompiler {
                         final OutputColumn c = newColumn(def.name, Scope.sequence, op.type,
                                 def.name + "_" + window.token() + "_count", Schema.FieldType.INT64, computeAt);
                         c.coordinates.put("func", "count");
-                        for (final String key : entity.keys()) addPastInput(c, key);
+                        // the keys are read from the self row (keying), not from past rows: no projection
+                        for (final String key : entity.keys()) addSelfInput(c, key);
                         finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         continue;
                     }
@@ -789,7 +796,7 @@ public final class FeaturePlanCompiler {
                             for (int i = 1; i <= k; i++) {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "lag" + i, ref.type(), computeAt);
                                 c.coordinates.put("k", Integer.toString(i));
-                                c.coordinates.put("field", field); addPastInput(c, field);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -797,14 +804,14 @@ public final class FeaturePlanCompiler {
                             final int k = op.k == null ? 1 : op.k;
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "delta" + k, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("k", Integer.toString(k));
-                            c.coordinates.put("field", field); addPastInput(c, field);
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "trend" -> {
                             final int k = op.k == null ? 5 : op.k;
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "trend" + k, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("k", Integer.toString(k));
-                            c.coordinates.put("field", field); addPastInput(c, field);
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "ewma" -> {
@@ -818,7 +825,7 @@ public final class FeaturePlanCompiler {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "ewma" + number(h), Schema.FieldType.FLOAT64, computeAt);
                                 c.coordinates.put("halflife", number(h));
                                 c.coordinates.put("decayBy", decayBy);
-                                c.coordinates.put("field", field); addPastInput(c, field);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -826,7 +833,7 @@ public final class FeaturePlanCompiler {
                             if (op.value == null) diagnostics.error("sequence.runLength.value", loc, "runLength requires 'value'");
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "runlength", Schema.FieldType.INT64, computeAt);
                             c.coordinates.put("value", String.valueOf(op.value));
-                            c.coordinates.put("field", field); addPastInput(c, field);
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "aggregate" -> {
@@ -844,7 +851,7 @@ public final class FeaturePlanCompiler {
                                 }
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 c.coordinates.put("func", func);
-                                c.coordinates.put("field", field); addPastInput(c, field);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -1612,16 +1619,13 @@ public final class FeaturePlanCompiler {
                 if (filterText != null) c.coordinates.put("filter", filterText);
             }
         }
-        if (targetReference != null) c.coordinates.put("field", targetReference);
+        if (targetReference != null) c.coordinates.put("field", canonicalOf(targetReference));
         c.coordinates.put("stat", stat);
         c.coordinates.put("fit", mode.token());
         if (ks.structure != null) c.coordinates.put("structure", ks.structure);
         for (final String key : ks.keys) addSelfInput(c, key);
+        // target-less statistics (count / share denominators) count rows: the keys are self reads (keying), not projected
         if (targetReference != null) addPastInput(c, targetReference);
-        else for (final String key : ks.keys) {
-            final Ref r = resolve(key);
-            if (r != null) c.pastInputs.add(r.canonical);
-        }
         if (offsetColumn != null) {
             addSelfInput(c, offsetColumn);
             addPastInput(c, offsetColumn);
@@ -1679,7 +1683,7 @@ public final class FeaturePlanCompiler {
                 final String reason = SequenceEvaluator.unboundedReason(c);
                 if (reason != null) {
                     diagnostics.hint("sequence.window.unbounded", loc,
-                            c.canonicalName + " keeps its inputs " + c.pastInputs + " for the whole history of each key on the worker (" + reason + "); give the window a maxAge to bound it");
+                            c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
             if (c.status == Status.violation) {

@@ -350,6 +350,10 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   of the columns reading it, so fusing blocks does not extend any field's retention — a column that reads
   the whole history of its key (a scan-path window without `maxAge`, reported by the
   `sequence.window.unbounded` hint) keeps only its own inputs for every row, not the other columns' fields.
+  The retained **row count** per key is still the longest window among the fused columns: with an unbounded
+  column every past row of the key keeps a small entry skeleton (~40 bytes) even after all other fields are
+  removed, so size hot keys by row count × the unbounded column's fields (the hint lists them), plus the
+  skeleton.
 - Keyed statistics (sequence `aggregate`, population encodings) are evaluated incrementally (O(n) per
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass
@@ -365,8 +369,8 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail. Only `ewma`,
   `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` read the key's
   full history, and they keep only the fields they read for it (the history is trimmed per field, so the
-  other columns' fields still leave with their own windows); the stage logs which columns do at startup —
-  give such windows a `maxAge` to bound them. Local disk of the workers must have room for the keys being sorted concurrently: the chunk
+  other columns' fields still leave with their own windows, though each retained row keeps a ~40-byte entry
+  skeleton); the stage logs which columns do at startup — give such windows a `maxAge` to bound them. Local disk of the workers must have room for the keys being sorted concurrently: the chunk
   files of a key are deleted as soon as its replay ends (and the stage's directory when the worker tears the
   stage down), so the disk holds at most one key per concurrent bundle, each up to the key's encoded size
   (`compress: true` trades CPU for a smaller footprint). The spill budget is per key being processed (each

@@ -648,7 +648,7 @@ public final class FeatureStages {
         private final SequenceEvaluator sequence;
         private final PopulationEvaluator population;
         private final Set<String> bufferedFields = new LinkedHashSet<>();
-        private final Duration retention;
+        private transient SequenceEvaluator.Watermarks watermarks;
 
         StageEvaluator(final List<OutputColumn> columns) {
             this.columns = columns;
@@ -668,10 +668,6 @@ public final class FeatureStages {
             this.population = new PopulationEvaluator(populations);
             bufferedFields.addAll(sequence.bufferedFields());
             bufferedFields.addAll(population.bufferedFields());
-            final Duration s = sequence.retention(), p = population.retention();
-            if (sequences.isEmpty()) retention = populations.isEmpty() ? Duration.ZERO : p;
-            else if (populations.isEmpty()) retention = s;
-            else retention = s == null || p == null ? null : (s.compareTo(p) > 0 ? s : p);
         }
 
         static Scope kindOf(final OutputColumn c) {
@@ -685,6 +681,9 @@ public final class FeatureStages {
             context.setup();
             sequence.setup();
             population.setup();
+            watermarks = new SequenceEvaluator.Watermarks(bufferedFields);
+            sequence.register(watermarks);
+            population.register(watermarks);
         }
 
         void setLambdas(final Map<String, Double> lambdas) {
@@ -738,10 +737,13 @@ public final class FeatureStages {
             return names;
         }
 
-        /** Trim watermarks of the shared history, per field the smaller of both evaluators' (see {@link SequenceEvaluator#retention}). */
-        SequenceEvaluator.Retention retention(final long nowMillis, final List<Past> history,
-                                              final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
-            return SequenceEvaluator.Retention.of(sequence.retention(sequenceState, nowMillis, history), population.retention(populationState, nowMillis, history));
+        /** Trim watermarks of the shared history: both evaluators fold their columns' retention into one reused instance. */
+        SequenceEvaluator.Watermarks watermarks(final long nowMillis, final List<Past> history,
+                                                final SequenceEvaluator.KeyState sequenceState, final SequenceEvaluator.KeyState populationState) {
+            watermarks.reset(history.size());
+            sequence.retainInto(sequenceState, nowMillis, history, watermarks);
+            population.retainInto(populationState, nowMillis, history, watermarks);
+            return watermarks;
         }
 
         Map<String, Object> project(final Map<String, Object> values) {
@@ -1053,11 +1055,12 @@ public final class FeatureStages {
                     return;
                 }
                 evaluator.evaluateKeyed(values, now.getMillis(), history, sequenceState, populationState);
-                c.outputWithTimestamp(MElement.of(values, now), now);
                 pending.add(new Past(now.getMillis(), evaluator.project(values)));
                 // absolute indices: the fold / evict pointers stay valid across trims; fields are dropped per
-                // column window, so an unbounded column keeps only its own inputs for the whole history
-                history.trim(evaluator.retention(now.getMillis(), history, sequenceState, populationState));
+                // column window, so an unbounded column keeps only its own inputs for the whole history.
+                // trimmed before the output so a trim failure does not double-route an already-emitted row
+                history.trim(evaluator.watermarks(now.getMillis(), history, sequenceState, populationState));
+                c.outputWithTimestamp(MElement.of(values, now), now);
             } catch (final Throwable e) {
                 c.output(failureTag, Module.processError("Failed to evaluate keyed features", input, e, failFast));
             }
