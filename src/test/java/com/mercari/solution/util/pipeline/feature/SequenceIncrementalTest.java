@@ -144,6 +144,11 @@ public class SequenceIncrementalTest {
         final PopulationEvaluator trimmedPopulation = new PopulationEvaluator(populations);
         trimmedSequence.setup();
         trimmedPopulation.setup();
+        final Set<String> buffered = new LinkedHashSet<>(trimmedSequence.bufferedFields());
+        buffered.addAll(trimmedPopulation.bufferedFields());
+        final SequenceEvaluator.Watermarks watermarks = new SequenceEvaluator.Watermarks(buffered);
+        trimmedSequence.register(watermarks);
+        trimmedPopulation.register(watermarks);
 
         final Random random = new Random(7);
         long millis = 1_700_000_000_000L;
@@ -163,7 +168,8 @@ public class SequenceIncrementalTest {
             row.put("sold", random.nextInt(2));
             if (millis != pendingMillis) {
                 full.addAll(pending);
-                trimmed.addAll(pending);
+                // the trimmed history owns its maps (the per-field trim mutates them; sharing would blind the oracle)
+                for (final SequenceEvaluator.Past p : pending) trimmed.add(new SequenceEvaluator.Past(p.millis(), new HashMap<>(p.values())));
                 pending.clear();
                 pendingMillis = millis;
             }
@@ -175,7 +181,10 @@ public class SequenceIncrementalTest {
                 assertSame(c.getCanonicalName() + "@" + i, expected, actual);
             }
             pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
-            trimmed.trimBefore(Math.min(trimmedSequence.retainFrom(tseq, millis, trimmed), trimmedPopulation.retainFrom(tpop, millis, trimmed)));
+            watermarks.reset(trimmed.size());
+            trimmedSequence.retainInto(tseq, millis, trimmed, watermarks);
+            trimmedPopulation.retainInto(tpop, millis, trimmed, watermarks);
+            trimmed.trim(watermarks);
             maxRetained = Math.max(maxRetained, trimmed.retained());
         }
         Assertions.assertEquals(full.size(), trimmed.size()); // absolute indices are preserved
@@ -223,6 +232,8 @@ public class SequenceIncrementalTest {
         full.setup();
         trimmedEvaluator.setup();
         Assertions.assertTrue(trimmedEvaluator.unboundedColumns().isEmpty(), () -> trimmedEvaluator.unboundedColumns().toString());
+        final SequenceEvaluator.Watermarks watermarks = new SequenceEvaluator.Watermarks(trimmedEvaluator.bufferedFields());
+        trimmedEvaluator.register(watermarks);
 
         final Random random = new Random(3);
         long millis = 1_700_000_000_000L;
@@ -239,7 +250,8 @@ public class SequenceIncrementalTest {
             row.put("start_price", random.nextInt(8) == 0 ? null : (double) random.nextInt(100));
             if (millis != pendingMillis) {
                 history.addAll(pending);
-                trimmed.addAll(pending);
+                // the trimmed history owns its maps (the per-field trim mutates them; sharing would blind the oracle)
+                for (final SequenceEvaluator.Past p : pending) trimmed.add(new SequenceEvaluator.Past(p.millis(), new HashMap<>(p.values())));
                 pending.clear();
                 pendingMillis = millis;
             }
@@ -250,7 +262,9 @@ public class SequenceIncrementalTest {
                         trimmedEvaluator.evaluateColumn(c, trimmedRow, millis, trimmed, trimmedState));
             }
             pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
-            trimmed.trimBefore(trimmedEvaluator.retainFrom(trimmedState, millis, trimmed));
+            watermarks.reset(trimmed.size());
+            trimmedEvaluator.retainInto(trimmedState, millis, trimmed, watermarks);
+            trimmed.trim(watermarks);
             maxRetained = Math.max(maxRetained, trimmed.retained());
         }
         final int retainedPeak = maxRetained;
@@ -291,4 +305,90 @@ public class SequenceIncrementalTest {
         Assertions.assertEquals(scan, incremental, at);
     }
 
+
+    /**
+     * Per-field retention: a scan-path column without maxAge keeps the whole history of its key, but only
+     * the fields it reads. The fields of the bounded columns are removed from the older entries, and every
+     * column still evaluates exactly as over the untrimmed list.
+     */
+    @Test
+    public void testFieldsAreTrimmedPerColumnWindow() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final String mixed = """
+                lineage:
+                  - {fields: [session_id, seller_id, condition_grade, start_price, sold], from: listings}
+                time: {field: session_time}
+                predictAt: "event_time - PT10M"
+                entities:
+                  - {name: seller, keys: [seller_id]}
+                features:
+                  - name: all_time
+                    scope: sequence
+                    entity: seller
+                    windows: [{filter: "condition_grade = 'g0'"}]
+                    ops:
+                      - {type: aggregate, field: sold, funcs: [count]}
+                  - name: recent
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxAge: P30D}]
+                    ops:
+                      - {type: aggregate, field: start_price, funcs: [mean, max]}
+                """;
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(mixed, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> keyed = plan.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
+        final SequenceEvaluator full = new SequenceEvaluator(keyed);
+        final SequenceEvaluator trimmedEvaluator = new SequenceEvaluator(keyed);
+        full.setup();
+        trimmedEvaluator.setup();
+        Assertions.assertEquals(1, trimmedEvaluator.unboundedColumns().size(), () -> trimmedEvaluator.unboundedColumns().toString());
+        final SequenceEvaluator.Watermarks watermarks = new SequenceEvaluator.Watermarks(trimmedEvaluator.bufferedFields());
+        trimmedEvaluator.register(watermarks);
+
+        final Random random = new Random(11);
+        long millis = 1_700_000_000_000L;
+        final List<SequenceEvaluator.Past> history = new ArrayList<>();
+        final SequenceEvaluator.History trimmed = new SequenceEvaluator.History();
+        final List<SequenceEvaluator.Past> pending = new ArrayList<>();
+        long pendingMillis = Long.MIN_VALUE;
+        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState(), trimmedState = new SequenceEvaluator.KeyState();
+        for (int i = 0; i < 3000; i++) {
+            millis += 1 + (long) (random.nextDouble() * 6 * 3600_000L);
+            final Map<String, Object> row = new HashMap<>();
+            row.put("seller_id", "s1");
+            row.put("condition_grade", "g" + random.nextInt(3));
+            row.put("start_price", random.nextInt(8) == 0 ? null : (double) random.nextInt(100));
+            row.put("sold", random.nextInt(2));
+            if (millis != pendingMillis) {
+                history.addAll(pending);
+                // the trimmed history owns its maps (the per-field trim mutates them)
+                for (final SequenceEvaluator.Past p : pending) trimmed.add(new SequenceEvaluator.Past(p.millis(), new HashMap<>(p.values())));
+                pending.clear();
+                pendingMillis = millis;
+            }
+            final Map<String, Object> trimmedRow = new HashMap<>(row);
+            for (final OutputColumn c : keyed) {
+                assertSame(c.getCanonicalName() + "@" + i,
+                        full.evaluateColumn(c, row, millis, history, state),
+                        trimmedEvaluator.evaluateColumn(c, trimmedRow, millis, trimmed, trimmedState));
+            }
+            pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
+            watermarks.reset(trimmed.size());
+            trimmedEvaluator.retainInto(trimmedState, millis, trimmed, watermarks);
+            trimmed.trim(watermarks);
+        }
+        // no entry is dropped (the filtered window reads them all) ...
+        Assertions.assertEquals(0, trimmed.base());
+        Assertions.assertEquals(history.size(), trimmed.retained());
+        // ... but the bounded column's field is gone from the old entries while the unbounded one's stays
+        final SequenceEvaluator.Past oldest = trimmed.get(0);
+        Assertions.assertTrue(oldest.values().containsKey("condition_grade") && oldest.values().containsKey("sold"), oldest::toString);
+        Assertions.assertFalse(oldest.values().containsKey("start_price"), oldest::toString);
+        // entity keys are self reads: the engine never projects them into the history
+        Assertions.assertFalse(trimmedEvaluator.bufferedFields().contains("seller_id"), () -> trimmedEvaluator.bufferedFields().toString());
+        int withPrice = 0;
+        for (int i = 0; i < trimmed.size(); i++) if (trimmed.get(i).values().containsKey("start_price")) withPrice++;
+        Assertions.assertTrue(withPrice < trimmed.size() / 4, () -> "entries still holding start_price: " + trimmed.size());
+    }
 }

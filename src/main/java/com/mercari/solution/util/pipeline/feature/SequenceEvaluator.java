@@ -26,6 +26,7 @@ import java.util.regex.Pattern;
 public class SequenceEvaluator implements Serializable {
 
     /** A buffered past row: event time millis + the projected field values. */
+    /** One replayed row's projection. {@code values} must be a MUTABLE map: {@link History#trim} removes fields from it. */
     public record Past(long millis, Map<String, Object> values) implements Serializable {}
 
     /** {@code past = $self.self} equality filter, dispatchable to per-value accumulators. */
@@ -117,14 +118,123 @@ public class SequenceEvaluator implements Serializable {
             entries.subList(0, drop).clear();
             base += drop;
         }
+
+        private int[] cleared;
+
+        /**
+         * Per-field retention: drops the entries below {@link Watermarks#all()} and removes every field from
+         * the entries below its own watermark, so a column that reads the whole history of a key keeps only
+         * the fields it reads there while the other fields are trimmed to their own windows. Each field's
+         * pointer only moves forward: amortised O(1) per row. An entry whose last field is removed keeps a
+         * shared empty map (the skeleton — {@code Past} + list slot — still costs ~40 bytes per row, which is
+         * why an unbounded column governs the retained ROW COUNT even though the other fields are trimmed).
+         * Entries below the overall watermark are dropped wholesale and skipped by the field pass.
+         */
+        public void trim(final Watermarks w) {
+            if (cleared == null) cleared = new int[w.fields.length];
+            for (int f = 0; f < w.fields.length; f++) {
+                final int to = Math.min(w.byField[f], size());
+                final int from = Math.max(cleared[f], Math.max(base, w.all));
+                if (to <= from) continue;
+                for (int i = from; i < to; i++) {
+                    final Past p = entries.get(i - base);
+                    final Map<String, Object> values = p.values();
+                    if (values.isEmpty()) continue;
+                    values.remove(w.fields[f]);
+                    if (values.isEmpty()) entries.set(i - base, new Past(p.millis(), Map.of()));
+                }
+                cleared[f] = to;
+            }
+            trimBefore(w.all);
+        }
     }
 
     /**
-     * First absolute history index a future row may still read (the trim watermark): every column's
-     * evict pointer (or fold pointer for an unbounded window) on the incremental path, the {@code maxAge}
-     * far edge on the scan path (or the near edge minus the {@link #tailSize bounded tail} without maxAge);
-     * {@code 0} when some scan-path column is unbounded.
+     * Reusable trim watermarks of a keyed stage (one instance per stage, refilled per row — no allocation on
+     * the replay hot path): {@code all} = first absolute index any column may still read (entries below it are
+     * dropped); {@code byField} = per projected field, the first index a column reading that field may still
+     * read (the field is removed from older entries). Fields read by an always-unbounded column (scan path, no
+     * maxAge, no bounded tail) are pinned at 0 once at registration, and columns whose watermarks are fully
+     * pinned are skipped per row.
      */
+    public static final class Watermarks {
+        final String[] fields;
+        final int[] byField;
+        final boolean[] pinned;
+        private final Map<String, Integer> index = new HashMap<>();
+        int all;
+        boolean anyUnbounded;
+
+        public Watermarks(final Collection<String> fields) {
+            this.fields = fields.toArray(new String[0]);
+            this.byField = new int[this.fields.length];
+            this.pinned = new boolean[this.fields.length];
+            for (int i = 0; i < this.fields.length; i++) index.put(this.fields[i], i);
+        }
+
+        public int all() {
+            return all;
+        }
+
+        public int of(final String field) {
+            final Integer i = index.get(field);
+            return i == null ? Integer.MAX_VALUE : byField[i];
+        }
+
+        public void reset(final int historySize) {
+            all = anyUnbounded ? 0 : historySize;
+            for (int i = 0; i < byField.length; i++) byField[i] = pinned[i] ? 0 : historySize;
+        }
+    }
+
+    /** Per-column state for {@link #retainInto}: watermark ordinals and the statically-skippable flag. */
+    private static final class RetainPlan {
+        int[] ordinals;
+        boolean skip;
+    }
+
+    /**
+     * Registers this evaluator's columns on the stage's {@link Watermarks}: resolves each column's projected
+     * fields to ordinals, pins the fields of always-unbounded columns at 0, and marks the columns whose every
+     * watermark is already pinned (their per-row computation would change nothing) as skippable.
+     * Call after {@link #setup()}, once per evaluator, with the watermarks shared by the stage.
+     */
+    public void register(final Watermarks w) {
+        retainPlans = new HashMap<>();
+        final List<OutputColumn> unboundedFirst = new ArrayList<>(columns);
+        unboundedFirst.sort(Comparator.comparing(c -> !unbounded(plans.get(c.canonicalName), c)));
+        for (final OutputColumn c : unboundedFirst) {
+            final RetainPlan rp = new RetainPlan();
+            rp.ordinals = c.pastInputs.stream().map(w.index::get).filter(Objects::nonNull).mapToInt(Integer::intValue).toArray();
+            if (unbounded(plans.get(c.canonicalName), c)) {
+                w.anyUnbounded = true;
+                for (final int i : rp.ordinals) w.pinned[i] = true;
+                rp.skip = true; // its watermarks are pinned at 0 by reset()
+            }
+            retainPlans.put(c.canonicalName, rp);
+        }
+        for (final OutputColumn c : columns) {
+            final RetainPlan rp = retainPlans.get(c.canonicalName);
+            if (rp.skip || !w.anyUnbounded) continue;
+            boolean allPinned = true;
+            for (final int i : rp.ordinals) allPinned &= w.pinned[i];
+            rp.skip = allPinned; // `all` is pinned at 0 too, so this column cannot lower any watermark
+        }
+    }
+
+    /** Folds this evaluator's columns' retention into the stage watermarks ({@code reset} first). */
+    public void retainInto(final KeyState state, final long nowMillis, final List<Past> history, final Watermarks w) {
+        for (final OutputColumn c : columns) {
+            final RetainPlan rp = retainPlans.get(c.canonicalName);
+            if (rp.skip) continue;
+            final int from = columnRetainFrom(c, state, nowMillis, history);
+            if (from < w.all) w.all = from;
+            for (final int i : rp.ordinals) {
+                if (from < w.byField[i]) w.byField[i] = from;
+            }
+        }
+    }
+
     /**
      * How many rows before the near edge a scan-path column without {@code maxAge} can need, or null when
      * unbounded. Without a filter the window is a suffix of the history, so {@code maxEvents} bounds it, and
@@ -142,7 +252,7 @@ public class SequenceEvaluator implements Serializable {
         };
     }
 
-    /** Columns that pin the whole history (scan path, no maxAge, no bounded tail): the keyed stage cannot trim with these. */
+    /** Columns that read the whole history (scan path, no maxAge, no bounded tail): their past inputs are kept for every row of the key. */
     public List<String> unboundedColumns() {
         final List<String> names = new ArrayList<>();
         for (final OutputColumn c : columns) {
@@ -168,32 +278,33 @@ public class SequenceEvaluator implements Serializable {
         return c.operator + " without maxAge";
     }
 
-    public int retainFrom(final KeyState state, final long nowMillis, final List<Past> history) {
-        int retain = history.size();
-        for (final OutputColumn c : columns) {
-            final ColumnPlan plan = plans.get(c.canonicalName);
-            final int from;
-            if (plan.incremental) {
-                final ColumnState cs = state.columns.get(c.canonicalName);
-                from = cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
-            } else if (plan.maxAgeMillis == null) {
-                final Integer tail = tailSize(plan, c);
-                if (tail == null) return 0;
-                // the window is the suffix of the history before the near edge; the near edge only moves
-                // forward, so rows more than `tail` behind it are never read again
-                from = Math.max(0, upperBound(history, nowMillis - plan.shiftMillis) - tail);
-            } else {
-                from = lowerBound(history, nowMillis - plan.maxAgeMillis);
-            }
-            retain = Math.min(retain, from);
+    /**
+     * First absolute history index this column may still read (its trim watermark): the evict pointer (or
+     * fold pointer for an unbounded window) on the incremental path, the {@code maxAge} far edge on the scan
+     * path (or the near edge minus the {@link #tailSize bounded tail} without maxAge); {@code 0} when the
+     * column is an unbounded scan.
+     */
+    private int columnRetainFrom(final OutputColumn c, final KeyState state, final long nowMillis, final List<Past> history) {
+        final ColumnPlan plan = plans.get(c.canonicalName);
+        if (plan.incremental) {
+            final ColumnState cs = state.columns.get(c.canonicalName);
+            return cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
         }
-        return retain;
+        if (plan.maxAgeMillis == null) {
+            final Integer tail = tailSize(plan, c);
+            if (tail == null) return 0;
+            // the window is the suffix of the history before the near edge; the near edge only moves
+            // forward, so rows more than `tail` behind it are never read again
+            return Math.max(0, upperBound(history, nowMillis - plan.shiftMillis) - tail);
+        }
+        return lowerBound(history, nowMillis - plan.maxAgeMillis);
     }
 
     private final List<OutputColumn> columns;
     private final boolean forceScan;
     private transient Map<String, Filter.ConditionNode> conditions;
     private transient Map<String, ColumnPlan> plans;
+    private transient Map<String, RetainPlan> retainPlans;
 
     public SequenceEvaluator(final List<OutputColumn> columns) {
         this(columns, false);
@@ -214,18 +325,6 @@ public class SequenceEvaluator implements Serializable {
         final Set<String> fields = new LinkedHashSet<>();
         for (final OutputColumn c : columns) fields.addAll(c.pastInputs);
         return fields;
-    }
-
-    /** Longest retention needed; null means unbounded (some window has no maxAge). */
-    public Duration retention() {
-        Duration max = Duration.ZERO;
-        for (final OutputColumn c : columns) {
-            final String maxAge = c.coordinates.get("maxAge");
-            if (maxAge == null) return null;
-            final Duration d = Duration.parse(maxAge).plus(c.windowShift == null ? Duration.ZERO : c.windowShift);
-            if (d.compareTo(max) > 0) max = d;
-        }
-        return max;
     }
 
     public void setup() {

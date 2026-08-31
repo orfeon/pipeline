@@ -411,6 +411,12 @@ public final class FeaturePlanCompiler {
         columns.add(c);
     }
 
+    /** The canonical name of a reference (as projected into history / row maps), or the raw text when unresolved. */
+    private String canonicalOf(final String reference) {
+        final Ref ref = resolve(reference);
+        return ref != null ? ref.canonical() : reference;
+    }
+
     /** Adds a row-side input (self row): availability max, lineage union. */
     private void addSelfInput(final OutputColumn c, final String reference) {
         final Ref ref = resolve(reference);
@@ -649,7 +655,7 @@ public final class FeaturePlanCompiler {
                     for (final String value : op.values) {
                         final Schema.FieldType type = "countByValue".equals(op.type) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64;
                         final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type + "_" + value, type, computeAt);
-                        c.coordinates.put("field", field);
+                        c.coordinates.put("field", canonicalOf(field));
                         c.coordinates.put("value", value);
                         addSelfInput(c, field);
                         finishContext(c, def, context, op);
@@ -657,7 +663,7 @@ public final class FeaturePlanCompiler {
                     continue;
                 }
                 final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type, operator.outputFor(ref.type()), computeAt);
-                c.coordinates.put("field", field);
+                c.coordinates.put("field", canonicalOf(field));
                 addSelfInput(c, field);
                 finishContext(c, def, context, op);
             }
@@ -767,7 +773,8 @@ public final class FeaturePlanCompiler {
                         final OutputColumn c = newColumn(def.name, Scope.sequence, op.type,
                                 def.name + "_" + window.token() + "_count", Schema.FieldType.INT64, computeAt);
                         c.coordinates.put("func", "count");
-                        for (final String key : entity.keys()) addPastInput(c, key);
+                        // the keys are read from the self row (keying), not from past rows: no projection
+                        for (final String key : entity.keys()) addSelfInput(c, key);
                         finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         continue;
                     }
@@ -789,7 +796,7 @@ public final class FeaturePlanCompiler {
                             for (int i = 1; i <= k; i++) {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "lag" + i, ref.type(), computeAt);
                                 c.coordinates.put("k", Integer.toString(i));
-                                c.coordinates.put("field", field); addPastInput(c, field);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -797,14 +804,14 @@ public final class FeaturePlanCompiler {
                             final int k = op.k == null ? 1 : op.k;
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "delta" + k, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("k", Integer.toString(k));
-                            c.coordinates.put("field", field); addPastInput(c, field);
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "trend" -> {
                             final int k = op.k == null ? 5 : op.k;
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "trend" + k, Schema.FieldType.FLOAT64, computeAt);
                             c.coordinates.put("k", Integer.toString(k));
-                            c.coordinates.put("field", field); addPastInput(c, field);
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "ewma" -> {
@@ -818,7 +825,7 @@ public final class FeaturePlanCompiler {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "ewma" + number(h), Schema.FieldType.FLOAT64, computeAt);
                                 c.coordinates.put("halflife", number(h));
                                 c.coordinates.put("decayBy", decayBy);
-                                c.coordinates.put("field", field); addPastInput(c, field);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -826,7 +833,7 @@ public final class FeaturePlanCompiler {
                             if (op.value == null) diagnostics.error("sequence.runLength.value", loc, "runLength requires 'value'");
                             final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "runlength", Schema.FieldType.INT64, computeAt);
                             c.coordinates.put("value", String.valueOf(op.value));
-                            c.coordinates.put("field", field); addPastInput(c, field);
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         case "aggregate" -> {
@@ -844,7 +851,7 @@ public final class FeaturePlanCompiler {
                                 }
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 c.coordinates.put("func", func);
-                                c.coordinates.put("field", field); addPastInput(c, field);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -1612,16 +1619,13 @@ public final class FeaturePlanCompiler {
                 if (filterText != null) c.coordinates.put("filter", filterText);
             }
         }
-        if (targetReference != null) c.coordinates.put("field", targetReference);
+        if (targetReference != null) c.coordinates.put("field", canonicalOf(targetReference));
         c.coordinates.put("stat", stat);
         c.coordinates.put("fit", mode.token());
         if (ks.structure != null) c.coordinates.put("structure", ks.structure);
         for (final String key : ks.keys) addSelfInput(c, key);
+        // target-less statistics (count / share denominators) count rows: the keys are self reads (keying), not projected
         if (targetReference != null) addPastInput(c, targetReference);
-        else for (final String key : ks.keys) {
-            final Ref r = resolve(key);
-            if (r != null) c.pastInputs.add(r.canonical);
-        }
         if (offsetColumn != null) {
             addSelfInput(c, offsetColumn);
             addPastInput(c, offsetColumn);
@@ -1679,7 +1683,7 @@ public final class FeaturePlanCompiler {
                 final String reason = SequenceEvaluator.unboundedReason(c);
                 if (reason != null) {
                     diagnostics.hint("sequence.window.unbounded", loc,
-                            c.canonicalName + " keeps the whole projected history of each key on the worker (" + reason + "); give the window a maxAge to bound it");
+                            c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
             if (c.status == Status.violation) {
@@ -1807,9 +1811,9 @@ public final class FeaturePlanCompiler {
      * one read before the DoFn — stage keys, fit / variance-components statistics computed over the stage input —
      * must come from an earlier stage. The hidden levels of a static-fit block, and the row columns that read
      * them, stay in the block's single fit stage (its artifact and lambdas are written / read there). A column
-     * that pins the whole history of its key (no maxAge on a scan-path window) fuses only with its own block,
-     * so it does not extend the retention of other blocks' projections. Inside a stage the columns keep the
-     * expansion order, which lists dependencies first.
+     * that reads the whole history of its key (no maxAge on a scan-path window) does not extend the retention
+     * of the other columns' fields: the history is trimmed per field ({@link SequenceEvaluator.History#trim}).
+     * Inside a stage the columns keep the expansion order, which lists dependencies first.
      */
     private final class StageScheduler {
 
@@ -1817,10 +1821,6 @@ public final class FeaturePlanCompiler {
             final FeaturePlan.StageKind kind;
             final List<String> keys;
             final Set<String> names = new LinkedHashSet<>();
-            /** blocks with keyed (sequence / population) columns in this slot */
-            final Set<String> keyedBlocks = new LinkedHashSet<>();
-            /** holds a column that keeps the whole history of each key */
-            boolean pinned;
             boolean population;
 
             Slot(final FeaturePlan.StageKind kind, final List<String> keys) {
@@ -1828,11 +1828,8 @@ public final class FeaturePlanCompiler {
                 this.keys = keys;
             }
 
-            boolean accepts(final FeaturePlan.StageKind k, final List<String> stageKeys, final boolean unbounded, final String block) {
-                if (kind != k || !keys.equals(stageKeys)) return false;
-                if (!pinned && !unbounded) return true;
-                // a pinned projection is shared within one block only
-                return keyedBlocks.isEmpty() || (keyedBlocks.size() == 1 && keyedBlocks.contains(block));
+            boolean accepts(final FeaturePlan.StageKind k, final List<String> stageKeys) {
+                return kind == k && keys.equals(stageKeys);
             }
 
             FeaturePlan.Stage build(final int index) {
@@ -1870,7 +1867,6 @@ public final class FeaturePlanCompiler {
             }
             final FeaturePlan.StageKind k;
             final List<String> stageKeys;
-            boolean unbounded = false;
             if (c.scope == Scope.context) {
                 k = FeaturePlan.StageKind.context;
                 final ContextDef context = contexts.get(c.coordinates.get("context"));
@@ -1883,27 +1879,18 @@ public final class FeaturePlanCompiler {
                     final EntityDef entity = entities.get(c.coordinates.get("entity"));
                     stageKeys = entity == null ? List.of() : entity.keys();
                 }
-                unbounded = SequenceEvaluator.unboundedReason(c) != null;
             } else if (FitMode.isLookupToken(c.coordinates.get("fit"))) {
                 k = FeaturePlan.StageKind.fit;
                 stageKeys = List.of();
             } else {
                 k = FeaturePlan.StageKind.sequence;
                 stageKeys = keyList(c.coordinates.get("keys"));
-                unbounded = SequenceEvaluator.unboundedReason(c) != null;
             }
             final Set<String> strict = strictInputs(c);
             strict.addAll(stageKeys);
-            final int target = k == FeaturePlan.StageKind.fit
-                    ? fitStage(c)
-                    : slotFor(k, stageKeys, earliest(c, strict), unbounded, c.block);
+            final int target = k == FeaturePlan.StageKind.fit ? fitStage(c) : slotFor(k, stageKeys, earliest(c, strict));
             place(c, target, strict);
-            final Slot slot = slots.get(target);
-            if (k == FeaturePlan.StageKind.sequence) {
-                slot.keyedBlocks.add(c.block);
-                if (unbounded) slot.pinned = true;
-                if (c.scope == Scope.population) slot.population = true;
-            }
+            if (c.scope == Scope.population && k == FeaturePlan.StageKind.sequence) slots.get(target).population = true;
         }
 
         /** Inputs read before the stage's DoFn (from the stage input), which must come from an earlier stage. */
@@ -1936,9 +1923,9 @@ public final class FeaturePlanCompiler {
             return earliest;
         }
 
-        private int slotFor(final FeaturePlan.StageKind k, final List<String> keys, final int earliest, final boolean unbounded, final String block) {
+        private int slotFor(final FeaturePlan.StageKind k, final List<String> keys, final int earliest) {
             for (int i = earliest; i < slots.size(); i++) {
-                if (slots.get(i).accepts(k, keys, unbounded, block)) return i;
+                if (slots.get(i).accepts(k, keys)) return i;
             }
             slots.add(new Slot(k, keys));
             return slots.size() - 1;
@@ -1955,7 +1942,7 @@ public final class FeaturePlanCompiler {
             for (final OutputColumn x : columns) {
                 if (x.block.equals(c.block) && FitMode.isLookupToken(x.coordinates.get("fit"))) earliest = Math.max(earliest, earliest(x, strictInputs(x)));
             }
-            final int target = slotFor(FeaturePlan.StageKind.fit, List.of(), earliest, false, c.block);
+            final int target = slotFor(FeaturePlan.StageKind.fit, List.of(), earliest);
             fitStageOf.put(c.block, target);
             return target;
         }
