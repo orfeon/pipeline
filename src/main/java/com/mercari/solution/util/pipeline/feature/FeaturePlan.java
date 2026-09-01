@@ -24,12 +24,14 @@ public class FeaturePlan implements Serializable {
      * Columns are scheduled by key affinity, so a stage may gather blocks from anywhere in the config, and
      * two stages may share a key when a dependency forces the split.
      */
-    public record Stage(int index, StageKind kind, List<String> keys, List<String> blocks, List<String> columnNames) implements Serializable {
+    public record Stage(int index, StageKind kind, List<String> keys, List<String> blocks, List<String> columnNames,
+                        List<Integer> dependsOn) implements Serializable {
         public int columns() {
             return columnNames.size();
         }
         public String describe() {
-            return "#" + index + " " + kind + (keys.isEmpty() ? "" : " key=" + keys) + " blocks=" + blocks + " columns=" + columns();
+            return "#" + index + " " + kind + (keys.isEmpty() ? "" : " key=" + keys) + " blocks=" + blocks + " columns=" + columns()
+                    + " deps=" + dependsOn;
         }
     }
 
@@ -109,6 +111,65 @@ public class FeaturePlan implements Serializable {
     }
 
     /**
+     * Waves of the stage DAG (engine doc §9.4): stage {@code i} is in wave {@code 1 + max(wave of its
+     * dependencies)}, so the stages of one wave are mutually independent and could be evaluated in parallel
+     * from the same input. The engine still runs the stages as a linear chain; the wave count is the depth of
+     * that chain's critical path — the barrier count a DAG execution would leave. Conservative: the row columns
+     * a stage hosts count too (a DAG engine could evaluate them on the merge path instead).
+     */
+    public List<List<Integer>> getWaves() {
+        final int[] depth = new int[stages.size()];
+        int max = 0;
+        for (final Stage s : stages) {
+            int d = 1;
+            for (final int dep : s.dependsOn) d = Math.max(d, depth[dep] + 1);
+            depth[s.index] = d;
+            max = Math.max(max, d);
+        }
+        final List<List<Integer>> waves = new ArrayList<>();
+        for (int w = 0; w < max; w++) waves.add(new ArrayList<>());
+        for (final Stage s : stages) waves.get(depth[s.index] - 1).add(s.index);
+        return waves;
+    }
+
+    /** Wave (1-based) of a stage, see {@link #getWaves()}. */
+    public int getWave(final int stageIndex) {
+        final List<List<Integer>> waves = getWaves();
+        for (int w = 0; w < waves.size(); w++) {
+            if (waves.get(w).contains(stageIndex)) return w + 1;
+        }
+        throw new IllegalArgumentException("no stage #" + stageIndex);
+    }
+
+    /**
+     * Shuffle estimate of the wave-DAG execution S3′ (engine doc §9.4.2), to compare with {@link #getShuffleCount()}
+     * before investing in it: per wave, one shuffle for its keyed branches (they run in parallel) plus one
+     * row-id merge when the wave holds two or more non-row branches (row branches are evaluated on the base
+     * path; a merge right before the groupBy stage folds into that stage's GroupByKey), plus one Reshuffle
+     * to pin the row ids when the first wave already branches.
+     */
+    public int getDagShuffleEstimate() {
+        final List<List<Integer>> waves = getWaves();
+        int count = 0;
+        for (int w = 0; w < waves.size(); w++) {
+            boolean keyed = false;
+            int branches = 0;
+            boolean groupBy = false;
+            for (final int i : waves.get(w)) {
+                final Stage s = stages.get(i);
+                if (s.kind == StageKind.groupBy) groupBy = true;
+                if (s.kind != StageKind.row && s.kind != StageKind.fit) keyed = true;
+                if (s.kind != StageKind.row) branches++;
+            }
+            if (keyed) count++;
+            final boolean nextIsGroupBy = w + 1 < waves.size() && waves.get(w + 1).stream().anyMatch(i -> stages.get(i).kind == StageKind.groupBy);
+            if (branches >= 2 && !groupBy && !nextIsGroupBy) count++;
+            if (w == 0 && branches >= 2) count++;
+        }
+        return count;
+    }
+
+    /**
      * Hot-key audit queries: one per distinct key set of the keyed stages (context / sequence / population /
      * groupBy), plus the row count for a global (single key) level. Keys that are not input fields are
      * intermediate columns; their query must be run on the relation as it stands before that stage.
@@ -151,9 +212,13 @@ public class FeaturePlan implements Serializable {
                 .append(" time.field=").append(spec.timeField)
                 .append(" columns=").append(getEmittedColumns().size()).append('/').append(columns.size())
                 .append(" stages=").append(stages.size())
-                .append(" shuffles=").append(getShuffleCount()).append('\n');
-        sb.append("-- stages\n");
-        for (final Stage s : stages) sb.append("  ").append(s.describe()).append('\n');
+                .append(" shuffles=").append(getShuffleCount());
+        final List<List<Integer>> waves = getWaves();
+        sb.append(" waves=").append(waves.size()).append(" (dag shuffles~").append(getDagShuffleEstimate()).append(")\n");
+        sb.append("-- stages (linear chain; deps = stages whose keyed/fit columns this one needs, wave = depth in that DAG)\n");
+        for (int w = 0; w < waves.size(); w++) {
+            for (final int i : waves.get(w)) sb.append("  ").append(stages.get(i).describe()).append(" wave=").append(w + 1).append('\n');
+        }
         sb.append("-- columns\n");
         for (final OutputColumn c : columns) sb.append("  ").append(c.describe()).append('\n');
         final List<AuditQuery> audit = getAuditQueries();
@@ -173,11 +238,18 @@ public class FeaturePlan implements Serializable {
         json.addProperty("hash", hash);
         json.addProperty("predictAt", spec.predictAt.describe());
         json.addProperty("shuffles", getShuffleCount());
+        final List<List<Integer>> waves = getWaves();
+        json.addProperty("waves", waves.size());
+        json.addProperty("dagShuffles", getDagShuffleEstimate());
         final JsonArray stageArray = new JsonArray();
         for (final Stage s : stages) {
             final JsonObject o = new JsonObject();
             o.addProperty("index", s.index);
             o.addProperty("kind", s.kind.name());
+            o.addProperty("wave", getWave(s.index));
+            final JsonArray deps = new JsonArray();
+            s.dependsOn.forEach(deps::add);
+            o.add("dependsOn", deps);
             final JsonArray keys = new JsonArray();
             s.keys.forEach(keys::add);
             o.add("keys", keys);

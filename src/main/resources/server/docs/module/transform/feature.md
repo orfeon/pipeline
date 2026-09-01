@@ -345,7 +345,14 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   in the stage of their first consumer, or in the last stage when only the output reads them — so their
   values are not carried through shuffles that do not need them. The hidden statistics of a `fit.mode:
   static` / `fold` block always share one fit stage. The plan report lists the resulting stages
-  (`#n kind key=[...] blocks=[...]`) and the shuffle count (one per keyed stage). A fused stage keeps one
+  (`#n kind key=[...] blocks=[...] deps=[...] wave=w`) and the shuffle count (one per keyed stage).
+  `deps` are the stages whose keyed / fit columns a stage needs (row columns are followed through to
+  their own inputs — a branch would just recompute them) and `wave` is its depth in that dependency DAG:
+  the stages of one wave are mutually independent. The engine runs the stages as a linear chain, so a job
+  pays one shuffle barrier per keyed stage; `waves=` (and `dagShuffles` in the JSON report) shows how
+  deep the chain would be if independent stages ran in parallel — the barrier count a DAG execution
+  would leave. Use it to judge whether restructuring the blocks (or a future parallel engine) can
+  shorten a long chain. A fused stage keeps one
   history per key, **trimmed per field**: each projected field stays only as far back as the longest window
   of the columns reading it, so fusing blocks does not extend any field's retention — a column that reads
   the whole history of its key (a scan-path window without `maxAge`, reported by the

@@ -439,6 +439,48 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testStageDependenciesAndWaves() {
+        // the levels of a shrinkage lattice are independent keyed stages: the seller level (fused with the
+        // sequence block), the global level and the context stage form one wave; the category stage hosts the
+        // compose rows over all three levels, so it depends on them (the row expression the levels share is
+        // followed through to its input field: placing it in the seller stage is not a data dependency)
+        final FeaturePlan plan = compile(SOURCES, withEncoding(LATTICE_ENC));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<FeaturePlan.Stage> stages = plan.getStages();
+        Assertions.assertEquals(4, stages.size(), plan::describe);
+        Assertions.assertEquals(List.of(), stages.get(0).dependsOn(), plan::describe);
+        Assertions.assertEquals(List.of(), stages.get(1).dependsOn(), plan::describe);
+        Assertions.assertEquals(List.of(), stages.get(2).dependsOn(), plan::describe);
+        Assertions.assertEquals(List.of(0, 1, 2), stages.get(3).dependsOn(), plan::describe);
+        Assertions.assertEquals(List.of(List.of(0, 1, 2), List.of(3)), plan.getWaves(), plan::describe);
+        Assertions.assertEquals(1, plan.getWave(2));
+        Assertions.assertEquals(2, plan.getWave(3));
+        // linear chain: 4 shuffles; wave DAG: wave 1 = one shuffle for its three keyed branches + row-id merge
+        // + Reshuffle pinning the ids, wave 2 = one shuffle
+        Assertions.assertEquals(4, plan.getShuffleCount());
+        Assertions.assertEquals(4, plan.getDagShuffleEstimate());
+        Assertions.assertTrue(plan.describe().contains("waves=2 (dag shuffles~4)"), plan::describe);
+        Assertions.assertTrue(plan.describe().contains("deps=[0, 1, 2] wave=2"), plan::describe);
+        final com.google.gson.JsonObject json = plan.toJson();
+        Assertions.assertEquals(2, json.get("waves").getAsInt());
+        Assertions.assertEquals(4, json.get("dagShuffles").getAsInt());
+        final com.google.gson.JsonObject last = json.getAsJsonArray("stages").get(3).getAsJsonObject();
+        Assertions.assertEquals(2, last.get("wave").getAsInt());
+        Assertions.assertEquals(3, last.getAsJsonArray("dependsOn").size());
+
+        // output.groupBy: the finalize stage depends on every stage; the merge of the wave before it folds
+        // into its GroupByKey (no extra shuffle)
+        final FeaturePlan grouped = compile(SOURCES, SPEC.replace("prefix: f_", "prefix: f_" + (char) 10 + "  groupBy: session"));
+        Assertions.assertFalse(grouped.getDiagnostics().hasErrors(), grouped::describe);
+        final FeaturePlan.Stage groupBy = grouped.getStages().get(grouped.getStages().size() - 1);
+        Assertions.assertEquals(FeaturePlan.StageKind.groupBy, groupBy.kind());
+        Assertions.assertEquals(List.of(0, 1, 2, 3), groupBy.dependsOn(), grouped::describe);
+        Assertions.assertEquals(3, grouped.getWaves().size(), grouped::describe);
+        Assertions.assertEquals(5, grouped.getShuffleCount());
+        Assertions.assertEquals(5, grouped.getDagShuffleEstimate());
+    }
+
+    @Test
     public void testShrinkageLatticeExpansion() {
         final FeaturePlan plan = compile(SOURCES, withEncoding(LATTICE_ENC));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
@@ -626,6 +668,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(stages.get(categoryStage).blocks().containsAll(List.of("enc_a", "enc_c")), plan::describe);
         // the derived key is a row column evaluated in the category stage itself (read inside the DoFn)
         Assertions.assertTrue(stages.get(categoryStage).columnNames().contains("seller_bucket"), plan::describe);
+        // the stage DAG follows the derived key through the row column to the category stage: one wave later
+        Assertions.assertTrue(stages.get(bucketStage).dependsOn().contains(categoryStage), plan::describe);
+        Assertions.assertEquals(plan.getWave(categoryStage) + 1, plan.getWave(bucketStage), plan::describe);
     }
 
     private static int indexOfStage(final List<FeaturePlan.Stage> stages, final List<String> keys) {
