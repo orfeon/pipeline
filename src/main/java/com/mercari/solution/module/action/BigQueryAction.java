@@ -767,7 +767,7 @@ public class BigQueryAction implements ActionService {
             jobIds.add(p.jobId);
         }
         final List<Map<String, Object>> jobs = new ArrayList<>();
-        for(final Job completed : waitForAll(p, jobIds, false)) {
+        for(final Job completed : waitForAll(p, p.location, jobIds, false)) {
             jobs.add(toPayload(completed));
         }
         if(jobs.size() == 1) {
@@ -783,16 +783,16 @@ public class BigQueryAction implements ActionService {
      * backoff and a single {@code timeoutSeconds} window (not one full wait per job). A job that
      * finished with an error fails the firing as non-retryable (these jobs cannot be resubmitted).
      */
-    private List<Job> waitForAll(final Parameters p, final List<String> jobIds, final boolean own) throws Exception {
+    private List<Job> waitForAll(final Parameters p, final String location, final List<String> jobIds, final boolean own) throws Exception {
         return ActionSupport.waitForAll(name, "bigquery jobs", jobIds, p.timeoutSeconds, sleeper,
                 jobId -> {
                     // poll the status only; the full resource (statistics can be large) is fetched once when DONE
-                    final Job status = bigquery.jobs().get(p.projectId, jobId).setLocation(p.location)
+                    final Job status = bigquery.jobs().get(p.projectId, jobId).setLocation(location)
                             .setFields("jobReference,status").execute();
                     if(!"DONE".equals(jobState(status))) {
                         return null;
                     }
-                    return checkResult(jobId, bigquery.jobs().get(p.projectId, jobId).setLocation(p.location).execute(), own);
+                    return checkResult(jobId, bigquery.jobs().get(p.projectId, jobId).setLocation(location).execute(), own);
                 },
                 e -> {
                     if(e instanceof GoogleJsonResponseException g) {
@@ -805,7 +805,7 @@ public class BigQueryAction implements ActionService {
                     return e instanceof IOException;
                 },
                 "complete",
-                p.cancelOnTimeout ? jobId -> bigquery.jobs().cancel(p.projectId, jobId).setLocation(p.location).execute() : null);
+                p.cancelOnTimeout ? jobId -> bigquery.jobs().cancel(p.projectId, jobId).setLocation(location).execute() : null);
     }
 
     private ActionResult executeTableGet(final Parameters p) throws IOException {
@@ -1457,7 +1457,10 @@ public class BigQueryAction implements ActionService {
             // already terminal (e.g. adopted or fetched job): no polling, only the outcome check
             return checkResult(jobId, job, true);
         }
-        return waitForAll(p, List.of(jobId), true).getFirst();
+        // poll in the location BigQuery actually placed the job in (routed by the referenced dataset):
+        // without it, jobs.get on a job in a regional location (e.g. us-central1) returns 404
+        final String location = Optional.ofNullable(job.getJobReference().getLocation()).orElse(p.location);
+        return waitForAll(p, location, List.of(jobId), true).getFirst();
     }
 
     /**

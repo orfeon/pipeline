@@ -24,7 +24,7 @@ becomes the body, `message.attributes` become template args).
 | --- | --- | --- | --- |
 | schema | required | [Schema](../common/schema.md) | Schema of the request body elements. Fields not present in the body become null |
 | path | optional | String | Dot-notation path selecting the subtree of the body to read elements from (e.g. `payload.items`). The default reads the whole body |
-| sample | optional | JSON | Fallback body used when no request body is available — keeps the config runnable for validation and local testing outside serve mode |
+| sample | optional | JSON | Fallback body used when no request body is available — keeps the config runnable for validation and local testing outside serve mode. Write it as a YAML/JSON object or array (the same shape as a request body), not as a JSON-encoded string — a string value fails with `body must be a JSON object or an array of objects` |
 
 The common source parameter `timestampAttribute` is supported: when set, each element's event
 time is taken from that field; otherwise the request processing time is used.

@@ -620,6 +620,14 @@ public class BuildActionTest {
         assertInvalid(base.formatted("builds.wait", "location: global"), "buildId, jobIdField or filter is required");
         assertInvalid(base.formatted("builds.list", "pageSize: 0"), "pageSize must be positive");
         assertInvalid(base.formatted("triggers.run", "location: global"), "triggerId is required");
+        // Reaches the projectId-required branch only when no ambient default GCP project is
+        // resolvable: surefire isolates CLOUDSDK_CONFIG under maven; an IDE run on a machine
+        // with a gcloud default project would resolve one, so skip there (the branch itself
+        // is covered deterministically by testValidateRequiresProjectId).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                org.apache.beam.sdk.options.PipelineOptionsFactory.create()
+                        .as(org.apache.beam.sdk.extensions.gcp.options.GcpOptions.class).getProject() == null,
+                "ambient default GCP project resolvable");
         assertInvalid("""
                 actions:
                   - name: step
@@ -634,6 +642,20 @@ public class BuildActionTest {
         final TestPipeline p = TestPipeline.create().enableAbandonedNodeEnforcement(false);
         final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class, () -> run(p, yaml, "step"));
         Assertions.assertTrue(e.getMessage().contains(expected), e.getMessage());
+    }
+
+    // The projectId-required branch, asserted on Parameters.validate directly: the pipeline-level
+    // case in testValidation only reaches it when no ambient default GCP project is resolvable
+    // (surefire isolates CLOUDSDK_CONFIG for that; this assertion holds even outside maven).
+    @Test
+    public void testValidateRequiresProjectId() {
+        final BuildAction.Parameters parameters = new BuildAction.Parameters();
+        parameters.op = BuildAction.Op.get;
+        parameters.buildId = "b";
+        final List<String> errors = parameters.validate("step", com.mercari.solution.module.Action.Trigger.once);
+        Assertions.assertTrue(
+                errors.stream().anyMatch(m -> m.contains("projectId is required")),
+                errors.toString());
     }
 
     @Test
