@@ -1663,7 +1663,7 @@ public class Schema implements Serializable {
         required,
         repeated;
 
-        static Mode of(final String mode) {
+        public static Mode of(final String mode) {
             if(mode == null) {
                 return Mode.nullable;
             }

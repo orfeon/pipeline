@@ -186,4 +186,147 @@ public class PartitionTransformTest {
 
         pipeline.run();
     }
+
+    // Multi-input case: the per-partition and excluded coders are built over the rebuilt
+    // (ELEMENT-typed) union schema, and elements from the second input carry index 1 —
+    // both the matched and the excluded path must adapt AVRO-backed elements to that coder.
+    @Test
+    public void testPartitionWithoutSelectMultiInput() throws Exception {
+
+        final String configYaml = """
+                sources:
+                  - name: create1
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - category: a
+                        - category: b
+                    schema:
+                      fields:
+                        - name: category
+                          type: string
+                  - name: create2
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - category: c
+                        - category: d
+                    schema:
+                      fields:
+                        - name: category
+                          type: string
+                transforms:
+                  - name: select1
+                    module: select
+                    inputs:
+                      - create1
+                    parameters:
+                      select:
+                        - name: category
+                          field: category
+                  - name: select2
+                    module: select
+                    inputs:
+                      - create2
+                    parameters:
+                      select:
+                        - name: category
+                          field: category
+                  - name: partition
+                    module: partition
+                    inputs:
+                      - select1
+                      - select2
+                    parameters:
+                      partitions:
+                        - name: matched
+                          filter:
+                            - { key: category, op: in, value: [a, c] }
+                """;
+
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("partition.matched").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for (final MElement element : elements) {
+                final String category = element.getPrimitiveValue("category").toString();
+                Assertions.assertTrue("a".equals(category) || "c".equals(category));
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        PAssert.that(outputs.get("partition.excluded").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for (final MElement element : elements) {
+                final String category = element.getPrimitiveValue("category").toString();
+                Assertions.assertTrue("b".equals(category) || "d".equals(category));
+                count++;
+            }
+            Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // union: true merges matched outputs into the default output, whose coder is built over
+    // the rebuilt (ELEMENT-typed) union of the partition output schemas — a select-less
+    // partition must adapt AVRO-backed elements to it even with a single input.
+    @Test
+    public void testPartitionWithoutSelectUnion() throws Exception {
+
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - category: a
+                        - category: b
+                    schema:
+                      fields:
+                        - name: category
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: category
+                          field: category
+                  - name: partition
+                    module: partition
+                    inputs:
+                      - select
+                    parameters:
+                      union: true
+                      partitions:
+                        - name: matched
+                          filter:
+                            - { key: category, op: "=", value: a }
+                """;
+
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("partition").getCollection()).satisfies(elements -> {
+            int count = 0;
+            for (final MElement element : elements) {
+                Assertions.assertEquals("a", element.getPrimitiveValue("category").toString());
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
 }

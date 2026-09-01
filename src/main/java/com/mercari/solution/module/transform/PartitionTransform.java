@@ -162,7 +162,7 @@ public class PartitionTransform extends Transform {
 
         final PCollectionTuple outputs = input
                 .apply("Partition", ParDo
-                        .of(new PartitionDoFn(getJobName(), getName(), parameters, settings, inputSchema, failureTag, excludedTag, getFailFast()))
+                        .of(new PartitionDoFn(getJobName(), getName(), parameters, settings, inputSchema, outputSchema, failureTag, excludedTag, getFailFast()))
                         .withOutputTags(defaultOutputTag, TupleTagList.of(outputTags)));
 
         if(errorHandler != null) {
@@ -194,6 +194,7 @@ public class PartitionTransform extends Transform {
         private final Boolean union;
         private final List<PartitionSetting> settings;
         private final Schema inputSchema;
+        private final Schema unionOutputSchema;
         private final TupleTag<BadRecord> failureTag;
         private final TupleTag<MElement> excludedTag;
         private final boolean failFast;
@@ -204,6 +205,7 @@ public class PartitionTransform extends Transform {
                 final Parameters parameters,
                 final List<PartitionSetting> settings,
                 final Schema inputSchema,
+                final Schema unionOutputSchema,
                 final TupleTag<BadRecord> failureTag,
                 final TupleTag<MElement> excludedTag,
                 final boolean failFast) {
@@ -214,6 +216,7 @@ public class PartitionTransform extends Transform {
             this.union = parameters.union;
             this.settings = settings;
             this.inputSchema = inputSchema;
+            this.unionOutputSchema = unionOutputSchema;
             this.failureTag = failureTag;
             this.excludedTag = excludedTag;
             this.failFast = failFast;
@@ -245,13 +248,10 @@ public class PartitionTransform extends Transform {
                     if (Filter.filter(setting.conditionNode, inputSchema, input)) {
                         final MElement result;
                         if(setting.selectFunctions.isEmpty()) {
-                            // pass the value through with its original backing data type: the partition's
-                            // output coder is built from the (union) input schema, so rebuilding the element
-                            // as a primitive map would not match the coder's backing data type (e.g. AVRO).
-                            // The index is reset because that coder holds a single union schema.
-                            result = input.getIndex() == 0
-                                    ? input
-                                    : MElement.of(0, input.getType(), input.getValue(), input.getEpochMillis());
+                            // adapt the input to the schema the output coder was built from: the
+                            // per-partition coder holds setting.schema (= the union input schema),
+                            // the union default output's coder holds the rebuilt union output schema
+                            result = normalize(union ? unionOutputSchema : setting.schema, input, c.timestamp().getMillis());
                         } else {
                             final Map<String, Object> values = SelectFunction.apply(setting.selectFunctions, input, c.timestamp());
                             result = MElement.of(setting.schema, values, c.timestamp());
@@ -268,12 +268,30 @@ public class PartitionTransform extends Transform {
                     }
                 }
                 if(!outputed) {
-                    c.output(excludedTag, input);
+                    // the excluded output's coder is also built from the single union input schema
+                    c.output(excludedTag, normalize(inputSchema, input, input.getEpochMillis()));
                 }
             } catch (final Throwable e) {
                 final BadRecord badRecord = processError("Failed to process partition", input, e, failFast);
                 c.output(failureTag, badRecord);
             }
+        }
+
+        /**
+         * Adapts an element to the schema its output coder was built from. When the backing data
+         * type matches, the value is passed through (resetting the union input index — the coder
+         * holds a single schema); otherwise (e.g. an AVRO-backed element against the ELEMENT-typed
+         * union schema of a multi-input partition) it is converted to the primitive-map
+         * representation the coder expects.
+         */
+        private static MElement normalize(final Schema schema, final MElement input, final long epochMillis) {
+            if(input.getType().equals(schema.getType())) {
+                if(input.getIndex() == 0 && input.getEpochMillis() == epochMillis) {
+                    return input;
+                }
+                return MElement.of(0, input.getType(), input.getValue(), epochMillis);
+            }
+            return MElement.of(schema, input.asPrimitiveMap(), epochMillis);
         }
     }
 

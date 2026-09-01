@@ -620,6 +620,14 @@ public class BuildActionTest {
         assertInvalid(base.formatted("builds.wait", "location: global"), "buildId, jobIdField or filter is required");
         assertInvalid(base.formatted("builds.list", "pageSize: 0"), "pageSize must be positive");
         assertInvalid(base.formatted("triggers.run", "location: global"), "triggerId is required");
+        // Reaches the projectId-required branch only when no ambient default GCP project is
+        // resolvable: surefire isolates CLOUDSDK_CONFIG under maven; an IDE run on a machine
+        // with a gcloud default project would resolve one, so skip there (the branch itself
+        // is covered deterministically by testValidateRequiresProjectId).
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                org.apache.beam.sdk.options.PipelineOptionsFactory.create()
+                        .as(org.apache.beam.sdk.extensions.gcp.options.GcpOptions.class).getProject() == null,
+                "ambient default GCP project resolvable");
         assertInvalid("""
                 actions:
                   - name: step
