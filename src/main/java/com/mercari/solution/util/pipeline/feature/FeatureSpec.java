@@ -189,8 +189,12 @@ public class FeatureSpec implements Serializable {
         public String passThrough = "all";
     }
 
-    /** Engine (runtime) knobs that do not change the plan: {@code engine.spill} of the keyed stages' sorter. */
+    /** Engine (runtime) knobs that do not change the plan: {@code engine.spill} of the keyed stages' sorter, the wave fan-out. */
     public static class EngineSpec implements Serializable {
+        /** Evaluate the independent stages of a wave in parallel and merge them by row id (engine doc §9.4); false = linear chain. */
+        public boolean parallelWaves = true;
+        /** Input fields identifying a row for the fan-out merge; empty = a random id pinned by a Reshuffle. */
+        public List<String> rowId = new ArrayList<>();
         /** In-memory sort buffer per key (MB); null = derived from the worker heap. */
         public Integer spillMemoryMB;
         /** Spill directory on the worker; null = java.io.tmpdir. */
@@ -328,6 +332,8 @@ public class FeatureSpec implements Serializable {
         }
         if (parameters.has("engine") && parameters.get("engine").isJsonObject()) {
             final JsonObject engine = parameters.getAsJsonObject("engine");
+            spec.engine.parallelWaves = Json.bool(engine, "parallelWaves", true);
+            spec.engine.rowId = Json.strings(engine, "rowId");
             if (engine.has("spill") && engine.get("spill").isJsonObject()) {
                 final JsonObject spill = engine.getAsJsonObject("spill");
                 if (spill.has("memoryMB") && !spill.get("memoryMB").isJsonNull()) {

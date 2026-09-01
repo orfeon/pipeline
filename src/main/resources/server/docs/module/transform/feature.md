@@ -64,7 +64,7 @@ time; warnings and hints from the compiler are part of that report.
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
-| engine     | optional | Object                         | Runtime knobs that do not change the plan. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
+| engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
 | output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`). |
 
 ### Sources contract
@@ -348,11 +348,21 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   (`#n kind key=[...] blocks=[...] deps=[...] wave=w`) and the shuffle count (one per keyed stage).
   `deps` are the stages whose keyed / fit columns a stage needs (row columns are followed through to
   their own inputs — a branch would just recompute them) and `wave` is its depth in that dependency DAG:
-  the stages of one wave are mutually independent. The engine runs the stages as a linear chain, so a job
-  pays one shuffle barrier per keyed stage; `waves=` (and `dagShuffles` in the JSON report) shows how
-  deep the chain would be if independent stages ran in parallel — the barrier count a DAG execution
-  would leave. Use it to judge whether restructuring the blocks (or a future parallel engine) can
-  shorten a long chain. A fused stage keeps one
+  the stages of one wave are mutually independent.
+- **Waves run in parallel.** The engine evaluates the stages of a wave as parallel branches of the same
+  input: each branch emits only its own columns keyed by a row id, and the branches are merged back into
+  full rows — inside the next stage's GroupByKey when that stage is a single context stage (or the
+  `output.groupBy` finalize), otherwise by one row-id GroupByKey per wave. A job therefore pays one
+  shuffle barrier per wave (plus the merges) instead of one per keyed stage, and a wave takes as long as
+  its slowest branch: `waves=` and `dagShuffles` in the plan report are the depth and the shuffle count of
+  this execution (`shuffles` is the linear count). Sizing: the branches of a wave run concurrently, so give
+  the job enough workers for their combined work (`numWorkers` at least the number of heavy branches)
+  and size `diskSizeGb` for the keys that spill at the same time; a wave of one stage costs nothing extra.
+  `engine.parallelWaves: false` restores the linear chain (for an A/B run — the outputs are identical);
+  `engine.rowId` names a natural key and drops the Reshuffle that pins random row ids. A row column that
+  reads an earlier stage and is only consumed by the output is evaluated in the last keyed stage, which
+  then depends on that earlier stage — a wave of its own; put such columns in the block that consumes them
+  when that matters. Streaming runs the linear chain. A fused stage keeps one
   history per key, **trimmed per field**: each projected field stays only as far back as the longest window
   of the columns reading it, so fusing blocks does not extend any field's retention — a column that reads
   the whole history of its key (a scan-path window without `maxAge`, reported by the
@@ -391,7 +401,8 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
 ## Limitations (current engine)
 
 - Batch only for sequence / population features (per-key time-ordered replay). Row / context features also
-  run in streaming within the configured window.
+  run in streaming within the configured window, as a linear chain (the parallel-wave merge is a batch
+  GroupByKey).
 - Key set `structure: sequence`, nested encoding targets, the `quantile` stat (and
   `distribution` in static mode), and population types other than `encoding` / `factorization` are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`, and non-static fits. In `shrinkage`,

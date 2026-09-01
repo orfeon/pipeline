@@ -119,6 +119,9 @@ public final class FeaturePlanCompiler {
         if (spec.timeField != null && !inputFields.containsKey(spec.timeField)) {
             inputFields.put(spec.timeField, FieldContract.synthetic(spec.timeField, Schema.FieldType.TIMESTAMP, AvailableAt.atEventTime()));
         }
+        for (final String f : spec.engine.rowId) {
+            if (!inputFields.containsKey(f)) diagnostics.error("engine.rowId", "engine", "engine.rowId field '" + f + "' is not an input field");
+        }
         if (spec.timeField != null && inputFields.get(spec.timeField).getType() != null) {
             final String timeType = inputFields.get(spec.timeField).getType().getType().name();
             if (!List.of("timestamp", "datetime", "date", "string").contains(timeType)) {

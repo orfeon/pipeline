@@ -8,12 +8,22 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.values.KV;
+import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionList;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * End-to-end test of the {@code feature} transform on a small online-auction dataset: sellers list items in
@@ -537,6 +547,171 @@ public class FeatureTransformTest {
                 Assertions.assertEquals(size, children.size());
             }
             Assertions.assertEquals(4, sessions);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // parallel waves (engine doc §9.4): independent stages branch and are merged back by row id
+    // ---------------------------------------------------------------------------------------------
+
+    /** Extra blocks: a category encoding (independent of the seller stage) and a context block reading both keyed stages. */
+    private static final String CAT_BLOCK = """
+        - name: cat
+          scope: population
+          type: encoding
+          keySets:
+            - keys: [category]
+          targets:
+            - {stats: [count]}
+            - {expr: "sold >= 1", stats: [mean]}
+""";
+    private static final String HIST_REL_BLOCK = """
+        - name: histRel
+          scope: context
+          context: session
+          inputs: [recent_n5_start_price_count, cat__category__count]
+          ops: [zscore]
+""";
+
+    /** wave 1 = session context + seller keyed + category keyed, wave 2 = the histRel context stage (folded merge). */
+    private static final String PARALLEL_CONFIG = FEATURE_CONFIG.replace("      output:\n", CAT_BLOCK + HIST_REL_BLOCK + "      output:\n");
+
+    /** Renders a row as a canonical string (sorted fields, sorted nested maps) so two engine modes can be compared. */
+    static String canonical(final Object value) {
+        if (value instanceof MElement element) return canonical(element.asPrimitiveMap());
+        if (value instanceof Map<?, ?> map) {
+            final TreeMap<String, String> sorted = new TreeMap<>();
+            for (final Map.Entry<?, ?> e : map.entrySet()) sorted.put(String.valueOf(e.getKey()), canonical(e.getValue()));
+            return sorted.toString();
+        }
+        if (value instanceof List<?> list) {
+            final List<String> items = new ArrayList<>();
+            for (final Object o : list) items.add(canonical(o));
+            java.util.Collections.sort(items);
+            return items.toString();
+        }
+        return String.valueOf(value);
+    }
+
+    static class TagDoFn extends DoFn<MElement, KV<String, String>> {
+        private final String tag;
+        TagDoFn(final String tag) { this.tag = tag; }
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            c.output(KV.of(tag, canonical(c.element())));
+        }
+    }
+
+    /** Full names of the pipeline's transforms, to check which merge path the engine chose. */
+    private Set<String> transformNames() {
+        final Set<String> names = new HashSet<>();
+        pipeline.traverseTopologically(new org.apache.beam.sdk.Pipeline.PipelineVisitor.Defaults() {
+            @Override
+            public CompositeBehavior enterCompositeTransform(final org.apache.beam.sdk.runners.TransformHierarchy.Node node) {
+                names.add(node.getFullName());
+                return CompositeBehavior.ENTER_TRANSFORM;
+            }
+            @Override
+            public void visitPrimitiveTransform(final org.apache.beam.sdk.runners.TransformHierarchy.Node node) {
+                names.add(node.getFullName());
+            }
+        });
+        return names;
+    }
+
+    private static boolean hasTransform(final Set<String> names, final String module, final String needle) {
+        return names.stream().anyMatch(n -> n.startsWith(module + "/") && n.contains(needle));
+    }
+
+    /**
+     * Runs the feature config in both engine modes on one pipeline and asserts identical outputs; {@code expected}
+     * / {@code forbidden} name the engine transforms the parallel graph must / must not contain.
+     */
+    private void assertParallelMatchesLinear(final String featureConfig, final int expectedRows,
+                                             final List<String> expected, final List<String> forbidden) throws java.io.IOException {
+        final String linear = featureConfig
+                .replace("name: features", "name: linear")
+                .replace("      lineage:", "      engine: {parallelWaves: false}\n      lineage:")
+                .replace("transforms:\n", "");
+        final Config config = Config.load(SOURCE_CONFIG + featureConfig + linear);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final Set<String> names = transformNames();
+        for (final String e : expected) Assertions.assertTrue(hasTransform(names, "features", e), () -> e + " missing in " + names);
+        for (final String f : forbidden) Assertions.assertFalse(hasTransform(names, "features", f), () -> f + " present in " + names);
+        Assertions.assertFalse(hasTransform(names, "linear", "Wave"), "the linear chain must not branch");
+        Assertions.assertFalse(hasTransform(names, "linear", "RowId_Pin"));
+        final PCollection<KV<String, String>> a = outputs.get("features").getCollection().apply("TagParallel", ParDo.of(new TagDoFn("parallel")));
+        final PCollection<KV<String, String>> b = outputs.get("linear").getCollection().apply("TagLinear", ParDo.of(new TagDoFn("linear")));
+        PAssert.that(PCollectionList.of(a).and(b).apply(Flatten.pCollections())).satisfies(kvs -> {
+            final Set<String> parallel = new HashSet<>(), lin = new HashSet<>();
+            for (final KV<String, String> kv : kvs) (kv.getKey().equals("parallel") ? parallel : lin).add(kv.getValue());
+            Assertions.assertEquals(expectedRows, parallel.size(), parallel::toString);
+            Assertions.assertEquals(lin, parallel);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testParallelWavesFoldIntoContextStage() throws java.io.IOException {
+        // wave 1 (session context, seller keyed, category keyed) merges inside the histRel context GroupByKey
+        assertParallelMatchesLinear(PARALLEL_CONFIG, 6, List.of("RowId_Pin", "Wave1_FanIn"), List.of("Wave1_Merge"));
+    }
+
+    @Test
+    public void testParallelWavesWithDeclaredRowId() throws java.io.IOException {
+        // engine.rowId names the natural key: no Reshuffle, same result
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      lineage:", "      engine: {rowId: [session_id, seller_id]}\n      lineage:"), 6,
+                List.of("Wave1_FanIn"), List.of("RowId_Pin", "Wave1_Merge"));
+    }
+
+    @Test
+    public void testParallelWavesRowIdMerge() throws java.io.IOException {
+        // shrinkage lattice: the seller / global levels and the session context branch; the category stage
+        // (a keyed stage hosting the compose rows) follows, so the merge is a row-id GroupByKey
+        final String lattice = FEATURE_CONFIG
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {priorWeight: 1, output: [composed, deviations]}")
+                .replace("- keys: [seller_id]", "- keys: [seller_id]\n          hierarchy: [[category], []]");
+        assertParallelMatchesLinear(lattice, 6, List.of("RowId_Pin", "Wave1_Merge"), List.of("Wave1_FanIn"));
+    }
+
+    @Test
+    public void testParallelWavesFoldIntoGroupedFinalize() throws java.io.IOException {
+        // two independent keyed blocks and output.groupBy: the last wave merges inside the finalize GroupByKey
+        // (vs_market is dropped: a row column over the context stage is placed in the last keyed stage and
+        // makes it depend on the context stage, i.e. a wave of its own)
+        final String grouped = FEATURE_CONFIG
+                .replace("        - name: vs_market\n          scope: row\n          type: residual\n          input: relative_start_price_shareOfTotal\n          baseline: market\n", "")
+                .replace("      output:\n", CAT_BLOCK + "      output:\n")
+                .replace("prefix: f_", "prefix: f_\n        groupBy: session\n        parentFields: [session_time]");
+        final Config config = Config.load(SOURCE_CONFIG + grouped);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        final MCollection output = outputs.get("features");
+        Assertions.assertNotNull(output.getSchema().getField("rows"));
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "Wave1_FanIn"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "Wave1_Merge"), names::toString);
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> bySession = new HashMap<>();
+            for (final MElement row : rows) bySession.put(row.getAsString("session_id"), row);
+            Assertions.assertEquals(4, bySession.size());
+            final List<?> c = (List<?>) bySession.get("C").getPrimitiveValue("rows");
+            Assertions.assertEquals(2, c.size());
+            for (final Object child : c) {
+                final Map<?, ?> m = child instanceof MElement e ? e.asPrimitiveMap() : (Map<?, ?>) child;
+                if ("s1".equals(String.valueOf(m.get("seller_id")))) {
+                    // seller branch (strictly past): C/s1 sees A/s1 and B/s1; category branch: electronics count = 2
+                    Assertions.assertEquals(200.0, ((Number) m.get("f_recent_n5_start_price_lag1")).doubleValue(), 1e-9);
+                    Assertions.assertEquals(2L, ((Number) m.get("f_recent_n5_start_price_count")).longValue());
+                    Assertions.assertEquals(2L, ((Number) m.get("f_cat__category__count")).longValue());
+                } else {
+                    Assertions.assertEquals(50.0, ((Number) m.get("f_recent_n5_start_price_lag1")).doubleValue(), 1e-9);
+                    Assertions.assertEquals(1L, ((Number) m.get("f_cat__category__count")).longValue());
+                }
+            }
             return null;
         });
         pipeline.run();

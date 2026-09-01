@@ -439,6 +439,18 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testEngineRowIdMustBeInputFields() {
+        final FeaturePlan bad = compile(SOURCES, SPEC.replace("output:\n", "engine: {rowId: [session_id, nope]}\noutput:\n"));
+        Assertions.assertTrue(hasCode(bad, "engine.rowId"), bad::describe);
+        final FeaturePlan ok = compile(SOURCES, SPEC.replace("output:\n", "engine: {rowId: [session_id, seller_id], parallelWaves: false}\noutput:\n"));
+        Assertions.assertFalse(ok.getDiagnostics().hasErrors(), ok::describe);
+        Assertions.assertEquals(List.of("session_id", "seller_id"), ok.getSpec().engine.rowId);
+        Assertions.assertFalse(ok.getSpec().engine.parallelWaves);
+        // engine knobs do not change the plan hash
+        Assertions.assertEquals(compile(SOURCES, SPEC).getHash(), ok.getHash());
+    }
+
+    @Test
     public void testStageDependenciesAndWaves() {
         // the levels of a shrinkage lattice are independent keyed stages: the seller level (fused with the
         // sequence block), the global level and the context stage form one wave; the category stage hosts the
