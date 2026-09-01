@@ -190,7 +190,8 @@ public class Filter implements Serializable {
             }
             for(final String requiredVariable : requiredVariables) {
                 if(!fieldNames.contains(requiredVariable)) {
-                    errorMessages.add("filter variable: " + requiredVariable + " not found in input schema: " + fieldNames);
+                    // callers validate against different schemas (input, output, ...): keep the message neutral
+                    errorMessages.add("filter variable: " + requiredVariable + " not found in schema fields: " + fieldNames);
                 }
             }
 

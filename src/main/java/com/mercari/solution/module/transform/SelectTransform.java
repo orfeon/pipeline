@@ -94,12 +94,22 @@ public class SelectTransform extends Transform {
 
         final Schema outputSchema = createOutputSchema(inputSchema, parameters);
 
-        // outputFilter references the fields after select / flatten: validate against the output schema
-        // (the SQL-like text form, a JSON primitive, is parsed lazily and not validated here)
-        if(parameters.useOutputFilter() && !parameters.outputFilter.isJsonPrimitive()) {
+        // outputFilter references the fields after select / flatten: validate against the output
+        // schema (the SQL-like text form is translated to the same condition structure by parse,
+        // so it is validated identically; a malformed condition is an assembly-time error)
+        if(parameters.useOutputFilter()) {
             final List<String> errorMessages = new ArrayList<>();
-            for(final String m : Filter.parse(parameters.outputFilter).validate(outputSchema.getFields())) {
-                errorMessages.add("parameters.outputFilter is illegal: " + m);
+            try {
+                final Filter.ConditionNode node = Filter.parse(parameters.outputFilter);
+                if(isEmptyCondition(node)) {
+                    errorMessages.add("parameters.outputFilter must not be an empty condition (it would match no record)");
+                } else {
+                    for(final String m : node.validate(outputSchema.getFields())) {
+                        errorMessages.add("parameters.outputFilter is illegal (fields are validated against the output schema): " + m);
+                    }
+                }
+            } catch (final Throwable e) {
+                errorMessages.add("parameters.outputFilter is illegal: " + e.getMessage());
             }
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -165,6 +175,19 @@ public class SelectTransform extends Transform {
 
         return MCollectionTuple
                 .of(outputs.get(outputTag), outputSchema);
+    }
+
+    // an AND/OR node with no leaves and no child nodes (e.g. `[]` or `{and: []}`) evaluates to
+    // "match nothing" at runtime — reject it at assembly instead of silently dropping every record
+    private static boolean isEmptyCondition(final Filter.ConditionNode node) {
+        if(node == null) {
+            return true;
+        }
+        if(Filter.Type.TRUE.equals(node.getType()) || Filter.Type.FALSE.equals(node.getType())) {
+            return false;
+        }
+        return (node.getLeaves() == null || node.getLeaves().isEmpty())
+                && (node.getNodes() == null || node.getNodes().isEmpty());
     }
 
     private Schema createOutputSchema(final Schema inputSchema, final Parameters parameters) {
@@ -239,6 +262,21 @@ public class SelectTransform extends Transform {
             this.outputFilter = Filter.of(outputFilterJson);
         }
 
+        /**
+         * Applies outputFilter to an output record using the typed (standard) representation of
+         * the output schema fields, so timestamp / date / enum conditions behave as documented
+         * for filter conditions. Returns true when the record should be emitted.
+         */
+        protected boolean filterOutput(final MElement output) {
+            if(outputFilter.filter(outputSchema.getFields(), output)) {
+                return true;
+            }
+            if(logging.containsKey("output_not_matched")) {
+                Logging.log(LOG, logging, "output_not_matched", output);
+            }
+            return false;
+        }
+
     }
 
     private static class StatelessSelectDoFn extends SelectDoFn<MElement> {
@@ -301,8 +339,7 @@ public class SelectTransform extends Transform {
                 }
 
                 for(final MElement output : outputs) {
-                    if(!outputFilter.filter(output)) {
-                        Logging.log(LOG, logging, "output_not_matched", output);
+                    if(!filterOutput(output)) {
                         continue;
                     }
                     final MElement output_ = output.convert(outputSchema);
@@ -369,22 +406,16 @@ public class SelectTransform extends Transform {
             final Map<String, Object> primitiveValues = processStateful(input, bufferState, maxCountState, eventTime);
 
             final List<MElement> outputs = new ArrayList<>();
+            final List<Map<String, Object>> list;
             if(unnest.useUnnest()) {
-                final List<Map<String, Object>> list = unnest.unnest(primitiveValues);
-                for(final Map<String, Object> values : list) {
-                    final MElement output = MElement.of(values, eventTime);
-                    if(!outputFilter.filter(output)) {
-                        Logging.log(LOG, logging, "output_not_matched", output);
-                        continue;
-                    }
-                    final MElement output_ = output.convert(outputSchema);
-                    outputs.add(output_);
-                }
+                list = unnest.unnest(primitiveValues);
             } else {
-                final MElement output = MElement.of(primitiveValues, eventTime);
-                if(!outputFilter.filter(output)) {
-                    Logging.log(LOG, logging, "output_not_matched", output);
-                    return outputs;
+                list = List.of(primitiveValues);
+            }
+            for(final Map<String, Object> values : list) {
+                final MElement output = MElement.of(values, eventTime);
+                if(!filterOutput(output)) {
+                    continue;
                 }
                 final MElement output_ = output.convert(outputSchema);
                 outputs.add(output_);
@@ -610,11 +641,12 @@ public class SelectTransform extends Transform {
             filter.setup();
             select.setup();
             unnest.setup();
+            outputFilter.setup();
         }
 
         @ProcessElement
         public void processElement(ProcessContext c) {
-            // TODO
+            // TODO (apply filterOutput to emitted records when implemented)
         }
     }
 

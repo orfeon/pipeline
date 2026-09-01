@@ -397,9 +397,71 @@ public class SelectTransformTest {
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
 
         PAssert.that(outputs.get("select").getCollection()).satisfies(rows -> {
+            // pins the documented contract: the state is updated before the output filter applies,
+            // so the filtered-out records (10, 20) still contribute to the windowed sums
+            final Map<Long, Long> expectedSums = Map.of(30L, 60L, 40L, 90L);
             int count = 0;
             for (final MElement row : rows) {
-                org.junit.jupiter.api.Assertions.assertTrue((long) row.getPrimitiveValue("field_long") >= 30L);
+                final long fieldLong = (long) row.getPrimitiveValue("field_long");
+                org.junit.jupiter.api.Assertions.assertTrue(fieldLong >= 30L);
+                org.junit.jupiter.api.Assertions.assertEquals(
+                        expectedSums.get(fieldLong), row.getPrimitiveValue("field_long_sum"));
+                count++;
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // outputFilter compares timestamp fields with the typed representation (ISO string literals),
+    // as documented for filter conditions.
+    @Test
+    public void testOutputFilterTimestamp() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - id: a
+                          field_ts: "2025-01-01T00:00:00Z"
+                        - id: b
+                          field_ts: "2025-01-02T00:00:00Z"
+                        - id: c
+                          field_ts: "2025-01-03T00:00:00Z"
+                    schema:
+                      fields:
+                        - name: id
+                          type: string
+                        - name: field_ts
+                          type: timestamp
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: id
+                          field: id
+                        - name: field_ts
+                          field: field_ts
+                      outputFilter:
+                        - key: field_ts
+                          op: ">="
+                          value: "2025-01-02T00:00:00Z"
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("select").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                final String id = row.getPrimitiveValue("id").toString();
+                org.junit.jupiter.api.Assertions.assertTrue("b".equals(id) || "c".equals(id));
                 count++;
             }
             org.junit.jupiter.api.Assertions.assertEquals(2, count);
@@ -443,6 +505,47 @@ public class SelectTransformTest {
                 com.mercari.solution.module.IllegalModuleException.class,
                 () -> MPipeline.apply(pipeline, config));
         org.junit.jupiter.api.Assertions.assertTrue(e.getMessage().contains("outputFilter"), e.getMessage());
+    }
+
+    // The SQL-like text form is validated against the output schema too, and an empty condition
+    // (which would match no record) is rejected at assembly time.
+    @Test
+    public void testOutputFilterValidationTextAndEmpty() throws IOException {
+        final String base = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - value: a
+                    schema:
+                      fields:
+                        - name: value
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: renamed
+                          field: value
+                      outputFilter: %s
+                """;
+
+        final Config textConfig = Config.load(base.formatted("\"renamd = 'a'\""));   // typo'd field in SQL text form
+        final com.mercari.solution.module.IllegalModuleException e1 = org.junit.jupiter.api.Assertions.assertThrows(
+                com.mercari.solution.module.IllegalModuleException.class,
+                () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), textConfig));
+        org.junit.jupiter.api.Assertions.assertTrue(e1.getMessage().contains("outputFilter"), e1.getMessage());
+
+        final Config emptyConfig = Config.load(base.formatted("[]"));
+        final com.mercari.solution.module.IllegalModuleException e2 = org.junit.jupiter.api.Assertions.assertThrows(
+                com.mercari.solution.module.IllegalModuleException.class,
+                () -> MPipeline.apply(TestPipeline.create().enableAbandonedNodeEnforcement(false), emptyConfig));
+        org.junit.jupiter.api.Assertions.assertTrue(e2.getMessage().contains("empty"), e2.getMessage());
     }
 
     // Regression test: json_path `mode: repeated` must yield an array type also when `type` is
