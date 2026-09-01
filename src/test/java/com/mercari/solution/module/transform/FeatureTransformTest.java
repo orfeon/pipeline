@@ -671,6 +671,16 @@ public class FeatureTransformTest {
     }
 
     @Test
+    public void testParallelWavesFoldWithVarianceComponents() throws java.io.IOException {
+        // the category encoding is shrunk with variance-components weights: its compose column (read by the output
+        // only) lands in the last stage, the histRel context stage, whose lambda estimate is then taken over the
+        // wave input so the merge still rides that stage's GroupByKey
+        final String vc = PARALLEL_CONFIG.replace("            - {field: won, stats: [mean]}\n",
+                "            - {field: won, stats: [mean]}\n          shrinkage: {weights: varianceComponents, priorWeight: 1}\n");
+        assertParallelMatchesLinear(vc, 6, List.of("RowId_Pin", "Wave1_FanIn", "_context_Vc"), List.of("Wave1_Merge"));
+    }
+
+    @Test
     public void testParallelWavesWithDeclaredRowId() throws java.io.IOException {
         // engine.rowId names the natural key: no Reshuffle, same result
         assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      lineage:", "      engine: {rowId: [session_id, seller_id]}\n      lineage:"), 6,

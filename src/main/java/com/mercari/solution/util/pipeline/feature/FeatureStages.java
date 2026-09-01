@@ -159,7 +159,8 @@ public final class FeatureStages {
                 if (foldInto != null) {
                     // the merge rides the next stage's GroupByKey: the pieces are keyed by that stage's key and the
                     // rows are reassembled by row id inside each group (ContextStageDoFn)
-                    current = wiring.applyStage(PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections()), foldInto);
+                    // (a variance-components estimate of that stage reads the wave input, not the flattened pieces)
+                    current = wiring.applyStage(PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections()), foldInto, current);
                     w++;
                 } else if (foldGroupBy) {
                     pending = PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections());
@@ -236,29 +237,47 @@ public final class FeatureStages {
             return new TupleTag<>() {};
         }
 
-        /** Every key is an input field or a column evaluated before wave {@code w}: the base rows of the wave carry it. */
+        /**
+         * The fields every branch of wave {@code w} reads from its input: input fields, columns of earlier waves and
+         * the wave's prelude row columns ({@link #preludeColumns}).
+         */
+        Set<String> waveInputFields(final int w) {
+            final Set<String> fields = new HashSet<>(inputNames);
+            for (final Map.Entry<String, Integer> e : waveOfColumn.entrySet()) if (e.getValue() < w) fields.add(e.getKey());
+            for (final OutputColumn c : preludeColumns(w)) fields.add(c.getCanonicalName());
+            return fields;
+        }
+
+        /** Every key is on the wave input (input field, earlier wave, prelude row column): the base rows carry it. */
         boolean keysAvailable(final List<String> keys, final int w) {
-            for (final String k : keys) {
-                if (inputNames.contains(k)) continue;
-                final Integer at = waveOfColumn.get(k);
-                if (at == null || at >= w) return false;
-            }
-            return true;
+            return waveInputFields(w).containsAll(keys);
         }
 
         /**
-         * The next stage when the merge of wave {@code w} can ride its GroupByKey: a single context stage whose
-         * key the base rows already carry and which reads no side input over its input rows (a variance-components
-         * estimate would count the partial rows too).
+         * The next stage when the merge of wave {@code w} can ride its GroupByKey: a single context stage whose key
+         * the base rows already carry. Its variance-components estimate, if any, is taken over the wave input (the
+         * flattened pieces would count the partial rows too), so the fields it reads must be on the wave input.
          */
         Stage foldTarget(final Stage next, final int w) {
             if (next.kind() != StageKind.context || !keysAvailable(next.keys(), w)) return null;
             final List<OutputColumn> stageColumns = new ArrayList<>();
             for (final String name : next.columnNames()) stageColumns.add(columns.get(name));
-            return VarianceComponents.specsOf(stageColumns, columns).isEmpty() ? next : null;
+            final Set<String> available = waveInputFields(w);
+            for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(stageColumns, columns)) {
+                if (!available.containsAll(spec.keys())) return null;
+                if (spec.field() != null && !available.contains(spec.field())) return null;
+                if (spec.offsetColumn() != null && !available.contains(spec.offsetColumn())) return null;
+                if (spec.foldKeys() != null && !available.containsAll(spec.foldKeys())) return null;
+            }
+            return next;
         }
 
         PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage) {
+            return applyStage(current, stage, current);
+        }
+
+        /** One stage on {@code current}; a variance-components estimate of its columns is computed over {@code estimateInput}. */
+        PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage, final PCollection<MElement> estimateInput) {
             final List<OutputColumn> stageColumns = new ArrayList<>();
             for (final String name : stage.columnNames()) stageColumns.add(columns.get(name));
             final StageEvaluator evaluator = new StageEvaluator(stageColumns);
@@ -268,7 +287,7 @@ public final class FeatureStages {
             // variance-components pseudo-counts for the composed columns of this stage (batch side input)
             final List<VarianceComponents.LevelSpec> specs = stage.kind() == StageKind.fit ? List.of() : VarianceComponents.specsOf(stageColumns, columns);
             final PCollectionView<Map<String, Double>> lambdas = specs.isEmpty() ? null
-                    : VarianceComponents.estimate(current, specs, label + "_Vc");
+                    : VarianceComponents.estimate(estimateInput, specs, label + "_Vc");
             final List<PCollectionView<?>> sideInputs = lambdas == null ? List.of() : List.of(lambdas);
             final PCollectionTuple outputs = switch (stage.kind()) {
                 case row -> current.apply(label, ParDo
