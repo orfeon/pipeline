@@ -350,7 +350,8 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   their own inputs — a branch would just recompute them) and `wave` is its depth in that dependency DAG:
   the stages of one wave are mutually independent.
 - **Waves run in parallel.** The engine evaluates the stages of a wave as parallel branches of the same
-  input: each branch emits only its own columns keyed by a row id, and the branches are merged back into
+  input (row columns the wave's stages share — an outcome expression read by several blocks, say — are
+  evaluated on that input first): each branch emits only its own columns keyed by a row id, and the branches are merged back into
   full rows — inside the next stage's GroupByKey when that stage is a single context stage (or the
   `output.groupBy` finalize), otherwise by one row-id GroupByKey per wave. A job therefore pays one
   shuffle barrier per wave (plus the merges) instead of one per keyed stage, and a wave takes as long as

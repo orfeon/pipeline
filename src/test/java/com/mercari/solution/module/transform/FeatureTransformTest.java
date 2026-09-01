@@ -556,8 +556,15 @@ public class FeatureTransformTest {
     // parallel waves (engine doc §9.4): independent stages branch and are merged back by row id
     // ---------------------------------------------------------------------------------------------
 
-    /** Extra blocks: a category encoding (independent of the seller stage) and a context block reading both keyed stages. */
+    /**
+     * Extra blocks: a row expression over an outcome shared by the seller and the category blocks (placed in the
+     * seller stage, the category branch must recompute it), a category encoding (independent of the seller stage)
+     * and a context block reading both keyed stages.
+     */
     private static final String CAT_BLOCK = """
+        - name: won
+          scope: row
+          expr: "sold >= 1"
         - name: cat
           scope: population
           type: encoding
@@ -565,7 +572,7 @@ public class FeatureTransformTest {
             - keys: [category]
           targets:
             - {stats: [count]}
-            - {expr: "sold >= 1", stats: [mean]}
+            - {field: won, stats: [mean]}
 """;
     private static final String HIST_REL_BLOCK = """
         - name: histRel
@@ -576,7 +583,10 @@ public class FeatureTransformTest {
 """;
 
     /** wave 1 = session context + seller keyed + category keyed, wave 2 = the histRel context stage (folded merge). */
-    private static final String PARALLEL_CONFIG = FEATURE_CONFIG.replace("      output:\n", CAT_BLOCK + HIST_REL_BLOCK + "      output:\n");
+    private static final String PARALLEL_CONFIG = FEATURE_CONFIG
+            .replace("            - {type: aggregate, field: start_price, funcs: [count, mean]}\n",
+                    "            - {type: aggregate, field: start_price, funcs: [count, mean]}\n            - {type: aggregate, field: won, funcs: [mean]}\n")
+            .replace("      output:\n", CAT_BLOCK + HIST_REL_BLOCK + "      output:\n");
 
     /** Renders a row as a canonical string (sorted fields, sorted nested maps) so two engine modes can be compared. */
     static String canonical(final Object value) {
@@ -685,6 +695,8 @@ public class FeatureTransformTest {
         // makes it depend on the context stage, i.e. a wave of its own)
         final String grouped = FEATURE_CONFIG
                 .replace("        - name: vs_market\n          scope: row\n          type: residual\n          input: relative_start_price_shareOfTotal\n          baseline: market\n", "")
+                .replace("            - {type: aggregate, field: start_price, funcs: [count, mean]}\n",
+                        "            - {type: aggregate, field: start_price, funcs: [count, mean]}\n            - {type: aggregate, field: won, funcs: [mean]}\n")
                 .replace("      output:\n", CAT_BLOCK + "      output:\n")
                 .replace("prefix: f_", "prefix: f_\n        groupBy: session\n        parentFields: [session_time]");
         final Config config = Config.load(SOURCE_CONFIG + grouped);
@@ -707,6 +719,8 @@ public class FeatureTransformTest {
                     Assertions.assertEquals(200.0, ((Number) m.get("f_recent_n5_start_price_lag1")).doubleValue(), 1e-9);
                     Assertions.assertEquals(2L, ((Number) m.get("f_recent_n5_start_price_count")).longValue());
                     Assertions.assertEquals(2L, ((Number) m.get("f_cat__category__count")).longValue());
+                    // the shared row expression is recomputed on the category branch: electronics won mean over A/s1 (1), B/s1 (0)
+                    Assertions.assertEquals(0.5, ((Number) m.get("f_cat__category__won__mean")).doubleValue(), 1e-9);
                 } else {
                     Assertions.assertEquals(50.0, ((Number) m.get("f_recent_n5_start_price_lag1")).doubleValue(), 1e-9);
                     Assertions.assertEquals(1L, ((Number) m.get("f_cat__category__count")).longValue());

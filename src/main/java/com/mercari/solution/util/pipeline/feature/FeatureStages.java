@@ -141,6 +141,10 @@ public final class FeatureStages {
                     current = wiring.applyStage(current, wave.get(0));
                     continue;
                 }
+                // the row columns the wave's stages host are placed in their first consumer's stage by the scheduler
+                // and carried on by the linear chain; the other branches read the wave input, so every row column
+                // computable from it (input fields, earlier waves, such row columns) is evaluated on it first
+                current = wiring.applyRows(current, "Wave" + (w + 1) + "_Rows", w);
                 // fan-out: every branch reads the wave input and emits only its own columns (+ row id + merge key)
                 final Stage foldInto = w + 1 < waves.size() && waves.get(w + 1).size() == 1 ? wiring.foldTarget(waves.get(w + 1).get(0), w) : null;
                 final boolean foldGroupBy = foldInto == null && w + 1 == waves.size() && groupBy != null && wiring.keysAvailable(groupBy.keys(), w);
@@ -293,6 +297,38 @@ public final class FeatureStages {
                 case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), label, loggings, failFast, outputTag, failureTag);
                 default -> throw new IllegalStateException("unexpected stage kind: " + stage.kind());
             };
+            failures.add(outputs.get(failureTag));
+            return outputs.get(outputTag).setCoder(elementCoder);
+        }
+
+        /**
+         * The row columns hosted by the stages of wave {@code w} that the wave input can evaluate (their inputs are
+         * input fields, columns of earlier waves or such row columns), in expansion order (dependencies first).
+         */
+        List<OutputColumn> preludeColumns(final int w) {
+            final Set<String> available = new HashSet<>(inputNames);
+            for (final Map.Entry<String, Integer> e : waveOfColumn.entrySet()) if (e.getValue() < w) available.add(e.getKey());
+            final List<OutputColumn> prelude = new ArrayList<>();
+            for (final OutputColumn c : plan.getColumns()) {
+                final Integer at = waveOfColumn.get(c.getCanonicalName());
+                if (at == null || at != w || !FeaturePlanCompiler.isRowColumn(c)) continue;
+                if (available.containsAll(c.getInputs())) {
+                    prelude.add(c);
+                    available.add(c.getCanonicalName());
+                }
+            }
+            return prelude;
+        }
+
+        /** Evaluates {@link #preludeColumns} on the wave input before its fan-out (no-op when there are none). */
+        PCollection<MElement> applyRows(final PCollection<MElement> current, final String name, final int w) {
+            final List<OutputColumn> prelude = preludeColumns(w);
+            if (prelude.isEmpty()) return current;
+            final TupleTag<MElement> outputTag = outputTag();
+            final TupleTag<BadRecord> failureTag = failureTag();
+            final PCollectionTuple outputs = current.apply(name, ParDo
+                    .of(new RowStageDoFn(new StageEvaluator(prelude), null, loggings, failFast, failureTag))
+                    .withOutputTags(outputTag, TupleTagList.of(failureTag)));
             failures.add(outputs.get(failureTag));
             return outputs.get(outputTag).setCoder(elementCoder);
         }
