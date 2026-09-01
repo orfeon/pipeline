@@ -135,6 +135,14 @@
         <version>${maven-surefire-plugin.version}</version>
         <configuration>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
+          <environmentVariables>
+            <!-- Isolate unit tests from the developer's gcloud CLI config: Beam's
+                 GcpOptions.DefaultProjectFactory otherwise resolves the machine's ambient
+                 default project, making "projectId is required" validations pass or fail
+                 depending on the machine (e.g. BuildActionTest#testValidation). The
+                 directory does not need to exist. -->
+            <CLOUDSDK_CONFIG>${project.build.directory}/gcloud-config-isolated</CLOUDSDK_CONFIG>
+          </environmentVariables>
           <properties>
             <!-- JUnit 5 parallel execution (equivalent of the former JUnit4 parallel=all/threadCount=4) -->
             <configurationParameters>

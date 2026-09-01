@@ -636,6 +636,20 @@ public class BuildActionTest {
         Assertions.assertTrue(e.getMessage().contains(expected), e.getMessage());
     }
 
+    // The projectId-required branch, asserted on Parameters.validate directly: the pipeline-level
+    // case in testValidation only reaches it when no ambient default GCP project is resolvable
+    // (surefire isolates CLOUDSDK_CONFIG for that; this assertion holds even outside maven).
+    @Test
+    public void testValidateRequiresProjectId() {
+        final BuildAction.Parameters parameters = new BuildAction.Parameters();
+        parameters.op = BuildAction.Op.get;
+        parameters.buildId = "b";
+        final List<String> errors = parameters.validate("step", com.mercari.solution.module.Action.Trigger.once);
+        Assertions.assertTrue(
+                errors.stream().anyMatch(m -> m.contains("projectId is required")),
+                errors.toString());
+    }
+
     @Test
     public void testTemplateLeavesForeignExpressions() {
         final Map<String, Object> data = new HashMap<>();
