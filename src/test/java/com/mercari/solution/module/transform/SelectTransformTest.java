@@ -230,6 +230,221 @@ public class SelectTransformTest {
 
     }
 
+    // outputFilter evaluates conditions on the computed output fields (the filter parameter
+    // only sees input fields), with and/or nesting.
+    @Test
+    public void testOutputFilter() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - path: datasets/dim_users/daily/a.parquet
+                        - path: datasets/events/weekly/b.parquet
+                        - path: datasets/other/daily/c.parquet
+                        - path: datasets/events/hourly/d.parquet
+                        - path: malformed
+                    schema:
+                      fields:
+                        - name: path
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      filter:
+                        - key: path
+                          op: match
+                          value: "^datasets/[^/]+/[^/]+/.+$"
+                      select:
+                        - name: table
+                          text: '${path?split("/")[1]}'
+                        - name: frequency
+                          text: '${path?split("/")[2]}'
+                      outputFilter:
+                        and:
+                          - key: frequency
+                            op: in
+                            value: [daily, weekly, monthly]
+                          - or:
+                              - key: table
+                                op: match
+                                value: "^dim_.*"
+                              - key: table
+                                op: in
+                                value: [events, users]
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("select").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                final String table = row.getPrimitiveValue("table").toString();
+                final String frequency = row.getPrimitiveValue("frequency").toString();
+                org.junit.jupiter.api.Assertions.assertTrue(
+                        ("dim_users".equals(table) && "daily".equals(frequency))
+                                || ("events".equals(table) && "weekly".equals(frequency)));
+                count++;
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // outputFilter applies after flattenField: individual flattened records are filtered.
+    @Test
+    public void testOutputFilterWithFlatten() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - body: '{"items":["a","b"]}'
+                        - body: '{"items":["c"]}'
+                    schema:
+                      fields:
+                        - name: body
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: item
+                          func: json_path
+                          field: body
+                          path: "$.items"
+                          mode: repeated
+                      flattenField: item
+                      outputFilter:
+                        - key: item
+                          op: "!="
+                          value: b
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("select").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                final String item = row.getPrimitiveValue("item").toString();
+                org.junit.jupiter.api.Assertions.assertTrue("a".equals(item) || "c".equals(item));
+                count++;
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // outputFilter also applies on the stateful select path.
+    @Test
+    public void testOutputFilterStateful() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    timestampAttribute: field_ts
+                    parameters:
+                      type: element
+                      elements:
+                        - field_long: 10
+                          field_ts: "2025-01-01T00:00:00Z"
+                        - field_long: 20
+                          field_ts: "2025-01-01T00:00:01Z"
+                        - field_long: 30
+                          field_ts: "2025-01-01T00:00:02Z"
+                        - field_long: 40
+                          field_ts: "2025-01-01T00:00:03Z"
+                    schema:
+                      fields:
+                        - name: field_long
+                          type: int64
+                        - name: field_ts
+                          type: timestamp
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: field_long
+                          field: field_long
+                        - name: field_long_sum
+                          func: sum
+                          field: field_long
+                          range:
+                            count: 3
+                      outputFilter:
+                        - key: field_long
+                          op: ">="
+                          value: 30
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        PAssert.that(outputs.get("select").getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                org.junit.jupiter.api.Assertions.assertTrue((long) row.getPrimitiveValue("field_long") >= 30L);
+                count++;
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(2, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
+
+    // outputFilter field names are validated against the output schema at assembly time.
+    @Test
+    public void testOutputFilterValidation() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - value: a
+                    schema:
+                      fields:
+                        - name: value
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: renamed
+                          field: value
+                      outputFilter:
+                        - key: value
+                          op: "="
+                          value: a
+                """;
+        final Config config = Config.load(configYaml);
+        final com.mercari.solution.module.IllegalModuleException e = org.junit.jupiter.api.Assertions.assertThrows(
+                com.mercari.solution.module.IllegalModuleException.class,
+                () -> MPipeline.apply(pipeline, config));
+        org.junit.jupiter.api.Assertions.assertTrue(e.getMessage().contains("outputFilter"), e.getMessage());
+    }
+
     // Regression test: json_path `mode: repeated` must yield an array type also when `type` is
     // omitted (default string) — it used to be ignored without an explicit `type`, which broke
     // a subsequent flattenField with "is not array type".

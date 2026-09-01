@@ -31,6 +31,7 @@ public class SelectTransform extends Transform {
         private JsonElement filter;
         private JsonArray select;
         private String flattenField;
+        private JsonElement outputFilter;
 
         private List<String> groupFields;
 
@@ -42,12 +43,17 @@ public class SelectTransform extends Transform {
             return flattenField != null;
         }
 
+        public boolean useOutputFilter() {
+            return outputFilter != null && !outputFilter.isJsonNull();
+        }
+
         private void validate(Schema inputSchema) {
             final List<String> errorMessages = new ArrayList<>();
             if((this.filter == null || this.filter.isJsonNull())
-                    && (this.select == null || !this.select.isJsonArray())) {
+                    && (this.select == null || !this.select.isJsonArray())
+                    && !useOutputFilter()) {
 
-                errorMessages.add("requires filter or select parameter.");
+                errorMessages.add("requires filter, select or outputFilter parameter.");
             } else if(this.select != null && this.select.isJsonArray()) {
                 int i=0;
                 for(final JsonElement e : this.select.getAsJsonArray()) {
@@ -88,6 +94,18 @@ public class SelectTransform extends Transform {
 
         final Schema outputSchema = createOutputSchema(inputSchema, parameters);
 
+        // outputFilter references the fields after select / flatten: validate against the output schema
+        // (the SQL-like text form, a JSON primitive, is parsed lazily and not validated here)
+        if(parameters.useOutputFilter() && !parameters.outputFilter.isJsonPrimitive()) {
+            final List<String> errorMessages = new ArrayList<>();
+            for(final String m : Filter.parse(parameters.outputFilter).validate(outputSchema.getFields())) {
+                errorMessages.add("parameters.outputFilter is illegal: " + m);
+            }
+            if(!errorMessages.isEmpty()) {
+                throw new IllegalModuleException(errorMessages);
+            }
+        }
+
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
         final TupleTag<BadRecord> failuresTag = new TupleTag<>() {};
 
@@ -106,12 +124,12 @@ public class SelectTransform extends Transform {
                 if(OptionUtil.isStreaming(inputs)) {
                     statefulSelectDoFn = new StatefulStreamingSelectDoFn(
                             getJobName(), getName(),
-                            inputSchema, outputSchema, parameters.filter, selectFunctions, parameters.flattenField,
+                            inputSchema, outputSchema, parameters.filter, selectFunctions, parameters.flattenField, parameters.outputFilter,
                             getLoggings(), getFailFast(), failuresTag, inputCoder.getValueCoder());
                 } else {
                     statefulSelectDoFn = new StatefulBatchSelectDoFn(
                             getJobName(), getName(),
-                            inputSchema, outputSchema, parameters.filter, selectFunctions, parameters.flattenField,
+                            inputSchema, outputSchema, parameters.filter, selectFunctions, parameters.flattenField, parameters.outputFilter,
                             getLoggings(), getFailFast(), failuresTag, inputCoder.getValueCoder());
                 }
                 outputs = input
@@ -124,7 +142,7 @@ public class SelectTransform extends Transform {
                         .apply("NavigationSelect", ParDo
                                 .of(new NavigationSelectDoFn(
                                         getJobName(), getName(),
-                                        outputSchema, parameters.filter, selectFunctions, parameters.flattenField,
+                                        outputSchema, parameters.filter, selectFunctions, parameters.flattenField, parameters.outputFilter,
                                         getLoggings(), getFailFast(), failuresTag))
                                 .withOutputTags(outputTag, TupleTagList.of(failuresTag)));
             }
@@ -136,7 +154,7 @@ public class SelectTransform extends Transform {
                     .apply("StatelessSelect", ParDo
                             .of(new StatelessSelectDoFn(
                                     getJobName(), getName(),
-                                    outputSchema, parameters.filter, selectFunctions, parameters.flattenField,
+                                    outputSchema, parameters.filter, selectFunctions, parameters.flattenField, parameters.outputFilter,
                                     getLoggings(), getFailFast(), failuresTag))
                             .withOutputTags(outputTag, TupleTagList.of(failuresTag)));
         }
@@ -189,6 +207,7 @@ public class SelectTransform extends Transform {
         protected final Filter filter;
         protected final Select select;
         protected final Unnest unnest;
+        protected final Filter outputFilter;
 
 
         public SelectDoFn(
@@ -199,6 +218,7 @@ public class SelectTransform extends Transform {
                 final JsonElement filterJson,
                 final List<SelectFunction> selectFunctions,
                 final String flattenField,
+                final JsonElement outputFilterJson,
                 //
                 final List<Logging> logging,
                 final boolean failFast,
@@ -216,6 +236,7 @@ public class SelectTransform extends Transform {
             this.filter = Filter.of(filterJson);
             this.select = Select.of(selectFunctions);
             this.unnest = Unnest.of(flattenField);
+            this.outputFilter = Filter.of(outputFilterJson);
         }
 
     }
@@ -230,12 +251,13 @@ public class SelectTransform extends Transform {
                 final JsonElement filterJson,
                 final List<SelectFunction> selectFunctions,
                 final String flattenField,
+                final JsonElement outputFilterJson,
                 //
                 final List<Logging> logging,
                 final boolean failFast,
                 final TupleTag<BadRecord> failuresTag) {
 
-            super(jobName, moduleName, outputSchema, filterJson, selectFunctions, flattenField, logging, failFast, failuresTag);
+            super(jobName, moduleName, outputSchema, filterJson, selectFunctions, flattenField, outputFilterJson, logging, failFast, failuresTag);
         }
 
         @Setup
@@ -243,6 +265,7 @@ public class SelectTransform extends Transform {
             filter.setup();
             select.setup();
             unnest.setup();
+            outputFilter.setup();
         }
 
         @ProcessElement
@@ -278,6 +301,10 @@ public class SelectTransform extends Transform {
                 }
 
                 for(final MElement output : outputs) {
+                    if(!outputFilter.filter(output)) {
+                        Logging.log(LOG, logging, "output_not_matched", output);
+                        continue;
+                    }
                     final MElement output_ = output.convert(outputSchema);
                     c.output(output_);
                     Logging.log(LOG, logging, "output", output_);
@@ -309,12 +336,13 @@ public class SelectTransform extends Transform {
                 final JsonElement filterJson,
                 final List<SelectFunction> selectFunctions,
                 final String flattenField,
+                final JsonElement outputFilterJson,
                 //
                 final List<Logging> logging,
                 final boolean failFast,
                 final TupleTag<BadRecord> failuresTag) {
 
-            super(jobName, moduleName, outputSchema, filterJson, selectFunctions, flattenField, logging, failFast, failuresTag);
+            super(jobName, moduleName, outputSchema, filterJson, selectFunctions, flattenField, outputFilterJson, logging, failFast, failuresTag);
             this.inputSchema = inputSchema;
             this.maxRange = StatefulFunction.calcMaxRange(selectFunctions);
         }
@@ -323,6 +351,7 @@ public class SelectTransform extends Transform {
             filter.setup();
             select.setup();
             unnest.setup();
+            outputFilter.setup();
             stateAvroSchema = Select.createStateAvroSchema(inputSchema, select.getSelectFunctions());
         }
 
@@ -344,11 +373,19 @@ public class SelectTransform extends Transform {
                 final List<Map<String, Object>> list = unnest.unnest(primitiveValues);
                 for(final Map<String, Object> values : list) {
                     final MElement output = MElement.of(values, eventTime);
+                    if(!outputFilter.filter(output)) {
+                        Logging.log(LOG, logging, "output_not_matched", output);
+                        continue;
+                    }
                     final MElement output_ = output.convert(outputSchema);
                     outputs.add(output_);
                 }
             } else {
                 final MElement output = MElement.of(primitiveValues, eventTime);
+                if(!outputFilter.filter(output)) {
+                    Logging.log(LOG, logging, "output_not_matched", output);
+                    return outputs;
+                }
                 final MElement output_ = output.convert(outputSchema);
                 outputs.add(output_);
             }
@@ -405,13 +442,14 @@ public class SelectTransform extends Transform {
                 final JsonElement filterJson,
                 final List<SelectFunction> selectFunctions,
                 final String flattenField,
+                final JsonElement outputFilterJson,
                 //
                 final List<Logging> logging,
                 final boolean failFast,
                 final TupleTag<BadRecord> failuresTag,
                 final Coder<MElement> inputCoder) {
 
-            super(jobName, moduleName, inputSchema, outputSchema, filterJson, selectFunctions, flattenField, logging, failFast, failuresTag);
+            super(jobName, moduleName, inputSchema, outputSchema, filterJson, selectFunctions, flattenField, outputFilterJson, logging, failFast, failuresTag);
 
             this.bufferStateSpec = StateSpecs.orderedList(inputCoder);
             this.maxCountTimeStateSpec = StateSpecs.value(InstantCoder.of());
@@ -486,13 +524,14 @@ public class SelectTransform extends Transform {
                 final JsonElement filterJson,
                 final List<SelectFunction> selectFunctions,
                 final String flattenField,
+                final JsonElement outputFilterJson,
                 //
                 final List<Logging> logging,
                 final boolean failFast,
                 final TupleTag<BadRecord> failuresTag,
                 final Coder<MElement> inputCoder) {
 
-            super(jobName, moduleName, inputSchema, outputSchema, filterJson, selectFunctions, flattenField, logging, failFast, failuresTag);
+            super(jobName, moduleName, inputSchema, outputSchema, filterJson, selectFunctions, flattenField, outputFilterJson, logging, failFast, failuresTag);
 
             this.bufferStateSpec = StateSpecs.orderedList(inputCoder);
             this.maxCountTimeStateSpec = StateSpecs.value(InstantCoder.of());
@@ -557,12 +596,13 @@ public class SelectTransform extends Transform {
                 final JsonElement filterJson,
                 final List<SelectFunction> selectFunctions,
                 final String flattenField,
+                final JsonElement outputFilterJson,
                 //
                 final List<Logging> logging,
                 final boolean failFast,
                 final TupleTag<BadRecord> failuresTag) {
 
-            super(jobName, moduleName, outputSchema, filterJson, selectFunctions, flattenField, logging, failFast, failuresTag);
+            super(jobName, moduleName, outputSchema, filterJson, selectFunctions, flattenField, outputFilterJson, logging, failFast, failuresTag);
         }
 
         @Setup

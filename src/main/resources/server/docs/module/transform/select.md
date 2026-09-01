@@ -3,7 +3,7 @@ type: Transform Module
 title: Select Transform Module
 description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
 tags: [transform, select, filter, batch, streaming, field, projection]
-timestamp: 2026-06-23T00:00:00Z
+timestamp: 2026-09-01T00:00:00Z
 ---
 
 # Select Transform Module
@@ -12,7 +12,7 @@ Transform Module for filtering rows by specified filter conditions and transform
 
 Supports:
 
-- **Row filtering** - Filter records using [Filter](../common/filter.md) conditions.
+- **Row filtering** - Filter records using [Filter](../common/filter.md) conditions, on the input fields (`filter`) or on the computed output fields (`outputFilter`).
 - **Field projection** - Select, rename, and reorder fields.
 - **Type casting** - Convert field values to different types.
 - **Computed fields** - Create new fields using mathematical expressions (Lucene expressions) or FreeMarker templates.
@@ -34,13 +34,14 @@ Supports:
 
 ## Select transform module parameters
 
-At least one of `filter` or `select` is required.
+At least one of `filter`, `select` or `outputFilter` is required.
 
 | parameter    | optional           | type                                   | description                                                                                                                                                                                                                   |
 |--------------|--------------------|----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| filter       | selective required | [Filter](../common/filter.md)          | Filter condition for rows. Records that do not match are discarded. At least one of `filter` or `select` is required.                                                                                                         |
-| select       | selective required | Array<[SelectField](#select-fields)\>  | List of field definitions for projecting, renaming, transforming, or computing output fields. At least one of `filter` or `select` is required. When specified, only the defined fields are included in the output.             |
+| filter       | selective required | [Filter](../common/filter.md)          | Filter condition for rows, evaluated on the **input** fields before `select`. Records that do not match are discarded.                                                                                                         |
+| select       | selective required | Array<[SelectField](#select-fields)\>  | List of field definitions for projecting, renaming, transforming, or computing output fields. When specified, only the defined fields are included in the output.             |
 | flattenField | optional           | String                                 | Name of an array field to flatten (unnest). Each array element produces a separate output record. Applied after `select`.                                                                                                     |
+| outputFilter | selective required | [Filter](../common/filter.md)          | Filter condition for rows, evaluated on the **output** fields after `select` and `flattenField` — use it to filter on computed fields (the `filter` parameter only sees input fields). Records that do not match are discarded (not treated as failures). Field names are validated against the output schema at assembly time. The [aggregation](aggregation.md) module's `filter` parameter is the equivalent for aggregation results. |
 | groupFields  | optional           | Array<String\>                         | Field names for grouping. Required when using stateful select functions (e.g. `lag`, windowed aggregations). Records are grouped by these fields and stateful functions operate within each group independently.                |
 
 ## Processing flow
@@ -48,6 +49,7 @@ At least one of `filter` or `select` is required.
 1. **Filter** - If `filter` is specified, records not matching the condition are discarded.
 2. **Select** - If `select` is specified, each select field function is applied in order. Output fields from earlier functions can be referenced by later functions.
 3. **Flatten** - If `flattenField` is specified, the named array field is unnested into multiple records.
+4. **Output filter** - If `outputFilter` is specified, output records not matching the condition are discarded. Stateful functions still observe the record (the state is updated before the output filter applies).
 
 When `groupFields` is specified and select functions include stateful functions, records are grouped by key and processed with per-key state (ordered by event time in batch mode).
 
@@ -1180,4 +1182,40 @@ transforms:
             key: status
             op: "="
             value: "cancelled"
+```
+
+### Example 18: Output filter on computed fields
+
+Extract fields from a path with FreeMarker templates, then keep only the records whose
+computed fields match — the `filter` parameter only sees input fields, so conditions on
+computed fields go in `outputFilter`.
+
+```yaml
+transforms:
+  - name: targets
+    module: select
+    inputs:
+      - files
+    parameters:
+      filter:                      # input filter: validate the raw path structure
+        - key: path
+          op: match
+          value: "^datasets/[^/]+/[^/]+/.+$"
+      select:
+        - name: table
+          text: '${path?split("/")[1]}'
+        - name: frequency
+          text: '${path?split("/")[2]}'
+      outputFilter:                # output filter: conditions on the computed fields
+        and:
+          - key: frequency
+            op: in
+            value: [daily, weekly, monthly]
+          - or:
+              - key: table
+                op: match
+                value: "^dim_.*"
+              - key: table
+                op: in
+                value: [events, users]
 ```
