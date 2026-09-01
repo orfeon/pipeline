@@ -229,4 +229,56 @@ public class SelectTransformTest {
         pipeline.run();
 
     }
+
+    // Regression test: json_path `mode: repeated` must yield an array type also when `type` is
+    // omitted (default string) — it used to be ignored without an explicit `type`, which broke
+    // a subsequent flattenField with "is not array type".
+    @Test
+    public void testJsonPathRepeatedModeWithoutType() throws IOException {
+        final String configYaml = """
+                sources:
+                  - name: create
+                    module: create
+                    parameters:
+                      type: element
+                      elements:
+                        - body: '{"items":["a","b"]}'
+                        - body: '{"items":["c"]}'
+                    schema:
+                      fields:
+                        - name: body
+                          type: string
+                transforms:
+                  - name: select
+                    module: select
+                    inputs:
+                      - create
+                    parameters:
+                      select:
+                        - name: item
+                          func: json_path
+                          field: body
+                          path: "$.items"
+                          mode: repeated
+                      flattenField: item
+                """;
+        final Config config = Config.load(configYaml);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+
+        final MCollection output = outputs.get("select");
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                final String item = row.getPrimitiveValue("item").toString();
+                org.junit.jupiter.api.Assertions.assertTrue(
+                        "a".equals(item) || "b".equals(item) || "c".equals(item));
+                count++;
+            }
+            org.junit.jupiter.api.Assertions.assertEquals(3, count);
+            return null;
+        });
+
+        pipeline.run();
+    }
 }

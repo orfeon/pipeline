@@ -245,7 +245,13 @@ public class PartitionTransform extends Transform {
                     if (Filter.filter(setting.conditionNode, inputSchema, input)) {
                         final MElement result;
                         if(setting.selectFunctions.isEmpty()) {
-                            result = MElement.of(setting.schema, input.asPrimitiveMap(), c.timestamp());
+                            // pass the value through with its original backing data type: the partition's
+                            // output coder is built from the (union) input schema, so rebuilding the element
+                            // as a primitive map would not match the coder's backing data type (e.g. AVRO).
+                            // The index is reset because that coder holds a single union schema.
+                            result = input.getIndex() == 0
+                                    ? input
+                                    : MElement.of(0, input.getType(), input.getValue(), input.getEpochMillis());
                         } else {
                             final Map<String, Object> values = SelectFunction.apply(setting.selectFunctions, input, c.timestamp());
                             result = MElement.of(setting.schema, values, c.timestamp());
