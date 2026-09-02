@@ -376,10 +376,14 @@ public class ProfileAccumulator implements Serializable {
                 nullCount += 1;
                 return null;
             }
+            if(value == ProfileRow.Marker.ERROR) {
+                errorCount += 1;
+                return null;
+            }
             try {
                 switch (fieldSpec.profileType) {
                     case NUMERIC -> {
-                        final Double v = ProfileSpec.toDouble(value);
+                        final Double v = ProfileSpec.toDouble(value, fieldSpec.scale);
                         if(v == null) {
                             errorCount += 1;
                             return null;
@@ -463,13 +467,7 @@ public class ProfileAccumulator implements Serializable {
         }
 
         private static Integer arrayLength(final Object value) {
-            if(value instanceof java.util.Collection<?> c) {
-                return c.size();
-            }
-            if(value.getClass().isArray()) {
-                return java.lang.reflect.Array.getLength(value);
-            }
-            return null;
+            return ProfileSpec.arrayLength(value);
         }
 
         private static String canonicalNumeric(final double v) {

@@ -6,6 +6,7 @@ import com.mercari.solution.util.pipeline.profile.ProfileAccumulator;
 import com.mercari.solution.util.pipeline.profile.ProfileAxis;
 import com.mercari.solution.util.pipeline.profile.ProfileCombineFn;
 import com.mercari.solution.util.pipeline.profile.ProfileRenderer;
+import com.mercari.solution.util.pipeline.profile.ProfileRow;
 import com.mercari.solution.util.pipeline.profile.ProfileSpec;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -86,7 +87,7 @@ public class ProfileReportPreviewTest {
             values.put("sold_flag", random.nextDouble() < 0.35);
             values.put("description", random.nextDouble() < 0.6 ? "A nice item number " + i : "");
             values.put("created_at", base + (long) (random.nextDouble() * 180) * 86400_000_000L);
-            final MElement element = MElement.of(values, 1735689600000L);
+            final ProfileRow element = ProfileRow.of(spec, MElement.of(values, 1735689600000L));
             acc = fn.addInput(acc, element);
             for(final ProfileAxis axis : axes) {
                 final String group = axis.groupValue(values.get(axis.field));

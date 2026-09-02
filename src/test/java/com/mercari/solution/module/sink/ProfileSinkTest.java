@@ -1,6 +1,7 @@
 package com.mercari.solution.module.sink;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mercari.solution.MPipeline;
@@ -11,6 +12,7 @@ import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.profile.ProfileAccumulator;
 import com.mercari.solution.util.pipeline.profile.ProfileCombineFn;
 import com.mercari.solution.util.pipeline.profile.ProfileRenderer;
+import com.mercari.solution.util.pipeline.profile.ProfileRow;
 import com.mercari.solution.util.pipeline.profile.ProfileSpec;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -484,7 +486,7 @@ public class ProfileSinkTest {
         ProfileAccumulator first = fn.createAccumulator();
         ProfileAccumulator second = fn.createAccumulator();
         for(int i = 0; i < 1000; i++) {
-            final MElement element = element(i);
+            final ProfileRow element = ProfileRow.of(spec, element(i));
             single = fn.addInput(single, element);
             if(i < 500) {
                 first = fn.addInput(first, element);
@@ -496,8 +498,8 @@ public class ProfileSinkTest {
         ProfileAccumulator merged = fn.mergeAccumulators(List.of(first, second));
 
         // adding inputs after a merge must keep working (Beam may do this)
-        merged = fn.addInput(merged, element(1000));
-        single = fn.addInput(single, element(1000));
+        merged = fn.addInput(merged, ProfileRow.of(spec, element(1000)));
+        single = fn.addInput(single, ProfileRow.of(spec, element(1000)));
         merged = roundTrip(merged);
 
         Assertions.assertEquals(single.getRowCount(), merged.getRowCount());
@@ -553,6 +555,299 @@ public class ProfileSinkTest {
         }
         try(final ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
             return (ProfileAccumulator) in.readObject();
+        }
+    }
+
+    @Test
+    public void testScriptTagInValueCannotBreakOutOfJsonBlock() {
+        final Schema schema = Schema.builder()
+                .withField("s", Schema.FieldType.STRING)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", true, false);
+        final ProfileCombineFn fn = new ProfileCombineFn(spec);
+        final String hostile = "</script><script>alert(document.cookie)</script>";
+        ProfileAccumulator acc = fn.createAccumulator();
+        for(int i = 0; i < 50; i++) {
+            final Map<String, Object> values = new HashMap<>();
+            values.put("s", i % 2 == 0 ? hostile : "plain");
+            acc = fn.addInput(acc, ProfileRow.of(spec, MElement.of(values, 0L)));
+        }
+        final ProfileRenderer.Config config = new ProfileRenderer.Config();
+        config.title = "hostile";
+        final ProfileRenderer.Result result = ProfileRenderer.render(acc, config);
+
+        // the hostile value never appears verbatim in the html (top-K label and sample rows)
+        Assertions.assertFalse(result.html.contains(hostile), "raw </script> value leaked into the html");
+        // yet the embedded blocks still parse to the original value
+        final JsonObject payload = extractJsonBlock(result.html, "profile-payload");
+        final JsonArray topK = payload.getAsJsonArray("fields").get(0).getAsJsonObject()
+                .getAsJsonObject("string").getAsJsonArray("topK");
+        boolean found = false;
+        for(final JsonElement item : topK) {
+            found |= hostile.equals(item.getAsJsonObject().get("value").getAsString());
+        }
+        Assertions.assertTrue(found, "top-K label lost after escaping");
+        // a report with such values can still be read back for compareWith
+        final ProfileRenderer.PastReport past = ProfileRenderer.PastReport.parse("past.html", result.html);
+        Assertions.assertEquals(payload, JsonParser.parseString(past.payloadJson).getAsJsonObject());
+        extractJsonBlock(result.html, "profile-manifest");
+        extractJsonBlock(result.html, "profile-sketches");
+    }
+
+    @Test
+    public void testNonFiniteSampleValuesBecomeNull() {
+        final Schema schema = Schema.builder()
+                .withField("x", Schema.FieldType.FLOAT64)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", true, false);
+        final ProfileCombineFn fn = new ProfileCombineFn(spec);
+        ProfileAccumulator acc = fn.createAccumulator();
+        for(int i = 0; i < 20; i++) {
+            final Map<String, Object> values = new HashMap<>();
+            values.put("x", i % 3 == 0 ? Double.NaN : (i % 3 == 1 ? Double.POSITIVE_INFINITY : (double) i));
+            acc = fn.addInput(acc, ProfileRow.of(spec, MElement.of(values, 0L)));
+        }
+        final ProfileRenderer.Config config = new ProfileRenderer.Config();
+        config.title = "nan";
+        final ProfileRenderer.Result result = ProfileRenderer.render(acc, config);
+
+        Assertions.assertFalse(result.payloadJson.contains("NaN"), "bare NaN in payload: " + result.payloadJson);
+        Assertions.assertFalse(result.payloadJson.contains("Infinity"), "bare Infinity in payload");
+        final JsonObject payload = JsonParser.parseString(result.payloadJson).getAsJsonObject();
+        final JsonObject numeric = payload.getAsJsonArray("fields").get(0).getAsJsonObject().getAsJsonObject("numeric");
+        Assertions.assertEquals(7, numeric.get("nanCount").getAsLong());
+        Assertions.assertEquals(7, numeric.get("infCount").getAsLong());
+        int nulls = 0;
+        for(final JsonElement row : payload.getAsJsonObject("sample").getAsJsonArray("rows")) {
+            if(row.getAsJsonArray().get(0).isJsonNull()) {
+                nulls += 1;
+            }
+        }
+        Assertions.assertEquals(14, nulls);
+    }
+
+    @Test
+    public void testNarrowRangeAtLargeMagnitudeRendersHistogram() {
+        // consecutive equal-width split points collide in double precision here (spacing < ulp)
+        final Schema schema = Schema.builder()
+                .withField("seq", Schema.FieldType.INT64)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false);
+        final ProfileCombineFn fn = new ProfileCombineFn(spec);
+        ProfileAccumulator acc = fn.createAccumulator();
+        for(int i = 0; i < 1000; i++) {
+            final Map<String, Object> values = new HashMap<>();
+            values.put("seq", 100_000_000_000_000_000L + i);
+            acc = fn.addInput(acc, ProfileRow.of(spec, MElement.of(values, 0L)));
+        }
+        final ProfileRenderer.Config config = new ProfileRenderer.Config();
+        config.title = "narrow";
+        config.axes = List.of();
+        config.comparePairs = List.<String[]>of(new String[] { "seq", "seq" });
+        final ProfileRenderer.Result result = ProfileRenderer.render(acc, config);
+
+        final JsonObject payload = JsonParser.parseString(result.payloadJson).getAsJsonObject();
+        final JsonObject numeric = payload.getAsJsonArray("fields").get(0).getAsJsonObject().getAsJsonObject("numeric");
+        final JsonArray edges = numeric.getAsJsonObject("histogram").getAsJsonArray("edges");
+        final JsonArray counts = numeric.getAsJsonObject("histogram").getAsJsonArray("counts");
+        Assertions.assertTrue(edges.size() >= 2 && edges.size() < 257, "edges: " + edges.size());
+        Assertions.assertEquals(edges.size() - 1, counts.size());
+        for(int i = 1; i < edges.size(); i++) {
+            Assertions.assertTrue(edges.get(i).getAsDouble() > edges.get(i - 1).getAsDouble(), "edges not increasing");
+        }
+        long total = 0;
+        for(final JsonElement c : counts) {
+            total += c.getAsLong();
+        }
+        Assertions.assertEquals(1000, total);
+        final JsonArray cdfPoints = numeric.getAsJsonObject("cdf").getAsJsonArray("points");
+        for(int i = 1; i < cdfPoints.size(); i++) {
+            Assertions.assertTrue(cdfPoints.get(i).getAsDouble() > cdfPoints.get(i - 1).getAsDouble(), "cdf points not increasing");
+        }
+        // declared pair on the same narrow field also renders
+        Assertions.assertFalse(payload.getAsJsonArray("fieldPairs").get(0).getAsJsonObject().has("error"));
+    }
+
+    @Test
+    public void testDecimalBytesAreProfiledAsNumbers() {
+        // Avro decimal logical type: unscaled two's-complement big-endian bytes
+        final java.math.BigDecimal decimal = new java.math.BigDecimal("1234.567890000");
+        final byte[] unscaled = decimal.unscaledValue().toByteArray();
+        Assertions.assertEquals(1234.56789, ProfileSpec.toDouble(java.nio.ByteBuffer.wrap(unscaled), 9), 1e-9);
+        Assertions.assertEquals(1234.56789, ProfileSpec.toDouble(unscaled, 9), 1e-9);
+        Assertions.assertEquals(-0.5, ProfileSpec.toDouble(new java.math.BigDecimal("-0.5")), 1e-12);
+
+        final Schema schema = Schema.builder()
+                .withField("price", Schema.FieldType.decimal(38, 9))
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false);
+        Assertions.assertEquals(9, spec.getFields().get(0).scale);
+        final Map<String, Object> values = new HashMap<>();
+        values.put("price", java.nio.ByteBuffer.wrap(unscaled));
+        final ProfileRow row = ProfileRow.of(spec, MElement.of(values, 0L));
+        Assertions.assertEquals(1234.56789, (Double) row.values[0], 1e-9);
+        Assertions.assertFalse(row.isFailed());
+    }
+
+    @Test
+    public void testNestedStructAsJsonStringIsNavigated() {
+        // Spanner STRUCT columns arrive as a JSON string from the primitive accessor
+        final Schema schema = Schema.builder()
+                .withField("id", Schema.FieldType.INT64)
+                .withField("address", Schema.FieldType.element(Schema.builder()
+                        .withField("city", Schema.FieldType.STRING)
+                        .withField("zip", Schema.FieldType.INT64)
+                        .withField("moved_at", Schema.FieldType.TIMESTAMP)
+                        .build()))
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false);
+        Assertions.assertEquals(List.of("id", "address.city", "address.zip", "address.moved_at"),
+                spec.getFields().stream().map(f -> f.path).toList());
+
+        final Map<String, Object> values = new HashMap<>();
+        values.put("id", 1L);
+        values.put("address", "{\"city\":\"Tokyo\",\"zip\":1000001,\"moved_at\":\"2025-03-01T00:00:00Z\"}");
+        final ProfileRow row = ProfileRow.of(spec, MElement.of(values, 0L));
+        Assertions.assertEquals("Tokyo", row.values[1]);
+        Assertions.assertEquals(1000001d, (Double) row.values[2], 0d);
+        Assertions.assertEquals((double) Instant.parse("2025-03-01T00:00:00Z").toEpochMilli(), (Double) row.values[3], 0d);
+        Assertions.assertFalse(row.isFailed());
+
+        // a nested map (every other data type) takes the same path
+        values.put("address", Map.of("city", "Osaka", "zip", 5300001L));
+        final ProfileRow mapRow = ProfileRow.of(spec, MElement.of(values, 0L));
+        Assertions.assertEquals("Osaka", mapRow.values[1]);
+        Assertions.assertNull(mapRow.values[3]);
+    }
+
+    @Test
+    public void testUnconvertibleValueIsAFieldErrorNotARowFailure() {
+        final Schema schema = Schema.builder()
+                .withField("x", Schema.FieldType.FLOAT64)
+                .withField("s", Schema.FieldType.STRING)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false);
+        final Map<String, Object> values = new HashMap<>();
+        values.put("x", Map.of("not", "a number"));
+        values.put("s", "fine");
+        final ProfileRow row = ProfileRow.of(spec, MElement.of(values, 0L));
+        Assertions.assertSame(ProfileRow.Marker.ERROR, row.values[0]);
+        Assertions.assertEquals("fine", row.values[1]);
+        Assertions.assertFalse(row.isFailed());
+
+        final ProfileCombineFn fn = new ProfileCombineFn(spec);
+        final ProfileAccumulator acc = fn.addInput(fn.createAccumulator(), row);
+        Assertions.assertEquals(1, acc.getRowCount());
+        Assertions.assertEquals(0, acc.getErrorCount());
+        Assertions.assertEquals(1, acc.getField(0).errorCount);
+        Assertions.assertEquals(1, acc.getField(1).count);
+    }
+
+    @Test
+    public void testNonGlobalWindowIsRejected() throws Exception {
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": {
+                        "type": "element",
+                        "elements": [{ "id": 1, "created_at": "2025-01-01T00:00:00Z" }]
+                      },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "long" },
+                          { "name": "created_at", "type": "timestamp" }
+                        ]
+                      },
+                      "timestampAttribute": "created_at"
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "profile",
+                      "module": "profile",
+                      "inputs": ["create"],
+                      "strategy": { "window": { "type": "fixed", "unit": "day", "size": 1, "offset": 0 } },
+                      "parameters": { "output": "%s" }
+                    }
+                  ]
+                }
+                """.formatted(tempDir.resolve("windowed.html").toString().replace('\\', '/'));
+        final Config config = Config.load(configJson);
+        final Throwable e = Assertions.assertThrows(Throwable.class, () -> MPipeline.apply(pipeline, config));
+        boolean found = false;
+        for(Throwable t = e; t != null; t = t.getCause()) {
+            found |= t.getMessage() != null && t.getMessage().contains("requires the global window");
+        }
+        Assertions.assertTrue(found, "unexpected error: " + e);
+    }
+
+    @Test
+    public void testSegmentGroupsAreBoundedInPipeline() throws Exception {
+        final Path reportPath = tempDir.resolve("report_segments.html");
+        final String output = reportPath.toString().replace('\\', '/');
+        final int groups = 50;
+        final StringBuilder elements = new StringBuilder();
+        // 50 groups of 8 rows, then 10 extra rows for each of the last 5 groups (18 rows each)
+        for(int i = 0; i < 450; i++) {
+            if(i > 0) {
+                elements.append(",");
+            }
+            final int group = i < 400 ? i % groups : groups - 5 + (i - 400) % 5;
+            elements.append(String.format("{ \"id\": %d, \"category\": \"cat%02d\" }", i, group));
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": { "type": "element", "elements": [%s] },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "long" },
+                          { "name": "category", "type": "string" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "profile",
+                      "module": "profile",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "%s",
+                        "segments": [{ "field": "category", "topK": 5 }]
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements, output);
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        PAssert.that(outputs.get("profile").getCollection()).satisfies(results -> {
+            int count = 0;
+            for(final MElement result : results) {
+                Assertions.assertEquals(450L, result.getAsLong("rows"));
+                Assertions.assertEquals(0L, result.getAsLong("errorRows"));
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+
+        final JsonObject payload = extractJsonBlock(Files.readString(reportPath), "profile-payload");
+        final JsonObject axis = payload.getAsJsonArray("comparisons").get(0).getAsJsonObject();
+        final JsonArray kept = axis.getAsJsonArray("groups");
+        Assertions.assertEquals(5, kept.size());
+        Assertions.assertEquals(groups - 5, axis.get("truncatedGroups").getAsInt());
+        // only the largest groups survive the in-pipeline bound
+        for(final JsonElement g : kept) {
+            Assertions.assertEquals(18L, g.getAsJsonObject().get("rows").getAsLong(), "a small group was kept: " + g);
         }
     }
 

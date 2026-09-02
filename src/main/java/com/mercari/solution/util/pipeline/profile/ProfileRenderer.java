@@ -3,6 +3,7 @@ package com.mercari.solution.util.pipeline.profile;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.apache.datasketches.cpc.CpcSketch;
@@ -124,6 +125,19 @@ public class ProfileRenderer {
             final java.util.Map<String, ProfileAccumulator> subProfiles,
             final PastReport past,
             final Config config) {
+        return render(accumulator, subProfiles, past, config, null);
+    }
+
+    /**
+     * @param groupTotals total distinct groups per axis id (from the pipeline, when the groups were
+     *                    bounded before the shuffle); null derives the count from {@code subProfiles}
+     */
+    public static Result render(
+            final ProfileAccumulator accumulator,
+            final java.util.Map<String, ProfileAccumulator> subProfiles,
+            final PastReport past,
+            final Config config,
+            final java.util.Map<String, Long> groupTotals) {
 
         final Result result = new Result();
         int bins = config.histogramBins;
@@ -131,7 +145,7 @@ public class ProfileRenderer {
         int groupLimit = Integer.MAX_VALUE;
         boolean embedSketches = config.embedSketches;
 
-        String payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit).toString();
+        String payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
         String sketches = embedSketches ? buildSketches(accumulator, config).toString() : null;
 
         // degradation order: sketches → sample rows → histogram resolution → top segments only
@@ -141,17 +155,17 @@ public class ProfileRenderer {
         }
         if(tooLarge(payload, sketches, config.embedLimitBytes) && sampleRows > 100) {
             sampleRows = 100;
-            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit).toString();
+            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
             result.degradations.add("sample rows in payload reduced to 100 (size limit exceeded)");
         }
         if(tooLarge(payload, sketches, config.embedLimitBytes) && bins > 64) {
             bins = 64;
-            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit).toString();
+            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
             result.degradations.add("histogram resolution reduced to 64 bins (size limit exceeded)");
         }
         if(tooLarge(payload, sketches, config.embedLimitBytes) && !config.axes.isEmpty()) {
             groupLimit = 5;
-            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit).toString();
+            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
             result.degradations.add("comparison groups limited to the top 5 per axis (size limit exceeded)");
         }
 
@@ -161,13 +175,69 @@ public class ProfileRenderer {
         result.html = template
                 .replace("__PROFILE_TITLE__", escapeHtml(config.title))
                 .replace("__PROFILE_STATIC__", buildStaticTable(accumulator))
-                .replace("__PROFILE_PAYLOAD__", payload)
-                .replace("__PROFILE_MANIFEST__", manifest)
-                .replace("__PROFILE_SKETCHES__", sketches == null ? "{}" : sketches);
+                .replace("__PROFILE_PAYLOAD__", embedJson(payload))
+                .replace("__PROFILE_MANIFEST__", embedJson(manifest))
+                .replace("__PROFILE_SKETCHES__", sketches == null ? "{}" : embedJson(sketches));
         result.payloadJson = payload;
         result.manifestJson = manifest;
         result.sketchesJson = sketches;
         return result;
+    }
+
+    /**
+     * Makes JSON text safe to splice into a {@code <script type="application/json">} block: a data
+     * value containing {@code </script>} (or {@code <!--}) would otherwise terminate the block early
+     * and hand the rest of the value to the HTML parser. {@code <} only ever occurs inside JSON
+     * strings, and {@code <} is the same string to JSON.parse, so the payload is unchanged.
+     */
+    static String embedJson(final String json) {
+        return json.replace("<", "\\u003c");
+    }
+
+    /**
+     * Strictly increasing equal-width edges from {@code min} to {@code max} (at most {@code bins}
+     * intervals). Consecutive points that collide in double precision (large magnitude, narrow
+     * range) are dropped, since the sketch PMF/CDF queries require monotonically increasing split
+     * points. Returns {@code [min, max]} when the range is empty.
+     */
+    static double[] equalWidthEdges(final double min, final double max, final int bins) {
+        if(!(max > min)) {
+            return new double[] { min, max };
+        }
+        final double[] edges = new double[bins + 1];
+        int n = 0;
+        edges[n++] = min;
+        for(int i = 1; i < bins; i++) {
+            final double edge = min + (max - min) * i / bins;
+            if(edge > edges[n - 1] && edge < max) {
+                edges[n++] = edge;
+            }
+        }
+        edges[n++] = max;
+        return n == edges.length ? edges : java.util.Arrays.copyOf(edges, n);
+    }
+
+    /** The interior points of {@code edges}: the split points for PMF/CDF queries over those bins. */
+    static double[] interiorPoints(final double[] edges) {
+        final double[] points = new double[Math.max(0, edges.length - 2)];
+        System.arraycopy(edges, 1, points, 0, points.length);
+        return points;
+    }
+
+    /** Bin shares of {@code kll} over {@code edges} (edges.length - 1 values); a single bin needs no query. */
+    static double[] pmfOverEdges(final KllDoublesSketch kll, final double[] edges) {
+        if(edges.length < 3) {
+            return new double[] { 1d };
+        }
+        return kll.getPMF(interiorPoints(edges), QuantileSearchCriteria.INCLUSIVE);
+    }
+
+    /** Cumulative ranks of {@code kll} at each interior edge plus 1.0 at the last (edges.length - 1 values). */
+    static double[] cdfOverEdges(final KllDoublesSketch kll, final double[] edges) {
+        if(edges.length < 3) {
+            return new double[] { 1d };
+        }
+        return kll.getCDF(interiorPoints(edges), QuantileSearchCriteria.INCLUSIVE);
     }
 
     private static boolean tooLarge(final String payload, final String sketches, final long limit) {
@@ -198,7 +268,8 @@ public class ProfileRenderer {
             final Config config,
             final int bins,
             final int sampleRows,
-            final int groupLimit) {
+            final int groupLimit,
+            final java.util.Map<String, Long> groupTotals) {
 
         final ProfileSpec spec = accumulator.getSpec();
         final ProfileSpec.SketchParameters params = spec.getSketchParameters();
@@ -226,7 +297,7 @@ public class ProfileRenderer {
         payload.add("fields", fields);
 
         if(withOverlay) {
-            final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit);
+            final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit, groupTotals);
             annotateBaselineDrift(comparisons, fields, config);
             payload.add("comparisons", comparisons);
         }
@@ -389,53 +460,39 @@ public class ProfileRenderer {
         return numeric;
     }
 
-    /** Equal-width PMF histogram: {@code edges} has bins+1 entries, {@code counts} has bins entries. */
+    /** Equal-width PMF histogram: {@code edges} has one more entry than {@code counts} (at most bins+1). */
     private static JsonObject buildHistogram(
             final KllDoublesSketch kll, final double min, final double max, final int bins, final long count) {
 
         final JsonObject histogram = new JsonObject();
-        final JsonArray edges = new JsonArray();
+        final double[] edges = equalWidthEdges(min, max, bins);
         final JsonArray counts = new JsonArray();
-        if(max <= min) {
-            edges.add(min);
-            edges.add(max);
+        if(edges.length < 3) {
             counts.add(count);
         } else {
-            final double[] splitPoints = new double[bins - 1];
-            for(int i = 1; i < bins; i++) {
-                splitPoints[i - 1] = min + (max - min) * i / bins;
-            }
-            final double[] pmf = kll.getPMF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-            edges.add(min);
-            for(final double splitPoint : splitPoints) {
-                edges.add(splitPoint);
-            }
-            edges.add(max);
-            for(final double p : pmf) {
+            for(final double p : pmfOverEdges(kll, edges)) {
                 counts.add(Math.round(p * count));
             }
         }
-        histogram.add("edges", edges);
+        histogram.add("edges", toJsonArray(edges));
         histogram.add("counts", counts);
         return histogram;
     }
 
-    /** CDF at bins+1 equally spaced points from min to max. */
+    /** CDF at up to bins+1 equally spaced points from min to max. */
     private static JsonObject buildCdf(final KllDoublesSketch kll, final double min, final double max, final int bins) {
         final JsonObject cdf = new JsonObject();
         final JsonArray points = new JsonArray();
         final JsonArray ranks = new JsonArray();
-        if(max <= min) {
+        if(!(max > min)) {
             points.add(min);
             ranks.add(1.0);
         } else {
-            final double[] splitPoints = new double[bins + 1];
-            for(int i = 0; i <= bins; i++) {
-                splitPoints[i] = min + (max - min) * i / bins;
-            }
-            final double[] cdfValues = kll.getCDF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-            for(int i = 0; i <= bins; i++) {
-                points.add(splitPoints[i]);
+            // the query points include min and max themselves, so dedupe them as one edge list
+            final double[] queryPoints = equalWidthEdges(min, max, bins);
+            final double[] cdfValues = kll.getCDF(queryPoints, QuantileSearchCriteria.INCLUSIVE);
+            for(int i = 0; i < queryPoints.length; i++) {
+                points.add(queryPoints[i]);
                 ranks.add(cdfValues[i]);
             }
         }
@@ -658,14 +715,7 @@ public class ProfileRenderer {
         if(field.count == 0 || !Double.isFinite(field.min) || !Double.isFinite(field.max)) {
             return null;
         }
-        if(field.max <= field.min) {
-            return new double[] { field.min, field.max };
-        }
-        final double[] edges = new double[bins + 1];
-        for(int i = 0; i <= bins; i++) {
-            edges[i] = field.min + (field.max - field.min) * i / bins;
-        }
-        return edges;
+        return equalWidthEdges(field.min, field.max, bins);
     }
 
     /** The global top values used as the comparison categories for string fields (actual values). */
@@ -691,7 +741,8 @@ public class ProfileRenderer {
             final java.util.Map<String, ProfileAccumulator> subProfiles,
             final ProfileSpec spec,
             final Config config,
-            final int groupLimit) {
+            final int groupLimit,
+            final java.util.Map<String, Long> groupTotals) {
 
         final JsonArray axes = new JsonArray();
         for(final ProfileAxis axis : config.axes) {
@@ -734,7 +785,11 @@ public class ProfileRenderer {
                     groups.subList(limit, groups.size()).clear();
                 }
             }
-            axisJson.addProperty("truncatedGroups", Math.max(0, countGroups(subProfiles, axis) - groups.size()));
+            // groups bounded before the shuffle report their true total via groupTotals
+            final long totalGroups = groupTotals != null && groupTotals.containsKey(axis.id())
+                    ? groupTotals.get(axis.id())
+                    : countGroups(subProfiles, axis);
+            axisJson.addProperty("truncatedGroups", Math.max(0L, totalGroups - groups.size()));
 
             final JsonArray groupsJson = new JsonArray();
             for(int g = 0; g < groups.size(); g++) {
@@ -791,9 +846,7 @@ public class ProfileRenderer {
                         final double[] edges = overlayEdges(globalField, config.overlayBins);
                         final KllDoublesSketch kll = groupField.getKll();
                         if(edges != null && edges.length > 2 && kll != null && !kll.isEmpty()) {
-                            final double[] splitPoints = new double[edges.length - 2];
-                            System.arraycopy(edges, 1, splitPoints, 0, splitPoints.length);
-                            final double[] pmf = kll.getPMF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
+                            final double[] pmf = pmfOverEdges(kll, edges);
                             final JsonArray hist = new JsonArray();
                             for(final double p : pmf) {
                                 hist.add(Math.round(p * groupField.count));
@@ -1024,35 +1077,12 @@ public class ProfileRenderer {
             }
             final double min = Math.min(fieldA.min, fieldB.min);
             final double max = Math.max(fieldA.max, fieldB.max);
-            final int bins = config.overlayBins;
-            final JsonArray edges = new JsonArray();
-            final double[] cdfA;
-            final double[] cdfB;
-            final double[] sharesA;
-            final double[] sharesB;
-            if(max <= min) {
-                edges.add(min);
-                edges.add(max);
-                sharesA = new double[] { 1d };
-                sharesB = new double[] { 1d };
-                cdfA = new double[] { 1d };
-                cdfB = new double[] { 1d };
-            } else {
-                final double[] splitPoints = new double[bins - 1];
-                for(int i = 1; i < bins; i++) {
-                    splitPoints[i - 1] = min + (max - min) * i / bins;
-                }
-                edges.add(min);
-                for(final double splitPoint : splitPoints) {
-                    edges.add(splitPoint);
-                }
-                edges.add(max);
-                sharesA = fieldA.getKll().getPMF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-                sharesB = fieldB.getKll().getPMF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-                cdfA = fieldA.getKll().getCDF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-                cdfB = fieldB.getKll().getCDF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-            }
-            o.add("edges", edges);
+            final double[] edges = equalWidthEdges(min, max, config.overlayBins);
+            final double[] sharesA = pmfOverEdges(fieldA.getKll(), edges);
+            final double[] sharesB = pmfOverEdges(fieldB.getKll(), edges);
+            final double[] cdfA = cdfOverEdges(fieldA.getKll(), edges);
+            final double[] cdfB = cdfOverEdges(fieldB.getKll(), edges);
+            o.add("edges", toJsonArray(edges));
             o.add("sharesA", toJsonArray(sharesA));
             o.add("sharesB", toJsonArray(sharesB));
             o.addProperty("countA", fieldA.count);
@@ -1228,23 +1258,18 @@ public class ProfileRenderer {
                 final double[] oldRanks = toDoubleArray(oldCdf.getAsJsonArray("ranks"));
                 final double min = Math.min(field.min, oldNumeric.get("min").getAsDouble());
                 final double max = Math.max(field.max, oldNumeric.get("max").getAsDouble());
-                if(max <= min || oldPoints.length == 0) {
+                if(!(max > min) || oldPoints.length == 0) {
                     return;
                 }
-                final int bins = config.overlayBins;
-                final double[] edges = new double[bins + 1];
-                for(int i = 0; i <= bins; i++) {
-                    edges[i] = min + (max - min) * i / bins;
-                }
-                final double[] splitPoints = new double[bins - 1];
-                System.arraycopy(edges, 1, splitPoints, 0, bins - 1);
-                final double[] newShares = kll.getPMF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
-                final double[] newCdf = kll.getCDF(splitPoints, QuantileSearchCriteria.INCLUSIVE);
+                final double[] edges = equalWidthEdges(min, max, config.overlayBins);
+                final int bins = edges.length - 1;
+                final double[] newShares = pmfOverEdges(kll, edges);
+                final double[] newCdf = cdfOverEdges(kll, edges);
                 final double[] oldShares = new double[bins];
                 final double[] oldCdfAtEdges = new double[bins];
                 double previous = 0d;
                 for(int i = 0; i < bins; i++) {
-                    final double rank = interpolateCdf(oldPoints, oldRanks, i + 1 == bins ? max : splitPoints[i]);
+                    final double rank = interpolateCdf(oldPoints, oldRanks, edges[i + 1]);
                     oldShares[i] = Math.max(0d, rank - previous);
                     oldCdfAtEdges[i] = rank;
                     previous = rank;
@@ -1345,6 +1370,17 @@ public class ProfileRenderer {
         return values;
     }
 
+    /** Gson's lenient parser accepts bare NaN/Infinity; they are not JSON and would break JSON.parse in the report. */
+    private static JsonElement finiteOrNull(final JsonElement element) {
+        if(element != null && element.isJsonPrimitive() && element.getAsJsonPrimitive().isNumber()) {
+            final double d = element.getAsDouble();
+            if(Double.isNaN(d) || Double.isInfinite(d)) {
+                return JsonNull.INSTANCE;
+            }
+        }
+        return element;
+    }
+
     private static JsonObject buildSample(
             final ProfileAccumulator accumulator, final ProfileSpec spec, final int maxRows) {
 
@@ -1369,7 +1405,7 @@ public class ProfileRenderer {
                 final JsonObject row = JsonParser.parseString(weighted.getItem()).getAsJsonObject();
                 final JsonArray values = new JsonArray();
                 for(final ProfileSpec.FieldSpec fieldSpec : spec.getFields()) {
-                    values.add(row.get(fieldSpec.path));
+                    values.add(finiteOrNull(row.get(fieldSpec.path)));
                 }
                 rows.add(values);
                 added += 1;
