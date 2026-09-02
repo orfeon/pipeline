@@ -136,11 +136,13 @@ buffered state per bundle and such stages slow down by orders of magnitude as ro
 executes them at proper speed.
 
 * Note:
-  * The prism binary is downloaded from the Beam GitHub release at startup (outbound network
-    required; `options.prism.prismLocation` points at a pre-downloaded binary otherwise — see
-    [Prism Options](../options/prism.md)). On Windows the automatic download URL is broken (Beam
-    derives it from `os.name`): download `apache_beam-v{beam.version}-prism-windows-amd64.zip`
-    manually and set `prismLocation`.
+  * The image bundles the prism binary (`/opt/prism/...`, linux/amd64; `--prismLocation` is set in the
+    entrypoint), so the container needs no outbound network access to start. A config's
+    `options.prism.prismLocation` overrides it — see [Prism Options](../options/prism.md); do not pass
+    `--prismLocation` on the command line again, a flag duplicated from the entrypoint fails parsing.
+    Outside the image (e.g. `mvn exec` on Windows) the runner downloads the binary itself, and the
+    automatic URL is broken on Windows (Beam derives it from `os.name`): download
+    `apache_beam-v{beam.version}-prism-windows-amd64.zip` manually and set `prismLocation`.
   * A `ManagedChannel allocation site` stack in the logs at shutdown is gRPC's channel-leak detector,
     not a failure. The completion marker is the `Pipeline finished with state: DONE` log line.
 

@@ -87,12 +87,17 @@ global keys, e.g. the `feature` transform's global encoding levels): DirectRunne
 each key's buffered state per bundle and such stages slow down by orders of magnitude as rows grow,
 while Prism executes them at proper speed.
 
-* The image does not bundle the prism binary: the runner downloads it from the Beam GitHub release at
-  startup, so the runtime needs outbound network access (otherwise point
-  `options.prism.prismLocation` at a pre-downloaded binary — see [Prism Options](../options/prism.md)),
-  plus a **writable, exec-capable `$HOME`**: the binary is cached and `chmod +x`-ed under
-  `~/.apache_beam/cache/prism/bin` even when `prismLocation` points at a local file (a hardened pod
-  with `readOnlyRootFilesystem` / `noexec` fails at startup where the direct image works).
+* The image **bundles the prism binary** (the linux/amd64 release asset of the Beam version the pipeline
+  is built with, at `/opt/prism/apache_beam-v{beam.version}-prism-linux-amd64`, `--prismLocation` set in
+  the entrypoint): a container starts with no outbound network access and no writable `$HOME`, and the
+  image digest pins the binary like everything else. The Maven build downloads the release zip once
+  (cached under the local Maven repository, sha256-verified by `prism.zip.sha256` in the `pom.xml` —
+  update it together with `beam.version`); a `-Djib.skip=true` build skips the download.
+  `options.prism.prismLocation` in a config still overrides the bundled binary (see
+  [Prism Options](../options/prism.md)) — note that a URL or zip given there is fetched / unpacked into
+  `~/.apache_beam/cache/prism/bin` at startup and needs a writable, exec-capable `$HOME`, while a plain
+  local binary is used in place. The asset is amd64: on an arm64 host (Apple Silicon) run the image
+  under emulation (`docker run --platform linux/amd64`), or point `prismLocation` at an arm64 binary.
 * Prism executes **in memory** (no disk spill): the container memory must fit the pipeline's working
   set, which grows roughly linearly with the input. Two processes share that memory — the JVM (the
   loopback SDK harness running your DoFns, heap capped at 50% by the entrypoint) and the prism Go

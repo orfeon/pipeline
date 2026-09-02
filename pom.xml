@@ -46,6 +46,7 @@
     <mockito.version>3.0.0</mockito.version>
 
     <maven-jib-plugin.version>3.5.1</maven-jib-plugin.version>
+    <download-maven-plugin.version>1.13.0</download-maven-plugin.version>
     <maven-compiler-plugin.version>3.14.1</maven-compiler-plugin.version>
     <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
     <maven-shade-plugin.version>3.6.1</maven-shade-plugin.version>
@@ -422,13 +423,75 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
+        <!-- The prism binary is baked into the image (download at build time, below) so that a container
+             starts without outbound network access and without a writable $HOME: PrismLocator uses a local,
+             unzipped, existing path as is, while a URL or zip is fetched / unpacked into
+             ~/.apache_beam/cache/prism/bin at every cold start. The release asset is the linux/amd64 build
+             (the base image and Cloud Run are amd64); the entrypoint points the runner at it, and a config's
+             options.prism.prismLocation still overrides it (the setter runs after argument parsing — do not
+             pass a second -/-prismLocation on the command line, duplicated flags fail parsing).
+             prism.zip.sha256 pins the asset: update it together with beam.version
+             (curl -sL <url> | sha256sum). -->
+        <prism.binary>apache_beam-v${beam.version}-prism-linux-amd64</prism.binary>
+        <prism.zip.url>https://github.com/apache/beam/releases/download/v${beam.version}/${prism.binary}.zip</prism.zip.url>
+        <prism.zip.sha256>943a583dc4c8cefb53d56a8bd999fa36a4b497bc7de0aab27b6ba11a5653b7ca</prism.zip.sha256>
+        <prism.home>/opt/prism</prism.home>
+        <!-- default for the download step's skip flag (a -Djib.skip=true build must not need the network) -->
+        <jib.skip>false</jib.skip>
         <!-- No baked GOOGLE_APPLICATION_CREDENTIALS: a set env var overrides the metadata-server ADC and
              breaks the image on Cloud Run; local docker runs pass it with -e next to the gcloud mount.
              Heap at 50% (not the direct image's 75%): the container is shared with the prism Go child
              process, which holds the whole in-memory GBK/shuffle state — the JVM (loopback SDK harness)
              and prism split the container memory roughly evenly. -->
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=50.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=50.0,com.mercari.solution.MPipeline,--runner=PrismRunner,--prismLocation=${prism.home}/${prism.binary}</jib.entrypoint>
       </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <!-- Fetches the prism release zip (cached under the local Maven repository, verified by sha256)
+                 and unpacks the single binary into target/prism for the jib layer below. -->
+            <groupId>com.googlecode.maven-download-plugin</groupId>
+            <artifactId>download-maven-plugin</artifactId>
+            <version>${download-maven-plugin.version}</version>
+            <executions>
+              <execution>
+                <id>download-prism</id>
+                <phase>prepare-package</phase>
+                <goals>
+                  <goal>wget</goal>
+                </goals>
+                <configuration>
+                  <url>${prism.zip.url}</url>
+                  <sha256>${prism.zip.sha256}</sha256>
+                  <unpack>true</unpack>
+                  <outputDirectory>${project.build.directory}/prism</outputDirectory>
+                  <skip>${jib.skip}</skip>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>com.google.cloud.tools</groupId>
+            <artifactId>jib-maven-plugin</artifactId>
+            <configuration>
+              <extraDirectories>
+                <paths>
+                  <path>
+                    <from>${project.build.directory}/prism</from>
+                    <into>${prism.home}</into>
+                  </path>
+                </paths>
+                <permissions>
+                  <permission>
+                    <file>${prism.home}/${prism.binary}</file>
+                    <mode>755</mode>
+                  </permission>
+                </permissions>
+              </extraDirectories>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
