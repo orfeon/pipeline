@@ -109,12 +109,12 @@ public class DataflowOptions implements Serializable {
                 clazz.getMethod("setLabels", Map.class).invoke(dataflowOptions, dataflow.labels);
             }
             if(dataflow.autoscalingAlgorithm != null) {
-                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineWorkerPoolOptions.AutoscalingAlgorithmType");
-                clazz.getMethod("setAutoscalingAlgorithm", Enum.class).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.autoscalingAlgorithm));
+                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineWorkerPoolOptions$AutoscalingAlgorithmType");
+                clazz.getMethod("setAutoscalingAlgorithm", enumClazz).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.autoscalingAlgorithm));
             }
             if(dataflow.flexRSGoal != null) {
-                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions.FlexResourceSchedulingGoal");
-                clazz.getMethod("setFlexRSGoal", Enum.class).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.flexRSGoal));
+                final Class enumClazz = Class.forName("org.apache.beam.runners.dataflow.options.DataflowPipelineOptions$FlexResourceSchedulingGoal");
+                clazz.getMethod("setFlexRSGoal", enumClazz).invoke(dataflowOptions, Enum.valueOf(enumClazz, dataflow.flexRSGoal));
             }
             if(dataflow.numWorkers != null && dataflow.numWorkers > 0) {
                 clazz.getMethod("setNumWorkers", int.class).invoke(dataflowOptions, dataflow.numWorkers);
