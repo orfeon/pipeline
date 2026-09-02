@@ -128,14 +128,16 @@ public class MPipeline {
         }
 
         final PipelineResult result = pipeline.run();
-        if(runner != Runner.dataflow) {
-            // Dataflow (FlexTemplate) must return right after submission — the launcher's exit is not the
-            // job's end. Every other runner executes the job in or from this process: a non-blocking
-            // submission (Prism's job service; direct with blockOnRun=false) would be killed by the JVM
-            // exiting here, and a Cloud Run Job would report success having processed nothing.
+        if(runner == Runner.direct || runner == Runner.prism) {
+            // These runners execute the job inside this process: a non-blocking submission (Prism's job
+            // service; direct with blockOnRun=false) would be killed by the JVM exiting here, and a
+            // Cloud Run Job would report success having processed nothing. Dataflow must return right
+            // after submission (the FlexTemplate launcher's exit is not the job's end), and flink /
+            // spark / portable keep their own attached / detached semantics (an attached run() blocks
+            // by itself; a detached submission is the caller's choice to not wait).
             final PipelineResult.State state = result.waitUntilFinish();
             LOG.info("Pipeline finished with state: {}", state);
-            if(PipelineResult.State.FAILED.equals(state) || PipelineResult.State.CANCELLED.equals(state)) {
+            if(!PipelineResult.State.DONE.equals(state)) {
                 throw new IllegalStateException("Pipeline finished with state: " + state);
             }
         }
@@ -148,11 +150,10 @@ public class MPipeline {
             final Config config) throws IOException {
 
         if(Optional.ofNullable(config.getEmpty()).orElse(false)) {
+            // the trivial transform keeps the pipeline runnable; main() runs it (running it here too
+            // used to submit the pipeline twice)
             LOG.info("Empty pipeline");
             pipeline.apply("Empty", Create.of("").withCoder(StringUtf8Coder.of()));
-            if(!pipelineOptions.getDryRun()) {
-                pipeline.run();
-            }
             return new HashMap<>();
         }
 

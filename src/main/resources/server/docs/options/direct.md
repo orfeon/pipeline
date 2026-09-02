@@ -4,10 +4,15 @@ Direct runner options.
 
 | parameter           | type    | description |
 |---------------------|---------|-------------|
-| targetParallelism   | Integer | Number of worker threads. Defaults to the number of available cores. |
+| targetParallelism   | Integer | Number of worker threads. Defaults to `max(available cores, 3)` — note the floor of 3, which matters on 1-vCPU containers. |
 | blockOnRun          | Boolean | Whether `run()` blocks until the pipeline finishes (default true). `MPipeline` waits for the result either way. |
-| enforceImmutability | Boolean | Check that DoFns do not mutate their inputs (default true). Disable for Struct-backed elements read from Spanner: their lazily-decoded internal state false-positives the check. |
-| enforceEncodability | Boolean | Encode / decode every element to verify the coders round-trip (default true). |
+| enforceImmutability | Boolean | Check that DoFns do not mutate their inputs (runner default true — but see the note below). Disable for Struct-backed elements read from Spanner: their lazily-decoded internal state false-positives the check. |
+| enforceEncodability | Boolean | Encode / decode every element to verify the coders round-trip (runner default true — but see the note below). |
+
+> The `direct` **image** bakes `--enforceImmutability=false --enforceEncodability=false` into its
+> entrypoint (the checks cost a coder round-trip per element). Re-enable them for a run with the
+> `options.direct` config block above — passing the flags again as arguments fails, because a flag may
+> only appear once.
 
 DirectRunner is for small data. Its GroupByKey copies each key's buffered state once per bundle that
 touches the key, so a keyed stage over a coarse or global key (a shrinkage lattice's global level of the

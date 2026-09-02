@@ -55,8 +55,10 @@ coarse or global keys), which DirectRunner slows down on by orders of magnitude.
 * The container downloads the prism binary from the Beam GitHub release at startup, so the job needs
   outbound network access (or set `options.prism.prismLocation`).
 * Prism executes in memory (no disk spill): size `--memory` to the pipeline's working set — it grows
-  roughly linearly with the input, and a sudden loss of every gRPC channel early in the run is the
-  prism process being OOM-killed. Data beyond the 32 GiB Cloud Run ceiling belongs on Dataflow.
+  roughly linearly with the input, split between the JVM (heap capped at 50% by the entrypoint) and
+  the prism Go process holding the GBK / shuffle state. A sudden loss of every gRPC channel early in
+  the run is the prism process being OOM-killed. Data beyond the 32 GiB Cloud Run ceiling belongs on
+  Dataflow.
 * The process waits for the pipeline result: `Pipeline finished with state: DONE` in the logs marks a
   completed run, and a failed pipeline fails the execution. A `ManagedChannel allocation site` stack
   at shutdown is gRPC's channel-leak detector, not a failure.
@@ -150,8 +152,8 @@ full list of variables and roles is in [server.md](server.md).
       enforceEncodability: true
   ```
 
-* The pipeline process blocks until completion (`blockOnRun` defaults to `true`) and the
-  exit code reflects the pipeline result, so Cloud Run's success/failure status and retry
-  semantics work as-is.
+* The pipeline process waits for the pipeline result on the direct and prism images regardless of
+  `blockOnRun`, and exits non-zero on anything but a DONE terminal state, so Cloud Run's
+  success/failure status and retry semantics reflect the pipeline outcome.
 * The GCP project is resolved from the metadata server; setting `GOOGLE_CLOUD_PROJECT` is
   usually unnecessary.

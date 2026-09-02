@@ -58,6 +58,10 @@
           would deactivate the activeByDefault dataflow profile.) -->
     <skipITs>true</skipITs>
 
+    <!-- Must match the com.github.jbellis:jamm version the beam-sdks-java-harness pom pins (it declares
+         jamm provided; the prism / portable images supply it) — re-check on a beam.version bump. -->
+    <jamm.version>0.4.0</jamm.version>
+
     <jetty.version>12.1.10</jetty.version>
     <mcp.version>2.0.1</mcp.version>
     <langchain4j.version>1.19.0</langchain4j.version>
@@ -419,8 +423,11 @@
       </activation>
       <properties>
         <!-- No baked GOOGLE_APPLICATION_CREDENTIALS: a set env var overrides the metadata-server ADC and
-             breaks the image on Cloud Run; local docker runs pass it with -e next to the gcloud mount. -->
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
+             breaks the image on Cloud Run; local docker runs pass it with -e next to the gcloud mount.
+             Heap at 50% (not the direct image's 75%): the container is shared with the prism Go child
+             process, which holds the whole in-memory GBK/shuffle state — the JVM (loopback SDK harness)
+             and prism split the container memory roughly evenly. -->
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=50.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
@@ -433,7 +440,7 @@
                declares it provided (a Dataflow worker container ships it), so this image supplies it. -->
           <groupId>com.github.jbellis</groupId>
           <artifactId>jamm</artifactId>
-          <version>0.4.0</version>
+          <version>${jamm.version}</version>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
@@ -446,7 +453,7 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=PortableRunner</jib.entrypoint>
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=PortableRunner</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
@@ -458,7 +465,7 @@
           <!-- Same as the prism profile: the portable SDK harness needs MemoryMeter at runtime. -->
           <groupId>com.github.jbellis</groupId>
           <artifactId>jamm</artifactId>
-          <version>0.4.0</version>
+          <version>${jamm.version}</version>
           <scope>runtime</scope>
         </dependency>
       </dependencies>

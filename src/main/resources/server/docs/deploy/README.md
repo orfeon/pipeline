@@ -89,11 +89,17 @@ while Prism executes them at proper speed.
 
 * The image does not bundle the prism binary: the runner downloads it from the Beam GitHub release at
   startup, so the runtime needs outbound network access (otherwise point
-  `options.prism.prismLocation` at a pre-downloaded binary — see [Prism Options](../options/prism.md)).
+  `options.prism.prismLocation` at a pre-downloaded binary — see [Prism Options](../options/prism.md)),
+  plus a **writable, exec-capable `$HOME`**: the binary is cached and `chmod +x`-ed under
+  `~/.apache_beam/cache/prism/bin` even when `prismLocation` points at a local file (a hardened pod
+  with `readOnlyRootFilesystem` / `noexec` fails at startup where the direct image works).
 * Prism executes **in memory** (no disk spill): the container memory must fit the pipeline's working
-  set, which grows roughly linearly with the input. When the data outgrows the machine (a Cloud Run
-  Job caps at 32 GiB), run on Dataflow instead — prism is the subset-verification / reproduction tier,
-  not the full-production one.
+  set, which grows roughly linearly with the input. Two processes share that memory — the JVM (the
+  loopback SDK harness running your DoFns, heap capped at 50% by the entrypoint) and the prism Go
+  process holding the GBK / shuffle state. When the data outgrows the machine (a Cloud Run Job caps
+  at 32 GiB), run on Dataflow instead — prism is the subset-verification / reproduction tier, not the
+  full-production one. In serve mode (Cloud Run Services) each concurrent `/run` starts its own prism
+  process, so keep the concurrency at 1 or size the memory accordingly.
 * See [How to Execute Pipeline](../exec/README.md#run-pipeline-locally--on-cloud-run-prism) for how to run it.
 
 ## Build bundled jar for Apache Flink / Apache Spark
