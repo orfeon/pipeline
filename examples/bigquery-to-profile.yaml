@@ -1,0 +1,41 @@
+# Profile: observe a BigQuery dataset and write one self-contained HTML report.
+# Runs as-is against a public dataset (NYC yellow taxi trips, 2022): the query keeps the
+# scan small with TABLESAMPLE, and the sink profiles every column in one pass with
+# DataSketches (quantiles/histograms, distinct counts, top-K values, correlations, samples).
+# Replace `output` with your bucket. Each declared parameter adds a report section:
+#   keys     → key diagnostics (distinct with bounds, keyness, containment between keys)
+#   segments → per-group sub-profiles + a compare bar that overlays group distributions
+#   time     → time-evolution view (per-bucket sub-profiles)
+#   compare  → declared numeric pairs with overlaid distributions, Q-Q plot and PSI/KS
+# Real-environment checks this example covers: NUMERIC (decimal) columns profiled as numbers,
+# TIMESTAMP columns as time buckets, top-K bounding of a segment field, gs:// output.
+sources:
+  - name: trips
+    module: bigquery
+    parameters:
+      query: |
+        SELECT
+          vendor_id, pickup_datetime, dropoff_datetime, passenger_count, trip_distance,
+          rate_code, store_and_fwd_flag, payment_type,
+          fare_amount, extra, mta_tax, tip_amount, tolls_amount, total_amount,
+          pickup_location_id, dropoff_location_id
+        FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2022`
+        TABLESAMPLE SYSTEM (1 PERCENT)
+        WHERE pickup_datetime BETWEEN '2022-01-01' AND '2022-12-31'
+
+sinks:
+  - name: tripsProfile
+    module: profile
+    inputs: [trips]
+    parameters:
+      output: gs://mybucket/reports/taxi/trips-2022.html
+      keys: [pickup_location_id, dropoff_location_id]
+      segments:
+        - { field: payment_type, topK: 10 }
+      time:
+        field: pickup_datetime
+        granularity: month
+      compare:
+        - [fare_amount, total_amount]
+      report:
+        title: NYC yellow taxi trips 2022

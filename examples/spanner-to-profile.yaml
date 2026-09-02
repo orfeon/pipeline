@@ -1,0 +1,35 @@
+# Profile: observe a Cloud Spanner table, including a STRUCT column.
+# Spanner delivers STRUCT values as nested records the profile flattens to dot paths
+# (`address.city`, `address.zip`), so nested fields get their own cards and can be used as
+# segments. `values: hide` keeps raw values (top-K labels, sample rows) out of the report,
+# which is the setting to use when the report will be shared more widely than the data.
+# Real-environment checks this example covers: STRUCT navigation, NUMERIC → number,
+# DATE/TIMESTAMP buckets, values: hide, an output path on the DirectRunner server's workDir
+# when `output` is omitted (here it is set explicitly).
+sources:
+  - name: users
+    module: spanner
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: mydatabase
+      query: |
+        SELECT
+          UserId, Email, Plan, Balance, SignupDate, LastLoginAt,
+          STRUCT(City AS city, Zip AS zip) AS address
+        FROM Users
+
+sinks:
+  - name: usersProfile
+    module: profile
+    inputs: [users]
+    parameters:
+      output: gs://mybucket/reports/spanner/users.html
+      values: hide
+      keys: [UserId]
+      segments: [Plan, address.city]
+      time:
+        field: SignupDate
+        granularity: week
+      report:
+        title: Users table observation
