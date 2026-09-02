@@ -17,7 +17,6 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
-import java.time.Instant;
 import java.util.*;
 
 /**
@@ -258,13 +257,10 @@ public final class Factorization {
                 }
             }
             ResourceUtil.writeBytes(path, bytes.toByteArray());
-            final JsonObject manifest = new JsonObject();
-            manifest.addProperty("planHash", planHash);
-            manifest.addProperty("block", block);
+            final JsonObject manifest = FitArtifact.manifest(planHash, block);
             manifest.addProperty("variant", model.fieldWeighted ? "fwfm" : "fm");
             manifest.addProperty("latentDim", model.k);
             manifest.addProperty("parameters", model.size());
-            manifest.addProperty("createdAt", Instant.now().toString());
             final JsonArray fields = new JsonArray();
             model.fields.forEach(fields::add);
             manifest.add("fields", fields);

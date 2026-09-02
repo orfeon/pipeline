@@ -67,6 +67,15 @@ public final class FitArtifact {
         return ResourceUtil.exists(statsPath(artifactUri, planHash, block));
     }
 
+    /** The manifest header every fit artifact writes: what plan / block it belongs to and when it was fitted. */
+    public static JsonObject manifest(final String planHash, final String block) {
+        final JsonObject manifest = new JsonObject();
+        manifest.addProperty("planHash", planHash);
+        manifest.addProperty("block", block);
+        manifest.addProperty("createdAt", Instant.now().toString());
+        return manifest;
+    }
+
     /** Composite map key used in memory and in side inputs: {@code level + (char) 1 + key}. */
     public static String entryKey(final String level, final String key) {
         return level + SEPARATOR + key;
@@ -98,11 +107,8 @@ public final class FitArtifact {
                 }
             }
             ResourceUtil.writeBytes(path, bytes.toByteArray());
-            final JsonObject manifest = new JsonObject();
-            manifest.addProperty("planHash", planHash);
-            manifest.addProperty("block", block);
+            final JsonObject manifest = manifest(planHash, block);
             manifest.addProperty("entries", stats.size());
-            manifest.addProperty("createdAt", Instant.now().toString());
             final JsonArray levelArray = new JsonArray();
             levels.forEach(levelArray::add);
             manifest.add("levels", levelArray);

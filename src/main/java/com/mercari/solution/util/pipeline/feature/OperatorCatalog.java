@@ -102,17 +102,26 @@ public final class OperatorCatalog {
         };
     }
 
-    /** Encoding statistics: whether a target is required and the output type. */
-    public record Stat(String name, boolean requiresTarget, Schema.FieldType output) {}
+    /**
+     * Encoding statistics: whether a target is required, the output type, and whether the statistic is
+     * derived from the sufficient statistics (n, Σy, Σy²) — the ones a static / fold fit keeps per key.
+     * {@code distribution} and the quantiles need the key's value distribution (expanding only).
+     */
+    public record Stat(String name, boolean requiresTarget, Schema.FieldType output, boolean sufficient) {}
+
+    /** The stat tokens a target may request (plus the {@code quantile<NN>} / {@code q<NN>} family). */
+    public static final List<String> STATS = List.of("count", "share", "mean", "rate", "std", "distribution", "quantile");
+
+    public static final String AVAILABLE_STATS = String.join(" | ", STATS) + " (median) | quantile<NN> / q<NN>";
 
     public static Stat stat(final String name) {
         if (name == null) return null;
         return switch (name) {
-            case "count" -> new Stat(name, false, I64);
-            case "share" -> new Stat(name, false, F64);
-            case "mean", "rate", "std" -> new Stat(name, true, F64);
-            case "distribution" -> new Stat(name, true, Schema.FieldType.map(F64));
-            default -> quantileProbability(name) == null ? null : new Stat(name, true, F64);
+            case "count" -> new Stat(name, false, I64, true);
+            case "share" -> new Stat(name, false, F64, true);
+            case "mean", "rate", "std" -> new Stat(name, true, F64, true);
+            case "distribution" -> new Stat(name, true, Schema.FieldType.map(F64), false);
+            default -> quantileProbability(name) == null ? null : new Stat(name, true, F64, false);
         };
     }
 
@@ -135,14 +144,13 @@ public final class OperatorCatalog {
         return List.of("year", "month", "day", "dayOfWeek", "dayOfYear", "weekOfYear", "hour", "minute");
     }
 
-    /** Populations types implemented by the v0 engine; the rest parse but fail compilation. */
+    /** Population types implemented by the engine; the other registered ones parse but fail compilation. */
+    public static final List<String> IMPLEMENTED_POPULATION_TYPES = List.of("encoding", "factorization", "discretize");
+
     public static boolean isImplemented(final Scope scope, final String name) {
         if (scope != Scope.population) return get(scope, name) != null;
-        return "encoding".equals(name) || "factorization".equals(name) || "discretize".equals(name);
+        return IMPLEMENTED_POPULATION_TYPES.contains(name);
     }
-
-    /** Population types implemented by the engine, for diagnostics. */
-    public static final String IMPLEMENTED_POPULATION_TYPES = "encoding | factorization | discretize";
 
     public static boolean isNumeric(final Schema.FieldType type) {
         if (type == null) return false;

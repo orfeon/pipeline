@@ -43,6 +43,24 @@ public class OrderStatisticsTest {
     }
 
     @Test
+    public void testBlocksEmptyAndRefill() {
+        // remove everything (blocks disappear), then refill: the rank tree must be rebuilt correctly
+        final OrderStatistics order = new OrderStatistics();
+        for (int i = 0; i < 5000; i++) order.add(i % 700);
+        for (int i = 0; i < 5000; i++) Assertions.assertTrue(order.remove(i % 700), "remove " + i);
+        Assertions.assertEquals(0, order.size());
+        Assertions.assertNull(order.quantile(0.5));
+        Assertions.assertFalse(order.remove(1));
+        for (int i = 3000; i > 0; i--) order.add(i);
+        Assertions.assertEquals(3000, order.size());
+        Assertions.assertEquals(1, order.select(0), 1e-12);
+        Assertions.assertEquals(3000, order.select(2999), 1e-12);
+        Assertions.assertEquals(1500.5, order.quantile(0.5), 1e-12);
+        // interpolation across a block boundary: both neighbours are read from the right blocks
+        for (int k = 0; k < 2999; k += 7) Assertions.assertEquals(k + 1.5, order.quantile((k + 0.5) / 2999), 1e-9, "k=" + k);
+    }
+
+    @Test
     public void testType7Quantile() {
         final double[] sorted = {80, 100, 200};
         Assertions.assertEquals(80, OrderStatistics.quantile(0, sorted, 3), 1e-12);

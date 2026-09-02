@@ -1079,7 +1079,7 @@ public final class FeaturePlanCompiler {
             return;
         }
         if (!OperatorCatalog.isImplemented(Scope.population, def.type)) {
-            diagnostics.error("population.unsupported", loc, "population type '" + def.type + "' is not implemented yet (available: " + OperatorCatalog.IMPLEMENTED_POPULATION_TYPES + ")");
+            diagnostics.error("population.unsupported", loc, "population type '" + def.type + "' is not implemented yet (available: " + String.join(" | ", OperatorCatalog.IMPLEMENTED_POPULATION_TYPES) + ")");
             return;
         }
         if ("factorization".equals(def.type)) {
@@ -1120,24 +1120,8 @@ public final class FeaturePlanCompiler {
         if (def.bins != null && def.bins < 2) diagnostics.error("discretize.bins", loc, "bins must be >= 2");
         if (def.minSamplesPerBin != null && def.minSamplesPerBin < 1) diagnostics.error("discretize.minSamplesPerBin", loc, "minSamplesPerBin must be >= 1");
 
-        // fit: static only (edges from the whole input); cadence / window / warmStart have no effect yet
-        final JsonObject defFit = parseJsonObject(def.fitJson);
-        final FeatureSpec.FitSpec fitSpec = new FeatureSpec.FitSpec();
-        fitSpec.artifactUri = spec.fit.artifactUri;
-        fitSpec.refit = spec.fit.refit;
-        FitMode mode = FitMode.statik;
-        if (defFit != null) {
-            if (SourceContract.Json.string(defFit, "mode") != null) mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
-            FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
-            for (final String key : List.of("cadence", "window", "warmStart")) {
-                if (defFit.has(key)) diagnostics.warning("discretize.fit." + key, loc, "fit." + key + " is not implemented yet and ignored (the edges are fitted on the whole input)");
-            }
-        }
-        if (mode != FitMode.statik) {
-            diagnostics.error("discretize.fit.mode", loc, "discretize requires fit.mode static (edges fitted on the whole input); expanding / fold are not available");
-        }
-        diagnostics.info("fit.mode.static", loc, "discretize fits the bin edges on the whole input"
-                + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persists them under " + fitSpec.artifactUri + "/<planHash>/")
+        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "discretize", "the edges are fitted", "edges fitted on the whole input");
+        diagnostics.info("fit.mode.static", loc, "discretize fits the bin edges on the whole input" + artifactPhrase(fitSpec)
                 + (isOutcomeLike(ref) ? "; the input is outcome-like, so training rows' own outcomes shape the edges (static-fit caveat)" : ""));
 
         final OutputColumn c = newColumn(def.name, Scope.population, "discretize", def.name, Schema.FieldType.INT64, computeAt);
@@ -1151,13 +1135,49 @@ public final class FeaturePlanCompiler {
         if (fitSpec.refit) c.coordinates.put("refit", "true");
         addSelfInput(c, input);
         addPastInput(c, input);
-        // the fitted edges are an artifact available at computeAt by declaration (§6.1 fit boundary)
+        finishStaticFitted(c, def);
+        register(c);
+    }
+
+    /**
+     * The {@code fit:} block of a static-only population type (factorization / discretize): artifact settings
+     * inherited from the top-level fit, {@code mode} must be static, and {@code cadence / window / warmStart}
+     * are accepted but ignored until fit boundaries are implemented.
+     */
+    private FeatureSpec.FitSpec parseStaticOnlyFit(final FeatureDef def, final String codePrefix, final String fitted, final String why) {
+        final String loc = def.location();
+        final JsonObject defFit = parseJsonObject(def.fitJson);
+        final FeatureSpec.FitSpec fitSpec = new FeatureSpec.FitSpec();
+        fitSpec.artifactUri = spec.fit.artifactUri;
+        fitSpec.refit = spec.fit.refit;
+        FitMode mode = FitMode.statik;
+        if (defFit != null) {
+            if (SourceContract.Json.string(defFit, "mode") != null) mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
+            FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
+            for (final String key : List.of("cadence", "window", "warmStart")) {
+                if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " is not implemented yet and ignored (" + fitted + " on the whole input)");
+            }
+        }
+        if (mode != FitMode.statik) {
+            diagnostics.error(codePrefix + ".fit.mode", loc, def.type + " requires fit.mode static (" + why + "); expanding / fold are not available");
+        }
+        return fitSpec;
+    }
+
+    private static String artifactPhrase(final FeatureSpec.FitSpec fitSpec) {
+        return fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persisted under " + fitSpec.artifactUri + "/<planHash>/";
+    }
+
+    /**
+     * Availability of a column filled by lookup from a static fit: the fitted result is an artifact available
+     * at computeAt by declaration (§6.1 fit boundary), so only the row-side inputs decide the status.
+     */
+    private void finishStaticFitted(final OutputColumn c, final FeatureDef def) {
         final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
         c.availableAt = AvailableAt.max(selfSide, c.computeAt);
         c.status = selfSide.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
                 : selfSide.isStatic() ? Status.violation : Status.runtimeFilter;
         c.validFor = def.validFor;
-        register(c);
     }
 
     /** §4.4 factorization: a static fit (ALS) applied by lookup; outputs are pair scores, embeddings or the linear predictor. */
@@ -1178,24 +1198,8 @@ public final class FeaturePlanCompiler {
         final int latentDim = def.latentDim == null ? 8 : def.latentDim;
         if (latentDim < 1) diagnostics.error("factorization.latentDim", loc, "latentDim must be >= 1");
 
-        // fit: static only; cadence / window / warmStart are accepted but have no effect yet
-        final JsonObject defFit = parseJsonObject(def.fitJson);
-        final FeatureSpec.FitSpec fitSpec = new FeatureSpec.FitSpec();
-        fitSpec.artifactUri = spec.fit.artifactUri;
-        fitSpec.refit = spec.fit.refit;
-        FitMode mode = FitMode.statik;
-        if (defFit != null) {
-            if (SourceContract.Json.string(defFit, "mode") != null) mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
-            FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
-            for (final String key : List.of("cadence", "window", "warmStart")) {
-                if (defFit.has(key)) diagnostics.warning("factorization.fit." + key, loc, "fit." + key + " is not implemented yet and ignored (the model is fitted on the whole input)");
-            }
-        }
-        if (mode != FitMode.statik) {
-            diagnostics.error("factorization.fit.mode", loc, "factorization requires fit.mode static (iterative ALS fit); expanding / fold are not available");
-        }
-        diagnostics.info("fit.mode.static", loc, "factorization is fitted on the whole input"
-                + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persisted under " + fitSpec.artifactUri + "/<planHash>/")
+        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "factorization", "the model is fitted", "iterative ALS fit");
+        diagnostics.info("fit.mode.static", loc, "factorization is fitted on the whole input" + artifactPhrase(fitSpec)
                 + "; the whole training set is gathered on one worker for ALS");
 
         // task: target (field or expr) and optional baseline offset
@@ -1274,11 +1278,7 @@ public final class FeaturePlanCompiler {
                 }
                 for (final String f : def.fields) addSelfInput(c, f);
                 addPastInput(c, target);
-                final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
-                c.availableAt = AvailableAt.max(selfSide, c.computeAt);
-                c.status = selfSide.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                        : selfSide.isStatic() ? Status.violation : Status.runtimeFilter;
-                c.validFor = def.validFor;
+                finishStaticFitted(c, def);
                 register(c);
                 produced++;
             }
@@ -1375,10 +1375,7 @@ public final class FeaturePlanCompiler {
             for (final String stat : stats) {
                 final OperatorCatalog.Stat s = OperatorCatalog.stat(stat);
                 if (s == null) {
-                    diagnostics.error("encoding.stat", loc, "unknown stat: " + stat);
-                } else if (!PopulationEvaluator.isSupported(stat) && !"share".equals(stat)) {
-                    diagnostics.error("encoding.stat.unsupported", loc,
-                            "stat " + stat + " is not implemented yet (available: " + PopulationEvaluator.AVAILABLE_STATS + ")");
+                    diagnostics.error("encoding.stat", loc, "unknown stat: " + stat + " (available: " + OperatorCatalog.AVAILABLE_STATS + ")");
                 } else if (s.requiresTarget() && reference == null) {
                     diagnostics.error("encoding.stat.target", loc, "stat " + stat + " requires a target field or expr");
                 }
@@ -1518,8 +1515,8 @@ public final class FeaturePlanCompiler {
                     final boolean shrunk = lattice.shrinkage.enabled && List.of("mean", "rate").contains(stat);
                     if (isStatic && !shrunk && !"share".equals(stat)) {
                         // static: every statistic is derived from the fitted leaf sufficient statistics
-                        if ("distribution".equals(stat) || OperatorCatalog.quantileProbability(stat) != null) {
-                            // these need the per-key value distribution, not the (n, Σy, Σy²) the fit keeps
+                        if (!s.sufficient()) {
+                            // needs the per-key value distribution, not the (n, Σy, Σy²) the fit keeps
                             diagnostics.error("encoding.stat.static", loc, "stat " + stat + " is not available in fit.mode " + mode.token() + " (expanding only)");
                             continue;
                         }
@@ -1739,15 +1736,11 @@ public final class FeaturePlanCompiler {
             for (final String o : fr.others) addPastInput(c, o);
         }
         if (lookup) {
-            // the fitted statistics are an artifact available at computeAt by declaration (§6.1 fit boundary)
-            final AvailableAt selfSide = c.availableAt == null ? AvailableAt.atEventTime() : c.availableAt;
-            c.availableAt = AvailableAt.max(selfSide, c.computeAt);
-            c.status = selfSide.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
-                    : selfSide.isStatic() ? Status.violation : Status.runtimeFilter;
+            finishStaticFitted(c, def);
         } else {
             classifyPast(c, null);
+            c.validFor = def.validFor;
         }
-        c.validFor = def.validFor;
     }
 
     private static JsonObject parseJsonObject(final String json) {

@@ -9,8 +9,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
-import java.time.Instant;
 import java.util.Arrays;
+import java.util.Map;
 
 /**
  * Fitted discretization of a numeric field (work-feature.md §4.4, {@code type: discretize}): bin edges
@@ -22,9 +22,10 @@ import java.util.Arrays;
  * value the fit never saw is a category of its own (and a drift signal) rather than a silent edge bin.
  *
  * <p>{@code method: quantile}: the interior edges are the type-7 quantiles {@code i / B} of the fitted
- * values ({@code B = bins}, or {@code n / minSamplesPerBin} capped by {@code bins}); duplicate edges (ties)
- * and edges at the extremes are dropped, so B can be smaller than requested on discrete data. Values equal
- * to an edge fall in the upper bin ({@code edge <= v < next}).
+ * values, {@code B = min(bins (default 10), n / minSamplesPerBin)}; duplicate edges (ties) and edges at the
+ * extremes are dropped, so B can be smaller than requested on discrete data. Values equal to an edge fall
+ * in the upper bin ({@code edge <= v < next}). A fit that saw no value (n = 0) maps every non-missing
+ * value to bin 1 — the artifact is still written so a later run can load it.
  */
 public final class Discretization implements Serializable {
 
@@ -73,11 +74,9 @@ public final class Discretization implements Serializable {
         }
         final double[] values = Arrays.copyOf(input, count);
         Arrays.sort(values);
+        // B = min(bins (default 10), n / minSamplesPerBin): the default caps a sample-driven bin count too
         int b = bins == null ? 10 : bins;
-        if (minSamplesPerBin != null) {
-            final int bySamples = Math.max(1, count / minSamplesPerBin);
-            b = bins == null ? bySamples : Math.min(b, bySamples);
-        }
+        if (minSamplesPerBin != null) b = Math.min(b, Math.max(1, count / minSamplesPerBin));
         final double min = values[0];
         final double max = values[count - 1];
         final double[] candidates = new double[Math.max(0, b - 1)];
@@ -121,17 +120,17 @@ public final class Discretization implements Serializable {
         final JsonArray array = json.getAsJsonArray("edges");
         final double[] edges = new double[array.size()];
         for (int i = 0; i < edges.length; i++) edges[i] = array.get(i).getAsDouble();
+        // n decides whether the edges apply at all (n = 0 maps everything to bin 1): never default it
         final JsonElement n = json.get("n");
+        if (n == null || !n.isJsonPrimitive()) throw new IllegalStateException("discretization artifact lacks 'n': " + json);
         return new Discretization(json.get("method").getAsString(), edges,
-                json.get("min").getAsDouble(), json.get("max").getAsDouble(), n == null ? 0 : n.getAsLong());
+                json.get("min").getAsDouble(), json.get("max").getAsDouble(), n.getAsLong());
     }
 
     public static void write(final String artifactUri, final String planHash, final String block, final Discretization d) {
         final String path = artifactPath(artifactUri, planHash, block);
-        final JsonObject json = d.toJson();
-        json.addProperty("planHash", planHash);
-        json.addProperty("block", block);
-        json.addProperty("createdAt", Instant.now().toString());
+        final JsonObject json = FitArtifact.manifest(planHash, block);
+        for (final Map.Entry<String, JsonElement> e : d.toJson().entrySet()) json.add(e.getKey(), e.getValue());
         ResourceUtil.writeString(path, json.toString());
         LOG.info("wrote discretization artifact {} ({} bins)", path, d.bins());
     }

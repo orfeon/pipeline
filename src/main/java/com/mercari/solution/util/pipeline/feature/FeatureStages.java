@@ -416,7 +416,7 @@ public final class FeatureStages {
             }
             if (c.getScope() == FeatureSpec.Scope.population && "encoding".equals(c.getOperator())
                     && !PopulationEvaluator.isSupported(c.getCoordinates().get("stat"))) {
-                errors.add(c.getCanonicalName() + ": stat '" + c.getCoordinates().get("stat") + "' is not implemented yet (available: " + PopulationEvaluator.AVAILABLE_STATS + ")");
+                errors.add(c.getCanonicalName() + ": stat '" + c.getCoordinates().get("stat") + "' is not implemented yet (available: " + OperatorCatalog.AVAILABLE_STATS + ")");
             }
         }
         return errors;
@@ -527,58 +527,30 @@ public final class FeatureStages {
                                 .withSideInputs(statsView));
             }
         }
-        // factorization blocks: gather the training set on one worker, fit by ALS (or load the artifact)
-        final List<FmSpec> fmSpecs = fmSpecs(stageColumns);
-        final Map<String, PCollectionView<List<Factorization.Model>>> fmViews = new LinkedHashMap<>();
-        final Map<String, FmSpec> fmLoad = new LinkedHashMap<>();
-        for (final FmSpec spec : fmSpecs) {
-            if (spec.artifactUri() != null && !spec.refit() && Factorization.exists(spec.artifactUri(), planHash, spec.block())) {
-                fmLoad.put(spec.block(), spec);
-                LOG.info("feature fit: block {} loads factorization artifact {}", spec.block(), Factorization.artifactPath(spec.artifactUri(), planHash, spec.block()));
+        // static-fit blocks (factorization / discretize): fitted on one worker over the whole input, or loaded
+        // from their artifact, and applied per row through a side input
+        final List<StaticFitBlock<?>> blocks = new ArrayList<>();
+        blocks.addAll(fmSpecs(stageColumns));
+        blocks.addAll(discretizeSpecs(stageColumns));
+        final Map<String, PCollectionView<?>> blockViews = new LinkedHashMap<>();
+        final Set<String> blockLoad = new LinkedHashSet<>();
+        for (final StaticFitBlock<?> block : blocks) {
+            if (block.artifactUri() != null && !block.refit() && block.artifactExists(planHash)) {
+                blockLoad.add(block.block());
+                LOG.info("feature fit: block {} loads artifact {}", block.block(), block.artifactPath(planHash));
                 continue;
             }
             if (com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
-                throw new IllegalStateException("factorization in streaming requires an existing artifact for plan " + planHash);
+                throw new IllegalStateException("fit.mode static block '" + block.block() + "' in streaming requires an existing artifact for plan " + planHash
+                        + " (fit it with a batch run first)");
             }
-            final PCollectionView<List<Factorization.Model>> view = fitInput
-                    .apply(label + "_Fm_" + spec.block() + "_Examples", ParDo.of(new ExtractExamplesDoFn(spec)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Example.class))
-                    .apply(label + "_Fm_" + spec.block() + "_Gather", Combine.globally(new GatherFn()).withoutDefaults())
-                    .apply(label + "_Fm_" + spec.block() + "_Fit", ParDo.of(new FitFmDoFn(spec, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Model.class))
-                    .apply(label + "_Fm_" + spec.block() + "_View", View.asList());
-            fmViews.put(spec.block(), view);
-            sideInputs.add(view);
-        }
-        final List<OutputColumn> fmColumns = new ArrayList<>();
-        for (final OutputColumn c : stageColumns) if ("fm".equals(c.getOperator())) fmColumns.add(c);
-
-        // discretize blocks: gather the input values on one worker, fit the quantile edges (or load the artifact)
-        final List<DiscretizeSpec> binSpecs = discretizeSpecs(stageColumns);
-        final Map<String, PCollectionView<List<Discretization>>> binViews = new LinkedHashMap<>();
-        final Map<String, DiscretizeSpec> binLoad = new LinkedHashMap<>();
-        for (final DiscretizeSpec spec : binSpecs) {
-            if (spec.artifactUri() != null && !spec.refit() && Discretization.exists(spec.artifactUri(), planHash, spec.block())) {
-                binLoad.put(spec.block(), spec);
-                LOG.info("feature fit: block {} loads discretization artifact {}", spec.block(), Discretization.artifactPath(spec.artifactUri(), planHash, spec.block()));
-                continue;
-            }
-            if (com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
-                throw new IllegalStateException("discretize in streaming requires an existing artifact for plan " + planHash);
-            }
-            final PCollectionView<List<Discretization>> view = fitInput
-                    .apply(label + "_Bins_" + spec.block() + "_Values", ParDo.of(new ExtractValuesDoFn(spec.field())))
-                    .setCoder(org.apache.beam.sdk.coders.DoubleCoder.of())
-                    .apply(label + "_Bins_" + spec.block() + "_Gather", Combine.globally(new GatherDoublesFn()).withoutDefaults())
-                    .apply(label + "_Bins_" + spec.block() + "_Fit", ParDo.of(new FitDiscretizeDoFn(spec, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Discretization.class))
-                    .apply(label + "_Bins_" + spec.block() + "_View", View.asList());
-            binViews.put(spec.block(), view);
+            final PCollectionView<?> view = block.fit(fitInput, label, planHash);
+            blockViews.put(block.block(), view);
             sideInputs.add(view);
         }
 
-        // fitted statistics are extracted from the stage INPUT: a target / offset produced by a column of
-        // this same stage would read null for every row, so reject the fusion explicitly
+        // fitted statistics are extracted from the stage INPUT: a target / offset / input produced by a column
+        // of this same stage would read null for every row, so reject the fusion explicitly
         final Set<String> stageProduced = new HashSet<>();
         for (final OutputColumn c : stageColumns) stageProduced.add(c.getCanonicalName());
         final List<String> sameStageDeps = new ArrayList<>();
@@ -586,12 +558,8 @@ public final class FeatureStages {
             if (level.field() != null && stageProduced.contains(level.field())) sameStageDeps.add(level.field());
             if (level.offsetColumn() != null && stageProduced.contains(level.offsetColumn())) sameStageDeps.add(level.offsetColumn());
         }
-        for (final FmSpec spec : fmSpecs) {
-            if (stageProduced.contains(spec.target())) sameStageDeps.add(spec.target());
-            if (spec.offsetColumn() != null && stageProduced.contains(spec.offsetColumn())) sameStageDeps.add(spec.offsetColumn());
-        }
-        for (final DiscretizeSpec spec : binSpecs) {
-            if (stageProduced.contains(spec.field())) sameStageDeps.add(spec.field());
+        for (final StaticFitBlock<?> block : blocks) {
+            for (final String f : block.fitInputs()) if (stageProduced.contains(f)) sameStageDeps.add(f);
         }
         if (!sameStageDeps.isEmpty()) {
             throw new IllegalStateException("fit.mode static targets/offsets/inputs " + sameStageDeps
@@ -600,124 +568,149 @@ public final class FeatureStages {
 
         return input.apply(label, ParDo
                 .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, loadBlocks, planHash,
-                        fmSpecs, fmColumns, fmViews, fmLoad, binSpecs, binViews, binLoad, loggings, failFast, failureTag))
+                        blocks, blockViews, blockLoad, loggings, failFast, failureTag))
                 .withSideInputs(sideInputs)
                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
     }
 
-    /** One discretize block of a fit stage, rebuilt from its output column's coordinates. */
-    record DiscretizeSpec(String block, String column, String field, String method, Integer bins, Integer minSamplesPerBin,
-                          String artifactUri, boolean refit) implements Serializable {}
-
-    static List<DiscretizeSpec> discretizeSpecs(final List<OutputColumn> stageColumns) {
-        final List<DiscretizeSpec> specs = new ArrayList<>();
-        for (final OutputColumn c : stageColumns) {
-            if (!"discretize".equals(c.getOperator())) continue;
-            final Map<String, String> k = c.getCoordinates();
-            specs.add(new DiscretizeSpec(c.getBlock(), c.getCanonicalName(), k.get("field"), k.get("method"),
-                    k.containsKey("bins") ? Integer.parseInt(k.get("bins")) : null,
-                    k.containsKey("minSamplesPerBin") ? Integer.parseInt(k.get("minSamplesPerBin")) : null,
-                    k.get("artifactUri"), "true".equals(k.get("refit"))));
-        }
-        return specs;
+    /**
+     * A population block fitted once on the whole input and applied by lookup ({@code fit.mode: static}
+     * outside the encoding lattice): its model {@code M} is either fitted in the fit stage (one side input
+     * per block) or loaded from its artifact on the worker. Implementations rebuild themselves from their
+     * output columns' coordinates ({@link #fmSpecs}, {@link #discretizeSpecs}).
+     */
+    interface StaticFitBlock<M extends Serializable> extends Serializable {
+        String block();
+        String artifactUri();
+        boolean refit();
+        String artifactPath(String planHash);
+        boolean artifactExists(String planHash);
+        M readArtifact(String planHash);
+        /** Fields the fit reads from the stage input (target / offset / input); they must come from an earlier stage. */
+        List<String> fitInputs();
+        PCollectionView<List<M>> fit(PCollection<MElement> fitInput, String label, String planHash);
+        /** Fills the block's output columns of one row; {@code model} is null when nothing could be fitted. */
+        void apply(M model, Map<String, Object> values);
     }
 
-    static class ExtractValuesDoFn extends DoFn<MElement, Double> {
-        private final String field;
-
-        ExtractValuesDoFn(final String field) {
-            this.field = field;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement element = c.element();
-            if (element == null) return;
-            final Double v = FeatureValues.toDouble(element.asPrimitiveMap().get(field));
-            if (v != null && !v.isNaN()) c.output(v);
-        }
-    }
-
-    /** Growable double buffer: the gathered fit values of a discretize block (sorted in memory on one worker). */
-    static final class Doubles implements Serializable {
-        double[] values = new double[16];
-        int size;
-
-        void add(final double v) {
-            if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
-            values[size++] = v;
-        }
-    }
-
-    static class GatherDoublesFn extends Combine.CombineFn<Double, Doubles, Doubles> {
+    /** Gathers a block's training examples into one list (the fit runs in memory on one worker). */
+    static class GatherFn<T extends Serializable> extends Combine.CombineFn<T, ArrayList<T>, ArrayList<T>> {
         @Override
-        public Doubles createAccumulator() { return new Doubles(); }
+        public ArrayList<T> createAccumulator() { return new ArrayList<>(); }
 
         @Override
-        public Doubles addInput(final Doubles acc, final Double v) {
-            acc.add(v);
+        public ArrayList<T> addInput(final ArrayList<T> acc, final T e) {
+            acc.add(e);
             return acc;
         }
 
         @Override
-        public Doubles mergeAccumulators(final Iterable<Doubles> accs) {
-            final Doubles out = new Doubles();
-            for (final Doubles a : accs) for (int i = 0; i < a.size; i++) out.add(a.values[i]);
+        public ArrayList<T> mergeAccumulators(final Iterable<ArrayList<T>> accs) {
+            final ArrayList<T> out = new ArrayList<>();
+            for (final ArrayList<T> a : accs) out.addAll(a);
             return out;
         }
 
         @Override
-        public Doubles extractOutput(final Doubles acc) { return acc; }
+        public ArrayList<T> extractOutput(final ArrayList<T> acc) { return acc; }
 
-        @Override
-        public Coder<Doubles> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Double> inputCoder) {
-            return org.apache.beam.sdk.coders.SerializableCoder.of(Doubles.class);
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        private static <T> Coder<ArrayList<T>> listCoder() {
+            return (Coder) org.apache.beam.sdk.coders.SerializableCoder.of(ArrayList.class);
         }
 
         @Override
-        public Coder<Doubles> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Double> inputCoder) {
-            return org.apache.beam.sdk.coders.SerializableCoder.of(Doubles.class);
+        public Coder<ArrayList<T>> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<T> inputCoder) {
+            return listCoder();
+        }
+
+        @Override
+        public Coder<ArrayList<T>> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<T> inputCoder) {
+            return listCoder();
         }
     }
 
-    static class FitDiscretizeDoFn extends DoFn<Doubles, Discretization> {
-        private final DiscretizeSpec spec;
-        private final String planHash;
-
-        FitDiscretizeDoFn(final DiscretizeSpec spec, final String planHash) {
-            this.spec = spec;
-            this.planHash = planHash;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final Doubles values = c.element();
-            LOG.info("discretize {}: fitting {} edges on {} values", spec.block(), spec.method(), values.size);
-            final Discretization d = Discretization.fitQuantile(values.values, values.size, spec.bins(), spec.minSamplesPerBin());
-            if (spec.artifactUri() != null) Discretization.write(spec.artifactUri(), planHash, spec.block(), d);
-            c.output(d);
-        }
-    }
+    // --- factorization ---------------------------------------------------------------------------
 
     /** One factorization block of a fit stage, rebuilt from its output columns' coordinates. */
     record FmSpec(String block, List<String> fields, boolean fieldWeighted, int k, String target, String offsetColumn,
-                  int epochs, double reg, long seed, String artifactUri, boolean refit) implements Serializable {
+                  int epochs, double reg, long seed, String artifactUri, boolean refit,
+                  List<OutputColumn> columns) implements StaticFitBlock<Factorization.Model> {
         Factorization.Options options() {
             return new Factorization.Options(fields, fieldWeighted, k, epochs, reg, seed);
+        }
+
+        @Override
+        public String artifactPath(final String planHash) {
+            return Factorization.artifactPath(artifactUri, planHash, block);
+        }
+
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return Factorization.exists(artifactUri, planHash, block);
+        }
+
+        @Override
+        public Factorization.Model readArtifact(final String planHash) {
+            return Factorization.read(artifactUri, planHash, block, fields, fieldWeighted, k);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            return offsetColumn == null ? List.of(target) : List.of(target, offsetColumn);
+        }
+
+        /** Gathers the training set on one worker and fits by ALS. */
+        @Override
+        public PCollectionView<List<Factorization.Model>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            return fitInput
+                    .apply(label + "_Fm_" + block + "_Examples", ParDo.of(new ExtractExamplesDoFn(this)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Example.class))
+                    .apply(label + "_Fm_" + block + "_Gather", Combine.globally(new GatherFn<Factorization.Example>()).withoutDefaults())
+                    .apply(label + "_Fm_" + block + "_Fit", ParDo.of(new FitFmDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Factorization.Model.class))
+                    .apply(label + "_Fm_" + block + "_View", View.asList());
+        }
+
+        @Override
+        public void apply(final Factorization.Model model, final Map<String, Object> values) {
+            final String[] x = fieldValues(values, fields);
+            for (final OutputColumn col : columns) {
+                Object v = null;
+                if (model != null) {
+                    switch (col.getCoordinates().get("kind")) {
+                        case "pair" -> {
+                            final String[] pair = col.getCoordinates().get("pair").split(",");
+                            v = model.pair(x, fields.indexOf(pair[0]), fields.indexOf(pair[1]));
+                        }
+                        case "embedding" -> {
+                            final int f = fields.indexOf(col.getCoordinates().get("field"));
+                            final int d = Integer.parseInt(col.getCoordinates().get("dim"));
+                            final double[] e = model.embedding(x, f, d + 1);
+                            v = e == null || e.length <= d ? null : e[d];
+                        }
+                        default -> v = model.predict(x);
+                    }
+                }
+                values.put(col.getCanonicalName(), v);
+            }
         }
     }
 
     static List<FmSpec> fmSpecs(final List<OutputColumn> stageColumns) {
-        final Map<String, FmSpec> specs = new LinkedHashMap<>();
+        final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
         for (final OutputColumn c : stageColumns) {
-            if (!"fm".equals(c.getOperator()) || specs.containsKey(c.getBlock())) continue;
-            final Map<String, String> k = c.getCoordinates();
-            specs.put(c.getBlock(), new FmSpec(c.getBlock(), List.of(k.get("fields").split(",")), "fwfm".equals(k.get("variant")),
+            if ("fm".equals(c.getOperator())) columns.computeIfAbsent(c.getBlock(), b -> new ArrayList<>()).add(c);
+        }
+        final List<FmSpec> specs = new ArrayList<>();
+        for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
+            final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            specs.add(new FmSpec(e.getKey(), List.of(k.get("fields").split(",")), "fwfm".equals(k.get("variant")),
                     Integer.parseInt(k.get("latentDim")), k.get("target"), k.get("offset"),
                     Integer.parseInt(k.get("epochs")), Double.parseDouble(k.get("reg")), Long.parseLong(k.get("seed")),
-                    k.get("artifactUri"), "true".equals(k.get("refit"))));
+                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
         }
-        return new ArrayList<>(specs.values());
+        return specs;
     }
 
     static String[] fieldValues(final Map<String, Object> row, final List<String> fields) {
@@ -749,43 +742,6 @@ public final class FeatureStages {
         }
     }
 
-    /** Gathers the training examples into one list (the ALS fit runs in memory on one worker). */
-    static class GatherFn extends org.apache.beam.sdk.transforms.Combine.CombineFn<Factorization.Example, ArrayList<Factorization.Example>, ArrayList<Factorization.Example>> {
-        @Override
-        public ArrayList<Factorization.Example> createAccumulator() { return new ArrayList<>(); }
-
-        @Override
-        public ArrayList<Factorization.Example> addInput(final ArrayList<Factorization.Example> acc, final Factorization.Example e) {
-            acc.add(e);
-            return acc;
-        }
-
-        @Override
-        public ArrayList<Factorization.Example> mergeAccumulators(final Iterable<ArrayList<Factorization.Example>> accs) {
-            final ArrayList<Factorization.Example> out = new ArrayList<>();
-            for (final ArrayList<Factorization.Example> a : accs) out.addAll(a);
-            return out;
-        }
-
-        @Override
-        public ArrayList<Factorization.Example> extractOutput(final ArrayList<Factorization.Example> acc) { return acc; }
-
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        private static Coder<ArrayList<Factorization.Example>> listCoder() {
-            return (Coder) org.apache.beam.sdk.coders.SerializableCoder.of(ArrayList.class);
-        }
-
-        @Override
-        public Coder<ArrayList<Factorization.Example>> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Factorization.Example> inputCoder) {
-            return listCoder();
-        }
-
-        @Override
-        public Coder<ArrayList<Factorization.Example>> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Factorization.Example> inputCoder) {
-            return listCoder();
-        }
-    }
-
     static class FitFmDoFn extends DoFn<ArrayList<Factorization.Example>, Factorization.Model> {
         private final FmSpec spec;
         private final String planHash;
@@ -804,6 +760,168 @@ public final class FeatureStages {
             c.output(model);
         }
     }
+
+    // --- discretize --------------------------------------------------------------------------------
+
+    /** One discretize block of a fit stage, rebuilt from its output column's coordinates. */
+    record DiscretizeSpec(String block, String column, String field, Integer bins, Integer minSamplesPerBin,
+                          String artifactUri, boolean refit) implements StaticFitBlock<Discretization> {
+        @Override
+        public String artifactPath(final String planHash) {
+            return Discretization.artifactPath(artifactUri, planHash, block);
+        }
+
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return Discretization.exists(artifactUri, planHash, block);
+        }
+
+        @Override
+        public Discretization readArtifact(final String planHash) {
+            return Discretization.read(artifactUri, planHash, block);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            return List.of(field);
+        }
+
+        /**
+         * Gathers the non-null input values on one worker and fits the quantile edges. The combine keeps its
+         * default (an empty buffer) so an input without any value still produces a fit — n = 0, every value
+         * to bin 1 — and writes the artifact instead of silently leaving the column null.
+         */
+        @Override
+        public PCollectionView<List<Discretization>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            return fitInput
+                    .apply(label + "_Bins_" + block + "_Values", ParDo.of(new ExtractValuesDoFn(field)))
+                    .setCoder(org.apache.beam.sdk.coders.DoubleCoder.of())
+                    .apply(label + "_Bins_" + block + "_Gather", Combine.globally(new GatherDoublesFn()))
+                    .apply(label + "_Bins_" + block + "_Fit", ParDo.of(new FitDiscretizeDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Discretization.class))
+                    .apply(label + "_Bins_" + block + "_View", View.asList());
+        }
+
+        @Override
+        public void apply(final Discretization d, final Map<String, Object> values) {
+            values.put(column, d == null ? null : d.bin(FeatureValues.toDouble(values.get(field))));
+        }
+    }
+
+    static List<DiscretizeSpec> discretizeSpecs(final List<OutputColumn> stageColumns) {
+        final List<DiscretizeSpec> specs = new ArrayList<>();
+        for (final OutputColumn c : stageColumns) {
+            if (!"discretize".equals(c.getOperator())) continue;
+            final Map<String, String> k = c.getCoordinates();
+            specs.add(new DiscretizeSpec(c.getBlock(), c.getCanonicalName(), k.get("field"),
+                    k.containsKey("bins") ? Integer.parseInt(k.get("bins")) : null,
+                    k.containsKey("minSamplesPerBin") ? Integer.parseInt(k.get("minSamplesPerBin")) : null,
+                    k.get("artifactUri"), "true".equals(k.get("refit"))));
+        }
+        return specs;
+    }
+
+    static class ExtractValuesDoFn extends DoFn<MElement, Double> {
+        private final String field;
+
+        ExtractValuesDoFn(final String field) {
+            this.field = field;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Double v = FeatureValues.toDouble(element.asPrimitiveMap().get(field));
+            if (v != null && !v.isNaN()) c.output(v);
+        }
+    }
+
+    /** Growable double buffer: the gathered fit values of a discretize block (sorted in memory on one worker). */
+    static final class Doubles implements Serializable {
+        double[] values;
+        int size;
+
+        Doubles() {
+            this(16);
+        }
+
+        Doubles(final int capacity) {
+            values = new double[capacity];
+        }
+
+        void add(final double v) {
+            if (size == values.length) values = Arrays.copyOf(values, Math.max(16, values.length * 2));
+            values[size++] = v;
+        }
+
+        /** Drops the spare capacity: what crosses a worker boundary is exactly {@code size} doubles. */
+        Doubles trimmed() {
+            if (values.length != size) values = Arrays.copyOf(values, size);
+            return this;
+        }
+    }
+
+    static class GatherDoublesFn extends Combine.CombineFn<Double, Doubles, Doubles> {
+        @Override
+        public Doubles createAccumulator() { return new Doubles(); }
+
+        @Override
+        public Doubles addInput(final Doubles acc, final Double v) {
+            acc.add(v);
+            return acc;
+        }
+
+        /** Allocates the merged buffer once (the sum of the parts) instead of regrowing by doubling. */
+        @Override
+        public Doubles mergeAccumulators(final Iterable<Doubles> accs) {
+            int total = 0;
+            for (final Doubles a : accs) total += a.size;
+            final Doubles out = new Doubles(Math.max(16, total));
+            for (final Doubles a : accs) {
+                System.arraycopy(a.values, 0, out.values, out.size, a.size);
+                out.size += a.size;
+            }
+            return out;
+        }
+
+        @Override
+        public Doubles compact(final Doubles acc) { return acc.trimmed(); }
+
+        @Override
+        public Doubles extractOutput(final Doubles acc) { return acc.trimmed(); }
+
+        @Override
+        public Coder<Doubles> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Double> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(Doubles.class);
+        }
+
+        @Override
+        public Coder<Doubles> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Double> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(Doubles.class);
+        }
+    }
+
+    static class FitDiscretizeDoFn extends DoFn<Doubles, Discretization> {
+        private final DiscretizeSpec spec;
+        private final String planHash;
+
+        FitDiscretizeDoFn(final DiscretizeSpec spec, final String planHash) {
+            this.spec = spec;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final Doubles values = c.element();
+            LOG.info("discretize {}: fitting quantile edges on {} values", spec.block(), values.size);
+            final Discretization d = Discretization.fitQuantile(values.values, values.size, spec.bins(), spec.minSamplesPerBin());
+            if (spec.artifactUri() != null) Discretization.write(spec.artifactUri(), planHash, spec.block(), d);
+            c.output(d);
+        }
+    }
+
+    // --- apply -------------------------------------------------------------------------------------
 
     static class WriteArtifactDoFn extends DoFn<String, Void> {
         private final String uri;
@@ -833,48 +951,35 @@ public final class FeatureStages {
     }
 
     static class FitApplyDoFn extends StageDoFn<MElement> {
+        /** Loaded artifacts per path, for the JVM lifetime (content-addressed paths: see FitArtifact). */
         private static final Map<String, Map<String, VarianceComponents.KeyStats>> ARTIFACT_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
-
-        private static final Map<String, Factorization.Model> FM_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
-        private static final Map<String, Discretization> BINS_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<String, Object> MODEL_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
         private final List<FitLevel> levels;
         private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
         private final Map<String, String> loadBlocks;
         private final String planHash;
-        private final List<FmSpec> fmSpecs;
-        private final List<OutputColumn> fmColumns;
-        private final Map<String, PCollectionView<List<Factorization.Model>>> fmViews;
-        private final Map<String, FmSpec> fmLoad;
-        private final List<DiscretizeSpec> binSpecs;
-        private final Map<String, PCollectionView<List<Discretization>>> binViews;
-        private final Map<String, DiscretizeSpec> binLoad;
+        private final List<StaticFitBlock<?>> blocks;
+        private final Map<String, PCollectionView<?>> blockViews;
+        private final Set<String> blockLoad;
         private transient Map<String, VarianceComponents.KeyStats> loaded;
         private transient Map<String, Double> loadedLambdas;
-        private transient Map<String, Factorization.Model> loadedModels;
-        private transient Map<String, Discretization> loadedBins;
+        private transient Map<String, Object> loadedModels;
 
         FitApplyDoFn(final StageEvaluator evaluator, final List<FitLevel> levels,
                      final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
                      final PCollectionView<Map<String, Double>> lambdas,
                      final Map<String, String> loadBlocks, final String planHash,
-                     final List<FmSpec> fmSpecs, final List<OutputColumn> fmColumns,
-                     final Map<String, PCollectionView<List<Factorization.Model>>> fmViews, final Map<String, FmSpec> fmLoad,
-                     final List<DiscretizeSpec> binSpecs, final Map<String, PCollectionView<List<Discretization>>> binViews,
-                     final Map<String, DiscretizeSpec> binLoad,
+                     final List<StaticFitBlock<?>> blocks, final Map<String, PCollectionView<?>> blockViews, final Set<String> blockLoad,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.levels = levels;
             this.statsView = statsView;
             this.loadBlocks = loadBlocks;
             this.planHash = planHash;
-            this.fmSpecs = fmSpecs;
-            this.fmColumns = fmColumns;
-            this.fmViews = fmViews;
-            this.fmLoad = fmLoad;
-            this.binSpecs = binSpecs;
-            this.binViews = binViews;
-            this.binLoad = binLoad;
+            this.blocks = blocks;
+            this.blockViews = blockViews;
+            this.blockLoad = blockLoad;
         }
 
         @Setup
@@ -887,64 +992,25 @@ public final class FeatureStages {
             }
             loadedLambdas = loaded.isEmpty() ? Map.of() : VarianceComponents.lambdasInMemory(loaded);
             loadedModels = new HashMap<>();
-            for (final FmSpec spec : fmLoad.values()) {
-                final String path = Factorization.artifactPath(spec.artifactUri(), planHash, spec.block());
-                loadedModels.put(spec.block(), FM_CACHE.computeIfAbsent(path, p ->
-                        Factorization.read(spec.artifactUri(), planHash, spec.block(), spec.fields(), spec.fieldWeighted(), spec.k())));
-            }
-            loadedBins = new HashMap<>();
-            for (final DiscretizeSpec spec : binLoad.values()) {
-                final String path = Discretization.artifactPath(spec.artifactUri(), planHash, spec.block());
-                loadedBins.put(spec.block(), BINS_CACHE.computeIfAbsent(path, p -> Discretization.read(spec.artifactUri(), planHash, spec.block())));
+            for (final StaticFitBlock<?> block : blocks) {
+                if (!blockLoad.contains(block.block())) continue;
+                loadedModels.put(block.block(), MODEL_CACHE.computeIfAbsent(block.artifactPath(planHash), p -> block.readArtifact(planHash)));
             }
         }
 
-        private void applyDiscretize(final ProcessContext c, final Map<String, Object> values) {
-            for (final DiscretizeSpec spec : binSpecs) {
-                Discretization d = loadedBins.get(spec.block());
-                if (d == null) {
-                    final PCollectionView<List<Discretization>> view = binViews.get(spec.block());
-                    final List<Discretization> fitted = view == null ? List.of() : c.sideInput(view);
-                    d = fitted.isEmpty() ? null : fitted.get(0);
-                }
-                values.put(spec.column(), d == null ? null : d.bin(FeatureValues.toDouble(values.get(spec.field()))));
-            }
-        }
-
-        private Factorization.Model model(final ProcessContext c, final String block) {
-            final Factorization.Model loadedModel = loadedModels.get(block);
+        /** The block's model: loaded from its artifact at setup, else the first (only) element of its fit view. */
+        private Object model(final ProcessContext c, final StaticFitBlock<?> block) {
+            final Object loadedModel = loadedModels.get(block.block());
             if (loadedModel != null) return loadedModel;
-            final PCollectionView<List<Factorization.Model>> view = fmViews.get(block);
-            if (view == null) return null;
-            final List<Factorization.Model> models = c.sideInput(view);
+            final PCollectionView<?> view = blockViews.get(block.block());
+            if (view == null) throw new IllegalStateException("static fit block " + block.block() + " was neither fitted nor loaded");
+            final List<?> models = (List<?>) c.sideInput(view);
             return models.isEmpty() ? null : models.get(0);
         }
 
-        private void applyFactorization(final ProcessContext c, final Map<String, Object> values) {
-            for (final FmSpec spec : fmSpecs) {
-                final Factorization.Model model = model(c, spec.block());
-                final String[] x = fieldValues(values, spec.fields());
-                for (final OutputColumn col : fmColumns) {
-                    if (!col.getBlock().equals(spec.block())) continue;
-                    Object v = null;
-                    if (model != null) {
-                        switch (col.getCoordinates().get("kind")) {
-                            case "pair" -> {
-                                final String[] pair = col.getCoordinates().get("pair").split(",");
-                                v = model.pair(x, spec.fields().indexOf(pair[0]), spec.fields().indexOf(pair[1]));
-                            }
-                            case "embedding" -> {
-                                final int f = spec.fields().indexOf(col.getCoordinates().get("field"));
-                                final int d = Integer.parseInt(col.getCoordinates().get("dim"));
-                                final double[] e = model.embedding(x, f, d + 1);
-                                v = e == null || e.length <= d ? null : e[d];
-                            }
-                            default -> v = model.predict(x);
-                        }
-                    }
-                    values.put(col.getCanonicalName(), v);
-                }
-            }
+        @SuppressWarnings("unchecked")
+        private static <M extends Serializable> void apply(final StaticFitBlock<M> block, final Object model, final Map<String, Object> values) {
+            block.apply((M) model, values);
         }
 
         @Override
@@ -982,8 +1048,7 @@ public final class FeatureStages {
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);
                     if (level.sumSqColumn() != null) values.put(level.sumSqColumn(), stats == null ? 0d : stats.sumSq);
                 }
-                applyFactorization(c, values);
-                applyDiscretize(c, values);
+                for (final StaticFitBlock<?> block : blocks) apply(block, model(c, block), values);
                 evaluator.evaluateRowColumns(values);
                 c.output(MElement.of(values, c.timestamp()));
             } catch (final Throwable e) {
