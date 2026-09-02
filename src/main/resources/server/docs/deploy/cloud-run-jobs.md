@@ -52,8 +52,9 @@ see [Deploy Prism Runner](README.md#deploy-prism-runner-for-local--cloud-run-exe
 `--image` and keep the arguments. Prefer it when the pipeline has heavy keyed stages (GroupByKey over
 coarse or global keys), which DirectRunner slows down on by orders of magnitude.
 
-* The container downloads the prism binary from the Beam GitHub release at startup, so the job needs
-  outbound network access (or set `options.prism.prismLocation`).
+* The prism binary is bundled in the image, so the job needs no outbound network access to start and
+  no writable `$HOME` (`options.prism.prismLocation` or `--prismLocation` in `--args` overrides it — see
+  [Prism Options](../options/prism.md#the-bundled-binary-prism-image)).
 * Prism executes in memory (no disk spill): size `--memory` to the pipeline's working set — it grows
   roughly linearly with the input, split between the JVM (heap capped at 50% by the entrypoint) and
   the prism Go process holding the GBK / shuffle state. A sudden loss of every gRPC channel early in

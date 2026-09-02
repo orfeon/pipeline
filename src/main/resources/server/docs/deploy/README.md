@@ -87,12 +87,10 @@ global keys, e.g. the `feature` transform's global encoding levels): DirectRunne
 each key's buffered state per bundle and such stages slow down by orders of magnitude as rows grow,
 while Prism executes them at proper speed.
 
-* The image does not bundle the prism binary: the runner downloads it from the Beam GitHub release at
-  startup, so the runtime needs outbound network access (otherwise point
-  `options.prism.prismLocation` at a pre-downloaded binary — see [Prism Options](../options/prism.md)),
-  plus a **writable, exec-capable `$HOME`**: the binary is cached and `chmod +x`-ed under
-  `~/.apache_beam/cache/prism/bin` even when `prismLocation` points at a local file (a hardened pod
-  with `readOnlyRootFilesystem` / `noexec` fails at startup where the direct image works).
+* The image **bundles the prism binary** (linux/amd64, downloaded and sha256-checked at build time), so a
+  container starts with no outbound network access and no writable `$HOME`; it does need a writable
+  `java.io.tmpdir`. Overrides (`options.prism.prismLocation`, a mirror for the build, an arm64 image) and
+  the requirements are in [Prism Options](../options/prism.md#the-bundled-binary-prism-image).
 * Prism executes **in memory** (no disk spill): the container memory must fit the pipeline's working
   set, which grows roughly linearly with the input. Two processes share that memory — the JVM (the
   loopback SDK harness running your DoFns, heap capped at 50% by the entrypoint) and the prism Go

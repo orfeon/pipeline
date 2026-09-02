@@ -60,6 +60,23 @@ jobs:
           path: target/surefire-reports/
           retention-days: 14
 
+  # The prism image bundles the prism release of beam.version, pinned by prism.zip.sha256: catch a
+  # beam.version bump without the matching pin here rather than at the next image build.
+  prism-binary-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Download and verify the prism release asset
+        run: mvn --batch-mode -Pprism -DskipTests generate-resources
+
   integration-test:
     runs-on: ubuntu-latest
     steps:
