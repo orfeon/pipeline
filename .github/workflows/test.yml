@@ -58,6 +58,7 @@ jobs:
         with:
           name: surefire-reports
           path: target/surefire-reports/
+          retention-days: 14
 
   # The prism image bundles the prism release of beam.version, pinned by prism.zip.sha256: catch a
   # beam.version bump without the matching pin here rather than at the next image build.
@@ -75,7 +76,6 @@ jobs:
 
       - name: Download and verify the prism release asset
         run: mvn --batch-mode -Pprism -DskipTests generate-resources
-          retention-days: 14
 
   integration-test:
     runs-on: ubuntu-latest
