@@ -128,6 +128,17 @@ public class MPipeline {
         }
 
         final PipelineResult result = pipeline.run();
+        if(runner != Runner.dataflow) {
+            // Dataflow (FlexTemplate) must return right after submission — the launcher's exit is not the
+            // job's end. Every other runner executes the job in or from this process: a non-blocking
+            // submission (Prism's job service; direct with blockOnRun=false) would be killed by the JVM
+            // exiting here, and a Cloud Run Job would report success having processed nothing.
+            final PipelineResult.State state = result.waitUntilFinish();
+            LOG.info("Pipeline finished with state: {}", state);
+            if(PipelineResult.State.FAILED.equals(state) || PipelineResult.State.CANCELLED.equals(state)) {
+                throw new IllegalStateException("Pipeline finished with state: " + state);
+            }
+        }
     }
 
     private static Map<String, MCollection> apply(
