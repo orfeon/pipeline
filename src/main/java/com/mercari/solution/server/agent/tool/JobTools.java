@@ -52,8 +52,10 @@ public class JobTools {
     @Tool(name = "getJobLogs", value = """
         Read a job's Cloud Logging entries (Dataflow worker / launcher logs, or a Cloud Run Job execution's
         container logs): the latest entries at or above minSeverity (default INFO), optionally only those
-        containing a text. Use it to see what happened around an error, the feature plan report a job
-        logged at startup, or progress messages; listJobErrors is the deduplicated error summary.
+        containing a text. Cloud Run container stdout carries severity DEFAULT, so for runner 'direct' any
+        threshold below WARNING returns all lines (stderr maps to ERROR). Use it to see what happened around
+        an error, the feature plan report a job logged at startup, or progress messages; listJobErrors is
+        the deduplicated error summary.
     """)
     public String getJobLogs(
             @P(name = "job", description = "Dataflow job id / exact job name, or a Cloud Run execution name.") String job,

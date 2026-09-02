@@ -1,4 +1,4 @@
-ARG BEAM_VERSION=2.74.0
+ARG BEAM_VERSION=2.76.0
 FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04 AS cuda
 
 FROM apache/beam_java21_sdk:${BEAM_VERSION}

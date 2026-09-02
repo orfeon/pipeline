@@ -55,7 +55,7 @@ forces it. `project` / `region` default to the server's launch configuration.
 | `get-job` | `getJob` | status; for Dataflow also the config the job was launched with; with `runner: direct` and no job, the latest executions of the configured Cloud Run Job |
 | `get-job-progress` | `getJobProgress` | why a Dataflow job is slow or not scaling: current / target workers with the autoscaler's decisions, the stage completion timeline with durations, the running fused stage (its transforms, the element counts of its inputs / outputs — few groups read but most rows already emitted means a tail of hot keys), and the feature plan's stages / keys mapped to the Dataflow stages |
 | `list-job-errors` | `listJobErrors` | the error picture: Dataflow error messages / execution conditions plus the deduplicated worker error logs (with stack traces) from Cloud Logging |
-| `get-job-logs` | `getJobLogs` | Cloud Logging entries of the job (`minSeverity`, `contains`, `limit`; latest first) — the INFO / WARNING context around an error, the feature plan report a job logs at startup, progress messages |
+| `get-job-logs` | `getJobLogs` | Cloud Logging entries of the job (`minSeverity`, `contains`, `limit`; latest first) — the INFO / WARNING context around an error, the feature plan report a job logs at startup, progress messages. Cloud Run container stdout carries severity DEFAULT, so for `runner: direct` any threshold below WARNING returns all lines (stderr maps to ERROR) |
 | `list-failed-jobs` | `listFailedJobs` | jobs that failed in the last `hours` (default 24): Dataflow jobs and the failed executions of the configured Cloud Run Job |
 
 ## Resources and prompt
