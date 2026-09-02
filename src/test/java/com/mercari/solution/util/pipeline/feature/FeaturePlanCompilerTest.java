@@ -481,12 +481,17 @@ public class FeaturePlanCompilerTest {
     @Test
     public void testGlobalKeyStageHint() {
         // a single-key stage (a lattice's global level, a share denominator) is one worker thread and the
-        // critical path of a parallel-wave run: the S4 hint points at fit.mode static / fold
+        // critical path of a parallel-wave run: the S4 hint points at fit.mode static / fold, one hint per
+        // stage at the blocks that force the global level
         final FeaturePlan lattice = compile(SOURCES, withEncoding(LATTICE_ENC));
-        Assertions.assertTrue(hasCode(lattice, "encoding.global-key"), lattice::describe);
+        Assertions.assertTrue(lattice.getDiagnostics().getMessages().stream()
+                        .anyMatch(m -> m.code().equals("encoding.globalKey") && m.location().startsWith("features.")),
+                lattice::describe);
+        // the plain SPEC's share statistic needs a global denominator stage: the hint fires there too
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC), "encoding.globalKey"));
         // no share statistic, no hierarchy: no global stage, no hint
         final FeaturePlan noGlobal = compile(SOURCES, SPEC.replace("stats: [count, share]", "stats: [count]"));
-        Assertions.assertFalse(hasCode(noGlobal, "encoding.global-key"), noGlobal::describe);
+        Assertions.assertFalse(hasCode(noGlobal, "encoding.globalKey"), noGlobal::describe);
     }
 
     @Test
