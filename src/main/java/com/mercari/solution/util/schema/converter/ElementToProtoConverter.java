@@ -152,7 +152,7 @@ public class ElementToProtoConverter {
                 default -> throw new IllegalArgumentException();
             };
             case STRING -> switch (fieldType.getType()) {
-                case string -> value;
+                case string, uuid -> value;
                 case int32, int64, float32, float64, date, time -> value.toString();
                 case enumeration -> fieldType.getSymbols().get((Integer) value);
                 default -> throw new IllegalArgumentException();

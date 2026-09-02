@@ -12,18 +12,18 @@
   <packaging>${packaging}</packaging>
 
   <properties>
-    <beam.version>2.75.0</beam.version>
+    <beam.version>2.76.0</beam.version>
 
     <snakeyaml.version>2.6</snakeyaml.version>
     <freemarker.version>2.3.34</freemarker.version>
-    <exp4j.version>0.4.8</exp4j.version>
-    <lucene.version>10.3.2</lucene.version>
-    <pdfbox.version>3.0.7</pdfbox.version>
-    <jsoup.version>1.22.2</jsoup.version>
+    <lucene.version>10.5.1</lucene.version>
+    <pdfbox.version>3.0.8</pdfbox.version>
+    <jsoup.version>1.23.2</jsoup.version>
     <djl.version>0.36.0</djl.version>
-    <ojalgo.version>57.0.0</ojalgo.version>
+    <ojalgo.version>57.1.1</ojalgo.version>
 
     <hbase.version>2.6.6</hbase.version>
+    <hadoop.version>3.4.2</hadoop.version>
     <mysql-connector.version>8.4.0</mysql-connector.version>
     <postgresql-connector.version>42.7.11</postgresql-connector.version>
     <alloydb-connector.version>1.3.1</alloydb-connector.version>
@@ -37,7 +37,7 @@
     <slides.version>v1-rev20260408-2.0.0</slides.version>
     <forms.version>v1-rev20250422-2.0.0</forms.version>
 
-    <onnxruntime.version>1.27.0</onnxruntime.version>
+    <onnxruntime.version>1.29.0</onnxruntime.version>
     <onnx.version>1.20.1-1.5.13</onnx.version>
 
     <!-- datasketches-java 7.x/8.x/9.x cannot run on Java 21 (their datasketches-memory versions
@@ -63,9 +63,13 @@
           would deactivate the activeByDefault dataflow profile.) -->
     <skipITs>true</skipITs>
 
+    <!-- Must match the com.github.jbellis:jamm version the beam-sdks-java-harness pom pins (it declares
+         jamm provided; the prism / portable images supply it) — re-check on a beam.version bump. -->
+    <jamm.version>0.4.0</jamm.version>
+
     <jetty.version>12.1.10</jetty.version>
-    <mcp.version>2.0.0</mcp.version>
-    <langchain4j.version>1.18.0</langchain4j.version>
+    <mcp.version>2.0.1</mcp.version>
+    <langchain4j.version>1.19.0</langchain4j.version>
 
     <packaging>jar</packaging>
     <jib.entrypoint>INHERIT</jib.entrypoint>
@@ -140,6 +144,14 @@
         <version>${maven-surefire-plugin.version}</version>
         <configuration>
           <redirectTestOutputToFile>true</redirectTestOutputToFile>
+          <environmentVariables>
+            <!-- Isolate unit tests from the developer's gcloud CLI config: Beam's
+                 GcpOptions.DefaultProjectFactory otherwise resolves the machine's ambient
+                 default project, making "projectId is required" validations pass or fail
+                 depending on the machine (e.g. BuildActionTest#testValidation). The
+                 directory does not need to exist. -->
+            <CLOUDSDK_CONFIG>${project.build.directory}/gcloud-config-isolated</CLOUDSDK_CONFIG>
+          </environmentVariables>
           <properties>
             <!-- JUnit 5 parallel execution (equivalent of the former JUnit4 parallel=all/threadCount=4) -->
             <configurationParameters>
@@ -263,12 +275,6 @@
               <APP_VERSION>${project.version}</APP_VERSION>
               <DATAFLOW_JAVA_COMMAND_SPEC>/template/MPipeline/resources/command-spec.json</DATAFLOW_JAVA_COMMAND_SPEC>
             </environment>
-            <jvmFlags>
-              <jvmFlag>-Xms2048m</jvmFlag>
-              <jvmFlag>-Xmx2048m</jvmFlag>
-              <jvmFlag>-Xdebug</jvmFlag>
-              <jvmFlag>-Xmy:flag=jib-rules</jvmFlag>
-            </jvmFlags>
           </container>
         </configuration>
       </plugin>
@@ -301,7 +307,10 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=DirectRunner</jib.entrypoint>
+        <!-- Local debugging image: skip DirectRunner's per-element encode/mutation checks by default.
+             Re-enable per run via config options.direct.enforceImmutability/enforceEncodability
+             (args cannot override: duplicating a flag fails PipelineOptionsFactory.fromArgs). -->
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=DirectRunner,--enforceImmutability=false,--enforceEncodability=false</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
@@ -352,10 +361,6 @@
             <artifactId>maven-war-plugin</artifactId>
             <configuration>
               <webResources>
-                <resource>
-                  <directory>docs/config</directory>
-                  <targetPath>docs/config</targetPath>
-                </resource>
                 <!-- Framework sources for the agent/MCP code-reading tools (CodeRepository).
                      Placed under WEB-INF so they are never served over HTTP. -->
                 <resource>
@@ -422,27 +427,25 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
+        <!-- No baked GOOGLE_APPLICATION_CREDENTIALS: a set env var overrides the metadata-server ADC and
+             breaks the image on Cloud Run; local docker runs pass it with -e next to the gcloud mount.
+             Heap at 50% (not the direct image's 75%): the container is shared with the prism Go child
+             process, which holds the whole in-memory GBK/shuffle state — the JVM (loopback SDK harness)
+             and prism split the container memory roughly evenly. -->
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=50.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
       </properties>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>com.google.cloud.tools</groupId>
-            <artifactId>jib-maven-plugin</artifactId>
-            <configuration>
-              <container>
-                <environment>
-                  <GOOGLE_APPLICATION_CREDENTIALS>/mnt/gcloud/application_default_credentials.json</GOOGLE_APPLICATION_CREDENTIALS>
-                </environment>
-              </container>
-            </configuration>
-          </plugin>
-        </plugins>
-      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-prism-java</artifactId>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <!-- The portable SDK harness (FnHarness -> Caches) needs MemoryMeter at runtime; the harness
+               declares it provided (a Dataflow worker container ships it), so this image supplies it. -->
+          <groupId>com.github.jbellis</groupId>
+          <artifactId>jamm</artifactId>
+          <version>${jamm.version}</version>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
@@ -455,12 +458,19 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=PortableRunner</jib.entrypoint>
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=PortableRunner</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>
           <artifactId>beam-runners-portability-java</artifactId>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <!-- Same as the prism profile: the portable SDK harness needs MemoryMeter at runtime. -->
+          <groupId>com.github.jbellis</groupId>
+          <artifactId>jamm</artifactId>
+          <version>${jamm.version}</version>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
@@ -648,12 +658,6 @@
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-sdks-java-extensions-sql</artifactId>
-      <exclusions>
-        <exclusion>
-          <groupId>org.apache.hadoop</groupId>
-          <artifactId>hadoop-client-api</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-expansion-service -->
@@ -669,15 +673,40 @@
     </dependency>
 
     <!-- Big Data -->
+    <!-- Required by ParquetIO at runtime and by parquet writer API signatures (hadoop Path) at compile time.
+         Beam declares hadoop as provided. Shaded, no transitive deps.
+         hadoop-client-api and hadoop-client-runtime are a pair: the api jar holds the public classes
+         (Configuration, Path), the runtime jar holds the shaded third-party classes they reference
+         (org.apache.hadoop.shaded.* — e.g. woodstox for Configuration's XML parsing). Without the
+         runtime jar, ParquetIO reads fail at execution with NoClassDefFoundError. -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-api</artifactId>
+      <version>${hadoop.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client-runtime</artifactId>
+      <version>${hadoop.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Test-only: HBaseBytesTest verifies the in-repo codec against the real HBase Bytes.
+         hadoop-common is excluded to avoid duplicating hadoop classes with hadoop-client-api. -->
     <!-- https://mvnrepository.com/artifact/org.apache.hbase/hbase-common -->
     <dependency>
       <groupId>org.apache.hbase</groupId>
       <artifactId>hbase-common</artifactId>
       <version>${hbase.version}</version>
+      <scope>test</scope>
       <exclusions>
         <exclusion>
           <groupId>io.opentelemetry</groupId>
           <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.hadoop</groupId>
+          <artifactId>hadoop-common</artifactId>
         </exclusion>
       </exclusions>
     </dependency>
@@ -716,6 +745,20 @@
       <version>${lucene.version}</version>
     </dependency>
 
+    <dependency>
+      <groupId>org.apache.lucene</groupId>
+      <artifactId>lucene-expressions</artifactId>
+      <version>${lucene.version}</version>
+    </dependency>
+
+    <!-- Mergeable approximate sketches (attribution distribution measures).
+         6.2.0 is the newest version that still targets Java 21 class files. -->
+    <dependency>
+      <groupId>org.apache.datasketches</groupId>
+      <artifactId>datasketches-java</artifactId>
+      <version>6.2.0</version>
+    </dependency>
+
     <!-- https://mvnrepository.com/artifact/org.apache.pdfbox/pdfbox -->
     <dependency>
       <groupId>org.apache.pdfbox</groupId>
@@ -746,6 +789,12 @@
     <dependency>
       <groupId>com.google.cloud</groupId>
       <artifactId>google-cloud-iamcredentials</artifactId>
+    </dependency>
+
+    <!-- https://mvnrepository.com/artifact/com.google.cloud/google-cloud-tasks -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-tasks</artifactId>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/com.google.cloud/google-cloud-kms -->
@@ -831,13 +880,6 @@
       <groupId>org.apache.datasketches</groupId>
       <artifactId>datasketches-java</artifactId>
       <version>${datasketches.version}</version>
-    </dependency>
-
-    <!-- https://mvnrepository.com/artifact/net.objecthunter/exp4j -->
-    <dependency>
-      <groupId>net.objecthunter</groupId>
-      <artifactId>exp4j</artifactId>
-      <version>${exp4j.version}</version>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/org.jsoup/jsoup -->
@@ -949,10 +991,18 @@
     </dependency>
 
     <!-- Pipeline Server for MCP -->
-    <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp -->
+    <!-- https://mvnrepository.com/artifact/io.modelcontextprotocol.sdk/mcp-core -->
+    <!-- mcp-core + the Jackson 2 JSON provider instead of the `mcp` aggregate: the aggregate brings
+         mcp-json-jackson3 (Jackson 3 databind), whose schema validator needs jackson-annotations 3.x
+         while Beam / GCP pin 2.x (NoSuchFieldError JsonFormat$Shape.POJO at server start). -->
     <dependency>
       <groupId>io.modelcontextprotocol.sdk</groupId>
-      <artifactId>mcp</artifactId>
+      <artifactId>mcp-core</artifactId>
+      <version>${mcp.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-json-jackson2</artifactId>
       <version>${mcp.version}</version>
     </dependency>
 
@@ -967,7 +1017,7 @@
     <dependency>
       <groupId>dev.langchain4j</groupId>
       <artifactId>langchain4j-google-genai</artifactId>
-      <version>${langchain4j.version}-beta28</version>
+      <version>${langchain4j.version}-beta29</version>
     </dependency>
 
     <!-- Experimental LLM -->

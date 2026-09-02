@@ -68,6 +68,11 @@ public abstract class Sink extends Module<MCollectionTuple> {
         this.inputNames = config.getInputs();
     }
 
+    /** Registered module names (the @Sink.Module(name=...) values). */
+    public static java.util.Set<String> moduleNames() {
+        return new java.util.TreeSet<>(sinks.keySet());
+    }
+
     public static @NonNull Sink create(
             final @NonNull SinkConfig config,
             final @NonNull PipelineOptions options,

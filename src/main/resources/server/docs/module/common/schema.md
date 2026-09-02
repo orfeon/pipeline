@@ -66,8 +66,35 @@ schema:
 | mode      | optional | Enum   | `nullable` (default), `required`, `repeated`.                                 |
 | fields    | selective | Array | Nested fields (for `element` type).                                           |
 | symbols   | selective | Array<String\> | Enum symbols (for `enum` type).                                       |
+| defaultValue | optional | Primitive | Value substituted when the field is missing or null. For `repeated` mode it replaces null elements inside the array. |
 | shape     | selective | Array<Integer\> | Dimensions (for `matrix` type). Required; positive integers.         |
 | valueType | selective | Enum   | Element type (for `matrix` type): a numeric type. Default: `float64`.         |
+| description | optional | String | Human-readable description of the field. Shown in the dry-run output schema (`spec.modules[].schema`) and written to destinations that support it (see below). |
+| options   | optional | Map<String,String\> | Free-form key/value metadata attached to the field. Shown in the dry-run output schema. |
+
+### Field descriptions
+
+The `schema` block itself also accepts a `description` (the table / view / record description).
+Sources fill it from the destination metadata the same way as field descriptions (BigQuery table
+description, jdbc table comment, Avro record `doc`); it appears as `description` of the module's
+output schema in the dry-run output. It is not carried into schemas derived by other modules, so a
+description always refers to the module that read it.
+
+Field descriptions are metadata: they never affect how data is read, converted or written, but
+they travel with the schema so that the dry-run output (Pipeline Builder, `run-pipeline` with `dryRun` /
+`run-pipeline` MCP tools) can show what each column means. They come from:
+
+- the `description` key of a declared `schema.fields` entry (any module);
+- the source table's metadata, for sources whose destination stores it:
+  `bigquery` (table or view read: BigQuery field descriptions; not available for `query` reads),
+  `jdbc` / `postgres` / `tidb` (`table` read: column comments, i.e. JDBC `REMARKS`),
+  and Avro-based inputs (`storage` / `files` avro or parquet, `pubsub` with an Avro schema: the field `doc`).
+
+Descriptions are kept by modules that pass fields through unchanged (`union`, `partition`,
+`reshuffle`, aggregation keys, `onnx`) and dropped by modules that rebuild their output schema
+(`select`, `beamsql`, `query`). They are written to destinations that store them: the `bigquery`
+sink (field descriptions of a table auto-created with `createDisposition: CREATE_IF_NEEDED`) and
+Avro output (`storage` / `files` avro, and parquet written via parquet-avro, as the field `doc`).
 
 A `matrix` field holds its values **flat in row-major order**; the shape lives in the schema
 (the same representation as ONNX tensor outputs and the select module's `reshape` function).

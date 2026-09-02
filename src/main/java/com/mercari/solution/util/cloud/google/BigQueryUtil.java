@@ -243,12 +243,16 @@ public class BigQueryUtil {
     }
 
     public static TableSchema getTableSchemaFromTable(final TableReference tableReference) {
+        return getTable(tableReference).getSchema();
+    }
+
+    /** The table (or view) resource: schema plus metadata such as description and labels. */
+    public static Table getTable(final TableReference tableReference) {
         final Bigquery bigquery = getBigquery();
         try {
-            final Table table = bigquery.tables()
+            return bigquery.tables()
                     .get(tableReference.getProjectId(), tableReference.getDatasetId(), tableReference.getTableId())
                     .execute();
-            return table.getSchema();
         } catch (IOException e) {
             throw new RuntimeException("Failed to get schema from BigQuery table: " + tableReference, e);
         }
@@ -540,11 +544,17 @@ public class BigQueryUtil {
         for(int index=0; index<fields.size(); index++) {
             final TableFieldSchema fieldSchema = fields.get(index);
             final Map<String,Object> listValue = list.get(index);
-            final Object primitiveValue = switch (fieldSchema.getMode()) {
+            // the API omits mode for NULLABLE fields (e.g. jobs.getQueryResults schemas)
+            final String mode = Optional.ofNullable(fieldSchema.getMode()).orElse("NULLABLE");
+            final Object primitiveValue = switch (mode) {
                 case "NULLABLE", "REQUIRED" -> parseAsPrimitiveValue(fieldSchema, listValue);
                 case "REPEATED" -> {
                     final List<Object> primitiveValueList = new ArrayList<>();
-                    final List<Map<String,Object>> repeatedValues = (List<Map<String,Object>>)listValue.get("v");
+                    final Object repeated = listValue == null ? null : listValue.get("v");
+                    if(repeated == null || com.google.api.client.util.Data.isNull(repeated)) {
+                        yield primitiveValueList;
+                    }
+                    final List<Map<String,Object>> repeatedValues = (List<Map<String,Object>>) repeated;
                     for(final Map<String,Object> repeatedValue : repeatedValues) {
                         final Object repeatedPrimitiveValue = parseAsPrimitiveValue(fieldSchema, repeatedValue);
                         primitiveValueList.add(repeatedPrimitiveValue);
@@ -563,20 +573,26 @@ public class BigQueryUtil {
             return null;
         }
         final Object value = listValue.get("v");
+        if(value == null || com.google.api.client.util.Data.isNull(value)) {
+            // a NULL cell is decoded as the client's null placeholder object, not as Java null
+            return null;
+        }
         return switch (fieldSchema.getType().toUpperCase()) {
             case "BOOLEAN" -> Boolean.valueOf((String)value);
             case "STRING", "JSON" -> value.toString();
             case "BYTES" -> Base64.getDecoder().decode(value.toString());
             case "INTEGER" -> Long.valueOf((String)value);
             case "FLOAT" -> Double.valueOf((String)value);
+            case "NUMERIC", "BIGNUMERIC" -> new java.math.BigDecimal(value.toString());
             case "DATE" -> DateTimeUtil.toEpochDay(value.toString());
             case "TIME" -> DateTimeUtil.toMicroOfDay(value.toString());
             case "TIMESTAMP" -> {
-                final Double doubleValue = Double.parseDouble(value.toString());
-                yield doubleValue.longValue() * 1000L * 1000L;
+                // epoch seconds with a fractional part ("1.7E9" / "1756252800.123456"): keep the microseconds
+                yield new java.math.BigDecimal(value.toString()).movePointRight(6).longValue();
             }
             case "RECORD" -> parseAsPrimitiveValues(fieldSchema.getFields(), (Map<String,Object>)value);
-            default -> throw new IllegalArgumentException();
+            // DATETIME, GEOGRAPHY, INTERVAL, RANGE and anything newer: the API's canonical text form
+            default -> value.toString();
         };
     }
 
@@ -759,15 +775,20 @@ public class BigQueryUtil {
         }
     }
 
+    /**
+     * {@code status.errorResult} is the sole failure indicator of a job: {@code status.errors} may list
+     * non-fatal problems of a successful job (e.g. rows skipped within {@code maxBadRecords}).
+     */
     public static boolean isJobResultSucceeded(final Job job) {
-        if(job == null) {
+        if(job == null || job.getStatus() == null) {
             return false;
         }
         if(job.getStatus().getErrorResult() != null) {
             return false;
         }
         if(job.getStatus().getErrors() != null && !job.getStatus().getErrors().isEmpty()) {
-            return false;
+            LOG.warn("BigQuery job: {} succeeded with non-fatal errors: {}",
+                    job.getJobReference() == null ? null : job.getJobReference().getJobId(), job.getStatus().getErrors());
         }
         return true;
     }

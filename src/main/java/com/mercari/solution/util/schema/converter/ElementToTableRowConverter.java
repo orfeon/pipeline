@@ -25,7 +25,7 @@ public class ElementToTableRowConverter {
     public static TableSchema convertSchema(final Schema schema) {
         final List<TableFieldSchema> tableFieldSchemas = new ArrayList<>();
         for(final Schema.Field field : schema.getFields()) {
-            tableFieldSchemas.add(convertTableFieldSchema(field.getName(), field.getFieldType()));
+            tableFieldSchemas.add(convertTableFieldSchema(field));
         }
         return new TableSchema().setFields(tableFieldSchemas);
     }
@@ -64,7 +64,7 @@ public class ElementToTableRowConverter {
                 case Number n -> n.doubleValue() > 0;
                 default -> throw new IllegalArgumentException();
             };
-            case string, json -> switch (value) {
+            case string, uuid, json -> switch (value) {
                 case String s -> s;
                 default -> value.toString();
             };
@@ -158,7 +158,11 @@ public class ElementToTableRowConverter {
     }
 
     private static TableFieldSchema convertTableFieldSchema(final Schema.Field field) {
-        return convertTableFieldSchema(field.getName(), field.getFieldType());
+        final TableFieldSchema tableFieldSchema = convertTableFieldSchema(field.getName(), field.getFieldType());
+        if(field.getDescription() != null && !field.getDescription().isEmpty()) {
+            tableFieldSchema.setDescription(field.getDescription());
+        }
+        return tableFieldSchema;
     }
 
 
@@ -168,7 +172,7 @@ public class ElementToTableRowConverter {
                 .setMode(mode);
         return switch (fieldType.getType()) {
             case bool -> tableFieldSchema.setName(name).setType("BOOLEAN");
-            case string, enumeration -> tableFieldSchema.setName(name).setType("STRING");
+            case string, uuid, enumeration -> tableFieldSchema.setName(name).setType("STRING");
             case geography -> tableFieldSchema.setName(name).setType("GEOGRAPHY");
             case json -> tableFieldSchema.setName(name).setType("JSON");
             case bytes -> tableFieldSchema.setName(name).setType("BYTES");

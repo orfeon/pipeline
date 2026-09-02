@@ -1,0 +1,61 @@
+{
+  "$id": "https://mercari.com/pipeline/module/transform/cdc",
+  "title": "CDC",
+  "description": "Transform module for normalizing provider-specific change data capture records into a unified change record envelope",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/transform" },
+    {
+      "properties": {
+        "module": { "const": "cdc" },
+        "parameters": { "$ref": "#/$defs/parameters" }
+      }
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "title": "CDC Transform Parameters",
+      "description": "Parameters for normalizing change data capture records",
+      "type": "object",
+      "required": ["format"],
+      "properties": {
+        "format": {
+          "type": "string",
+          "title": "Format",
+          "description": "Input provider format",
+          "enum": ["spanner", "postgres", "ticdc", "envelope"]
+        },
+        "field": {
+          "type": "string",
+          "title": "Field",
+          "description": "(ticdc) Input field carrying canal-json event text, default: payload or content. (envelope) Field (may be nested, e.g. record.json) carrying envelope JSON text; omit when the inputs are envelope records"
+        },
+        "accumulate": {
+          "type": "boolean",
+          "title": "Accumulate",
+          "description": "Collapse changes per (table, keys) to the latest change by sequence within each window (TRUNCATE records act as a barrier)",
+          "default": false
+        },
+        "emitSchemaChanges": {
+          "type": "boolean",
+          "title": "Emit schema changes",
+          "description": "Emit a SCHEMA control record when the row schema of a table drifts",
+          "default": true
+        },
+        "schemaChanges": {
+          "type": "object",
+          "title": "Schema changes",
+          "description": "Generate destination DDL into the statement of SCHEMA / TRUNCATE records",
+          "required": ["dialect", "table"],
+          "properties": {
+            "dialect": { "type": "string", "title": "Dialect", "enum": ["bigquery"] },
+            "table": { "type": "string", "title": "Destination table", "description": "Destination table name, may be a template on ${table}" },
+            "onTypeChange": { "type": "string", "title": "On type change", "enum": ["skip", "fail"], "default": "skip" },
+            "onDropColumn": { "type": "string", "title": "On drop column", "enum": ["skip"], "default": "skip" },
+            "baseline": { "type": "string", "title": "Baseline", "description": "Comparison baseline for a table first seen on a worker", "enum": ["destination", "none"], "default": "destination" }
+          }
+        }
+      }
+    }
+  }
+}

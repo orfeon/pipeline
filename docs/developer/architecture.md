@@ -17,7 +17,7 @@ error handling, module lifecycle). Package root is `com.mercari.solution`.
 
 ### The assembly loop (`MPipeline.apply` → `setResult`)
 
-Modules are **not** built in file order. `apply` repeatedly walks sources, transforms, and sinks, building
+Modules are **not** built in file order. `apply` repeatedly walks sources, transforms, sinks and actions, building
 any module whose dependencies are already available in the `outputs` map (`name → MCollection`):
 
 - A module is buildable once all of its `inputs`, `waits`, and `sideInputs` names exist in `outputs`.
@@ -29,6 +29,17 @@ any module whose dependencies are already available in the `outputs` map (`name 
 - Modules with `ignore: true` are skipped entirely; `null` entries (trailing commas) are tolerated.
 
 This makes config authoring order-independent and lets transforms/sinks reference any upstream module by name.
+
+Two assembly-time extensions build on this loop (`resolveInputNames` / `applyFanOutSinks` in `MPipeline`):
+
+- **Wildcard inputs** — `inputs: ["module.*"]` waits until `module` is in `executedModuleNames`, then expands
+  to every registered `module.<tag>` output (sorted; `.failures` excluded). Matching nothing throws.
+- **`${input.*}` fan-out (sinks only)** — if a sink both declares a wildcard input and references the reserved
+  `${input.*}` namespace in its parameters, it is instantiated once per matched input (`<sinkName>.<tag>`),
+  with the expressions resolved against that input's `MCollection.getAttributes()` plus `name`/`tag` before
+  `Sink.create`. Only `${input.…}` expressions are consumed (`TemplateUtil.executeInputTemplate`); all other
+  `${...}` text survives for runtime templating. `MCollection`/`MCollectionTuple` carry the per-tag
+  `attributes` map (e.g. `table` from the spanner source's all-tables mode) through `withSource`/merges.
 
 ### Failure fallback
 
@@ -55,13 +66,14 @@ resolved from `system.args` merged with runtime `--arg` values; arg values can t
 
 **Imports.** `system.imports` (`base` + `files`) compose a config from multiple files.
 
-**Module config shape.** `ModuleConfig` is the base of `SourceConfig` / `TransformConfig` / `SinkConfig`.
-Common fields:
+**Module config shape.** `ModuleConfig` is the base of `SourceConfig` / `TransformConfig` / `SinkConfig` /
+`ActionConfig` (config sections `sources` / `transforms` / `sinks` / `actions`). Common fields:
 
 - `name` — unique id, used as the graph node key.
 - `module` — registered module name (see §3).
 - `parameters` — module-specific JSON object.
-- `inputs` — upstream module names (transforms/sinks).
+- `inputs` — upstream module names (transforms/sinks; optional for actions).
+- `trigger` — actions only: `once` / `perElement` / `collect` firing semantics.
 - `waits` — names that must complete before this module starts (ordering without data flow).
 - `sideInputs` — names provided as Beam side inputs.
 - `tags` — additional named outputs.
@@ -72,24 +84,30 @@ Common fields:
 
 ## 3. Module system (`module/`)
 
-Three base classes — `Source`, `Transform`, `Sink` — all extend `Module<InputT>`. Each defines its **own**
-nested runtime annotation used for discovery:
+Four module kinds — `Source`, `Transform`, `Sink`, `Action` — all extend `Module<InputT>`. Each defines its
+**own** nested runtime annotation used for discovery:
 
 ```java
 @Source.Module(name="bigquery")
 @Transform.Module(name="select")
 @Sink.Module(name="spanner")
+@Action.Service(name="bigquery")   // on an ActionService implementation
 ```
 
 At class-load time each base class scans its package with Guava `ClassPath`
-(`findSourcesInPackage("com.mercari.solution.module.source")`, and the transform/sink equivalents) to build a
-`name → Class` registry. `Source.create` / `Transform.create` / `Sink.create` instantiate the right class for
-a config's `module` value and call its `expand()`.
+(`findSourcesInPackage("com.mercari.solution.module.source")`, and the transform/sink/action equivalents) to
+build a `name → Class` registry. `Source.create` / `Transform.create` / `Sink.create` / `Action.create`
+instantiate the right class for a config's `module` value and call its `expand()`.
+
+`Action` differs in shape: it is a single concrete module (trigger topologies `once` / `perElement` /
+`collect`, the common envelope output, failure routing) whose behavior is supplied by a pluggable
+`ActionService` (`module/action/`, `configure` → `setup` → `execute`); the config's `module` value is the
+service name. The service instance is serialized into the DoFn, so it must be `Serializable`.
 
 To find the authoritative module list, grep the annotations:
 
 ```bash
-grep -rhoE '@(Source|Transform|Sink)\.Module\([^)]*\)' src/main/java | sort -u
+grep -rhoE '@(Source|Transform|Sink)\.Module\([^)]*\)|@Action\.Service\([^)]*\)' src/main/java | sort -u
 ```
 
 See the root `CLAUDE.md` for the current enumerated list and for the "Adding a New Module" steps.
@@ -131,14 +149,23 @@ Built with the `server` Maven profile (WAR, Jetty EE11 12). Surfaces:
 
 - **REST API** — `PipelineApiServer` + `api/` services: `PipelineService`, `SchemaService`, `SpecService`,
   `LaunchService`, `ProbeService`, `AgentService` (validate config, infer schema, launch jobs).
-- **MCP** — `PipelineMcpStreamableServer` / `PipelineMcpSseServer` with `mcp/tool` (list/describe/validate/run),
-  `mcp/resource` (docs), and `mcp/prompt`.
-- **Webhook / Agent** — `PipelineWebhookServer`, `agent/PipelineAgent` with `DocsReader` + `PipelineExecutor`.
+- **MCP** — `PipelineMcpStreamableServer` (Streamable HTTP at `/mcp`; `PipelineMcpSseServer` exists but is not
+  mapped) with `mcp/tool` (14 tools, one class per tool annotated `@Tool.Module`, discovered by package scan;
+  docs / source / validation / launch / job observation — user doc: `server/docs/deploy/mcp.md`),
+  `mcp/resource` (`docs://` documents) and `mcp/prompt` (`design-pipeline`). `Tool.Registry` holds one
+  instance per tool, shared with the agent. Runner-agnostic job observation lives in `server/job/`
+  (`JobReader` over `dataflow/DataflowJobReader`, Cloud Run and Cloud Logging; `JobProgress` = workers /
+  stage timeline / plan mapping); launch targets in `server/launch/` (`Launcher` SPI).
+- **Webhook / Agent** — `PipelineWebhookServer`, `agent/PipelineAgent` (langchain4j) whose tools
+  (`agent/tool/*`: `DocsReader`, `CodeReader`, `JobTools`, `PipelineExecutor`, `FeatureValidator`,
+  `PipelineLauncher`) are thin wrappers over the MCP tools through `McpToolBridge` — one implementation per
+  capability, agent names = camelCase of the MCP names.
 
-`src/main/resources/server/docs/` is the **canonical location for user-facing docs**: the agent's
-`DocsReader` tool reads `module/<type>/<name>.md` from the classpath (front-matter `title:` is used for
-listings), `module/index.yaml` is the module catalog, and MCP `DocsResources` exposes the files as
-`docs://` resources. Legacy user docs under `docs/config/` are being migrated here.
+`src/main/resources/server/docs/` is the **canonical location for user-facing docs**: the MCP
+`read-docs` tool (and the agent's `readDocs` wrapper) reads `module/<type>/<name>.md` from the classpath,
+`module/index.yaml` is the module catalog behind `list-modules` and the Builder UI, and MCP `DocsResources`
+exposes the files as `docs://` resources (read from the same classpath tree). All user-facing docs (config reference,
+`options/`, `deploy/`, `exec/`) live in this tree; `docs/` in the repo root keeps only developer docs.
 
 ## 7. Where to look
 
@@ -153,4 +180,4 @@ listings), `module/index.yaml` is the module catalog, and MCP `DocsResources` ex
 | SQL (BeamSQL / Calcite)                | `util/domain/sql/`                                     |
 | Server / MCP / API                     | `server/`                                              |
 | Runnable examples                      | `examples/` (`examples/README.md`)                    |
-| Per-module config reference            | `docs/config/module/`                                  |
+| Per-module config reference            | `src/main/resources/server/docs/module/`               |

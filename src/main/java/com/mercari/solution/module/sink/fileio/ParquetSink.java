@@ -8,7 +8,6 @@ import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.io.FileIO;
-import org.apache.beam.sdk.values.KV;
 import org.apache.parquet.avro.*;
 import org.apache.parquet.hadoop.*;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
@@ -24,7 +23,7 @@ import java.util.Map;
 
 import static org.apache.parquet.hadoop.ParquetFileWriter.Mode.OVERWRITE;
 
-public class ParquetSink implements FileIO.Sink<KV<String, MElement>> {
+public class ParquetSink implements FileIO.Sink<MElement> {
 
     private final com.mercari.solution.module.Schema schema;
     private final FileUtil.CodecName codecName;
@@ -90,8 +89,7 @@ public class ParquetSink implements FileIO.Sink<KV<String, MElement>> {
     }
 
     @Override
-    public void write(KV<String, MElement> element) throws IOException {
-        final MElement input = element.getValue();
+    public void write(MElement input) throws IOException {
         final GenericRecord record = ElementToAvroConverter.convert(schema.getAvroSchema(), input);
         try {
             if (fitSchema && DataType.AVRO.equals(input.getType())) {

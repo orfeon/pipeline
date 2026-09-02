@@ -4,15 +4,92 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.schema.AvroSchemaUtil;
+import com.mercari.solution.util.schema.ElementSchemaUtil;
+import com.mercari.solution.util.schema.converter.AvroToElementConverter;
+import com.mercari.solution.util.schema.converter.ElementToAvroConverter;
+import org.apache.avro.LogicalTypes;
 import org.joda.time.Instant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 public class SelectFunctionTest {
+
+    @Test
+    public void testUuidCast() {
+        final String uuid = "10000000-0000-0000-0000-000000000001";
+        final List<Schema.Field> inputFields = List.of(
+                Schema.Field.of("textId", Schema.FieldType.STRING),
+                Schema.Field.of("uuidId", Schema.FieldType.UUID));
+        final JsonArray array = new Gson().fromJson("""
+                [
+                  { "name": "uuidId", "field": "textId", "type": "uuid" },
+                  { "name": "textId", "field": "uuidId", "type": "string" }
+                ]
+                """, JsonArray.class);
+
+        final List<SelectFunction> functions = SelectFunction.of(array, inputFields);
+        final Schema outputSchema = SelectFunction.createSchema(functions);
+        Assertions.assertEquals(Schema.Type.uuid, outputSchema.getField("uuidId").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.string, outputSchema.getField("textId").getFieldType().getType());
+
+        final Map<String, Object> values = Map.of("textId", uuid, "uuidId", uuid);
+        final Map<String, Object> results = SelectFunction.apply(functions, values, Instant.EPOCH);
+        Assertions.assertEquals(uuid, results.get("uuidId"));
+        Assertions.assertEquals(uuid, results.get("textId"));
+
+        final org.apache.avro.Schema avroSchema = ElementToAvroConverter.convertSchema(outputSchema.getFields());
+        Assertions.assertEquals(LogicalTypes.uuid(), AvroSchemaUtil.unnestUnion(avroSchema.getField("uuidId").schema()).getLogicalType());
+        Assertions.assertNull(AvroSchemaUtil.unnestUnion(avroSchema.getField("textId").schema()).getLogicalType());
+        Assertions.assertEquals(Schema.Type.uuid,
+                AvroToElementConverter.convertFields(avroSchema.getFields()).getFirst().getFieldType().getType());
+    }
+
+    @Test
+    public void testUuidCastRejectsInvalidValue() {
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                ElementSchemaUtil.getAsPrimitive(Schema.FieldType.UUID, "not-a-uuid"));
+    }
+
+    @Test
+    public void testUuidAndBytesCast() {
+        final String uuid = "30000000-0000-0000-0000-000000000001";
+        final ByteBuffer bytes = ByteBuffer.allocate(16)
+                .putLong(UUID.fromString(uuid).getMostSignificantBits())
+                .putLong(UUID.fromString(uuid).getLeastSignificantBits())
+                .flip();
+        final List<Schema.Field> inputFields = List.of(
+                Schema.Field.of("uuidId", Schema.FieldType.UUID),
+                Schema.Field.of("bytesId", Schema.FieldType.BYTES));
+        final JsonArray array = new Gson().fromJson("""
+                [
+                  { "name": "bytesId", "field": "uuidId", "type": "bytes" },
+                  { "name": "uuidId", "field": "bytesId", "type": "uuid" }
+                ]
+                """, JsonArray.class);
+
+        final List<SelectFunction> functions = SelectFunction.of(array, inputFields);
+        final Map<String, Object> results = SelectFunction.apply(
+                functions, Map.of("uuidId", uuid, "bytesId", bytes), Instant.EPOCH);
+        Assertions.assertEquals(uuid, results.get("uuidId"));
+        Assertions.assertEquals(16, ((ByteBuffer) results.get("bytesId")).remaining());
+        Assertions.assertArrayEquals(bytes.array(), ((ByteBuffer) results.get("bytesId")).array());
+    }
+
+    @Test
+    public void testBytesCastToUuidRejectsInvalidLength() {
+        final List<SelectFunction> functions = SelectFunction.of(
+                new Gson().fromJson("[{ \"name\": \"id\", \"type\": \"uuid\" }]", JsonArray.class),
+                List.of(Schema.Field.of("id", Schema.FieldType.BYTES)));
+        Assertions.assertThrows(IllegalArgumentException.class, () ->
+                SelectFunction.apply(functions, Map.of("id", ByteBuffer.allocate(15)), Instant.EPOCH));
+    }
 
     @Test
     public void test() {

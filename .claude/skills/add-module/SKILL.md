@@ -1,23 +1,27 @@
 ---
 name: add-module
-description: Add a new pipeline module (source, transform, or sink) to Mercari Pipeline. Use when asked to create/add a new module, connector, or integration (e.g. "add a redis source", "create a slack sink", "add a dedup transform"). Guides implementation, tests, and agent-readable docs.
+description: Add a new pipeline module (source, transform, sink, or action) to Mercari Pipeline. Use when asked to create/add a new module, connector, integration, or action service (e.g. "add a redis source", "create a slack sink", "add a dedup transform", "add an http action"). Guides implementation, tests, and agent-readable docs.
 ---
 
 # Add a New Pipeline Module
 
-Add a source, transform, or sink module to Mercari Pipeline. Modules are auto-discovered by package
-scanning — a new module is: **one annotated class + one test + docs**. No manual registration.
+Add a source, transform, sink, or action module to Mercari Pipeline. Modules are auto-discovered by
+package scanning — a new module is: **one annotated class + one test + docs**. No manual registration.
 
 ## Step 0 — Determine type and name
 
 - **Type**: `source` (reads external data, starts from `PBegin`), `transform` (processes `MCollectionTuple`
-  inputs), or `sink` (writes to external system). If ambiguous from the request, ask the user.
+  inputs), `sink` (writes to external system), or `action` (executes an operation against an external
+  service — run a job, write a result artifact, notify — as a workflow step). If ambiguous from the
+  request, ask the user. Rule of thumb: processes/persists the data records themselves → source/transform/
+  sink; triggers something *about* the pipeline run → action.
 - **Registered name**: lowercase, short (e.g. `bigquery`, `select`, `pubsub`). This is what users write in
   config `module:` fields, and it must match the doc filename (the server agent lowercases the name when
-  looking up docs).
-- **Class name**: `<PascalName>Source` / `<PascalName>Transform` / `<PascalName>Sink`.
+  looking up docs). Action services are configured in the `actions` section with `module: <service>`
+  (e.g. `module: bigquery` under `actions:`); the same name may exist as a source/sink too.
+- **Class name**: `<PascalName>Source` / `<PascalName>Transform` / `<PascalName>Sink` / `<PascalName>Action`.
 - Check the name is not already taken:
-  `grep -rhoE '@(Source|Transform|Sink)\.Module\([^)]*\)' src/main/java | sort -u`
+  `grep -rhoE '@(Source|Transform|Sink)\.Module\([^)]*\)|@Action\.Service\([^)]*\)' src/main/java | sort -u`
 
 ## Step 1 — Read the type-specific guide
 
@@ -26,6 +30,8 @@ Read the matching reference file in this skill directory **before writing code**
 - Source → [source.md](source.md)
 - Transform → [transform.md](transform.md)
 - Sink → [sink.md](sink.md)
+- Action → [action.md](action.md) — action services implement the `ActionService` SPI instead of
+  extending a module base class, so Steps 2–4 below apply in adapted form; the guide is self-contained.
 
 Also read 1–2 existing modules similar to the new one (each guide lists good references), and
 `src/main/java/com/mercari/solution/module/transform/ExampleTransform.java` — a commented template showing
@@ -33,7 +39,8 @@ the canonical DoFn / failure-handling / logging pattern that applies to all thre
 
 ## Step 2 — Implement
 
-All module types share this skeleton (details per type in the guides):
+Source/transform/sink share this skeleton (details per type in the guides; actions use the
+`ActionService` SPI contract shown in [action.md](action.md) instead):
 
 ```java
 package com.mercari.solution.module.<type>;          // MUST be in this package (scanned at startup)
@@ -94,8 +101,11 @@ User-facing docs are read by the bundled AI agent from the classpath — this is
    - Self-contained: what it does, all `parameters` (name/type/required/description table), at least one
      complete YAML config example. Model it on an existing file in the same directory.
 2. Register in `src/main/resources/server/docs/module/index.yaml`: add `title` / `description` / `tags`
-   under the matching `sources:` / `transforms:` / `sinks:` key. Write a real description (1–3 sentences,
-   capabilities + supported options), not a placeholder.
+   under the matching `sources:` / `transforms:` / `sinks:` / `actions:` key (the `title` is the
+   registered name, for actions the service name). Write a real description (1–3 sentences, capabilities + supported
+   options), not a placeholder. Double-quote the `description` scalar: an unquoted value containing
+   `: ` or `#` breaks YAML parsing and takes the whole `/api/*` servlet down at init
+   (`ModuleIndexYamlTest` guards this on `mvn test`).
 
 ## Step 5 — Verify
 
@@ -110,12 +120,12 @@ User-facing docs are read by the bundled AI agent from the classpath — this is
   (`MCollectionTuple.done(...)`) without applying anything leaves an empty composite node, which
   **never completes on DirectRunner and hangs the pipeline** (see DebugSink's workDir fallback).
 
-- The annotation is the **nested** one (`@Source.Module` / `@Transform.Module` / `@Sink.Module`) — there is
-  no shared top-level `@Module`.
+- The annotation is the **nested** one (`@Source.Module` / `@Transform.Module` / `@Sink.Module`, or
+  `@Action.Service` for action services) — there is no shared top-level `@Module`.
 - The class must live directly under `com.mercari.solution.module.<type>` (subpackages are scanned too:
   `getTopLevelClassesRecursive`), and every `Source`/`Transform`/`Sink` subclass in those packages **must**
-  be annotated or startup fails.
+  be annotated or startup fails. Action services live under `com.mercari.solution.module.action`.
 - Forgetting `.withEventTime(...)` on built `MElement`s causes runtime failures.
 - `failFast` defaults to `true` in batch and `false` in streaming — don't assume one mode.
-- Don't add docs under `docs/config/module/` — that tree is legacy; `src/main/resources/server/docs/` is
-  canonical.
+- Docs go under `src/main/resources/server/docs/` — the single tree read by humans (GitHub), the AI
+  agent, MCP server, and Pipeline Builder UI. The legacy `docs/config/` tree no longer exists.

@@ -1,7 +1,6 @@
 package com.mercari.solution.util.coder;
 
 import com.google.cloud.bigtable.data.v2.models.ChangeStreamMutation;
-import com.google.cloud.spanner.Struct;
 import com.google.datastore.v1.Entity;
 import com.google.firestore.v1.Document;
 import com.mercari.solution.module.DataType;
@@ -11,7 +10,6 @@ import org.apache.beam.sdk.coders.*;
 import org.apache.beam.sdk.extensions.avro.coders.AvroGenericCoder;
 import org.apache.beam.sdk.extensions.protobuf.DynamicProtoCoder;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessageWithAttributesAndMessageIdAndOrderingKeyCoder;
-import org.apache.beam.sdk.io.gcp.spanner.changestreams.model.DataChangeRecord;
 import org.apache.beam.sdk.util.VarInt;
 import org.apache.beam.sdk.util.common.ElementByteSizeObserver;
 
@@ -54,11 +52,10 @@ public class ElementCoder extends StructuredCoder<MElement> {
             case ROW -> RowCoder.of(schema.getRow().getSchema());
             case AVRO -> AvroGenericCoder.of(schema.getAvro().getSchema());
             case PROTO -> DynamicProtoCoder.of(schema.getProtobuf().getDescriptor());
-            case STRUCT -> SerializableCoder.of(Struct.class);
+            case STRUCT -> StructCoder.of();
             case DOCUMENT -> SerializableCoder.of(Document.class);
             case ENTITY -> SerializableCoder.of(Entity.class);
             case MESSAGE -> PubsubMessageWithAttributesAndMessageIdAndOrderingKeyCoder.of();
-            case SPANNER_DATACHANGERECORD -> AvroGenericCoder.of(DataChangeRecord.class);
             case BIGTABLE_DATACHANGERECORD -> SerializableCoder.of(ChangeStreamMutation.class);
             default -> throw new IllegalStateException("Not supported schema: " + schema.getType());
         };

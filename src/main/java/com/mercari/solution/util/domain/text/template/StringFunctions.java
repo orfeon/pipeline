@@ -47,4 +47,67 @@ public class StringFunctions {
         return new StringBuilder(text).reverse().toString();
     }
 
+    /** Hex SHA-256 of the UTF-8 text (e.g. deterministic idempotency keys). */
+    public String sha256(String text) {
+        return digest("SHA-256", text);
+    }
+
+    /** Static form for callers outside templates. */
+    public static String sha256Hex(String text) {
+        return digest("SHA-256", text);
+    }
+
+    public String md5(String text) {
+        return digest("MD5", text);
+    }
+
+    /** Hex HMAC-SHA256 of the UTF-8 text with the given secret (webhook signature headers). */
+    public String hmacSha256(String text, String secret) {
+        return hmac("HmacSHA256", text, secret);
+    }
+
+    public String hmacSha1(String text, String secret) {
+        return hmac("HmacSHA1", text, secret);
+    }
+
+    public String base64(String text) {
+        if(text == null) {
+            return null;
+        }
+        return java.util.Base64.getEncoder().encodeToString(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static String digest(final String algorithm, final String text) {
+        if(text == null) {
+            return null;
+        }
+        try {
+            final java.security.MessageDigest md = java.security.MessageDigest.getInstance(algorithm);
+            return hex(md.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (final java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String hmac(final String algorithm, final String text, final String secret) {
+        if(text == null || secret == null) {
+            return null;
+        }
+        try {
+            final javax.crypto.Mac mac = javax.crypto.Mac.getInstance(algorithm);
+            mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), algorithm));
+            return hex(mac.doFinal(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (final java.security.GeneralSecurityException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String hex(final byte[] bytes) {
+        final StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for(final byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
 }

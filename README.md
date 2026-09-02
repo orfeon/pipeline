@@ -5,7 +5,7 @@
 The Mercari Pipeline enables you to run various data pipelines without writing programs by simply defining a configuration file.
 
 * **Config-driven**: describe a pipeline as sources → transforms → sinks in a YAML/JSON file — no code required.
-* **Rich built-in modules**: BigQuery, Cloud Spanner, Bigtable, Datastore, Firestore, Iceberg, JDBC, Pub/Sub, Kafka, Cloud Storage, HTTP, ONNX inference, per-element SQL and more. See the [module list](docs/config/module/README.md).
+* **Rich built-in modules**: BigQuery, Cloud Spanner, Bigtable, Datastore, Firestore, Iceberg, JDBC, Pub/Sub, Kafka, Cloud Storage, HTTP, ONNX inference, per-element SQL and more. See the [module list](src/main/resources/server/docs/module/README.md).
 * **Portable runners**: the primary target is Cloud Dataflow, and the same configuration file can also run locally (DirectRunner) or on Apache Flink / Apache Spark clusters via Maven profiles.
 * **Pipeline API Server**: an auxiliary web UI / REST API / MCP server with a built-in AI agent that helps you create, validate, debug, and deploy pipelines.
 
@@ -13,9 +13,9 @@ The Mercari Pipeline enables you to run various data pipelines without writing p
 
 ## Documentation
 
-* [How to Deploy Pipeline](docs/deploy/README.md) — build container images / bundled jars for each runner
-* [How to Define Pipeline](docs/config/README.md) — configuration file reference ([module list](docs/config/module/README.md))
-* [How to Execute Pipeline](docs/exec/README.md) — run on Dataflow, locally, or on Flink/Spark
+* [How to Deploy Pipeline](src/main/resources/server/docs/deploy/README.md) — build container images / bundled jars for each runner
+* [How to Define Pipeline](src/main/resources/server/docs/README.md) — configuration file reference ([module list](src/main/resources/server/docs/module/README.md))
+* [How to Execute Pipeline](src/main/resources/server/docs/exec/README.md) — run on Dataflow, locally, or on Flink/Spark
 * [Examples](examples/README.md) — ready-to-use configuration files for common use cases
 * [Developer docs](docs/developer/README.md) — internals and how to extend modules
 
@@ -39,7 +39,7 @@ gcloud dataflow flex-template build gs://{path/to/template_file} \
   --sdk-language "JAVA"
 ```
 
-See [How to Deploy Pipeline](docs/deploy/README.md) for details, including images for local execution, the Pipeline API server, and bundled jars for Flink/Spark.
+See [How to Deploy Pipeline](src/main/resources/server/docs/deploy/README.md) for details, including images for local execution, the Pipeline API server, and bundled jars for Flink/Spark.
 
 ### 2. Write a configuration file
 
@@ -82,19 +82,20 @@ The Dataflow job will be started, and you can check the execution status of the 
 <img src="docs/images/bigquery-to-spanner.png">
 
 You can also pass the config as a GCS path (`--parameters=config=gs://{path/to/config.yaml}`), run in streaming mode, launch via the REST API, run the pipeline locally with Docker, or submit it to a Flink/Spark cluster.
-See [How to Execute Pipeline](docs/exec/README.md) for all execution methods.
+See [How to Execute Pipeline](src/main/resources/server/docs/exec/README.md) for all execution methods.
 
 ## Supported Runners (Maven profiles)
 
 | Maven profile        | Runner         | Build artifact                                                 |
 |----------------------|----------------|----------------------------------------------------------------|
 | `dataflow` (default) | DataflowRunner | FlexTemplate container image                                   |
-| `direct`             | DirectRunner   | Container image for local execution                            |
+| `direct`             | DirectRunner   | Container image for local execution, Cloud Run (Jobs / Worker Pools / Services) and Kubernetes |
+| `prism`              | PrismRunner    | Same targets as `direct` with Beam's portable local runner — prefer it for heavy keyed stages (coarse/global-key GroupByKey) |
 | `flink`              | FlinkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `spark`              | SparkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `server`             | —              | Pipeline API server container image (WAR on Jetty)             |
 
-(Other profiles: `prism`, `portable`, `dataflow-gpu`.)
+(Other profiles: `portable`, `dataflow-gpu`.)
 
 ## Pipeline API Server
 
@@ -102,7 +103,7 @@ The Pipeline server is an auxiliary tool for creating, debugging, and deploying 
 
 * **Web UI (Pipeline Builder)** — build and edit pipeline configs in a GUI editor
 * **REST API** — validate config files and launch jobs programmatically
-* **MCP server & built-in AI agent** — AI integration that references the bundled module documentation to help you design pipelines
+* **MCP server & built-in AI agent** — AI integration that references the bundled module documentation to help you design, validate, launch and diagnose pipelines (tools, workflows and client setup: [MCP server](src/main/resources/server/docs/deploy/mcp.md))
 
 Build and run it locally as follows, then open `http://localhost:8080/` in your browser.
 
@@ -114,10 +115,11 @@ mvn clean package -DskipTests -Pserver -Dimage="{region}-docker.pkg.dev/{deploy_
 docker run \
   -p "8080:8080" \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server
 ```
 
-See [How to Deploy Pipeline](docs/deploy/README.md) for deploying the server to Cloud Run.
+See [How to Deploy Pipeline](src/main/resources/server/docs/deploy/README.md) for deploying the server to Cloud Run.
 
 ## Committers
 

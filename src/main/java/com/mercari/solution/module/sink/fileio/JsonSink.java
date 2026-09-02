@@ -5,7 +5,6 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.ElementToJsonConverter;
 import org.apache.beam.sdk.io.FileIO;
-import org.apache.beam.sdk.values.KV;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.io.*;
@@ -14,7 +13,7 @@ import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 
 
-public class JsonSink implements FileIO.Sink<KV<String, MElement>> {
+public class JsonSink implements FileIO.Sink<MElement> {
 
     private final Schema schema;
     private final boolean fitSchema;
@@ -52,8 +51,7 @@ public class JsonSink implements FileIO.Sink<KV<String, MElement>> {
     }
 
     @Override
-    public void write(KV<String, MElement> element) throws IOException {
-        final MElement input = element.getValue();
+    public void write(MElement input) throws IOException {
         final JsonObject json = ElementToJsonConverter.convert(schema, input);
         writer.println(json.toString());
     }

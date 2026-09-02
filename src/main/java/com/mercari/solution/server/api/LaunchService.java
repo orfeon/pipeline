@@ -1,57 +1,97 @@
 package com.mercari.solution.server.api;
 
-import com.google.dataflow.v1beta3.FlexTemplateRuntimeEnvironment;
-import com.google.dataflow.v1beta3.Job;
-import com.google.dataflow.v1beta3.LaunchFlexTemplateParameter;
-import com.google.dataflow.v1beta3.LaunchFlexTemplateResponse;
-import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
-import com.mercari.solution.config.Options;
-import com.mercari.solution.config.options.DataflowOptions;
-import com.mercari.solution.server.ServerVersion;
-import com.mercari.solution.server.dataflow.DataflowJobReader;
+import com.mercari.solution.server.launch.CloudRunJobLauncher;
+import com.mercari.solution.server.launch.CloudRunWorkerPoolLauncher;
+import com.mercari.solution.server.launch.ConfigStager;
+import com.mercari.solution.server.launch.DataflowFlexTemplateLauncher;
+import com.mercari.solution.server.launch.DataflowInProcessLauncher;
+import com.mercari.solution.server.launch.DataprocServerlessLauncher;
+import com.mercari.solution.server.launch.LaunchDefaults;
+import com.mercari.solution.server.launch.LaunchRequest;
+import com.mercari.solution.server.launch.Launcher;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.util.FailureUtil;
-import com.mercari.solution.util.cloud.google.DataflowUtil;
-import com.mercari.solution.util.cloud.google.DataprocUtil;
+import com.mercari.solution.util.cloud.google.CloudRunUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.apache.beam.sdk.Pipeline;
-import org.apache.beam.sdk.PipelineResult;
-import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Reader;
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+/**
+ * {@code POST /api/launch}: submit a config to a runner / execution environment.
+ * <pre>
+ * { "config": "...", "args": "..." | {...},
+ *   "launch": { "runner": "direct", "environment": "cloudRunJob", "parameters": {...}, "args": {...} } }
+ * </pre>
+ * Dispatches on {@code runner/environment} to a registered {@link Launcher}; when {@code environment}
+ * is omitted the runner's default environment is used. Legacy runner names ({@code dataflowTemplate})
+ * are still accepted.
+ */
 public class LaunchService {
 
     private static final Logger LOG = LoggerFactory.getLogger(LaunchService.class);
 
-    private static final String ENV_VARIABLE_WAIT_SECONDS = "MERCARI_PIPELINE_WAIT_SECONDS";
-    private static final String ENV_VARIABLE_DATAFLOW_PROJECT = "MERCARI_PIPELINE_DATAFLOW_PROJECT";
-    private static final String ENV_VARIABLE_DATAFLOW_REGION = "MERCARI_PIPELINE_DATAFLOW_REGION";
-    private static final String ENV_VARIABLE_DATAFLOW_SERVICE_ACCOUNT = "MERCARI_PIPELINE_DATAFLOW_SERVICE_ACCOUNT";
-    private static final String ENV_VARIABLE_DATAFLOW_SUBNETWORK = "MERCARI_PIPELINE_DATAFLOW_SUBNETWORK";
-    private static final String ENV_VARIABLE_DATAFLOW_STAGING_LOCATION = "MERCARI_PIPELINE_DATAFLOW_STAGING_LOCATION";
-    private static final String ENV_VARIABLE_TEMP_LOCATION = "MERCARI_PIPELINE_TEMP_LOCATION";
-    private static final String ENV_VARIABLE_DATAFLOW_TEMPLATE_LOCATION = "MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION";
-    private static final String ENV_VARIABLE_GOOGLE_CLOUD_PROJECT = "GOOGLE_CLOUD_PROJECT";
-
     private static final String HEADER_NAME_USER_EMAIL = "X-Goog-Authenticated-User-Email";
 
-    private static final int WAIT_SECONDS = Optional
-            .ofNullable(System.getenv(ENV_VARIABLE_WAIT_SECONDS))
-            .map(Integer::valueOf)
-            .orElse(10);
+    private static final Map<String, String> LEGACY_RUNNERS = Map.of(
+            "dataflowTemplate", "dataflow/flexTemplate");
+
+    private static final Map<String, Launcher> LAUNCHERS = register(launchers());
+
+    private static List<Launcher> launchers() {
+        final CloudRunUtil cloudRun = new CloudRunUtil();
+        final ConfigStager stager = new ConfigStager();
+        return List.of(
+                new DataflowFlexTemplateLauncher(),
+                new DataflowInProcessLauncher(),
+                new CloudRunJobLauncher(cloudRun, stager),
+                new CloudRunWorkerPoolLauncher(cloudRun, stager),
+                new CloudRunJobLauncher("prism", cloudRun, stager),
+                new CloudRunWorkerPoolLauncher("prism", cloudRun, stager),
+                new DataprocServerlessLauncher());
+    }
+
+    private static Map<String, Launcher> register(final List<Launcher> launchers) {
+        final Map<String, Launcher> map = new LinkedHashMap<>();
+        for(final Launcher launcher : launchers) {
+            map.put(launcher.key(), launcher);
+            if(launcher.isDefaultEnvironment()) {
+                map.put(launcher.runner(), launcher);
+            }
+        }
+        return map;
+    }
+
+    /** Registered {@code runner/environment} keys (for the schema consistency test). */
+    public static List<String> launcherKeys() {
+        return LAUNCHERS.values().stream().map(Launcher::key).distinct().toList();
+    }
+
+    public static Launcher findLauncher(final String runner, final String environment) {
+        if(runner == null || runner.isBlank()) {
+            throw new IllegalArgumentException("request parameter launch must have runner property");
+        }
+        final String legacy = LEGACY_RUNNERS.get(runner);
+        final String key = legacy != null ? legacy
+                : environment == null || environment.isBlank() ? runner : runner + "/" + environment;
+        final Launcher launcher = LAUNCHERS.get(key);
+        if(launcher == null) {
+            throw new IllegalArgumentException("Not supported launch target: " + key + " (available: " + launcherKeys() + ")");
+        }
+        return launcher;
+    }
 
     public static void serve(
             final HttpServletRequest request,
@@ -68,13 +108,14 @@ public class LaunchService {
             }
             final String configText = jsonObject.get("config").getAsString();
             final String argsText;
-            if (jsonObject.has("args")) {
-                argsText = jsonObject.get("args").getAsString();
+            if (jsonObject.has("args") && !jsonObject.get("args").isJsonNull()) {
+                final JsonElement args = jsonObject.get("args");
+                argsText = args.isJsonPrimitive() ? args.getAsString() : args.toString();
             } else {
                 argsText = null;
             }
 
-            if (!jsonObject.has("launch")) {
+            if (!jsonObject.has("launch") || !jsonObject.get("launch").isJsonObject()) {
                 throw new IllegalArgumentException("request parameter launch is not found");
             }
             final JsonObject launch = jsonObject.getAsJsonObject("launch");
@@ -82,18 +123,7 @@ public class LaunchService {
             launch(configText, argsText, launch, response, userEmail);
         } catch (final Throwable e) {
             final long endMillis = Instant.now().toEpochMilli();
-            final JsonObject responseJson = new JsonObject();
-            responseJson.addProperty("type", "launch");
-            responseJson.addProperty("status", "error");
-            responseJson.addProperty("millis", (endMillis - startMillis));
-            {
-                final JsonObject error = new JsonObject();
-                error.addProperty("name", "");
-                error.addProperty("module", "server");
-                error.addProperty("message", FailureUtil.convertThrowableMessage(e));
-                responseJson.add("error", error);
-            }
-            response.getWriter().println(responseJson);
+            response.getWriter().println(errorResponse("server", endMillis - startMillis, e));
         }
     }
 
@@ -104,290 +134,123 @@ public class LaunchService {
             final HttpServletResponse response,
             final String userEmail) throws IOException {
 
-
-        String configContent = null;
         final long startMillis = Instant.now().toEpochMilli();
         try {
-            final Config config = Config.load(configText, null, Config.Format.unknown, argsText);
-            configContent = config.getContent();
+            final JsonObject job = launchJob(configText, argsText, launch, userEmail);
 
-            if(!launch.has("runner")) {
-                throw new IllegalArgumentException("request parameter launch must have runner property");
-            }
-            final String runner = launch.get("runner").getAsString();
-            final JsonObject responseJson = switch (runner) {
-                case "dataflow" -> launchDataflow(config);
-                case "dataflowTemplate" -> launchFlexDataflowTemplate(config, launch, userEmail);
-                case "spark" -> launchSpark(config, launch);
-                case "flink" -> launchFlink(config, launch);
-                case "direct" -> launchDirect(config, launch);
-                default -> throw new IllegalArgumentException("Not supported runner: " + runner);
-            };
-
-            log(userEmail, "Launch", true, configContent, null);
-
+            final long endMillis = Instant.now().toEpochMilli();
+            final JsonObject responseJson = new JsonObject();
+            responseJson.addProperty("type", "launch");
+            responseJson.addProperty("status", "ok");
+            responseJson.addProperty("millis", (endMillis - startMillis));
+            responseJson.add("job", job);
             response.getWriter().println(responseJson);
         } catch (final Throwable e) {
-            final JsonObject responseJson = new JsonObject();
             final long endMillis = Instant.now().toEpochMilli();
-            responseJson.addProperty("status", "error");
-            responseJson.addProperty("millis", (endMillis - startMillis));
-            {
-                final JsonObject error = new JsonObject();
-                error.addProperty("name", "");
-                error.addProperty("module", "pipeline");
-                error.addProperty("message", FailureUtil.convertThrowableMessage(e));
-                responseJson.add("error", error);
+            response.getWriter().println(errorResponse("pipeline", endMillis - startMillis, e));
+        }
+    }
+
+    /**
+     * Submits a config to a launch target and returns the {@code job} object (see {@link LaunchResult#job}).
+     * Shared by the REST endpoint, the MCP {@code launch-pipeline} tool and the agent's {@code launchPipeline}.
+     *
+     * @param launch {@code {runner, environment?, parameters?: {...}, args?: {...}}}; {@code launch.args}
+     *               overrides {@code argsText}
+     * @throws IllegalArgumentException for user errors (unknown target, unresolved project / region / job, ...)
+     */
+    public static JsonObject launchJob(
+            final String configText,
+            final String argsText,
+            final JsonObject launch,
+            final String userEmail) throws Exception {
+
+        String configContent = null;
+        try {
+            // launch.args (JSON object from the modal) overrides the request-level args text.
+            final JsonObject launchArgs = launch.has("args") && launch.get("args").isJsonObject()
+                    ? launch.getAsJsonObject("args") : null;
+            final Config config = launchArgs != null
+                    ? Config.load(configText, null, Config.Format.unknown, argsMap(launchArgs))
+                    : Config.load(configText, null, Config.Format.unknown, argsText);
+            configContent = config.getContent();
+            // a placeholder that survives substitution would reach the job as the literal text "${args.x}"
+            final java.util.List<String> unresolved = Config.unresolvedArgs(configContent);
+            if(!unresolved.isEmpty()) {
+                throw new IllegalArgumentException("unresolved template arguments " + unresolved
+                        + ": pass them in args (launch.args / --args.<name>) or define defaults under the config's args. "
+                        + "Placeholders must be written as ${args.<name>}; a bare ${<name>} is not substituted");
             }
 
+            final String runner = launch.has("runner") && !launch.get("runner").isJsonNull()
+                    ? launch.get("runner").getAsString() : null;
+            final String environment = launch.has("environment") && !launch.get("environment").isJsonNull()
+                    ? launch.get("environment").getAsString() : null;
+            final Launcher launcher = findLauncher(runner, environment);
+
+            final JsonObject parameters = launch.has("parameters") && launch.get("parameters").isJsonObject()
+                    ? launch.getAsJsonObject("parameters") : new JsonObject();
+            final LaunchRequest launchRequest = new LaunchRequest(
+                    config, parameters, launchArgs, userEmail, LaunchDefaults.get());
+
+            final JsonObject job = launcher.launch(launchRequest);
+            log(userEmail, launcher.key(), true, configContent, null);
+            return job;
+        } catch (final Throwable e) {
             log(userEmail, "Launch", false, configContent, FailureUtil.convertThrowableMessage(e));
-
-            response.getWriter().println(responseJson);
+            throw e;
         }
-
     }
 
-    private static String getTemplateLocation(Options options, String templateLocation_) {
-        if(options != null && options.getDataflow() != null && options.getDataflow().getTemplateLocation() != null) {
-            return options.getDataflow().getTemplateLocation();
-        }
-
-        final String templateLocation = Optional
-                .ofNullable(templateLocation_)
-                .orElseGet(() -> System.getenv(ENV_VARIABLE_DATAFLOW_TEMPLATE_LOCATION));
-        if(templateLocation == null) {
-            throw new IllegalModuleException("To launch dataflow, environment variable must be set: MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION");
-        } else if(!templateLocation.startsWith("gs://")) {
-            throw new IllegalModuleException("templateLocation must be starts with gs://. but: " + templateLocation);
-        }
-        return templateLocation;
+    /** The message a caller should show for a launch failure: user errors plainly, others with their cause chain. */
+    public static String launchErrorMessage(final Throwable e) {
+        return isUserError(e) ? userMessage(e) : FailureUtil.convertThrowableMessage(e);
     }
 
-    private static String getProject(Options options) {
-        if(options != null) {
-            if(options.getDataflow() != null && options.getDataflow().getProject() != null) {
-                return options.getDataflow().getProject();
-            }
-            if(options.getGcp() != null && options.getGcp().getProject() != null) {
-                return options.getGcp().getProject();
-            }
-        }
-
-        String project = System.getenv(ENV_VARIABLE_DATAFLOW_PROJECT);
-        if(project != null) {
-            return project;
-        }
-
-        project = System.getenv(ENV_VARIABLE_GOOGLE_CLOUD_PROJECT);
-        if(project != null) {
-            return project;
-        }
-
-        throw new IllegalModuleException("To launch dataflow, environment variable must be set: MERCARI_PIPELINE_DATAFLOW_PROJECT");
+    /**
+     * Errors the user can act on (config validation, unresolved project/region/job, a missing Cloud Run
+     * job, a 4xx from the target API) are reported as plain messages; anything unexpected keeps the
+     * stack trace so it can be diagnosed.
+     */
+    /** JSON args as template args: string values as-is (not JSON-quoted), other values as their JSON text. */
+    public static Map<String, String> argsMap(final JsonObject args) {
+        return Config.templateArgs(args);
     }
 
-    private static String getRegion(Options options) {
-        if(options != null) {
-            if(options.getDataflow() != null && options.getDataflow().getRegion() != null) {
-                return options.getDataflow().getRegion();
-            }
-            if(options.getGcp() != null && options.getGcp().getWorkerRegion() != null) {
-                return options.getGcp().getWorkerRegion();
-            }
-        }
-
-        String region = System.getenv(ENV_VARIABLE_DATAFLOW_REGION);
-        if(region != null) {
-            return region;
-        }
-
-        throw new IllegalModuleException("To launch dataflow, environment variable must be set: MERCARI_PIPELINE_DATAFLOW_REGION");
-    }
-
-    private static LaunchFlexTemplateParameter updateLaunchParameter(
-            LaunchFlexTemplateParameter originalLaunchParameter,
-            final String userEmail) {
-
-        final FlexTemplateRuntimeEnvironment.Builder builder = FlexTemplateRuntimeEnvironment
-                .newBuilder(originalLaunchParameter.getEnvironment());
-
-        // Labels let the diagnosis tools recover who launched the job and from which build
-        // (DataflowJobReader compares the version label against the server's own version).
-        final String version = ServerVersion.get();
-        if(version != null) {
-            builder.putAdditionalUserLabels(DataflowJobReader.VERSION_LABEL, sanitizeLabelValue(version));
-        }
-        if(userEmail != null && !userEmail.isBlank()) {
-            builder.putAdditionalUserLabels("mercari-pipeline-user", sanitizeLabelValue(userEmail));
-        }
-
-        final String serviceAccount = System.getenv(ENV_VARIABLE_DATAFLOW_SERVICE_ACCOUNT);
-        if(serviceAccount != null) {
-            builder.setServiceAccountEmail(serviceAccount);
-        }
-
-        final String subnetwork = System.getenv(ENV_VARIABLE_DATAFLOW_SUBNETWORK);
-        if(subnetwork != null) {
-            builder.setSubnetwork(subnetwork);
-        }
-
-        final String stagingLocation = System.getenv(ENV_VARIABLE_DATAFLOW_STAGING_LOCATION);
-        if(stagingLocation != null) {
-            builder.setStagingLocation(stagingLocation);
-        }
-
-        final String tempLocation = System.getenv(ENV_VARIABLE_TEMP_LOCATION);
-        if(tempLocation != null) {
-            builder.setTempLocation(tempLocation);
-        }
-
-        return LaunchFlexTemplateParameter
-                .newBuilder(originalLaunchParameter)
-                .setEnvironment(builder.build())
-                .build();
-    }
-
-    /** GCP label values allow only lowercase letters, digits, '-' and '_', up to 63 chars. */
-    private static String sanitizeLabelValue(final String value) {
-        final String sanitized = value.trim().toLowerCase().replaceAll("[^a-z0-9_-]", "-");
-        return sanitized.length() > 63 ? sanitized.substring(0, 63) : sanitized;
-    }
-
-    private static JsonObject launchDataflow(final Config config) {
-        /*
-        final PipelineOptions pipelineOptions = PipelineOptionsFactory
-                .fromArgs(
-                        "--runner=DataflowRunner",
-                        "--region=asia-northeast1",
-                        "--project=kouzoh-p-orfeon",
-                        "--tempLocation=gs://kouzoh-p-orfeon-dataflow/temp",
-                        "--stagingLocation=gs://kouzoh-p-orfeon/staging")
-                .as(MPipeline.MPipelineOptions.class);
-         */
-
-        final String defaultProjectId = "";
-
-
-        final PipelineOptions pipelineOptions = PipelineOptionsFactory
-                .fromArgs("--runner=DataflowRunner")
-                .as(MPipeline.MPipelineOptions.class);
-        Options.setOptions(pipelineOptions, config.getOptions());
-
-        final Pipeline pipeline = Pipeline.create(pipelineOptions);
-
-        final long startMillis = Instant.now().toEpochMilli();
-        MPipeline.apply(pipeline, config);
-        final PipelineResult pipelineResult = pipeline.run();
-
-        final long endMillis = Instant.now().toEpochMilli();
-
+    private static JsonObject errorResponse(final String module, final long millis, final Throwable e) {
         final JsonObject responseJson = new JsonObject();
-        responseJson.addProperty("millis", (endMillis - startMillis));
-        responseJson.addProperty("status", pipelineResult.getState().name());
-
+        responseJson.addProperty("type", "launch");
+        responseJson.addProperty("status", "error");
+        responseJson.addProperty("millis", millis);
+        final JsonObject error = new JsonObject();
+        if(e instanceof IllegalModuleException ime) {
+            error.addProperty("name", ime.name == null ? "" : ime.name);
+            error.addProperty("module", ime.module == null ? module : ime.module);
+            final JsonArray messages = new JsonArray();
+            ime.errorMessages.forEach(messages::add);
+            error.add("messages", messages);
+        } else {
+            error.addProperty("name", "");
+            error.addProperty("module", module);
+            error.addProperty("message", isUserError(e) ? userMessage(e) : FailureUtil.convertThrowableMessage(e));
+        }
+        responseJson.add("error", error);
         return responseJson;
     }
 
-    private static JsonObject launchFlexDataflowTemplate(Config config, JsonObject launch, String userEmail) throws IOException {
-
-        final String templateLocation;
-        if(launch.has("parameters") && launch.get("parameters").isJsonObject()) {
-            templateLocation = launch.getAsJsonObject("parameters").get("templateLocation").getAsString();
-        } else {
-            templateLocation = null;
-        }
-
-        final String project = getProject(config.getOptions());
-        final String region = getRegion(config.getOptions());
-        final String template = getTemplateLocation(config.getOptions(), templateLocation);
-
-        final Map<String, String> parameter = new HashMap<>();
-        parameter.put("config", config.getContent());
-
-        final JsonObject responseJson = new JsonObject();
-        final long startMillis = Instant.now().toEpochMilli();
-        final LaunchFlexTemplateParameter launchParameter = updateLaunchParameter(DataflowOptions
-                .createLaunchFlexTemplateParameter(template, parameter, config.getOptions()), userEmail);
-        final LaunchFlexTemplateResponse resp = DataflowUtil
-                .launchFlexTemplate(project, region, launchParameter, false);
-
-        final long endMillis = Instant.now().toEpochMilli();
-        responseJson.addProperty("millis", (endMillis - startMillis));
-        if (!resp.hasJob()) {
-            responseJson.addProperty("status", "error");
-            responseJson.addProperty("module", "pipeline");
-            {
-                final JsonObject error = new JsonObject();
-                error.addProperty("name", "");
-                error.addProperty("message", "Job not found: " + resp.getJob());
-                responseJson.add("error", error);
-            }
-        } else {
-            responseJson.addProperty("status", "ok");
-            final Job job = resp.getJob();
-            {
-                final JsonObject jobObject = new JsonObject();
-                jobObject.addProperty("id", job.getId());
-                jobObject.addProperty("name", job.getName());
-                jobObject.addProperty("project", job.getProjectId());
-                jobObject.addProperty("location", job.getLocation());
-                jobObject.addProperty("createTime", Instant.ofEpochSecond(job.getCreateTime().getSeconds(), job.getCreateTime().getNanos()).toString());
-                responseJson.add("job", jobObject);
-            }
-        }
-        return responseJson;
+    private static boolean isUserError(final Throwable e) {
+        return e instanceof IllegalArgumentException
+                || (e instanceof CloudRunUtil.CloudRunException cre && cre.status >= 400 && cre.status < 500);
     }
 
-    private static JsonObject launchSpark(Config config, JsonObject launch) {
-        final String project = getProject(config.getOptions());
-        final String region = getRegion(config.getOptions());
-
-        final String jars;
-        final String version;
-        if(launch.has("parameters") && launch.get("parameters").isJsonObject()) {
-            final JsonObject parameters = launch.getAsJsonObject("parameters");
-            if(parameters.has("jars")) {
-                jars = parameters.get("jars").getAsString();
-            } else {
-                jars = null;
-            }
-            if(parameters.has("version")) {
-                version = parameters.get("version").getAsString();
-            } else {
-                version = null;
-            }
-        } else {
-            throw new IllegalArgumentException("launch.parameters is null");
+    private static String userMessage(final Throwable e) {
+        final StringBuilder sb = new StringBuilder(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        Throwable cause = e.getCause();
+        while(cause != null && cause.getMessage() != null) {
+            sb.append("\ncaused by: ").append(cause.getMessage());
+            cause = cause.getCause();
         }
-
-        final String str = new Gson().toJson(config.getContent());
-        final Map<String, String> args = new HashMap<>();
-        args.put("--runner", "SparkRunner");
-        args.put("--config", str.substring(1, str.length() - 1));
-
-
-
-        final long startMillis = Instant.now().toEpochMilli();
-        final JsonObject jobResponse = DataprocUtil
-                .launchServerlessBatchJob(jars, version, args, project, region,null);
-        final long endMillis = Instant.now().toEpochMilli();
-
-        final JsonObject responseJson = new JsonObject();
-        responseJson.addProperty("millis", (endMillis - startMillis));
-        responseJson.addProperty("status", "ok");
-        responseJson.add("job", jobResponse);
-
-        System.out.println(responseJson);
-
-        return responseJson;
-    }
-
-    private static JsonObject launchFlink(Config config, JsonObject launch) {
-        return new JsonObject();
-    }
-
-    private static JsonObject launchDirect(Config config, JsonObject launch) {
-        return new JsonObject();
+        return sb.toString();
     }
 
     private static void log(

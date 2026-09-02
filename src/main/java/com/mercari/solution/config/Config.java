@@ -48,6 +48,7 @@ public class Config implements Serializable {
     private List<SourceConfig> sources;
     private List<TransformConfig> transforms;
     private List<SinkConfig> sinks;
+    private List<ActionConfig> actions;
 
     private Boolean empty;
 
@@ -91,6 +92,10 @@ public class Config implements Serializable {
 
     public List<SinkConfig> getSinks() {
         return sinks;
+    }
+
+    public List<ActionConfig> getActions() {
+        return actions;
     }
 
     public List<FailureConfig> getFailureSinks() {
@@ -317,6 +322,21 @@ public class Config implements Serializable {
     }
 
     public static Config load(final String configParam, final String context, final Format format, final Map<String, String> args) throws IOException {
+        final String content = readContent(configParam);
+        if(content == null) {
+            // a subscription config resource with no message available yields an empty pipeline
+            return empty();
+        }
+        return parse(content, context, format, args);
+    }
+
+    /**
+     * Resolves the config parameter to its raw text content without parsing, accepting the same
+     * forms as {@link #load} (GCS, Parameter Manager, Artifact Registry, base64, Pub/Sub
+     * subscription, local file path, or the config body itself). Returns null only for a
+     * subscription resource with no message available.
+     */
+    public static String readContent(final String configParam) throws IOException {
         if(configParam == null) {
             throw new IllegalModuleException("", "pipeline", List.of("pipeline parameter config must not be null"));
         }
@@ -340,7 +360,7 @@ public class Config implements Serializable {
             LOG.info("config parameter is PubSub Subscription: {}", configParam);
             content = PubSubUtil.getTextMessage(configParam);
             if(content == null) {
-                return empty();
+                return null;
             }
             LOG.info("config content: {}", content);
         } else  {
@@ -363,7 +383,7 @@ public class Config implements Serializable {
             throw new IllegalModuleException("", "pipeline", List.of("pipeline parameter config must not be empty"));
         }
 
-        return parse(content, context, format, args);
+        return content;
     }
 
     public static Config parse(final String configText, final String context, final Format format, final String[] args) {
@@ -375,8 +395,12 @@ public class Config implements Serializable {
         try {
             JsonObject jsonObject = convertConfigJson(configText, format);
 
+            // the modules' runtime template arguments: config defaults (args / system.args) overridden by the
+            // load-time args — the same values that substitute ${args.*} over the config text
+            final Map<String, String> moduleArgs;
             try {
-                jsonObject = processArgs(jsonObject, templateArgs);
+                moduleArgs = resolveArgs(jsonObject, templateArgs);
+                jsonObject = substituteArgs(jsonObject, moduleArgs); // evaluated once: templated args (dates, uuids) stay consistent
             } catch (Throwable e) {
                 throw new IllegalModuleException("", "pipeline", e);
             }
@@ -388,19 +412,19 @@ public class Config implements Serializable {
                 throw new IllegalModuleException("", "pipeline", List.of("config must not be empty"));
             }
             config.validate();
-            config.setDefaults(context, templateArgs);
+            config.setDefaults(context, moduleArgs);
 
             final List<FailureConfig> failureSinks = Optional.ofNullable(config.getSystem().getFailure().getSinks()).orElseGet(ArrayList::new)
                     .stream()
                     .filter(Objects::nonNull)
-                    .peek(c -> c.setArgs(templateArgs))
+                    .peek(c -> c.setArgs(moduleArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .collect(Collectors.toList());
 
             final List<SourceConfig> sources = Optional.ofNullable(config.getSources()).orElseGet(ArrayList::new)
                     .stream()
                     .filter(Objects::nonNull)
-                    .peek(c -> c.setArgs(templateArgs))
+                    .peek(c -> c.setArgs(moduleArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
                     .peek(c -> c.addFailureSinks(failureSinks))
@@ -408,7 +432,7 @@ public class Config implements Serializable {
             final List<TransformConfig> transforms = Optional.ofNullable(config.getTransforms()).orElseGet(ArrayList::new)
                     .stream()
                     .filter(Objects::nonNull)
-                    .peek(c -> c.setArgs(templateArgs))
+                    .peek(c -> c.setArgs(moduleArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
                     .peek(c -> c.addFailureSinks(failureSinks))
@@ -416,7 +440,15 @@ public class Config implements Serializable {
             final List<SinkConfig> sinks = Optional.ofNullable(config.getSinks()).orElseGet(ArrayList::new)
                     .stream()
                     .filter(Objects::nonNull)
-                    .peek(c -> c.setArgs(templateArgs))
+                    .peek(c -> c.setArgs(moduleArgs))
+                    .peek(c -> c.applyContext(config.system.context))
+                    .peek(c -> c.setFailFast(config.system.failure.failFast))
+                    .peek(c -> c.addFailureSinks(failureSinks))
+                    .collect(Collectors.toList());
+            final List<ActionConfig> actions = Optional.ofNullable(config.getActions()).orElseGet(ArrayList::new)
+                    .stream()
+                    .filter(Objects::nonNull)
+                    .peek(c -> c.setArgs(moduleArgs))
                     .peek(c -> c.applyContext(config.system.context))
                     .peek(c -> c.setFailFast(config.system.failure.failFast))
                     .peek(c -> c.addFailureSinks(failureSinks))
@@ -453,16 +485,26 @@ public class Config implements Serializable {
                                 .peek(c -> c.addFailureSinks(failureSinks))
                                 .toList());
                     }
+                    if(importConfig.getActions() != null) {
+                        actions.addAll(importConfig.getActions()
+                                .stream()
+                                .peek(c -> c.setArgs(i.args))
+                                .peek(c -> c.applyContext(config.system.context))
+                                .peek(c -> c.setFailFast(config.system.failure.failFast))
+                                .peek(c -> c.addFailureSinks(failureSinks))
+                                .toList());
+                    }
                 }
             }
 
-            if(sources.isEmpty() && transforms.isEmpty() && sinks.isEmpty()) {
-                throw new IllegalModuleException("", "pipeline", List.of("config has no module(sources,transforms,sinks) definition"));
+            if(sources.isEmpty() && transforms.isEmpty() && sinks.isEmpty() && actions.isEmpty()) {
+                throw new IllegalModuleException("", "pipeline", List.of("config has no module(sources,transforms,sinks,actions) definition"));
             }
 
             config.sources = sources;
             config.transforms = transforms;
             config.sinks = sinks;
+            config.actions = actions;
             config.setFailureSinks(failureSinks);
 
             config.content = jsonObject.toString();
@@ -532,34 +574,95 @@ public class Config implements Serializable {
         return new LinkedHashMap<>(argsParameters.getOrDefault("args", new LinkedHashMap<>()));
     }
 
+    // anything written as ${args.<...>}: only exact names are ever substituted, so every other spelling stays literal
+    private static final Pattern UNRESOLVED_ARG = Pattern.compile("\\$\\{args\\.([^}]+)\\}");
+
+    /**
+     * Names of {@code ${args.<name>}} placeholders still present in a config text after substitution:
+     * arguments neither defined in the config's {@code args} / {@code system.args} nor passed at load time.
+     */
+    public static List<String> unresolvedArgs(final String content) {
+        final List<String> names = new ArrayList<>();
+        if(content == null) return names;
+        final java.util.regex.Matcher m = UNRESOLVED_ARG.matcher(content);
+        while(m.find()) {
+            if(!names.contains(m.group(1))) names.add(m.group(1));
+        }
+        return names;
+    }
+
     private static Map<String, String> parseArgs(String argsText) {
         if(argsText == null || argsText.isEmpty()) {
             return new HashMap<>();
         }
-
         try {
-            final Map<String, String> parsed = new HashMap<>();
-            final JsonObject jsonObject = JsonUtil.fromJson(argsText, JsonObject.class);
-            for(final Map.Entry<String, ?> entry : jsonObject.entrySet()) {
-                parsed.put(entry.getKey(), entry.getValue().toString());
-            }
-            return parsed;
+            return templateArgs(JsonUtil.fromJson(argsText, JsonObject.class));
         } catch (final Throwable t) {
             throw new IllegalArgumentException("Failed to parse pipeline args: " + argsText, t);
         }
     }
 
-    private static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
-        final JsonObject argsJsonObject;
-        if(configJson.has("args") && configJson.get("args").isJsonObject()) {
-            argsJsonObject = configJson.getAsJsonObject("args");
-        } else if(configJson.has("system") && configJson.get("system").isJsonObject()
+    /**
+     * JSON args as template args: string values as-is (their JSON quotes would break the config text), other
+     * values as their JSON text, nulls skipped — the convention shared by every args entry point.
+     */
+    public static Map<String, String> templateArgs(final JsonObject args) {
+        final Map<String, String> parsed = new HashMap<>();
+        if(args == null) {
+            return parsed;
+        }
+        for(final Map.Entry<String, JsonElement> entry : args.entrySet()) {
+            final JsonElement value = entry.getValue();
+            if(value == null || value.isJsonNull()) {
+                continue;
+            }
+            parsed.put(entry.getKey(), value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
+                    ? value.getAsString() : value.toString());
+        }
+        return parsed;
+    }
+
+    /** Substitutes {@code ${args.*}} from {@code args} / {@code system.args} (+ extra params) over the whole config text. */
+    public static JsonObject processArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
+        return substituteArgs(configJson, resolveArgs(configJson, paramsArgs));
+    }
+
+    /** Substitutes {@code ${args.<name>}} over the config text with already-resolved values. */
+    public static JsonObject substituteArgs(final JsonObject configJson, final Map<String, String> resolved) {
+        if(resolved.isEmpty()) {
+            return configJson;
+        }
+        String configText = configJson.toString();
+        for(final Map.Entry<String, String> entry : resolved.entrySet()) {
+            // the placeholder sits inside JSON text: escape the value as JSON string content (quotes, backslashes,
+            // control characters) and neutralise regex replacement metacharacters ($, backslash)
+            final String json = new Gson().toJson(entry.getValue());
+            final String escaped = json.substring(1, json.length() - 1);
+            configText = configText.replaceAll(Pattern.quote("${args." + entry.getKey() + "}"), java.util.regex.Matcher.quoteReplacement(escaped));
+        }
+        return JsonUtil.fromJson(configText, JsonObject.class);
+    }
+
+    /**
+     * The effective template arguments of a config: {@code args} / {@code system.args} defaults (with their own
+     * templates evaluated, earlier entries usable by later ones) overridden by the load-time {@code paramsArgs}.
+     * These substitute {@code ${args.<name>}} over the config text and are the modules' runtime template
+     * arguments ({@code ${<name>}} inside module templates such as a BigQuery query).
+     */
+    public static Map<String, String> resolveArgs(final JsonObject configJson, final Map<String, String> paramsArgs) {
+        // system.args and the (deprecated) top-level args are merged, top-level entries overriding
+        final JsonObject argsJsonObject = new JsonObject();
+        if(configJson.has("system") && configJson.get("system").isJsonObject()
                 && configJson.getAsJsonObject("system").has("args")
                 && configJson.getAsJsonObject("system").get("args").isJsonObject()) {
-
-            argsJsonObject = configJson.getAsJsonObject("system").getAsJsonObject("args");
-        } else {
-            argsJsonObject = new JsonObject();
+            for(final Map.Entry<String, JsonElement> e : configJson.getAsJsonObject("system").getAsJsonObject("args").entrySet()) {
+                argsJsonObject.add(e.getKey(), e.getValue());
+            }
+        }
+        if(configJson.has("args") && configJson.get("args").isJsonObject()) {
+            for(final Map.Entry<String, JsonElement> e : configJson.getAsJsonObject("args").entrySet()) {
+                argsJsonObject.add(e.getKey(), e.getValue());
+            }
         }
 
         final Map<String, String> args = new LinkedHashMap<>();
@@ -580,8 +683,9 @@ public class Config implements Serializable {
             args.putAll(paramsArgs);
         }
 
+        final Map<String, String> resolved = new LinkedHashMap<>();
         if(args.isEmpty()) {
-            return configJson;
+            return resolved;
         }
 
         final Map<String,String> values = new LinkedHashMap<>();
@@ -590,21 +694,16 @@ public class Config implements Serializable {
             if(TemplateUtil.isTemplateText(entry.getValue())) {
                 String entryValue = entry.getValue();
                 for(final Map.Entry<String, String> ventry : values.entrySet()) {
-                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), ventry.getValue());
+                    entryValue = entryValue.replaceAll(Pattern.quote(ventry.getKey()), java.util.regex.Matcher.quoteReplacement(ventry.getValue()));
                 }
                 value = TemplateUtil.executeStrictTemplate(entryValue, values);
             } else {
                 value = entry.getValue();
             }
             values.put("${args." + entry.getKey() + "}", value);
+            resolved.put(entry.getKey(), value);
         }
-
-        String configText = configJson.toString();
-        for(final Map.Entry<String, String> entry : values.entrySet()) {
-            configText = configText.replaceAll(Pattern.quote(entry.getKey()), entry.getValue());
-        }
-
-        return JsonUtil.fromJson(configText, JsonObject.class);
+        return resolved;
     }
 
     private static Map<String, Map<String, String>> filterConfigArgs(final String[] args) {

@@ -67,6 +67,89 @@ Supports the following mutation operations:
 | emulator        | optional | Boolean | If `true`, connects to the Spanner emulator instead of production. Must run with DirectRunner. Default: `false`.                                |
 | flattenFailures | optional | Boolean | If `true`, failed mutations are output as flat individual records. If `false`, they are grouped with their attached mutations. Default: `true`.  |
 
+### CDC apply mode parameters
+
+| parameter             | optional | type    | description |
+|-----------------------|----------|---------|-------------|
+| cdc                   | optional | Boolean | CDC apply mode: consume unified change records (the [`cdc` transform](../transform/cdc.md) output) and apply them as upserts/deletes. See [CDC apply mode](#cdc-apply-mode). Default: `false`. |
+| transactional         | optional | Boolean | (cdc) Commit the changes of one source transaction atomically as one Spanner commit. Requires a windowing `strategy` in streaming. Default: `false`. |
+| onTruncate            | optional | Enum    | (cdc) Reaction to a `TRUNCATE` control record: `skip` (log and drop) or `fail`. Default: `skip`. |
+| onLate                | optional | Enum    | (cdc, transactional) Records of a transaction arriving after their window's watermark: `apply` (commit them separately — the transaction is no longer atomic, logged and counted) or `fail` (route to the failure output). Default: `apply`. |
+| maxMutationsPerCommit | optional | Integer | (cdc, transactional) A transaction with more mutations is split into several commits (atomicity is lost, logged and counted). Spanner allows 80,000 mutations per commit. Default: `20000`. |
+
+## CDC apply mode
+
+With `cdc: true`, the sink consumes **unified change records** — the output of the
+[`cdc` transform](../transform/cdc.md) — and applies them to the destination tables. `table` may be
+a template on the envelope table (`${table}`) so one sink replicates a whole change stream; every
+resolved table must exist, and its column types and primary key order are fetched from
+`INFORMATION_SCHEMA` once per table per worker.
+
+- `INSERT` / `UPDATE` / `SNAPSHOT` → `insertOrUpdate(keys ∪ after)`. Only the columns present in the
+  change record are set, so a partial `after` (Spanner `valueCaptureType: OLD_AND_NEW_VALUES`)
+  leaves the other columns untouched, and re-applying a change is harmless. Columns the
+  destination table does not have are ignored (logged once).
+- `DELETE` → `delete(key)`, key parts in the table's primary key order.
+- Control records (`TRUNCATE`, `SCHEMA`, ...) carry no mutation and are dropped (metric
+  `spanner_sink_cdc_control_records`); `onTruncate: fail` stops the pipeline instead. Apply them out
+  of band (the [`cdc` transform's `schemaChanges`](../transform/cdc.md#destination-ddl-generation)
+  generates BigQuery DDL today; Spanner DDL is a long-running operation and is left to operators).
+
+### Transactional apply
+
+Destinations with interleaved tables or foreign keys need the changes of one source transaction
+(parent and children) in one commit. With `transactional: true` the records are grouped by
+`transaction.id` **within the input window** and each group is committed as one Spanner
+transaction:
+
+- **Why windows complete a transaction**: every record of a transaction carries the same
+  `commitTimestamp`, which is the element's event time (spanner and postgres sources), so a
+  transaction never straddles a window boundary, and the window's watermark guarantees all of it
+  has arrived. No per-provider completeness tracking is needed. In streaming a windowing
+  `strategy` is therefore required (e.g. `fixed` 10s — the latency of the apply is the window size
+  plus the watermark lag); in batch the global window groups whole transactions.
+- Within a commit the changes of one row are folded (a later partial `UPDATE` overrides only
+  the columns it carries, a `DELETE` discards what came before), because Spanner rejects two
+  mutations of the same row in one commit. Mutations keep the order in which each row first
+  appeared in the source transaction, which is known to satisfy parent/child constraints.
+- **Late records** (after the watermark, within `allowedLateness`) cannot join their
+  transaction's commit: `onLate` decides between a separate partial commit and the failure
+  output. Set a generous `allowedLateness` on the strategy.
+- **Transactions sharing a row within one window** are committed in no particular order; use
+  the `cdc` transform's `accumulate` (final state per key, not transactional) when that matters
+  more than atomicity.
+- **ticdc** records take their event time from Kafka, not from the TiDB commit, so a transaction
+  spread over Kafka partitions may straddle windows — transactional apply is not guaranteed for
+  ticdc input.
+
+```yaml
+sinks:
+  - name: replica
+    module: spanner
+    inputs: [normalize]
+    strategy:
+      type: fixed
+      unit: second
+      size: 10
+      allowedLateness: 300
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: replica
+      table: ${table}
+      cdc: true
+      transactional: true
+```
+
+## Column types
+
+Input field types map to Spanner column types one-to-one; the sink does not consult the destination
+table schema, so the input type must match the column type (Spanner mutations do not coerce types).
+In particular, a `uuid` input field is written as a native Spanner `UUID` value (an `array` of `uuid` as
+`ARRAY<UUID>`), and UUID primary keys are bound as `UUID` key parts. To write a `uuid` field into a
+`STRING` column, cast it first (e.g. a `select` transform with `type: string`); conversely, cast a
+`string` field to `uuid` to target a `UUID` column.
+
 ## Mutation operations
 
 ### INSERT_OR_UPDATE (default)

@@ -54,6 +54,7 @@ public class JsonToMapConverter {
                     yield element.toString();
                 }
             }
+            case uuid -> UUID.fromString(element.getAsString()).toString();
             case int32 -> element.getAsInt();
             case int64 -> element.getAsLong();
             case float32 -> element.getAsFloat();

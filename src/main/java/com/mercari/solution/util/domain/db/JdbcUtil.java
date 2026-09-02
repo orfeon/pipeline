@@ -113,12 +113,24 @@ public class JdbcUtil {
             final Schema schema = ResultSetToRecordConverter.convertSchema(statement.getMetaData());
             final List<String> parameterFieldNames = getPrimaryKeyNames(connection, null, null, table);
             final String parameterFieldNamesAttr = String.join(",", parameterFieldNames);
-            final SchemaBuilder.FieldAssembler<Schema> schemaBuilder = SchemaBuilder
-                    .record("root")
+            final Map<String, String> columnRemarks = getColumnRemarks(connection, table);
+            final String tableRemark = getTableRemark(connection, table);
+            final SchemaBuilder.RecordBuilder<Schema> recordBuilder = SchemaBuilder.record("root");
+            if(tableRemark != null) {
+                recordBuilder.doc(tableRemark);
+            }
+            final SchemaBuilder.FieldAssembler<Schema> schemaBuilder = recordBuilder
                     .prop("table", table)
                     .prop("primaryKeys", parameterFieldNamesAttr)
                     .fields();
-            schema.getFields().forEach(f -> schemaBuilder.name(f.name()).type(f.schema()).noDefault());
+            for(final Schema.Field f : schema.getFields()) {
+                final SchemaBuilder.FieldBuilder<Schema> fieldBuilder = schemaBuilder.name(f.name());
+                final String remark = columnRemarks.get(f.name());
+                if(remark != null) {
+                    fieldBuilder.doc(remark);
+                }
+                fieldBuilder.type(f.schema()).noDefault();
+            }
             return schemaBuilder.endRecord();
         }
     }
@@ -465,6 +477,140 @@ public class JdbcUtil {
             case UNION -> setStatement(statement, parameterIndex, AvroSchemaUtil.unnestUnion(fieldSchema), fieldValue);
             default -> throw new IllegalStateException("Not supported prepare parameter type: " + fieldSchema.getType().getName());
         }
+    }
+
+    /**
+     * Column comments ({@code REMARKS} of {@link DatabaseMetaData#getColumns}) of the table, keyed by
+     * column name (matched case-insensitively against the result set column names). Never throws:
+     * any failure yields an empty map since the comments are informational only.
+     */
+    public static Map<String, String> getColumnRemarks(final Connection connection, final String table) {
+        final Map<String, String> remarks = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        lookupTableMetadata(connection, table, "column remarks",
+                (metaData, catalog, schema, tableName) -> metaData.getColumns(catalog, schema, tableName, null),
+                resultSet -> {
+                    final String remark = resultSet.getString("REMARKS");
+                    if(remark != null && !remark.isEmpty()) {
+                        remarks.put(resultSet.getString("COLUMN_NAME"), remark);
+                    }
+                });
+        return remarks;
+    }
+
+    /**
+     * Table comment ({@code REMARKS} of {@link DatabaseMetaData#getTables}), or null when the table
+     * has none or the metadata cannot be read (informational only, never throws).
+     */
+    public static String getTableRemark(final Connection connection, final String table) {
+        final String[] holder = new String[1];
+        lookupTableMetadata(connection, table, "table remark",
+                (metaData, catalog, schema, tableName) -> metaData.getTables(catalog, schema, tableName, null),
+                resultSet -> {
+                    final String remark = resultSet.getString("REMARKS");
+                    if(holder[0] == null && remark != null && !remark.isEmpty()) {
+                        holder[0] = remark;
+                    }
+                });
+        return holder[0];
+    }
+
+    @FunctionalInterface
+    private interface MetadataQuery {
+        ResultSet query(DatabaseMetaData metaData, String catalog, String schema, String tableName) throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface MetadataRowConsumer {
+        void accept(ResultSet resultSet) throws SQLException;
+    }
+
+    /**
+     * Runs a {@link DatabaseMetaData} lookup for exactly one table, resolving the driver's
+     * catalog / schema convention and identifier case:
+     * <ul>
+     *   <li>{@code qualifier.table}: the qualifier is tried as schema and then as catalog
+     *       (MySQL / TiDB expose databases as catalogs and ignore the schema pattern), in the
+     *       given, upper and lower case;</li>
+     *   <li>unqualified: scoped to the connection's current catalog and schema so that a
+     *       same-named table elsewhere does not contribute;</li>
+     *   <li>the name is tried as given, upper- and lower-cased (deduplicated), stopping at the
+     *       first candidate that returns any row; LIKE wildcards in the name are escaped.</li>
+     * </ul>
+     * Never throws; failures are logged and leave the consumer untouched.
+     */
+    private static void lookupTableMetadata(
+            final Connection connection,
+            final String table,
+            final String what,
+            final MetadataQuery query,
+            final MetadataRowConsumer consumer) {
+
+        if(table == null || table.isEmpty()) {
+            return;
+        }
+        final String[] parts = table.split("\\.");
+        final String tableName = parts[parts.length - 1];
+        final String qualifier = parts.length > 1 ? parts[parts.length - 2] : null;
+        try {
+            final DatabaseMetaData metaData = connection.getMetaData();
+            final String escape = metaData.getSearchStringEscape();
+
+            final List<String[]> scopes = new ArrayList<>();
+            if(qualifier != null) {
+                // identifier case of the qualifier is resolved the same way as the table name
+                for(final String q : new LinkedHashSet<>(List.of(qualifier, qualifier.toUpperCase(), qualifier.toLowerCase()))) {
+                    scopes.add(new String[]{ null, q });
+                    scopes.add(new String[]{ q, null });
+                }
+            } else {
+                String catalog = null;
+                String schema = null;
+                try {
+                    catalog = connection.getCatalog();
+                } catch (final Exception e) {
+                    LOG.debug("connection.getCatalog is not supported: {}", e.getMessage());
+                }
+                try {
+                    schema = connection.getSchema();
+                } catch (final Throwable e) {
+                    LOG.debug("connection.getSchema is not supported: {}", e.getMessage());
+                }
+                scopes.add(new String[]{ catalog, schema });
+            }
+
+            final Set<String> candidates = new LinkedHashSet<>(List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase()));
+            for(final String[] scope : scopes) {
+                for(final String candidate : candidates) {
+                    final String pattern = escapeLikePattern(candidate, escape);
+                    try(final ResultSet resultSet = query.query(metaData, scope[0], scope[1], pattern)) {
+                        boolean found = false;
+                        while(resultSet.next()) {
+                            found = true;
+                            consumer.accept(resultSet);
+                        }
+                        if(found) {
+                            return;
+                        }
+                    } catch (final SQLException e) {
+                        LOG.debug("Failed to look up {} of table: {} (catalog: {}, schema: {}, name: {}), cause: {}",
+                                what, table, scope[0], scope[1], candidate, e.getMessage());
+                    }
+                }
+            }
+        } catch (final Exception e) {
+            LOG.warn("Failed to get {} of table: {}, cause: {}", what, table, e.getMessage());
+        }
+    }
+
+    /** Escapes the LIKE wildcards ({@code %}, {@code _}) of an identifier used as a metadata search pattern. */
+    static String escapeLikePattern(final String identifier, final String escape) {
+        if(escape == null || escape.isEmpty()) {
+            return identifier;
+        }
+        return identifier
+                .replace(escape, escape + escape)
+                .replace("%", escape + "%")
+                .replace("_", escape + "_");
     }
 
     public static List<String> getPrimaryKeyNames(

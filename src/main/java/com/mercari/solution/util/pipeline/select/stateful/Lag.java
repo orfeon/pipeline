@@ -8,7 +8,7 @@ import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.pipeline.Filter;
 import com.mercari.solution.util.pipeline.aggregation.Accumulator;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
-import net.objecthunter.exp4j.Expression;
+import com.mercari.solution.util.ExpressionUtil.Expression;
 import org.joda.time.Instant;
 
 import java.util.*;
@@ -153,7 +153,7 @@ public class Lag implements StatefulFunction {
             return null;
         }
         try {
-            return exp.setVariables((Map<String, Double>) variables).evaluate();
+            return exp.evaluate((Map<String, Double>) variables);
         } catch (final IllegalArgumentException e) {
             return null;
         }

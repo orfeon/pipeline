@@ -1,6 +1,5 @@
 package com.mercari.solution.util.schema;
 
-import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.Type;
 import com.google.datastore.v1.Entity;
@@ -141,8 +140,6 @@ public class SchemaUtil {
                 return new TupleTag<Document>(){};
             case ENTITY:
                 return new TupleTag<Entity>(){};
-            case MUTATION:
-                return new TupleTag<Mutation>(){};
             default:
                 throw new IllegalArgumentException();
         }

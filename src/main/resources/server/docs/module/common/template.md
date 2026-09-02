@@ -59,6 +59,16 @@ Consult each module's documentation for which of its parameters accept templates
 | `uuid()` | random UUID string |
 | `replaceAll(str, from, to)` | regex replace (also accepts date/timestamp values) |
 | `reverse(text)` | reverse a string |
+| `sha256(text)` / `md5(text)` | hex digest of the UTF-8 text (deterministic ids, idempotency keys) |
+| `hmacSha256(text, secret)` / `hmacSha1(text, secret)` | hex HMAC (webhook signature headers, e.g. with `__body` in the http sink) |
+| `base64(text)` | Base64 of the UTF-8 text |
+
+### utils.json
+
+| function | description |
+|---|---|
+| `toJson(value)` | JSON text of a map / list / scalar (e.g. `${utils.json.toJson(__doc)}` in the http sink; temporal values as ISO-8601 strings, bytes as Base64) |
+| `quote(text)` | JSON string literal (quoted and escaped) |
 
 ### utils.datetime
 

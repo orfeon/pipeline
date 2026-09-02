@@ -3,13 +3,14 @@ package com.mercari.solution.util.pipeline;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.coder.ElementCoder;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.domain.file.JsonUtil;
 import com.mercari.solution.util.schema.ElementSchemaUtil;
-import net.objecthunter.exp4j.Expression;
+import com.mercari.solution.util.ExpressionUtil.Expression;
 import org.apache.avro.util.Utf8;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -86,7 +87,12 @@ public class Filter implements Serializable {
         if(filterJson == null) {
             return JsonNull.INSTANCE;
         }
-        return JsonUtil.fromJson(filterJson);
+        try {
+            return JsonUtil.fromJson(filterJson);
+        } catch (final RuntimeException e) {
+            // SQL-like condition text is not JSON: keep it as a string value
+            return new JsonPrimitive(filterJson);
+        }
     }
 
     public enum Type implements Serializable {
@@ -106,6 +112,7 @@ public class Filter implements Serializable {
         IN("in"),
         NOT_IN("not in"),
         MATCH("match"),
+        NOT_MATCH("not match"),
         TRUE("true"),
         FALSE("false");
 
@@ -183,7 +190,8 @@ public class Filter implements Serializable {
             }
             for(final String requiredVariable : requiredVariables) {
                 if(!fieldNames.contains(requiredVariable)) {
-                    errorMessages.add("filter variable: " + requiredVariable + " not found in input schema: " + fieldNames);
+                    // callers validate against different schemas (input, output, ...): keep the message neutral
+                    errorMessages.add("filter variable: " + requiredVariable + " not found in schema fields: " + fieldNames);
                 }
             }
 
@@ -235,6 +243,7 @@ public class Filter implements Serializable {
         private String key;
         private Op op;
         private JsonElement value;
+        private String valueKey;
 
         private Expression expression;
         private Set<String> expressionVariables;
@@ -266,11 +275,20 @@ public class Filter implements Serializable {
             this.value = value;
         }
 
+        public String getValueKey() {
+            return valueKey;
+        }
 
+        public void setValueKey(String valueKey) {
+            this.valueKey = valueKey;
+        }
 
         @Override
         public String toString() {
-            return String.format("%s %s %s", this.expression != null ? "(" + this.expressionString + ")" : this.key, this.op, this.value);
+            return String.format("%s %s %s",
+                    this.expression != null ? "(" + this.expressionString + ")" : this.key,
+                    this.op,
+                    this.valueKey != null ? this.valueKey : this.value);
         }
 
         public Double evaluateExpression(final MElement input) {
@@ -279,7 +297,7 @@ public class Filter implements Serializable {
                 final Double fieldValue = input.getAsDouble(variableName);
                 variables.put(variableName, fieldValue);
             }
-            return expression.setVariables(variables).evaluate();
+            return expression.evaluate(variables);
         }
 
         public Double evaluateExpression(final MElement input, final Map<String, Object> values) {
@@ -293,7 +311,7 @@ public class Filter implements Serializable {
                 }
                 variables.put(variableName, ExpressionUtil.getAsDouble(fieldValue));
             }
-            return expression.setVariables(variables).evaluate();
+            return expression.evaluate(variables);
         }
 
         public Set<String> getRequiredVariables() {
@@ -303,13 +321,26 @@ public class Filter implements Serializable {
             } else if(this.key != null) {
                 variables.add(this.key);
             }
+            if(this.valueKey != null) {
+                variables.add(this.valueKey);
+            }
             return variables;
         }
 
     }
 
-    public static ConditionNode parse(final String filterJson) {
-        return parse(JsonUtil.fromJson(filterJson, JsonElement.class));
+    public static ConditionNode parse(final String filterText) {
+        if(filterText == null) {
+            return parse((JsonElement) null);
+        }
+        final JsonElement jsonElement;
+        try {
+            jsonElement = JsonUtil.fromJson(filterText, JsonElement.class);
+        } catch (final RuntimeException e) {
+            // Not JSON: treat as SQL-like condition text
+            return parse(new JsonPrimitive(filterText));
+        }
+        return parse(jsonElement);
     }
 
     public static ConditionNode parse(final JsonElement jsonElement) {
@@ -320,6 +351,16 @@ public class Filter implements Serializable {
         }
 
         if(jsonElement.isJsonPrimitive()) {
+            if(jsonElement.getAsJsonPrimitive().isString()) {
+                // SQL-like condition text is translated once (at setup) into the same
+                // JSON condition structure, so the evaluation runtime is unchanged.
+                return parse(FilterSqlParser.toJsonCondition(jsonElement.getAsString()));
+            }
+            if(jsonElement.getAsJsonPrimitive().isBoolean()) {
+                final ConditionNode node = new ConditionNode();
+                node.setType(jsonElement.getAsBoolean() ? Type.TRUE : Type.FALSE);
+                return node;
+            }
             throw new IllegalArgumentException("Illegal condition json: " + jsonElement);
         }
 
@@ -387,12 +428,28 @@ public class Filter implements Serializable {
     }
 
     private static ConditionLeaf createLeaf(final JsonObject jsonObject) {
-        if((!jsonObject.has("key") && !jsonObject.has("expression")) || !jsonObject.has("op") || !jsonObject.has("value")) {
-            throw new IllegalArgumentException("Simple conditions must contain `key`,`op`,`value`. json: " + jsonObject);
+        final boolean hasValue = jsonObject.has("value");
+        final boolean hasValueKey = jsonObject.has("valueKey");
+        if((!jsonObject.has("key") && !jsonObject.has("expression")) || !jsonObject.has("op") || (!hasValue && !hasValueKey)) {
+            throw new IllegalArgumentException("Simple conditions must contain `key` (or `expression`), `op` and `value` (or `valueKey`). json: " + jsonObject);
+        }
+        if(hasValue && hasValueKey) {
+            throw new IllegalArgumentException("Simple conditions must not contain both `value` and `valueKey`. json: " + jsonObject);
         }
         final ConditionLeaf leaf = new ConditionLeaf();
         leaf.setOp(Op.of(jsonObject.get("op").getAsString()));
-        leaf.setValue(jsonObject.get("value"));
+        if(hasValue) {
+            leaf.setValue(jsonObject.get("value"));
+        } else {
+            if(!jsonObject.get("valueKey").isJsonPrimitive() || !jsonObject.get("valueKey").getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException("Condition `valueKey` must be string. json: " + jsonObject);
+            }
+            switch (leaf.op) {
+                case IN, NOT_IN, MATCH, NOT_MATCH -> throw new IllegalArgumentException(
+                        "Condition op `" + jsonObject.get("op").getAsString() + "` does not support `valueKey`. json: " + jsonObject);
+                default -> leaf.valueKey = jsonObject.get("valueKey").getAsString();
+            }
+        }
 
         if(jsonObject.has("expression")) {
             if(!jsonObject.get("expression").isJsonPrimitive() || !jsonObject.get("expression").getAsJsonPrimitive().isString()) {
@@ -401,10 +458,10 @@ public class Filter implements Serializable {
             final String expression = jsonObject.get("expression").getAsString();
             leaf.key = expression;
             leaf.pattern = null;
-            leaf.expressionVariables = ExpressionUtil.estimateVariables(expression);
-            leaf.expression = ExpressionUtil.createDefaultExpression(expression, leaf.expressionVariables);
+            leaf.expression = ExpressionUtil.createDefaultExpression(expression);
+            leaf.expressionVariables = leaf.expression.getVariableNames();
             leaf.expressionString = expression;
-        } else if(Op.MATCH.equals(leaf.op)) {
+        } else if(Op.MATCH.equals(leaf.op) || Op.NOT_MATCH.equals(leaf.op)) {
             leaf.key = jsonObject.get("key").getAsString();
             leaf.pattern = Pattern.compile(leaf.value.getAsString());
             leaf.expression = null;
@@ -428,6 +485,12 @@ public class Filter implements Serializable {
         if(condition == null) {
             return true;
         }
+        if(Type.TRUE.equals(condition.getType())) {
+            return true;
+        }
+        if(Type.FALSE.equals(condition.getType())) {
+            return false;
+        }
 
         final List<Boolean> bits = new ArrayList<>();
 
@@ -445,7 +508,7 @@ public class Filter implements Serializable {
                                     Map.Entry::getKey,
                                     e -> ExpressionUtil.getAsDouble(e.getValue(), Double.NaN)));
                     try {
-                        final double evaluatedValue = leaf.expression.setVariables(variables).evaluate();
+                        final double evaluatedValue = leaf.expression.evaluate(variables);
                         if(Double.isNaN(evaluatedValue)) {
                             value = null;
                         } else {
@@ -457,7 +520,12 @@ public class Filter implements Serializable {
                 } else {
                     value = ElementSchemaUtil.getValue(standardValues, leaf.getKey());
                 }
-                bits.add(is(value, leaf));
+                if(leaf.valueKey != null) {
+                    final Object target = ElementSchemaUtil.getValue(standardValues, leaf.valueKey);
+                    bits.add(is(value, target, leaf.getOp()));
+                } else {
+                    bits.add(is(value, leaf));
+                }
             }
         }
         if(condition.getNodes() != null && !condition.getNodes().isEmpty()) {
@@ -506,8 +574,9 @@ public class Filter implements Serializable {
                 }
             }
             return leaf.getOp().equals(Op.NOT_IN);
-        } else if(leaf.getOp().equals(Op.MATCH)) {
-            return leaf.pattern.matcher(value.toString()).find();
+        } else if(leaf.getOp().equals(Op.MATCH) || leaf.getOp().equals(Op.NOT_MATCH)) {
+            final boolean found = leaf.pattern.matcher(value.toString()).find();
+            return leaf.getOp().equals(Op.MATCH) == found;
         } else {
             final int c = switch (value) {
                 case Byte b -> new BigDecimal(b.toString()).compareTo(leaf.getValue().getAsBigDecimal());
@@ -540,18 +609,98 @@ public class Filter implements Serializable {
                 return false;
             }
 
-            return switch (leaf.getOp()) {
-                case EQUAL -> c == 0;
-                case NOT_EQUAL -> c != 0;
-                case GREATER -> c > 0;
-                case GREATER_OR_EQUAL -> c >= 0;
-                case LESSER -> c < 0;
-                case LESSER_OR_EQUAL -> c <= 0;
-                case TRUE -> true;
-                case FALSE -> false;
-                default -> throw new IllegalArgumentException("");
-            };
+            return matches(c, leaf.getOp());
         }
+    }
+
+    // Field-to-field comparison (leaf with `valueKey`): both sides come from the record.
+    static boolean is(final Object value, final Object target, final Op op) {
+        if(value == null) {
+            if(target == null) {
+                return op.equals(Op.EQUAL);
+            }
+            return false;
+        } else if(target == null) {
+            return op.equals(Op.NOT_EQUAL);
+        }
+
+        final int c = compareValues(value, target);
+        if(c == INCOMPARABLE) {
+            return false;
+        }
+        return matches(c, op);
+    }
+
+    private static boolean matches(final int c, final Op op) {
+        return switch (op) {
+            case EQUAL -> c == 0;
+            case NOT_EQUAL -> c != 0;
+            case GREATER -> c > 0;
+            case GREATER_OR_EQUAL -> c >= 0;
+            case LESSER -> c < 0;
+            case LESSER_OR_EQUAL -> c <= 0;
+            case TRUE -> true;
+            case FALSE -> false;
+            default -> throw new IllegalArgumentException("");
+        };
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static int compareValues(final Object value, final Object target) {
+        if(isIncomparableNumber(value) || isIncomparableNumber(target)) {
+            return INCOMPARABLE;
+        }
+        if(value instanceof Number v && target instanceof Number t) {
+            return toBigDecimal(v).compareTo(toBigDecimal(t));
+        }
+        if((value instanceof String || value instanceof Utf8) && (target instanceof String || target instanceof Utf8)) {
+            return value.toString().compareTo(target.toString());
+        }
+        if(value instanceof Boolean v && target instanceof Boolean t) {
+            return v.compareTo(t);
+        }
+        final Long valueEpochMicros = toEpochMicros(value);
+        if(valueEpochMicros != null) {
+            final Long targetEpochMicros = toEpochMicros(target);
+            if(targetEpochMicros != null) {
+                return valueEpochMicros.compareTo(targetEpochMicros);
+            }
+        }
+        if(value.getClass().equals(target.getClass()) && value instanceof Comparable comparable) {
+            return comparable.compareTo(target);
+        }
+        LOG.warn("not comparable values: {} ({}) and {} ({})", value, value.getClass(), target, target.getClass());
+        return value.toString().compareTo(target.toString());
+    }
+
+    private static boolean isIncomparableNumber(final Object value) {
+        return switch (value) {
+            case Double d -> d.isNaN() || d.isInfinite();
+            case Float f -> f.isNaN() || f.isInfinite();
+            default -> false;
+        };
+    }
+
+    private static BigDecimal toBigDecimal(final Number number) {
+        return switch (number) {
+            case BigDecimal b -> b;
+            case BigInteger b -> new BigDecimal(b);
+            case Double d -> BigDecimal.valueOf(d);
+            case Float f -> BigDecimal.valueOf(f.doubleValue());
+            case Byte b -> BigDecimal.valueOf(b.longValue());
+            case Short s -> BigDecimal.valueOf(s.longValue());
+            case Integer i -> BigDecimal.valueOf(i.longValue());
+            case Long l -> BigDecimal.valueOf(l);
+            default -> new BigDecimal(number.toString());
+        };
+    }
+
+    private static Long toEpochMicros(final Object value) {
+        return switch (value) {
+            case java.time.Instant i -> DateTimeUtil.toEpochMicroSecond(i);
+            case Instant i -> i.getMillis() * 1000L;
+            default -> null;
+        };
     }
 
     // PTransform

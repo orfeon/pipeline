@@ -21,17 +21,26 @@ sources:
     description: Reads documents from Google Cloud Firestore. Supports collection queries with field filters, field projection, ordering, parallel partition queries, and subcollection traversal via allDescendants.
     tags: [source, firestore, batch, gcp, nosql, document]
   - title: http
-    description: Sends HTTP requests and outputs the responses. Supports GET/POST/PUT/DELETE methods, FreeMarker template expressions for endpoint/params/headers/body, loop-based pagination, request chaining with input dependencies, response format handling (text/json/xml/bytes), backoff/retry configuration, and rate limiting.
-    tags: [source, http, batch, api, rest]
+    description: "Fetches records from HTTP/REST APIs with the same target/body/response blocks as the http sink. FreeMarker templates for url/params/headers/body, authentication providers (basic, bearer, apiKey, OAuth2 client credentials / JWT bearer with token caching, GCP OIDC/OAuth), typed output records from JSON responses (response.schema) with array fan-out (itemsPath), pagination loops (vars/next/until; page numbers, cursors from body or headers), request chaining (input: one request per parent record, foreach: per item of a raw parent response, in parallel), per-request rate limiting, declarative success/retry with Retry-After aware backoff, and periodic polling in streaming mode."
+    tags: [source, http, rest, api, pagination, polling, oauth2, batch, streaming]
+  - title: iceberg
+    description: Reads records from an Apache Iceberg table through a configurable Iceberg catalog. The table is specified as a catalog table identifier, and catalog connection settings are passed as catalog/config property maps. Experimental - the Beam IcebergIO integration is still under development and the module is not yet functional.
+    tags: [source, iceberg, batch, lakehouse, experimental]
   - title: jdbc
     description: Reads data from relational databases via JDBC queries. Supports MySQL, PostgreSQL and other JDBC-compatible databases with parallel reads over split queries.
     tags: [source, jdbc, batch, database, sql, mysql, postgresql]
+  - title: kafka
+    description: Reads messages from Apache Kafka topics in streaming mode. Connects to brokers via bootstrapServers and subscribes to a single topic, a list of topics, or a regex topic pattern. Message values can be deserialized as JSON, Avro, or Protocol Buffers according to the declared schema. Supports bounded reads via maxNumRecords/maxReadTime and Kafka read options such as read-committed isolation and log-append-time timestamps.
+    tags: [source, kafka, streaming, messaging]
   - title: postgres
-    description: .
-    tags: [source, postgres, batch]
+    description: Reads records from PostgreSQL (or compatible) databases in parallel using COPY BINARY format. Each table is split into physical block (ctid) ranges read concurrently by distributed workers via TID range scans, giving higher throughput than the generic jdbc source. Reads a single table, or every table matching include/exclude patterns with one tagged output per table. Also streams change data capture events via native logical replication (pgoutput binary mode) in changeDataCapture mode.
+    tags: [source, postgres, batch, streaming, database, sql, copy, cdc, replication]
   - title: pubsub
     description: Reads messages from Google Cloud Pub/Sub topics or subscriptions. Supports JSON, Avro, Protocol Buffers, and raw message formats. Includes attribute-based filtering, partition routing with inline filter/select/flatten, additional metadata field injection, seek-based replay, and multi-partition output.
     tags: [source, pubsub, streaming, gcp, messaging]
+  - title: request
+    description: Turns the HTTP request body into source data when the pipeline runs in HTTP serve mode (direct-profile container deployed as a Cloud Run Service). Parses the body as JSON against the declared schema - an array becomes one element per entry, an object becomes one element. Supports subtree selection via a dot-notation path and a sample fallback body for validation and local testing outside serve mode.
+    tags: [source, request, batch, http, serve, cloudrun, api]
   - title: spanner
     description: Reads data from Google Cloud Spanner via SQL query or table scan. Supports batch partitioned queries, table key range filtering, change streams for CDC, view mode for periodic polling, microbatch mode for near real-time streaming, Data Boost, and timestamp-bound reads.
     tags: [source, spanner, batch, streaming, gcp, sql, cdc]
@@ -39,18 +48,39 @@ sources:
     description: Reads and parses file contents from Google Cloud Storage (GCS), AWS S3, or local file systems. Supports Avro, Parquet, CSV, and JSON formats with schema auto-inference for binary formats. Includes column projection for Parquet, header skipping and line filtering for CSV, and compression support for text formats.
     tags: [source, storage, batch, gcs, s3, avro, parquet, csv, json]
   - title: tidb
-    description: .
-    tags: [source, postgres, batch]
+    description: Reads records from TiDB (or MySQL compatible) databases in parallel. The table is split into chunks by TiKV region boundaries (with numeric MIN/MAX and whole-table fallbacks) and read by distributed workers under a consistent tidb_snapshot, so all workers see the same MVCC version without locking.
+    tags: [source, tidb, mysql, batch, database, sql]
 transforms:
   - title: aggregation
     description: Performs aggregation processing on multiple inputs with grouping, filtering, and field selection. Supports 12 aggregation functions (count, sum, avg, max, min, last, first, arg_max, arg_min, std, simple_regression, array_agg) with per-record conditions, expression-based fields, weighted calculations, and configurable output limiting. Works consistently in both batch and streaming modes.
     tags: [transform, aggregation, batch, streaming, groupby]
+  - title: feature
+    description: Declarative machine-learning feature generation with built-in leakage checking. Declares features in four scopes (row expressions/datetime/bin/cross/residual, context statistics within co-occurrence groups, per-entity strictly-past sequence history such as lag/ewma/trend/aggregates, expanding population encodings) against a sources contract stating when each field becomes known and how late it reaches the system; derives the availability of every output column, rejects leaking columns at assembly, and shifts history windows for late-arriving outcomes. Batch mode.
+    tags: [transform, feature, machine-learning, leakage, batch]
+  - title: attribution
+    description: Explains why a metric changed between a baseline and a target period along two orthogonal axes. Slice attribution (vocabulary.unit slice, the default) localizes the change to a concise set of dimension-value slices (where) with the RiskLoc, Squeeze and Adtributor algorithms, derived (ratio) measure allocation, distribution measures (KLL sketches), distinct-count measures (Theta sketches), pre-serialized sketch input, four baseline strategies and cardinality/support guards. Metric-tree attribution (vocabulary.unit metric) decomposes the change along a declared driver/KPI tree (why) — sum, product (volume x rate), sum-of-products and weighted-average nodes with per-dimension breakdowns — with exact additivity at every level and an optional causal adjustment for declared rate-to-volume dependencies. Batch only.
+    tags: [transform, attribution, rootcause, rca, anomaly, analysis, batch, datasketches, metrictree, kpi, decomposition, causal]
   - title: beamsql
     description: Processes and combines input data using SQL queries based on Apache Beam SQL (Calcite). Supports JOIN across multiple inputs, aggregation with windowing, built-in UDFs/UDAFs, and inline lookup joins against external sources (JDBC / Spanner / Bigtable / REST) registered via the sources parameter.
     tags: [transform, beamsql, batch, streaming, sql, join, aggregation, lookup, jdbc, spanner, bigtable, rest]
+  - title: cdc
+    description: Normalizes provider-specific change data capture records into a unified change record envelope (table, op, keys, before, after, commitTimestamp, sequence, source, transaction, schema, statement). Supported provider formats are Spanner change streams (the spanner source changeDataCapture output, live or replayed from archived files), PostgreSQL logical replication (the postgres source changeDataCapture output) and TiCDC canal-json events (from Kafka messages or newline-delimited files synced to GCS/S3). The normalized records are consumed by apply-capable sinks such as the bigquery sink cdc mode, or archived/reshaped as ordinary records. Table-level control records (TRUNCATE, SCHEMA on schema drift, optionally carrying destination DDL generated by schemaChanges) flow through the same output and primary key changes are split into DELETE+INSERT. A format envelope mode re-reads archived envelopes or failure-record JSON for replay. An accumulate option collapses changes per key to the latest state for batch replay, honoring TRUNCATE as a barrier.
+    tags: [transform, cdc, changestream, changedatacapture, spanner, postgres, tidb, ticdc, canal, streaming, batch]
+  - title: compare
+    description: Compares records from multiple inputs by primary key and outputs mismatch reports. Records from all inputs are grouped by the specified primaryKeyFields, and for each key the transform detects inputs missing a record, inputs contributing duplicate records, and field-level value differences across inputs. Only keys with at least one mismatch produce an output record, which makes the module useful for data migration validation and cross-datastore consistency checks.
+    tags: [transform, compare, validation, consistency, migration, batch]
+  - title: onnx
+    description: Runs inference on input records with an ONNX model using ONNX Runtime. Loads the model file from Google Cloud Storage or a local path, maps record fields to model inputs and model outputs to record fields, and appends the inference results to each record. Supports optional filter conditions, select-based pre/post-processing, micro-batching via bufferSize, and chained multi-step mappings. Works in both batch and streaming pipelines.
+    tags: [transform, onnx, ml, inference, machinelearning, batch, streaming]
+  - title: onnx_gen
+    description: Experimental transform that runs text generation for each input record with an ONNX Runtime GenAI model (e.g. Phi-family models). Loads the generative model files from a Google Cloud Storage directory or local path, renders a FreeMarker prompt template with each record's field values, and generates a response with configurable search options. Currently the generated text is only written to worker logs; the module produces no downstream output collection.
+    tags: [transform, onnx, genai, llm, generation, experimental]
   - title: partition
     description: Splits input data into multiple named outputs based on filter conditions. Each partition can have its own filter and optional select processing. Supports exclusive routing (first match only) or non-exclusive routing (multiple matches). Unmatched records are routed to an excluded output. Optionally merges all partitions into a single union output.
     tags: [transform, partition, filter, routing, batch, streaming]
+  - title: pdfextract
+    description: Extracts text and document metadata (title, author, page count, dates, etc.) from PDF content using Apache PDFBox. The PDF is read from a byte-array field or from a GCS path given in a string field. Extracted fields are appended to the input record, with an optional field-name prefix and optional select post-processing. Parse failures are reported in-record via Failed/ErrorMessage fields, and EPUB content is handled as a fallback.
+    tags: [transform, pdfextract, pdf, text, extraction, pdfbox, epub]
   - title: query
     description: Runs Calcite SQL over each input element inside a DoFn, without any shuffle. Array-of-struct fields can be expanded with UNNEST/LATERAL so aggregation, ORDER BY/LIMIT and set operations (UNION/INTERSECT/EXCEPT) run over the per-element collection. External tables (JDBC / Spanner / Bigtable / Datastore / Firestore / REST) can be joined on their keys as batched lookup-joins that never scan the external table - point, key-prefix or bounded-range fetches, and correlated LATERAL blocks whose aggregation/ORDER BY/LIMIT run over each key's fetched rows inside the DoFn. Spanner sources also expose parameterized GoogleSQL/GQL statements as key-driven query tables (Spanner Graph traversals, full-text SEARCH, arbitrary parameterized queries). A buffer source exposes the transform's own past input elements, accumulated per group key in Beam state, as a lookup table - per-key history, sequence detection and funnels with no external store; its insertSql defines the buffered rows by SQL, and insertOutput/restoreSql/dedupFields keep an external copy and rebuild state from it after a pipeline restart (state as a cache over the external store). Multiple named queries can run per element in one session - later queries reference earlier results as tables, each output query becomes a named module output, and exclusive mode routes each element to its first matching output. One element yields zero or more output rows (fan-out or fold), and windowing/timestamps are preserved so batch and streaming behave identically.
     tags: [transform, query, batch, streaming, sql, calcite, unnest, lateral, lookup, join, jdbc, spanner, bigtable, datastore, firestore, rest, graph, search, buffer, state, history, cep, routing, multi-output]
@@ -65,8 +95,8 @@ sinks:
     description: Sends input data as events to the Auxia platform via its ingestion API.
     tags: [sink, auxia, batch, streaming, event, api]
   - title: bigquery
-    description: Writes input data to Google BigQuery tables. Supports multiple write methods (FILE_LOADS, STREAMING_INSERTS, STORAGE_WRITE_API, STORAGE_API_AT_LEAST_ONCE), dynamic destination tables via FreeMarker templates, time partitioning, clustering, primary key, schema update options, auto-sharding, KMS encryption, and failure handling.
-    tags: [sink, bigquery, batch, streaming, gcp, sql]
+    description: Writes input data to Google BigQuery tables. Supports multiple write methods (FILE_LOADS, STREAMING_INSERTS, STORAGE_WRITE_API, STORAGE_API_AT_LEAST_ONCE), dynamic destination tables via FreeMarker templates, time partitioning, clustering, primary key, schema update options, auto-sharding, KMS encryption, failure handling, and a CDC apply mode that upserts/deletes rows from unified change records (cdc transform output) via the Storage Write API _CHANGE_TYPE pseudocolumn.
+    tags: [sink, bigquery, batch, streaming, gcp, sql, cdc, upsert]
   - title: bigtable
     description: Writes, updates, or deletes cells and rows in Google Cloud Bigtable. Supports flexible row key generation with FreeMarker templates, multiple column families and qualifiers, per-record dynamic mutation operations, cell timestamp control, flow control, and batching.
     tags: [sink, bigtable, batch, streaming, gcp, nosql, wide-column]
@@ -82,18 +112,57 @@ sinks:
   - title: firestore
     description: Writes or deletes documents in Google Cloud Firestore. Supports flexible document name generation from fields, templates, or auto-generated UUIDs. Includes RPC QoS tuning for write throughput control.
     tags: [sink, firestore, batch, streaming, gcp, nosql, document]
+  - title: iceberg
+    description: Writes input records to an Apache Iceberg table through a configurable Iceberg catalog. The destination table is specified as a catalog table identifier, catalog connection settings are passed as catalog/config property maps (config type defaults to hadoop), and streaming writes can set a triggering frequency. Experimental - the Beam IcebergIO integration is still under development and the module currently performs no write.
+    tags: [sink, iceberg, batch, streaming, lakehouse, experimental]
   - title: jdbc
     description: Writes data to relational databases via JDBC statements. Supports MySQL, PostgreSQL and other JDBC-compatible databases with batching and configurable write operations.
     tags: [sink, jdbc, batch, streaming, database, sql, mysql, postgresql]
   - title: profile
     description: Generates a single self-contained interactive HTML data profiling report from the input dataset using Apache DataSketches. Collects quantiles/histograms (KLL), distinct counts (CPC), frequent items, key set sketches (Theta), row samples (VarOpt) and numeric correlations in one pass, all with mathematical error bounds. Supports field filtering, key declarations with containment/venn diagnostics, segment/time-bucket/multi-input comparison with distribution overlays and PSI/KS drift metrics, comparison against a past report artifact without re-scanning (compareWith), declared field-pair comparison with Q-Q plots, accuracy presets, raw-value hiding, and embeds mergeable sketch binaries for cross-run comparison and BigQuery interoperability.
     tags: [sink, profile, batch, report, html, statistics, datasketches, observation, quality]
+  - title: localH2
+    description: Builds a local H2 database file from input records on the pipeline workers and uploads it as a zip archive to Cloud Storage (GCS). Supports multiple inputs written to separate tables, user-supplied DDL statements, INSERT/UPSERT/DELETE operations, batched JDBC writes, optionally seeding from an existing database zip, and grouping records into separate database files by key fields.
+    tags: [sink, localH2, h2, database, jdbc, gcs, batch, embedded]
   - title: pubsub
     description: Publishes input data as messages to Google Cloud Pub/Sub topics. Supports JSON, Avro, and Protocol Buffers serialization formats. Includes dynamic topic routing via FreeMarker templates, custom message attributes with template expressions, message ID and ordering key control, batch size tuning, and passthrough of PubsubMessage inputs.
     tags: [sink, pubsub, batch, streaming, gcp, messaging]
   - title: spanner
-    description: Writes input data to Google Cloud Spanner tables using mutations. Supports INSERT, UPDATE, INSERT_OR_UPDATE, REPLACE, and DELETE operations. Includes commit timestamp injection, batch tuning parameters, RPC priority control, max commit delay, failure handling with dead-letter output, and emulator support.
-    tags: [sink, spanner, batch, streaming, gcp, sql]
+    description: Writes input data to Google Cloud Spanner tables using mutations. Supports INSERT, UPDATE, INSERT_OR_UPDATE, REPLACE, and DELETE operations. Includes commit timestamp injection, batch tuning parameters, RPC priority control, max commit delay, failure handling with dead-letter output, and emulator support. A cdc mode applies unified change records (cdc transform output) as upserts/deletes, optionally committing each source transaction atomically (transactional, grouped by transaction id within the input window).
+    tags: [sink, spanner, batch, streaming, gcp, sql, cdc, replication]
   - title: storage
     description: Writes input data as files to Cloud Storage (GCS), S3, or local file system in Avro, Parquet, JSON, or CSV format. Supports dynamic output paths using FreeMarker templates, sharding, compression, and codec configuration.
     tags: [sink, storage, batch, streaming, gcs, s3, avro, parquet, csv, json]
+  - title: grpc
+    description: Sends each input record (or a keyed micro-batch) as a gRPC request to any service described by a protoc descriptor set (no generated stubs). Records map to the request message by field name or through a FreeMarker protobuf-JSON template; unary and client-streaming methods, batches via a repeated field or the client stream. Shares the http sink's auth providers (as call metadata), status-code based retry with backoff, concurrency, rate limiting, and emits SUCCEEDED/FAILED control records with the response as JSON payload.
+    tags: [sink, grpc, protobuf, api, batch, streaming]
+  - title: http
+    description: Sends each input record (or a keyed micro-batch) as an HTTP request to an endpoint and emits one SUCCEEDED/PARTIAL/FAILED control record per request with status, headers, body and typed payload. Supports per-record templates for URL/params/headers (incl. __body signature headers), JSON/NDJSON/form/bytes/Avro/Protobuf/template bodies with gzip and size guard, auth providers (basic, bearer, apiKey, OAuth2 client credentials with token cache, GCP OIDC/OAuth) with refresh on 401, declarative success/retry classification with Retry-After aware backoff, per-item partial failure and selective item retry for bulk APIs (Elasticsearch _bulk, Solr), per-worker rate limiting and bounded in-flight concurrency, batch and streaming.
+    tags: [sink, http, rest, api, webhook, bulk, elasticsearch, solr, oauth2, oidc, batch, streaming]
+  - title: tasks
+    description: Enqueues each input record as a Google Cloud Tasks HTTP task so the queue governs rate limiting, retries, delayed/scheduled execution and name-based deduplication. Supports per-record templates for URL, headers, task id (hashed, idempotent), scheduleTime/delay, JSON/Avro/Protobuf/FreeMarker bodies with a size guard, keyed micro-batching of records into one task, OIDC/OAuth target auth, queue-level HTTP routing (tasks:buffer), and emits CREATED/ALREADY_EXISTS/FAILED control records.
+    tags: [sink, tasks, cloudtasks, gcp, http, webhook, scheduling, batch, streaming]
+# Action modules (config section `actions`; `module:` names the service)
+# The Builder UI shows them as their own "Actions" group.
+actions:
+  - title: bigquery
+    description: BigQuery control-plane operations. Jobs via the Jobs API with idempotent deterministic job ids and error classification (jobs.query with query parameters and resultRows, jobs.load with schema/csv/parquet/hive options, jobs.extract to GCS, jobs.copy for COPY/SNAPSHOT/CLONE/RESTORE, jobs.wait for jobs launched elsewhere); table and dataset management (tables.get as a metadata guard with failWhen/skipWhen, tables.insert/patch incl. view definitions, tables.delete, datasets.get/insert/delete) with ifNotExists/ignoreNotFound idempotency; raw configuration/resource escape hatches for any API field. trigger once fires after upstream steps complete; perElement runs one job per record with ${field} templates; collect runs one job over all records (e.g. sourceUrisField gathers every written file into a single load job). Emits the common action envelope (service, operation, jobId, state, startedAt, finishedAt, payload).
+    tags: [action, bigquery, job, query, load, extract, copy, snapshot, wait, table, dataset, view, guard, trigger, batch, workflow]
+  - title: vertexai
+    description: "Vertex AI generative AI (Gemini) operations as workflow steps (Vertex AI REST API v1). Operations (module-level operation field): batchPredictionJobs.create (submit a Gemini batch prediction job — JSONL on GCS or a BigQuery table with a request column in, predictions out — and wait until terminal, idempotent via a deterministic displayName that adopts a queued/running/succeeded job), batchPredictionJobs.get and batchPredictionJobs.list (read job state into the payload as a guard with failWhen/skipWhen), batchPredictionJobs.wait (wait for jobs submitted elsewhere by jobId, filter, or jobIdField with collect), batchPredictionJobs.cancel, and models.generateContent (one generateContent call from the control plane with prompt / system / responseSchema shorthands — summarize or triage the triggering control records into structured JSON, payload.text / payload.json). Per-record inference over data records belongs in the select transform. Emits the common action envelope with the BatchPredictionJob / GenerateContentResponse as payload."
+    tags: [action, vertexai, gemini, llm, batch, prediction, generate, generateContent, job, wait, cancel, guard, trigger, workflow, gcp]
+  - title: storage
+    description: Writes a small file from the triggering records — the control-plane counterpart of the storage sink. Keeps execution result histories (e.g. the file list a storage sink emitted) as JSONL, writes templated summary reports, or creates marker files (empty _SUCCESS object with trigger once). Supports GCS/S3/local paths. Emits the common action envelope.
+    tags: [action, storage, gcs, file, history, marker, report, trigger, workflow]
+  - title: http
+    description: One HTTP request per trigger firing as a workflow step, the control-plane counterpart of the http sink. Notify (Slack/webhook) after upstream steps complete (once), trigger downstream jobs (Cloud Run Jobs, Airflow, Workflows), run maintenance calls around a bulk load (create index, disable refresh, commit, alias swap), or start an asynchronous API job and poll its status endpoint until done (poll with until/failWhen/interval/timeout). Shares target/body/response/auth (basic, bearer, apiKey, OAuth2, GCP OIDC/OAuth) with the http sink and emits the common action envelope with the final response as payload.
+    tags: [action, http, rest, api, webhook, notify, trigger, poll, workflow]
+  - title: tasks
+    description: "Cloud Tasks queue operations as workflow steps, the control-plane counterpart of the tasks sink. Operations (module-level operation field): queues.create (idempotent, adopts an existing queue) / queues.update rate limits and retry config / queues.pause / queues.resume / queues.purge / queues.delete / queues.get, queues.waitForEmpty (poll until the queue has drained so a later step can rely on every task having run), tasks.run and tasks.delete (perElement templates). Emits the common action envelope."
+    tags: [action, tasks, cloudtasks, queue, pause, resume, purge, wait, trigger, workflow, gcp]
+  - title: dataflow
+    description: "Cloud Dataflow job operations as workflow steps (Dataflow REST API v1b3). Operations (module-level operation field): flexTemplates.launch (launch a Flex Template job with config/args, wait until terminal or running, idempotent via a deterministic jobName that adopts an already-active job), jobs.get and jobs.list (read job state into the payload as a guard with failWhen/skipWhen, e.g. is the streaming consumer running), jobs.wait (wait for jobs launched elsewhere, jobIdField with collect), jobs.update (requestedState JOB_STATE_CANCELLED / JOB_STATE_DRAINED and runtimeUpdatableParams min/maxNumWorkers) and jobs.messages.list (error messages for diagnosis). Runs from any runner (a Direct pipeline on Cloud Run can orchestrate heavy Dataflow batches). Emits the common action envelope with the Job resource as payload."
+    tags: [action, dataflow, job, flextemplate, launch, wait, cancel, drain, scale, guard, orchestration, trigger, workflow, gcp]
+  - title: build
+    description: "Cloud Build operations as workflow steps (Cloud Build REST API v1). Operations (module-level operation field): builds.create (run a Build resource or the image + script shorthand for a one-step container run, wait until terminal, idempotent via deterministic tags that adopt a queued/working/succeeded build; the decoded step outputs results.buildStepOutputs come back as payload.outputs), builds.get and builds.list (read build state into the payload as a guard with failWhen/skipWhen, e.g. is the latest build of a trigger green), builds.wait (wait for builds started elsewhere by buildId, filter, or jobIdField with collect), builds.cancel, and triggers.run (run a build trigger with a RepoSource). Runs from any runner: a generic run-this-container-once step (dbt, terraform, gcloud, scripts) without pre-registering a Cloud Run job, or the bridge from pipeline artifacts into CI/CD. Emits the common action envelope with the Build resource as payload."
+    tags: [action, build, cloudbuild, ci, cd, container, script, trigger, wait, cancel, guard, orchestration, workflow, gcp]

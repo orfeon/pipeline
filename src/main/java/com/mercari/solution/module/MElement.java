@@ -364,7 +364,7 @@ public class MElement implements Serializable {
                 case Number n -> n.doubleValue() > 0;
                 default -> throw new IllegalArgumentException();
             };
-            case string, json -> switch (primitiveValue) {
+            case string, uuid, json -> switch (primitiveValue) {
                 case String s -> s;
                 case ByteBuffer bb -> new String(Base64.getDecoder().decode(bb.array()), StandardCharsets.UTF_8);
                 case byte[] b -> new String(b, StandardCharsets.UTF_8);
@@ -422,11 +422,22 @@ public class MElement implements Serializable {
                 case String s -> fieldType.getSymbols().contains(s) ? s : null;
                 default -> throw new IllegalArgumentException();
             };
-            case element, map -> switch (primitiveValue) {
+            case element -> switch (primitiveValue) {
                 case Map map -> {
                     final Map<String, Object> standardValues = new HashMap<>();
                     for(final Schema.Field field : fieldType.getElementSchema().getFields()) {
                         standardValues.put(field.getName(), getAsStandardValue(field.getFieldType(), map.get(field.getName())));
+                    }
+                    yield standardValues;
+                }
+                default -> throw new IllegalArgumentException();
+            };
+            case map -> switch (primitiveValue) {
+                case Map<?, ?> map -> {
+                    final Map<String, Object> standardValues = new HashMap<>();
+                    for(final Map.Entry<?, ?> entry : map.entrySet()) {
+                        standardValues.put(String.valueOf(entry.getKey()), fieldType.getMapValueType() == null
+                                ? entry.getValue() : getAsStandardValue(fieldType.getMapValueType(), entry.getValue()));
                     }
                     yield standardValues;
                 }

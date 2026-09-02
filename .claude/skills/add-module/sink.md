@@ -61,7 +61,15 @@ tuple.
 ## Reference implementations
 
 - `DebugSink.java` (~240 lines) — simplest full sink; also shows DirectRunner-only local output.
-- `ActionSink.java` / `TasksSink.java` — small, action-style sinks.
+- `HttpSink.java` — built on the shared `util/pipeline/outbound/` core (`RequestSpec`/`RequestRenderer` for
+  target+body templates, `AuthProvider`, `HttpTransport`, `ResponsePolicy`); async in-flight sends with retry,
+  partial-failure handling, control-record output; tests against an in-process JDK `HttpServer`.
+  Modules that call HTTP endpoints reuse this core (the http source is built on it too).
+- `TasksSink.java` — custom client boundary (`TasksClient` interface, in-memory client for unit tests via
+  `endpoint: memory://…`, emulator IT), per-record templates, control-record output.
+  (Operations against external services — run a job, notify, wait for something — usually belong
+  in an action service (the `actions` config section) instead, see
+  [action.md](action.md).)
 - `FilesSink.java` — per-record file writing with templated paths.
 - `SpannerSink.java` — mutations, failure handling, emulator support.
 - `PubSubSink.java` — serialization formats + dynamic topics.

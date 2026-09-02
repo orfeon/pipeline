@@ -75,6 +75,7 @@ public class MutationToJsonConverter {
             switch (entry.getValue().getType().getCode()) {
                 case BOOL -> jsonObject.addProperty(entry.getKey(), value.getBool());
                 case STRING -> jsonObject.addProperty(entry.getKey(), value.getString());
+                case UUID -> jsonObject.addProperty(entry.getKey(), value.getUuid().toString());
                 case BYTES -> jsonObject.addProperty(entry.getKey(), value.getBytes().toBase64());
                 case JSON -> jsonObject.addProperty(entry.getKey(), value.getJson());
                 case INT64 -> jsonObject.addProperty(entry.getKey(), value.getInt64());
@@ -100,6 +101,8 @@ public class MutationToJsonConverter {
                     switch (value.getType().getArrayElementType().getCode()) {
                         case BOOL -> value.getBoolArray().forEach(jsonArray::add);
                         case STRING -> value.getStringArray().forEach(jsonArray::add);
+                        case UUID -> value.getUuidArray().stream()
+                                .map(v -> v == null ? null : v.toString()).forEach(jsonArray::add);
                         case BYTES -> value.getBytesArray().stream().map(ByteArray::toBase64).forEach(jsonArray::add);
                         case JSON -> value.getJsonArray().forEach(jsonArray::add);
                         case INT64 -> value.getInt64Array().forEach(jsonArray::add);

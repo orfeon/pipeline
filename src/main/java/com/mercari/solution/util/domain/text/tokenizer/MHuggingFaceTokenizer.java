@@ -6,7 +6,6 @@ import com.google.api.services.storage.Storage;
 import com.google.api.services.storage.model.StorageObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.cloud.google.StorageUtil;
-import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -191,7 +190,7 @@ public class MHuggingFaceTokenizer implements MTokenizer, Serializable {
                 throw new IllegalArgumentException("");
             }
         } else if (!Files.exists(Path.of(path))) {
-            throw new IllegalArgumentIOException();
+            throw new FileNotFoundException("Tokenizer path not found: " + path);
         }
 
         final HuggingFaceTokenizer.Builder builder = HuggingFaceTokenizer

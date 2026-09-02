@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.module.Strategy;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class TransformConfig extends ModuleConfig {
@@ -13,7 +14,11 @@ public class TransformConfig extends ModuleConfig {
     private Strategy strategy;
 
     public List<String> getInputs() {
-        return inputs;
+        if(inputs != null) {
+            return inputs;
+        } else {
+            throw new IllegalArgumentException("Transform module: " + getName() + " has no input");
+        }
     }
 
     public void setInputs(List<String> inputs) {

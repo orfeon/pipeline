@@ -41,7 +41,7 @@ public class AgentService {
             final GoogleCredentials credentials = GcpCredentialsCache.credentials();
             credentials.refreshIfExpired();
             final String project = ServiceOptions.getDefaultProjectId();
-            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-3.5-flash-lite");
+            final String modelName = env("MERCARI_PIPELINE_AGENT_MODEL", "gemini-3.7-flash");
             agentModelName = modelName;
             final String location = env("MERCARI_PIPELINE_AGENT_LOCATION", "global");
             final String debugLog = env("MERCARI_PIPELINE_AGENT_DEBUG_LOG", "");

@@ -12,7 +12,6 @@ import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.DatumWriter;
 import org.apache.beam.sdk.io.FileIO;
-import org.apache.beam.sdk.values.KV;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.io.IOException;
@@ -21,7 +20,7 @@ import java.nio.channels.WritableByteChannel;
 import java.util.HashMap;
 import java.util.Map;
 
-public class AvroSink implements FileIO.Sink<KV<String, MElement>> {
+public class AvroSink implements FileIO.Sink<MElement> {
 
     private final String jsonSchema;
     private final FileUtil.CodecName codecName;
@@ -68,8 +67,7 @@ public class AvroSink implements FileIO.Sink<KV<String, MElement>> {
     }
 
     @Override
-    public void write(KV<String, MElement> element) throws IOException {
-        final MElement input = element.getValue();
+    public void write(MElement input) throws IOException {
         final GenericRecord record = ElementToAvroConverter.convert(schema, input);
         if(fitSchema && DataType.AVRO.equals(input.getType())) {
             final GenericRecord fitted = AvroSchemaUtil.toBuilder(schema, record).build();

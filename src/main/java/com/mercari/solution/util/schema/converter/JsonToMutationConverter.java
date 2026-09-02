@@ -28,7 +28,7 @@ public class JsonToMutationConverter {
         return values;
     }
 
-    private static Value convertValue(final Schema.Field field, final JsonElement jsonElement) {
+    public static Value convertValue(final Schema.Field field, final JsonElement jsonElement) {
         final Schema.Options options = field.getOptions();
         final boolean isNull = jsonElement == null || jsonElement.isJsonNull();
         return switch (field.getType().getTypeName()) {
@@ -36,7 +36,9 @@ public class JsonToMutationConverter {
             case STRING -> {
                 final String stringValue = isNull ? null : jsonElement.getAsString();
                 final String sqlType = options.hasOption("sqlType") ? options.getValue("sqlType") : null;
-                if("DATETIME".equals(sqlType)) {
+                if(RowSchemaUtil.hasSpannerType(options, "UUID")) {
+                    yield Value.uuid(isNull ? null : UUID.fromString(stringValue));
+                } else if("DATETIME".equals(sqlType)) {
                     yield Value.timestamp(isNull ? null : Timestamp.parseTimestamp(stringValue));
                 } else if("JSON".equals(sqlType)) {
                     yield Value.json(stringValue);
@@ -95,7 +97,19 @@ public class JsonToMutationConverter {
                     }
                     case STRING -> {
                         final String sqlType = options.hasOption("sqlType") ? options.getValue("sqlType") : null;
-                        if("DATETIME".equals(sqlType)) {
+                        if(RowSchemaUtil.hasSpannerType(options, "UUID")) {
+                            if(isNull) {
+                                yield Value.uuidArray(new ArrayList<>());
+                            }
+                            final List<UUID> values = new ArrayList<>();
+                            for(final JsonElement element : jsonArray) {
+                                if(element == null || element.isJsonNull()) {
+                                    continue;
+                                }
+                                values.add(UUID.fromString(element.getAsString()));
+                            }
+                            yield Value.uuidArray(values);
+                        } else if("DATETIME".equals(sqlType)) {
                             if(isNull) {
                                 yield Value.timestampArray(new ArrayList<>());
                             }

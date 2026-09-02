@@ -1,113 +1,135 @@
 package com.mercari.solution.util.pipeline.select;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.TemplateUtil;
-import freemarker.template.Template;
+import com.mercari.solution.util.pipeline.outbound.*;
+import com.mercari.solution.util.schema.converter.JsonToElementConverter;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.io.Serializable;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
+/**
+ * Select function that calls an HTTP endpoint once per record and returns the response as the
+ * field value: text (default), bytes, or a typed struct when {@code response.schema} is set.
+ *
+ * <p>Uses the same {@code target} / {@code body} / {@code response} blocks as the http source /
+ * sink ({@link RequestSpec}, {@link ResponsePolicy}, {@link AuthProvider}) with retry via
+ * {@link SyncCaller}. A 404 response yields {@code null}; other failures throw (the select
+ * module routes the record to failures). Intended for light per-record enrichment — for keyed
+ * joins with batching and caching prefer the query transform's rest lookup source.
+ */
 public class Http implements SelectFunction {
 
     private static final Logger LOG = LoggerFactory.getLogger(Http.class);
 
-    private final String name;
-    private final String endpoint;
-    private final String method;
-    private final String body;
-    private final Map<String, String> headers;
+    public static class Parameters implements Serializable {
+        public RequestSpec.Target target;
+        public RequestSpec.Body body;
+        public ResponsePolicy.Parameters response;
+        public HttpTransport.TimeoutParameters timeout;
+        public HttpTransport.Parameters http;
+    }
 
-    private final Set<String> templateArgs;
+    private final String name;
+    private final Parameters parameters;
     private final List<Schema.Field> inputFields;
+    private final Schema inputSchema;
     private final Schema.FieldType outputFieldType;
     private final boolean ignore;
+    private final RequestRenderer renderer;
+    private final ResponsePolicy policy;
 
+    private transient HttpTransport transport;
 
-    private transient HttpClient httpClient;
-    private transient Template endpointTemplate;
-    private transient Template bodyTemplate;
-
-    Http(String name,
-         String endpoint,
-         String method,
-         String body,
-         Map<String, String> headers,
-         List<Schema.Field> inputFields,
-         Schema.FieldType outputFieldType,
-         Set<String> templateArgs,
-         boolean ignore) {
-
+    private Http(String name, Parameters parameters, List<Schema.Field> inputFields, boolean ignore) {
         this.name = name;
-        this.endpoint = endpoint;
-        this.method = method;
-        this.body = body;
-        this.headers = headers;
-
-        this.templateArgs = templateArgs;
-
+        this.parameters = parameters;
         this.inputFields = inputFields;
-        this.outputFieldType = outputFieldType;
+        this.inputSchema = Schema.of(inputFields);
         this.ignore = ignore;
+        this.policy = new ResponsePolicy(parameters.response);
+        this.outputFieldType = policy.schema() != null
+                ? Schema.FieldType.element(policy.schema()).withNullable(true)
+                : ResponsePolicy.Format.bytes.equals(parameters.response.format)
+                        ? Schema.FieldType.BYTES.withNullable(true)
+                        : Schema.FieldType.STRING.withNullable(true);
+        this.renderer = new RequestRenderer("select." + name, parameters.target, parameters.body,
+                null, false, inputSchema, inputSchema, List.of());
     }
 
     public static Http of(String name, JsonObject jsonObject, List<Schema.Field> inputFields, boolean ignore) {
-        if(!jsonObject.has("endpoint")) {
-            throw new IllegalArgumentException("SelectField http: " + name + " requires endpoint parameter");
-        }
-        final String endpoint = jsonObject.get("endpoint").getAsString();
-
-        final String method;
-        if(jsonObject.has("method")) {
-            method = jsonObject.get("method").getAsString();
+        final Parameters parameters = new Gson().fromJson(jsonObject, Parameters.class);
+        final List<String> errorMessages = new ArrayList<>();
+        final String prefix = "SelectField http: " + name;
+        final Schema inputSchema = Schema.of(inputFields);
+        if(parameters.target == null) {
+            errorMessages.add(prefix + " requires target");
         } else {
-            method = "get";
+            errorMessages.addAll(parameters.target.validate(prefix + ".target", inputSchema,
+                    parameters.http != null && parameters.http.allowedHosts != null));
         }
-
-        final String body;
-        if(jsonObject.has("body")) {
-            body = jsonObject.get("body").getAsString();
-        } else {
-            body = "";
+        if(parameters.body != null) {
+            errorMessages.addAll(parameters.body.validate(prefix + ".body", inputSchema));
         }
-
-        final Map<String, String> headers = new HashMap<>();
-        if(jsonObject.has("headers")) {
-            for(final Map.Entry<String, JsonElement> entry : jsonObject.get("headers").getAsJsonObject().entrySet()) {
-                headers.put(entry.getKey(), entry.getValue().toString());
+        if(parameters.response != null) {
+            errorMessages.addAll(parameters.response.validate(prefix + ".response"));
+            if(parameters.response.partialFailure != null) {
+                errorMessages.add(prefix + ".response.partialFailure is not supported");
             }
         }
-
-        final Schema.FieldType outputFieldType;
-        if(jsonObject.has("type")) {
-            final String type = jsonObject.get("type").getAsString();
-            outputFieldType = switch (type) {
-                case "string" -> Schema.FieldType.STRING.withNullable(true);
-                case "bytes" -> Schema.FieldType.BYTES.withNullable(true);
-                default -> throw new IllegalArgumentException();
-            };
-        } else {
-            outputFieldType = Schema.FieldType.STRING.withNullable(true);
+        if(parameters.timeout != null) {
+            errorMessages.addAll(parameters.timeout.validate(prefix + ".timeout"));
         }
-
-        final Set<String> templateArgs = new HashSet<>();
-        final List<String> endpointTemplateArgs = TemplateUtil.extractTemplateArgs(endpoint, inputFields);
-        final List<String> bodyTemplateArgs = TemplateUtil.extractTemplateArgs(body, inputFields);
-        templateArgs.addAll(endpointTemplateArgs);
-        templateArgs.addAll(bodyTemplateArgs);
-
-        return new Http(name, endpoint, method, body, headers, inputFields, outputFieldType, templateArgs, ignore);
+        if(parameters.http != null) {
+            errorMessages.addAll(parameters.http.validate(prefix + ".http"));
+        }
+        if(!errorMessages.isEmpty()) {
+            throw new IllegalArgumentException(String.join(", ", errorMessages));
+        }
+        if(parameters.target.method == null) {
+            parameters.target.method = "GET";
+        }
+        parameters.target.setDefaults();
+        if(parameters.body == null) {
+            parameters.body = new RequestSpec.Body();
+            parameters.body.format = RequestSpec.Format.none;
+        }
+        parameters.body.setDefaults();
+        if(parameters.target.headers.keySet().stream().anyMatch(k -> k.equalsIgnoreCase("Content-Type"))) {
+            parameters.body.contentType = null;
+        }
+        if(parameters.response == null) {
+            parameters.response = new ResponsePolicy.Parameters();
+            parameters.response.format = ResponsePolicy.Format.text;
+        }
+        if(parameters.response.format == null) {
+            parameters.response.format = parameters.response.schema != null ? ResponsePolicy.Format.json : ResponsePolicy.Format.text;
+        }
+        parameters.response.setDefaults();
+        if(parameters.timeout == null) {
+            parameters.timeout = new HttpTransport.TimeoutParameters();
+        }
+        parameters.timeout.setDefaults();
+        if(parameters.http == null) {
+            parameters.http = new HttpTransport.Parameters();
+        }
+        parameters.http.setDefaults();
+        if(parameters.http.allowedHosts == null && !parameters.target.auth.isNone()) {
+            final String origin = RequestSpec.staticOrigin(parameters.target.url);
+            if(origin != null) {
+                parameters.http.allowedHosts = List.of(java.net.URI.create(origin).getHost());
+            }
+        }
+        return new Http(name, parameters, inputFields, ignore);
     }
 
     @Override
@@ -132,95 +154,44 @@ public class Http implements SelectFunction {
 
     @Override
     public void setup() {
-        this.httpClient = HttpClient.newBuilder()
-                .build();
-        this.endpointTemplate = TemplateUtil.createStrictTemplate("HttpSelectEndpoint", endpoint);
-        this.bodyTemplate = TemplateUtil.createStrictTemplate("HttpSelectBody", body);
+        renderer.setup();
+        policy.setup();
+        if(policy.schema() != null) {
+            policy.schema().setup();
+        }
+        final AuthProvider auth = AuthProvider.create(parameters.target.auth, RequestSpec.staticOrigin(parameters.target.url));
+        this.transport = new HttpTransport(parameters.http, parameters.timeout, auth);
     }
 
     @Override
     public Object apply(Map<String, Object> input, Instant timestamp) {
-        final Map<String, Object> values = copy(input, templateArgs);
-        TemplateUtil.setFunctions(values);
-        final String url;
+        final MElement element = MElement.of(input, timestamp);
+        final OutboundRequest request = renderer.build(element);
+        final SyncCaller.Result result;
         try {
-            url = TemplateUtil.executeStrictTemplate(endpointTemplate, values);
-        } catch (Exception e) {
+            result = SyncCaller.call("select." + name, transport, policy, request);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("http select function " + name + " interrupted", e);
+        }
+        if(result.response() != null && result.response().statusCode() == 404) {
+            LOG.debug("select.{}: 404 from {}", name, request.url());
             return null;
         }
-
-        final String body = TemplateUtil.executeStrictTemplate(bodyTemplate, values);
-        final HttpRequest.BodyPublisher bodyPublisher = HttpRequest.BodyPublishers.ofString(body);
-
-        final HttpRequest httpRequest = createHttpRequest(url, method, headers, bodyPublisher);
-        final HttpResponse.BodyHandler<?> bodyHandler = switch (outputFieldType.getType()) {
-            case string -> HttpResponse.BodyHandlers.ofString();
-            case bytes -> HttpResponse.BodyHandlers.ofByteArray();
-            default -> throw new IllegalArgumentException();
-        };
-        try {
-            final HttpResponse<?> httpResponse = httpClient.send(httpRequest, bodyHandler);
-            if(httpResponse.statusCode() == 404 || httpResponse.statusCode() == 400) {
-                LOG.warn("http 4XX error for endpoint: {}, statusCode: {}, body: {}",
-                        url, httpResponse.statusCode(), httpResponse.body());
+        if(!result.succeeded()) {
+            throw new IllegalStateException("http select function " + name + " " + request.method() + " " + request.url() + " failed: " + result.error());
+        }
+        final ResponsePolicy.Parsed parsed = result.parsed();
+        if(policy.schema() != null) {
+            final JsonElement json = parsed.values().get("json") instanceof JsonElement e ? e : null;
+            if(json == null || !json.isJsonObject()) {
                 return null;
             }
-            if(httpResponse.statusCode() > 400 && httpResponse.statusCode() < 500) {
-                throw new IllegalArgumentException("http error for endpoint: " + url + ", statusCode: " + httpResponse.statusCode() + ", body: " + httpResponse.body());
-            }
-            final Object output = httpResponse.body();
-            return switch (outputFieldType.getType()) {
-                case string -> switch (output) {
-                    case String s -> s;
-                    case byte[] b -> new String(b, StandardCharsets.UTF_8);
-                    case Object o -> o.toString();
-                };
-                case bytes -> switch (output) {
-                    case String s -> ByteBuffer.wrap(Base64.getDecoder().decode(s));
-                    case byte[] b -> ByteBuffer.wrap(b);
-                    default -> throw new IllegalArgumentException();
-                };
-                default -> throw new IllegalArgumentException();
-            };
-        } catch (IOException | InterruptedException e) {
-            throw new IllegalArgumentException();
+            return JsonToElementConverter.convert(policy.schema().getFields(), json.getAsJsonObject());
         }
-    }
-
-    private static HttpRequest createHttpRequest(final String url, final String method, final Map<String, String> headers, final HttpRequest.BodyPublisher bodyPublisher) {
-        final URI uri;
-        try {
-            uri = new URI(url);
-        } catch (final URISyntaxException e) {
-            throw new IllegalArgumentException(e);
-        }
-        HttpRequest.Builder builder = HttpRequest.newBuilder().uri(uri);
-        for(Map.Entry<String, String> header : headers.entrySet()) {
-            builder = builder.header(header.getKey(), header.getValue());
-        }
-
-        builder = switch (method.toLowerCase()) {
-            case "get" -> builder.GET();
-            case "post" -> builder.POST(bodyPublisher);
-            case "put" -> builder.PUT(bodyPublisher);
-            case "delete" -> builder.DELETE();
-            default -> throw new IllegalArgumentException("Not supported method: " + method);
+        return switch (outputFieldType.getType()) {
+            case bytes -> parsed.bytes() == null ? null : ByteBuffer.wrap(parsed.bytes());
+            default -> parsed.text();
         };
-
-        return builder.build();
     }
-
-    private static Map<String, Object> copy(final Map<String, Object> values, final Set<String> fields) {
-        final Map<String, Object> newValues = new HashMap<>();
-        if(values == null) {
-            return newValues;
-        }
-        for(final Map.Entry<String, Object> entry : values.entrySet()) {
-            if(fields.contains(entry.getKey())) {
-                newValues.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return newValues;
-    }
-
 }

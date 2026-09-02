@@ -5,7 +5,14 @@ import com.google.gson.JsonObject;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.coder.ElementCoder;
+import com.mercari.solution.util.TemplateUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
+import com.mercari.solution.util.pipeline.cdc.ChangeRecord;
+import com.mercari.solution.util.pipeline.cdc.ChangeRecordMutationConverter;
+import freemarker.template.Template;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Metrics;
+import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.*;
@@ -48,6 +55,11 @@ public class SpannerSink extends Sink {
         private Boolean flattenGroup;
 
         private Mode mode;
+        private Boolean cdc;
+        private Boolean transactional;
+        private OnTruncate onTruncate;
+        private OnLate onLate;
+        private Integer maxMutationsPerCommit;
         private Boolean emulator;
         private Long maxNumRows;
         private Long maxNumMutations;
@@ -76,6 +88,9 @@ public class SpannerSink extends Sink {
                 if(maxCommitDelay < 0 || maxCommitDelay > 500) {
                     errorMessages.add("Parameter maxCommitDelay must be between 0 to 500. but: " + maxCommitDelay);
                 }
+            }
+            if(this.maxMutationsPerCommit != null && this.maxMutationsPerCommit <= 0) {
+                errorMessages.add("Parameter maxMutationsPerCommit must be positive. but: " + maxMutationsPerCommit);
             }
 
             if(this.emulator) {
@@ -106,6 +121,22 @@ public class SpannerSink extends Sink {
             }
             if(mode == null) {
                 mode = Mode.normal;
+            }
+            if(this.cdc == null) {
+                this.cdc = false;
+            }
+            if(this.transactional == null) {
+                this.transactional = false;
+            }
+            if(this.onTruncate == null) {
+                this.onTruncate = OnTruncate.skip;
+            }
+            if(this.onLate == null) {
+                this.onLate = OnLate.apply;
+            }
+            if(this.maxMutationsPerCommit == null) {
+                // Spanner allows 80,000 mutations per commit; keep a margin for wide rows
+                this.maxMutationsPerCommit = 20000;
             }
 
             if(this.maxNumRows == null) {
@@ -141,6 +172,20 @@ public class SpannerSink extends Sink {
         restore
     }
 
+    /** How the cdc apply mode reacts to a {@code TRUNCATE} control record. */
+    public enum OnTruncate {
+        skip,
+        fail
+    }
+
+    /** Transactional cdc apply: what to do with records arriving after their window's watermark. */
+    public enum OnLate {
+        /** Commit them as a separate (partial) transaction, logged and counted. */
+        apply,
+        /** Route them to the failure output. */
+        fail
+    }
+
     @Override
     public MCollectionTuple expand(
             final MCollectionTuple inputs,
@@ -149,6 +194,10 @@ public class SpannerSink extends Sink {
         final Parameters parameters = getParameters(Parameters.class);
         parameters.setDefaults();
         parameters.validate(getRunner());
+
+        if(parameters.cdc) {
+            return expandChangeRecords(inputs, parameters, errorHandler);
+        }
 
         switch (parameters.mode) {
             case normal -> {
@@ -179,6 +228,273 @@ public class SpannerSink extends Sink {
                 throw new IllegalArgumentException();
             }
             default -> throw new IllegalArgumentException();
+        }
+    }
+
+    /**
+     * CDC apply mode: consumes unified change records (the {@code cdc} transform output) and
+     * applies them to the destination tables as {@code insertOrUpdate} / {@code delete}
+     * mutations. With {@code transactional: true} the changes of one source transaction are
+     * grouped (by {@code transaction.id} within the input window, whose watermark guarantees the
+     * transaction is complete) and committed atomically as one {@link MutationGroup}.
+     */
+    private MCollectionTuple expandChangeRecords(
+            final MCollectionTuple inputs,
+            final Parameters parameters,
+            final MErrorHandler errorHandler) {
+
+        final Schema inputSchema = Union.createUnionSchema(inputs);
+        for(final String field : List.of(
+                ChangeRecord.FIELD_TABLE, ChangeRecord.FIELD_OP, ChangeRecord.FIELD_KEYS, ChangeRecord.FIELD_SEQUENCE)) {
+            if(!inputSchema.hasField(field)) {
+                throw new IllegalModuleException(
+                        "spanner sink module[" + getName() + "] with cdc mode requires unified change records (the cdc transform output) as input. missing field: " + field);
+            }
+        }
+        final PCollection<MElement> input = inputs
+                .apply("Union", Union.flatten()
+                        .withWaits(getWaits())
+                        .withStrategy(getStrategy()));
+        if(parameters.transactional
+                && OptionUtil.isStreaming(input)
+                && input.getWindowingStrategy().getWindowFn() instanceof org.apache.beam.sdk.transforms.windowing.GlobalWindows) {
+            throw new IllegalModuleException(
+                    "spanner sink module[" + getName() + "] with cdc transactional mode requires a windowing strategy in streaming (the window watermark is what completes a transaction)");
+        }
+
+        final TupleTag<MutationGroup> groupTag = new TupleTag<>() {};
+        final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
+        final PCollectionTuple groups;
+        if(parameters.transactional) {
+            groups = input
+                    .apply("WithTransactionKey", ParDo.of(new WithTransactionKeyDoFn()))
+                    .setCoder(KvCoder.of(StringUtf8Coder.of(), input.getCoder()))
+                    .apply("GroupByTransaction", GroupByKey.create())
+                    .apply("ToTransactionMutationGroups", ParDo
+                            .of(new TransactionToMutationGroupsDoFn(getName(), parameters, getFailFast(), failureTag))
+                            .withOutputTags(groupTag, TupleTagList.of(failureTag)));
+        } else {
+            groups = input
+                    .apply("ToMutationGroups", ParDo
+                            .of(new ChangeRecordToMutationGroupDoFn(getName(), parameters, getFailFast(), failureTag))
+                            .withOutputTags(groupTag, TupleTagList.of(failureTag)));
+        }
+        final PCollection<MutationGroup> mutationGroups = groups.get(groupTag)
+                .setCoder(SerializableCoder.of(MutationGroup.class));
+
+        final PCollection<Void> result;
+        PCollection<MutationGroup> failedGroups = null;
+        if(OptionUtil.isDirectRunner(input)) {
+            result = mutationGroups
+                    .apply("WriteSpanner", ParDo.of(new WriteMutationGroupDoFn(
+                            getName(), parameters.projectId, parameters.instanceId, parameters.databaseId, parameters.emulator)));
+        } else {
+            final SpannerWriteResult writeResult = mutationGroups
+                    .apply("WriteSpanner", createWrite(parameters, getFailFast()).grouped());
+            result = writeResult.getOutput();
+            if(!getFailFast()) {
+                failedGroups = writeResult.getFailedMutations();
+            }
+        }
+        if(failedGroups == null) {
+            failedGroups = input.getPipeline()
+                    .apply("Empty", Create.empty(SerializableCoder.of(MutationGroup.class)));
+        }
+        final PCollection<BadRecord> failures = PCollectionList
+                .of(groups.get(failureTag))
+                .and(failedGroups.apply("ToBadRecord", ParDo.of(new BadRecordDoFn())))
+                .apply("FlattenFailures", Flatten.pCollections());
+        errorHandler.addError(failures);
+
+        final PCollection<MElement> output = result
+                .apply("ToElement", ParDo.of(new VoidDoFn()));
+        return MCollectionTuple.of(output, createVoidSchema());
+    }
+
+    /**
+     * Destination table resolution (template on the envelope {@code table}) and the per-table
+     * schema cache shared by the cdc DoFns. Schemas are fetched once per table per worker.
+     */
+    private static class ChangeRecordApplier implements Serializable {
+
+        private final String name;
+        private final Parameters parameters;
+        private transient Template tableTemplate;
+        private transient Map<String, ChangeRecordMutationConverter.TableSchema> schemas;
+        private transient ChangeRecordMutationConverter converter;
+        private transient Counter controlCounter;
+
+        ChangeRecordApplier(final String name, final Parameters parameters) {
+            this.name = name;
+            this.parameters = parameters;
+        }
+
+        void setup() {
+            this.schemas = new HashMap<>();
+            this.converter = new ChangeRecordMutationConverter();
+            this.controlCounter = Metrics.counter(name, "spanner_sink_cdc_control_records");
+            if(TemplateUtil.isTemplateText(parameters.table)) {
+                this.tableTemplate = TemplateUtil.createStrictTemplate("spannerCdcTable", parameters.table);
+            }
+        }
+
+        /** The mutation of a change record, or null for control records (TRUNCATE may fail). */
+        Mutation toMutation(final Map<String, Object> envelope) {
+            final ChangeRecord.Op op = ChangeRecord.getOp(envelope.get(ChangeRecord.FIELD_OP));
+            final String sourceTable = envelope.get(ChangeRecord.FIELD_TABLE).toString();
+            if(op.isControl()) {
+                controlCounter.inc();
+                if(ChangeRecord.Op.TRUNCATE.equals(op) && OnTruncate.fail.equals(parameters.onTruncate)) {
+                    throw new IllegalStateException(
+                            "spanner sink module[" + name + "] received TRUNCATE of table: " + sourceTable + " (onTruncate: fail)");
+                }
+                LOG.info("spanner sink module[{}] skips cdc control record: {} of table: {}", name, op, sourceTable);
+                return null;
+            }
+            return converter.convert(tableSchema(sourceTable), envelope);
+        }
+
+        private ChangeRecordMutationConverter.TableSchema tableSchema(final String sourceTable) {
+            final String table = tableTemplate == null
+                    ? parameters.table
+                    : TemplateUtil.executeStrictTemplate(tableTemplate, Map.of(ChangeRecord.FIELD_TABLE, sourceTable));
+            return schemas.computeIfAbsent(table, t -> new ChangeRecordMutationConverter.TableSchema(
+                    t,
+                    SpannerUtil.getSchemaFromTable(parameters.projectId, parameters.instanceId, parameters.databaseId, t, parameters.emulator),
+                    SpannerUtil.getPrimaryKeyFieldNames(parameters.projectId, parameters.instanceId, parameters.databaseId, t, parameters.emulator)));
+        }
+    }
+
+    private static class ChangeRecordToMutationGroupDoFn extends DoFn<MElement, MutationGroup> {
+
+        private final ChangeRecordApplier applier;
+        private final boolean failFast;
+        private final TupleTag<BadRecord> failureTag;
+
+        ChangeRecordToMutationGroupDoFn(final String name, final Parameters parameters, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+            this.applier = new ChangeRecordApplier(name, parameters);
+            this.failFast = failFast;
+            this.failureTag = failureTag;
+        }
+
+        @Setup
+        public void setup() {
+            applier.setup();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if(element == null) {
+                return;
+            }
+            try {
+                final Mutation mutation = applier.toMutation(element.asPrimitiveMap());
+                if(mutation != null) {
+                    c.output(MutationGroup.create(mutation));
+                }
+            } catch (final Throwable e) {
+                c.output(failureTag, processError("Failed to apply change record to spanner", element, e, failFast));
+            }
+        }
+    }
+
+    private static class WithTransactionKeyDoFn extends DoFn<MElement, KV<String, MElement>> {
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if(element == null) {
+                return;
+            }
+            final String transactionId = element.getAsString(ChangeRecord.FIELD_TRANSACTION + "." + ChangeRecord.FIELD_TRANSACTION_ID);
+            // a record without transaction identity is its own transaction
+            final String key = transactionId != null
+                    ? transactionId
+                    : "#" + element.getAsString(ChangeRecord.FIELD_TABLE) + "#" + element.getAsString(ChangeRecord.FIELD_SEQUENCE);
+            c.output(KV.of(key, element));
+        }
+    }
+
+    private static class TransactionToMutationGroupsDoFn extends DoFn<KV<String, Iterable<MElement>>, MutationGroup> {
+
+        private final String name;
+        private final ChangeRecordApplier applier;
+        private final OnLate onLate;
+        private final int maxMutationsPerCommit;
+        private final boolean failFast;
+        private final TupleTag<BadRecord> failureTag;
+
+        private transient Counter transactionCounter;
+        private transient Counter lateCounter;
+        private transient Counter splitCounter;
+
+        TransactionToMutationGroupsDoFn(final String name, final Parameters parameters, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+            this.name = name;
+            this.applier = new ChangeRecordApplier(name, parameters);
+            this.onLate = parameters.onLate;
+            this.maxMutationsPerCommit = parameters.maxMutationsPerCommit;
+            this.failFast = failFast;
+            this.failureTag = failureTag;
+        }
+
+        @Setup
+        public void setup() {
+            applier.setup();
+            this.transactionCounter = Metrics.counter(name, "spanner_sink_cdc_transactions");
+            this.lateCounter = Metrics.counter(name, "spanner_sink_cdc_late_transaction_records");
+            this.splitCounter = Metrics.counter(name, "spanner_sink_cdc_split_transactions");
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final KV<String, Iterable<MElement>> kv = c.element();
+            if(kv == null || kv.getValue() == null) {
+                return;
+            }
+            final List<Map<String, Object>> envelopes = new ArrayList<>();
+            for(final MElement element : kv.getValue()) {
+                envelopes.add(element.asPrimitiveMap());
+            }
+            if(PaneInfo.Timing.LATE.equals(c.pane().getTiming())) {
+                lateCounter.inc(envelopes.size());
+                if(OnLate.fail.equals(onLate)) {
+                    for(final Map<String, Object> envelope : envelopes) {
+                        c.output(failureTag, processError(
+                                "Late change record of transaction: " + kv.getKey() + " (onLate: fail)", envelope,
+                                new IllegalStateException("late transaction record"), failFast));
+                    }
+                    return;
+                }
+                LOG.warn("spanner sink module[{}] applies {} late change records of transaction: {} as a separate commit", name, envelopes.size(), kv.getKey());
+            }
+            try {
+                final List<Mutation> mutations = new ArrayList<>();
+                for(final Map<String, Object> envelope : ChangeRecordMutationConverter.collapse(envelopes)) {
+                    final Mutation mutation = applier.toMutation(envelope);
+                    if(mutation != null) {
+                        mutations.add(mutation);
+                    }
+                }
+                if(mutations.isEmpty()) {
+                    return;
+                }
+                transactionCounter.inc();
+                LOG.info("spanner sink module[{}] commits transaction: {} with {} mutations (pane: {})", name, kv.getKey(), mutations.size(), c.pane().getTiming());
+                if(mutations.size() > maxMutationsPerCommit) {
+                    splitCounter.inc();
+                    LOG.warn("spanner sink module[{}] splits transaction: {} of {} mutations into commits of {} (atomicity is lost)",
+                            name, kv.getKey(), mutations.size(), maxMutationsPerCommit);
+                }
+                for(int from = 0; from < mutations.size(); from += maxMutationsPerCommit) {
+                    final List<Mutation> chunk = mutations.subList(from, Math.min(mutations.size(), from + maxMutationsPerCommit));
+                    c.output(MutationGroup.create(chunk.getFirst(), chunk.subList(1, chunk.size())));
+                }
+            } catch (final Throwable e) {
+                for(final Map<String, Object> envelope : envelopes) {
+                    c.output(failureTag, processError("Failed to apply transaction: " + kv.getKey() + " to spanner", envelope, e, failFast));
+                }
+            }
         }
     }
 

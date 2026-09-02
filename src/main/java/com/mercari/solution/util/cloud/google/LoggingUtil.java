@@ -24,6 +24,15 @@ public class LoggingUtil {
             final String project,
             final String filter,
             final int maxEntries) throws Exception {
+        return listEntries(project, filter, maxEntries, false);
+    }
+
+    /** @param latestFirst read the newest entries first (the result is then reversed to oldest-first order) */
+    public static List<LogEntry> listEntries(
+            final String project,
+            final String filter,
+            final int maxEntries,
+            final boolean latestFirst) throws Exception {
 
         final LoggingOptions options = LoggingOptions.newBuilder()
                 .setProjectId(project)
@@ -32,18 +41,77 @@ public class LoggingUtil {
         try(final Logging logging = options.getService()) {
             Page<LogEntry> page = logging.listLogEntries(
                     Logging.EntryListOption.filter(filter),
+                    Logging.EntryListOption.sortOrder(Logging.SortingField.TIMESTAMP,
+                            latestFirst ? Logging.SortingOrder.DESCENDING : Logging.SortingOrder.ASCENDING),
                     Logging.EntryListOption.pageSize(Math.min(maxEntries, 1000)));
             while(page != null) {
                 for(final LogEntry entry : page.getValues()) {
                     entries.add(entry);
                     if(entries.size() >= maxEntries) {
+                        if(latestFirst) java.util.Collections.reverse(entries);
                         return entries;
                     }
                 }
                 page = page.hasNextPage() ? page.getNextPage() : null;
             }
         }
+        if(latestFirst) java.util.Collections.reverse(entries);
         return entries;
+    }
+
+    /** Worker / harness / launcher logs of a Dataflow job (resource.type dataflow_step), optionally filtered by text. */
+    public static String createDataflowLogFilter(final String jobId, final String minSeverity, final Instant since, final String contains) {
+        final StringBuilder filter = new StringBuilder();
+        filter.append("resource.type=\"dataflow_step\"");
+        filter.append(" AND resource.labels.job_id=\"").append(jobId).append("\"");
+        appendCommonFilter(filter, minSeverity, since, contains);
+        return filter.toString();
+    }
+
+    /** Container logs of one Cloud Run Job execution (resource.type cloud_run_job), optionally filtered by text. */
+    public static String createCloudRunJobLogFilter(final String job, final String execution, final String minSeverity, final Instant since, final String contains) {
+        final StringBuilder filter = new StringBuilder();
+        filter.append("resource.type=\"cloud_run_job\"");
+        filter.append(" AND resource.labels.job_name=\"").append(job).append("\"");
+        filter.append(" AND labels.\"run.googleapis.com/execution_name\"=\"").append(execution).append("\"");
+        // a container's plain stdout lines are ingested with severity DEFAULT (only stderr maps to ERROR),
+        // so any threshold below WARNING would exclude every ordinary log line — those thresholds drop the clause
+        appendCommonFilter(filter, containerSeverityDropped(minSeverity) ? null : minSeverity, since, contains);
+        return filter.toString();
+    }
+
+    /** True when {@code minSeverity} would exclude the DEFAULT-severity stdout lines of a container (below WARNING). */
+    public static boolean containerSeverityDropped(final String minSeverity) {
+        return minSeverity == null || minSeverity.isBlank()
+                || List.of("DEFAULT", "DEBUG", "INFO", "NOTICE").contains(minSeverity.trim().toUpperCase());
+    }
+
+    private static void appendCommonFilter(final StringBuilder filter, final String minSeverity, final Instant since, final String contains) {
+        if(minSeverity != null && !minSeverity.isBlank() && !"DEFAULT".equalsIgnoreCase(minSeverity)) {
+            filter.append(" AND severity>=").append(minSeverity.trim().toUpperCase());
+        }
+        if(since != null) {
+            filter.append(" AND timestamp>=\"").append(since).append("\"");
+        }
+        if(contains != null && !contains.isBlank()) {
+            // substring match over the text / json payloads
+            final String quoted = contains.replace("\\", "\\\\").replace("\"", "\\\"");
+            filter.append(" AND (textPayload:\"").append(quoted).append("\" OR jsonPayload.message:\"").append(quoted)
+                    .append("\" OR jsonPayload.exception:\"").append(quoted).append("\")");
+        }
+    }
+
+    /** One line per entry, oldest first: {@code timestamp [SEVERITY] text} (text truncated to maxText, newlines kept indented). */
+    public static String formatEntries(final List<LogEntry> entries, final int maxText) {
+        final StringBuilder sb = new StringBuilder();
+        for(final LogEntry entry : entries) {
+            String text = extractText(entry);
+            if(text == null) text = "";
+            if(text.length() > maxText) text = text.substring(0, maxText) + "... (truncated)";
+            sb.append(entry.getInstantTimestamp()).append(" [").append(entry.getSeverity()).append("] ")
+                    .append(text.replace("\n", "\n    ")).append('\n');
+        }
+        return sb.toString();
     }
 
     /** Write a structured (jsonPayload) entry, e.g. a diagnosis record queryable later. */
@@ -71,14 +139,7 @@ public class LoggingUtil {
      * Covers worker, harness and launcher logs, which all use resource.type dataflow_step.
      */
     public static String createDataflowErrorLogFilter(final String jobId, final Instant startTime) {
-        final StringBuilder filter = new StringBuilder();
-        filter.append("resource.type=\"dataflow_step\"");
-        filter.append(" AND resource.labels.job_id=\"").append(jobId).append("\"");
-        filter.append(" AND severity>=ERROR");
-        if(startTime != null) {
-            filter.append(" AND timestamp>=\"").append(startTime).append("\"");
-        }
-        return filter.toString();
+        return createDataflowLogFilter(jobId, "ERROR", startTime, null);
     }
 
     /**

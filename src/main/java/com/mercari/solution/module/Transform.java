@@ -63,6 +63,11 @@ public abstract class Transform extends Module<MCollectionTuple> {
         this.sideInputs = sideInputs;
     }
 
+    /** Registered module names (the @Transform.Module(name=...) values). */
+    public static java.util.Set<String> moduleNames() {
+        return new java.util.TreeSet<>(transforms.keySet());
+    }
+
     public static @NonNull Transform create(
             final @NonNull TransformConfig config,
             final @NonNull PipelineOptions options,

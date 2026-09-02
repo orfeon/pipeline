@@ -49,7 +49,7 @@ public class AuxiaSink extends Sink {
                         errorMessages.add("field: " + field + " does not exist in input schema: " + inputSchema);
                     } else {
                         switch (inputSchema.getField(field).getFieldType().getType()) {
-                            case string, json, bytes -> {}
+                            case string, uuid, json, bytes -> {}
                             default -> errorMessages.add("field: " + field + " type must be json, string or bytes : " + inputSchema);
                         }
                     }
@@ -144,9 +144,7 @@ public class AuxiaSink extends Sink {
                 write = write.withMaxBatchBytesSize(maxBatchBytesSize);
             }
 
-            errorHandler.apply(write);
-
-            return write;
+            return errorHandler.apply(write);
         }
     }
 

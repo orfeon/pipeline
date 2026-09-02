@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mercari.com/server/api/spec/options",
   "title": "Pipeline Options",
-  "description": "Pipeline execution options",
+  "description": "Pipeline execution options: common settings plus per-runner (dataflow/direct/prism/portable/flink/spark) and per-cloud (gcp/aws) sections. Only the section for the runner in use is read.",
   "type": "object",
   "x-metadata": {
     "name": "options",
@@ -11,18 +11,553 @@
   "properties": {
     "jobName": {
       "type": "string",
-      "title": "Job Name",
       "description": "Pipeline job name"
     },
     "streaming": {
       "type": "boolean",
-      "title": "Streaming Mode",
-      "description": "Enable streaming mode"
+      "description": "Run as a streaming (unbounded) job"
     },
     "tempLocation": {
       "type": "string",
-      "title": "Temp Location",
-      "description": "GCS path for temporary files (gs://...)"
+      "description": "Path for temporary files (gs://... on Dataflow)"
+    },
+    "dataflow": {
+      "type": "object",
+      "title": "Dataflow",
+      "description": "Cloud Dataflow runner options (see docs/options/dataflow.md)",
+      "properties": {
+        "project": {
+          "type": "string",
+          "description": "GCP project the Dataflow job runs in"
+        },
+        "region": {
+          "type": "string",
+          "description": "Regional endpoint of the Dataflow job (e.g. asia-northeast1)"
+        },
+        "tempLocation": {
+          "type": "string",
+          "description": "Cloud Storage path for temporary files (gs://BUCKET/...)"
+        },
+        "stagingLocation": {
+          "type": "string",
+          "description": "Cloud Storage path for staging local files (gs://BUCKET/...). Defaults to tempLocation"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "User-defined job labels (additional-user-labels), visible in billing exports"
+        },
+        "autoscalingAlgorithm": {
+          "type": "string",
+          "enum": [
+            "THROUGHPUT_BASED",
+            "NONE"
+          ],
+          "description": "Autoscaling mode: THROUGHPUT_BASED to enable, NONE to disable"
+        },
+        "flexRSGoal": {
+          "type": "string",
+          "enum": [
+            "COST_OPTIMIZED",
+            "SPEED_OPTIMIZED"
+          ],
+          "description": "Flexible Resource Scheduling goal for autoscaled batch jobs"
+        },
+        "numWorkers": {
+          "type": "integer",
+          "description": "Initial number of Compute Engine instances"
+        },
+        "maxNumWorkers": {
+          "type": "integer",
+          "description": "Maximum number of Compute Engine instances (1-1000)"
+        },
+        "numberOfWorkerHarnessThreads": {
+          "type": "integer",
+          "description": "Number of threads per worker harness process"
+        },
+        "workerMachineType": {
+          "type": "string",
+          "description": "Compute Engine machine type for workers (e.g. n2-standard-2)"
+        },
+        "workerDiskType": {
+          "type": "string",
+          "description": "Persistent Disk type, as a full disk type resource URL (e.g. compute.googleapis.com/projects/PROJECT/zones/ZONE/diskTypes/pd-ssd)"
+        },
+        "diskSizeGb": {
+          "type": "integer",
+          "description": "Worker disk size in gigabytes"
+        },
+        "workerRegion": {
+          "type": "string",
+          "description": "Compute Engine region for worker instances (when different from region)"
+        },
+        "workerZone": {
+          "type": "string",
+          "description": "Compute Engine zone for worker instances"
+        },
+        "serviceAccount": {
+          "type": "string",
+          "description": "Service account email the workers run as"
+        },
+        "impersonateServiceAccount": {
+          "type": "string",
+          "description": "Service account (or delegation chain) to impersonate for API requests"
+        },
+        "network": {
+          "type": "string",
+          "description": "Compute Engine network for worker instances"
+        },
+        "subnetwork": {
+          "type": "string",
+          "description": "Compute Engine subnetwork: regions/REGION/subnetworks/SUBNETWORK or the fully qualified name"
+        },
+        "usePublicIps": {
+          "type": "boolean",
+          "description": "Whether workers use external IP addresses (default true). Set false for internal IPs only"
+        },
+        "workerCacheMb": {
+          "type": "integer",
+          "description": "Size of the worker side-input cache in MB"
+        },
+        "createFromSnapshot": {
+          "type": "string",
+          "description": "Snapshot ID to create the streaming job from"
+        },
+        "sdkContainerImage": {
+          "type": "string",
+          "description": "Custom SDK container image for workers"
+        },
+        "sdkHarnessContainerImageOverrides": {
+          "type": "string",
+          "description": "Overrides for SDK harness container images"
+        },
+        "enableStreamingEngine": {
+          "type": "boolean",
+          "description": "Use Dataflow Streaming Engine (default true)"
+        },
+        "streamingSideInputCacheExpirationMillis": {
+          "type": "integer",
+          "description": "Streaming side-input cache expiration in milliseconds"
+        },
+        "update": {
+          "type": "boolean",
+          "description": "Update the running streaming job with the same jobName"
+        },
+        "transformNameMapping": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Old-to-new transform name mapping used with update"
+        },
+        "dataflowServiceOptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional Dataflow service options (job modes and configurations)"
+        },
+        "experiments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Experimental or pre-GA Dataflow features to enable"
+        },
+        "templateLocation": {
+          "type": "string",
+          "description": "Cloud Storage path to write the classic template to"
+        },
+        "launcherMachineType": {
+          "type": "string",
+          "description": "Machine type of the Flex Template launcher VM"
+        }
+      }
+    },
+    "direct": {
+      "type": "object",
+      "title": "Direct",
+      "description": "Direct runner options (local execution)",
+      "properties": {
+        "targetParallelism": {
+          "type": "integer",
+          "description": "Target parallelism level (defaults to the number of available processors)"
+        },
+        "blockOnRun": {
+          "type": "boolean",
+          "description": "Block until the pipeline completes (default true)"
+        },
+        "enforceImmutability": {
+          "type": "boolean",
+          "description": "Check that PCollection elements are not mutated (default true)"
+        },
+        "enforceEncodability": {
+          "type": "boolean",
+          "description": "Check that PCollection elements are encodable by their coders (default true)"
+        }
+      }
+    },
+    "prism": {
+      "type": "object",
+      "title": "Prism",
+      "description": "Prism runner options (local portable runner)",
+      "properties": {
+        "enableWebUI": {
+          "type": "boolean",
+          "description": "Start the Prism web UI"
+        },
+        "idleShutdownTimeout": {
+          "type": "string",
+          "description": "Shut Prism down after this idle period (e.g. 5m)"
+        },
+        "prismLocation": {
+          "type": "string",
+          "description": "Path or URL of the Prism binary"
+        },
+        "prismVersionOverride": {
+          "type": "string",
+          "description": "Prism version to download instead of the default"
+        }
+      }
+    },
+    "portable": {
+      "type": "object",
+      "title": "Portable",
+      "description": "Portable runner options (job service)",
+      "properties": {
+        "jobEndpoint": {
+          "type": "string",
+          "description": "Job service endpoint (host:port)"
+        },
+        "jobServerTimeout": {
+          "type": "integer",
+          "description": "Job server connection timeout in seconds"
+        },
+        "defaultEnvironmentType": {
+          "type": "string",
+          "description": "SDK harness environment type (DOCKER, PROCESS, EXTERNAL, LOOPBACK)"
+        },
+        "defaultEnvironmentConfig": {
+          "type": "string",
+          "description": "Environment-type specific configuration (e.g. docker image)"
+        },
+        "environmentOptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional environment options"
+        },
+        "environmentCacheMillis": {
+          "type": "integer",
+          "description": "Environment cache duration in milliseconds"
+        },
+        "environmentExpirationMillis": {
+          "type": "integer",
+          "description": "Environment expiration in milliseconds"
+        },
+        "enableHeapDumps": {
+          "type": "boolean",
+          "description": "Enable heap dumps from the SDK harness"
+        },
+        "loadBalanceBundles": {
+          "type": "boolean",
+          "description": "Load-balance bundles across SDK workers"
+        },
+        "outputExecutablePath": {
+          "type": "string",
+          "description": "Write the pipeline as an executable jar to this path instead of running it"
+        },
+        "sdkWorkerParallelism": {
+          "type": "integer",
+          "description": "Number of SDK workers per environment"
+        }
+      }
+    },
+    "flink": {
+      "type": "object",
+      "title": "Flink",
+      "description": "Apache Flink runner options",
+      "properties": {
+        "flinkMaster": {
+          "type": "string",
+          "description": "Address of the Flink JobManager. [local] for embedded, [auto] to detect from the environment (default)"
+        },
+        "parallelism": {
+          "type": "integer",
+          "description": "Degree of parallelism for distributing operations"
+        },
+        "maxParallelism": {
+          "type": "integer",
+          "description": "Pipeline-wide maximum parallelism (upper bound for scaling and number of key groups)"
+        },
+        "allowNonRestoredState": {
+          "type": "boolean",
+          "description": "Skip savepoint state that cannot be restored (default false)"
+        },
+        "attachedMode": {
+          "type": "boolean",
+          "description": "Submit in attached mode and wait for the job to finish (default true)"
+        },
+        "executionModeForBatch": {
+          "type": "string",
+          "enum": [
+            "PIPELINED",
+            "BATCH"
+          ],
+          "description": "Execution mode for batch pipelines"
+        }
+      }
+    },
+    "spark": {
+      "type": "object",
+      "title": "Spark",
+      "description": "Apache Spark runner options",
+      "properties": {
+        "sparkMaster": {
+          "type": "string",
+          "description": "Spark master URL: local[*], spark://host:port, yarn or k8s://https://host:port"
+        },
+        "checkpointDir": {
+          "type": "string",
+          "description": "Checkpoint directory for streaming resilience"
+        },
+        "storageLevel": {
+          "type": "string",
+          "description": "Storage level for cached RDDs (default MEMORY_ONLY)"
+        },
+        "enableSparkMetricSinks": {
+          "type": "boolean",
+          "description": "Report metrics to Spark metric sinks (default true)"
+        },
+        "preferGroupByKeyToHandleHugeValues": {
+          "type": "boolean",
+          "description": "Prefer GroupByKey over Combine for huge values (default false)"
+        },
+        "bundleSize": {
+          "type": "integer",
+          "description": "Bundle size for read and write operations"
+        },
+        "batchIntervalMillis": {
+          "type": "integer",
+          "description": "Batch interval in milliseconds for the Spark streaming context"
+        },
+        "checkpointDurationMillis": {
+          "type": "integer",
+          "description": "Checkpoint duration in milliseconds for Spark streaming"
+        },
+        "maxRecordsPerBatch": {
+          "type": "integer",
+          "description": "Maximum records per batch for bounded reads"
+        },
+        "minReadTimeMillis": {
+          "type": "integer",
+          "description": "Minimum read time in milliseconds for micro-batch reads"
+        },
+        "readTimePercentage": {
+          "type": "number",
+          "description": "Fraction (0-1) of the batch interval to use as read time"
+        },
+        "cacheDisabled": {
+          "type": "boolean",
+          "description": "Disable RDD caching (default false)"
+        },
+        "usesProvidedSparkContext": {
+          "type": "boolean",
+          "description": "Use a provided Spark context instead of creating one"
+        },
+        "filesToStage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Local files to stage on all Spark workers"
+        }
+      }
+    },
+    "gcp": {
+      "type": "object",
+      "title": "GCP",
+      "description": "Google Cloud options",
+      "properties": {
+        "project": {
+          "type": "string",
+          "description": "Google Cloud project ID (required for Dataflow; set this or GOOGLE_CLOUD_PROJECT when running off Google Cloud)"
+        },
+        "credentials": {
+          "type": "string",
+          "description": "Where to load GCP credentials from instead of Application Default Credentials: inline JSON, classpath:..., gs:// or s3:// path, or a local file"
+        },
+        "impersonateServiceAccount": {
+          "type": "string",
+          "description": "Service account (or comma-separated delegation chain) to impersonate for all API requests"
+        },
+        "workerRegion": {
+          "type": "string",
+          "description": "Compute Engine region for launching worker instances"
+        },
+        "workerZone": {
+          "type": "string",
+          "description": "Compute Engine zone for launching worker instances"
+        },
+        "enableStreamingEngine": {
+          "type": "boolean",
+          "description": "Use Dataflow Streaming Engine"
+        },
+        "dataflowKmsKey": {
+          "type": "string",
+          "description": "Customer-managed encryption key (Cloud KMS) for data at rest; requires tempLocation"
+        },
+        "gcpOauthScopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "OAuth scopes requested when creating the default Google Cloud credentials"
+        },
+        "pubsub": {
+          "type": "object",
+          "title": "Pub/Sub",
+          "description": "Common Cloud Pub/Sub settings (including emulator)",
+          "properties": {
+            "pubsubRootUrl": {
+              "type": "string",
+              "description": "Root URL of the Pub/Sub API; point at host:port of a local emulator"
+            }
+          }
+        },
+        "bigquery": {
+          "type": "object",
+          "title": "BigQuery",
+          "description": "Common BigQuery settings (including emulator)",
+          "properties": {
+            "bigqueryProject": {
+              "type": "string",
+              "description": "BigQuery project ID to connect to"
+            },
+            "bigqueryEndpoint": {
+              "type": "string",
+              "description": "BigQuery endpoint override (default: public endpoint)"
+            },
+            "enableStorageReadApiV2": {
+              "type": "boolean",
+              "description": "Enable Storage Read API v2 (default false)"
+            },
+            "useStorageApiConnectionPool": {
+              "type": "boolean",
+              "description": "Use the Storage API connection pool"
+            }
+          }
+        },
+        "firestore": {
+          "type": "object",
+          "title": "Firestore",
+          "description": "Common Cloud Firestore settings (including emulator)",
+          "properties": {
+            "firestoreProject": {
+              "type": "string",
+              "description": "Firestore project ID to connect to"
+            },
+            "firestoreHost": {
+              "type": "string",
+              "description": "host:port of a Firestore instance to use instead of the live service"
+            },
+            "emulatorHost": {
+              "type": "string",
+              "description": "host:port of a Firestore emulator to use instead of the live service"
+            },
+            "firestoreDb": {
+              "type": "string",
+              "description": "Firestore database ID to connect to"
+            }
+          }
+        }
+      }
+    },
+    "aws": {
+      "type": "object",
+      "title": "AWS",
+      "description": "AWS options (region, endpoint, credentials)",
+      "properties": {
+        "region": {
+          "type": "string",
+          "description": "AWS region, e.g. ap-northeast-1"
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Service endpoint override, e.g. http://localhost:4566 for LocalStack"
+        },
+        "credentials": {
+          "type": "object",
+          "title": "Credentials",
+          "description": "How AWS credentials are obtained. Omit to use the default provider chain (env vars, profile, EC2/ECS/EKS role)",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "default",
+                "static",
+                "assumeRole",
+                "gcpFederation"
+              ],
+              "description": "Credential type. Inferred when omitted: assumeRole if roleArn is set, static if accessKey is set, otherwise default"
+            },
+            "accessKey": {
+              "type": "string",
+              "description": "(static) Access key ID; prefer IAM roles or assumeRole"
+            },
+            "secretKey": {
+              "type": "string",
+              "description": "(static) Secret access key"
+            },
+            "sessionToken": {
+              "type": "string",
+              "description": "(static, optional) Session token for temporary credentials"
+            },
+            "roleArn": {
+              "type": "string",
+              "description": "(assumeRole, gcpFederation) ARN of the IAM role to assume via STS"
+            },
+            "roleSessionName": {
+              "type": "string",
+              "description": "(assumeRole, gcpFederation, optional) Session name (default mercari-pipeline)"
+            },
+            "externalId": {
+              "type": "string",
+              "description": "(assumeRole, optional) External ID required by the role's trust policy"
+            },
+            "durationSeconds": {
+              "type": "integer",
+              "description": "(assumeRole, gcpFederation, optional) Session duration in seconds"
+            },
+            "audience": {
+              "type": "string",
+              "description": "(gcpFederation, optional) OIDC audience of the GCP ID token (defaults to roleArn)"
+            }
+          }
+        }
+      }
+    },
+    "beamsql": {
+      "type": "object",
+      "title": "Beam SQL",
+      "description": "Beam SQL common settings",
+      "properties": {
+        "plannerName": {
+          "type": "string",
+          "description": "Query planner class, e.g. org.apache.beam.sdk.extensions.sql.impl.CalciteQueryPlanner or ZetaSQLQueryPlanner"
+        },
+        "zetaSqlDefaultTimezone": {
+          "type": "string",
+          "description": "Default timezone for the ZetaSQL planner"
+        },
+        "verifyRowValues": {
+          "type": "boolean",
+          "description": "Verify row values against the schema (default false)"
+        }
+      }
     },
     "expansion": {
       "type": "object",
@@ -72,303 +607,6 @@
           }
         }
       }
-    },
-    "runner": {
-      "type": "string",
-      "title": "Runner",
-      "description": "Select pipeline runner",
-      "enum": [
-        "Dataflow",
-        "Spark",
-        "Direct",
-        "Flink"
-      ]
-    },
-    "environment": {
-      "type": "string",
-      "title": "Environment",
-      "description": "Select execution environment",
-      "enum": [
-        "GCP",
-        "AWS"
-      ]
     }
-  },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "runner": {
-            "const": "Dataflow"
-          }
-        },
-        "required": [
-          "runner"
-        ]
-      },
-      "then": {
-        "properties": {
-          "dataflow": {
-            "type": "object",
-            "title": "Dataflow",
-            "description": "Cross-language expansion options",
-            "properties": {
-              "workerMachineType": {
-                "type": "string",
-                "title": "Worker Machine Type",
-                "description": "GCE machine type for workers (e.g. n1-standard-4)"
-              },
-              "maxWorkers": {
-                "type": "integer",
-                "title": "Max Workers",
-                "description": "Maximum number of workers"
-              },
-              "usePublicIps": {
-                "type": "boolean",
-                "title": "Use Public IPs",
-                "description": "Whether to use public IPs for workers"
-              },
-              "serviceAccount": {
-                "type": "string",
-                "title": "Service Account",
-                "description": "Service account email for workers"
-              },
-              "subnetwork": {
-                "type": "string",
-                "title": "Subnetwork",
-                "description": "Subnetwork for workers (regions/REGION/subnetworks/NAME)"
-              },
-              "stagingLocation": {
-                "type": "string",
-                "title": "Staging Location",
-                "description": "GCS path for staging files (gs://...)"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "runner": {
-            "const": "Spark"
-          }
-        },
-        "required": [
-          "runner"
-        ]
-      },
-      "then": {
-        "properties": {
-          "spark": {
-            "type": "object",
-            "title": "Spark",
-            "description": "Cross-language expansion options",
-            "properties": {
-              "sparkMaster": {
-                "type": "string",
-                "title": "Spark Master",
-                "description": "Spark master URL (e.g. yarn, spark://host:port)"
-              },
-              "checkpointDir": {
-                "type": "string",
-                "title": "Checkpoint Dir",
-                "description": "Checkpoint directory path"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "runner": {
-            "const": "Direct"
-          }
-        },
-        "required": [
-          "runner"
-        ]
-      },
-      "then": {
-        "properties": {
-          "direct": {
-            "type": "object",
-            "title": "Direct",
-            "description": "Cross-language expansion options",
-            "properties": {
-              "targetParallelism": {
-                "type": "integer",
-                "title": "Target Parallelism",
-                "description": "Target parallelism level"
-              },
-              "blockOnRun": {
-                "type": "boolean",
-                "title": "Block on Run",
-                "description": "Block until pipeline completes"
-              },
-              "enforceImmutability": {
-                "type": "boolean",
-                "title": "Enforce Immutability",
-                "description": "Enforce immutability of PCollection contents"
-              },
-              "enforceEncodability": {
-                "type": "boolean",
-                "title": "Enforce Encodability",
-                "description": "Enforce encodability of PCollection contents"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "runner": {
-            "const": "Flink"
-          }
-        },
-        "required": [
-          "runner"
-        ]
-      },
-      "then": {
-        "properties": {
-          "flink": {
-            "type": "object",
-            "title": "Flink",
-            "description": "Cross-language expansion options",
-            "properties": {
-              "flinkMaster": {
-                "type": "string",
-                "title": "Flink Master",
-                "description": "Flink JobManager URL (e.g. http://host:8081)"
-              },
-              "parallelism": {
-                "type": "integer",
-                "title": "Parallelism",
-                "description": "Default parallelism for Flink pipeline"
-              },
-              "maxParallelism": {
-                "type": "integer",
-                "title": "Max Parallelism",
-                "description": "Maximum parallelism for Flink pipeline"
-              },
-              "attachedMode": {
-                "type": "boolean",
-                "title": "Attached Mode",
-                "description": "Run in attached mode (wait for job completion)"
-              },
-              "executionModeForBatch": {
-                "type": "string",
-                "title": "Execution Mode for Batch",
-                "description": "Flink execution mode for batch jobs"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "environment": {
-            "const": "GCP"
-          }
-        },
-        "required": [
-          "environment"
-        ]
-      },
-      "then": {
-        "properties": {
-          "gcp": {
-            "type": "object",
-            "title": "GCP",
-            "description": "Cross-language expansion options",
-            "properties": {
-              "project": {
-                "type": "string",
-                "title": "Project",
-                "description": "GCP Project ID"
-              },
-              "impersonateServiceAccount": {
-                "type": "string",
-                "title": "Impersonate Service Account",
-                "description": "Service account to impersonate"
-              },
-              "workerRegion": {
-                "type": "string",
-                "title": "Worker Region",
-                "description": "GCP region for workers (e.g. us-central1)"
-              },
-              "workerZone": {
-                "type": "string",
-                "title": "Worker Zone",
-                "description": "GCP zone for workers (e.g. us-central1-a)"
-              },
-              "gcpOauthScopes": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "title": "GCP OAuth Scopes",
-                  "description": "OAuth scopes for GCP access"
-                },
-                "title": "GCP OAuth Scopes",
-                "description": "OAuth scopes for GCP access"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "environment": {
-            "const": "AWS"
-          }
-        },
-        "required": [
-          "environment"
-        ]
-      },
-      "then": {
-        "properties": {
-          "aws": {
-            "type": "object",
-            "title": "AWS",
-            "description": "Cross-language expansion options",
-            "properties": {
-              "region": {
-                "type": "string",
-                "title": "Region",
-                "description": "AWS region"
-              },
-              "credentials": {
-                "type": "object",
-                "properties": {
-                  "profileFile": {
-                    "type": "string",
-                    "title": "Profile File",
-                    "description": "AWS profile file path"
-                  },
-                  "asyncCredentialUpdateEnabled": {
-                    "type": "boolean",
-                    "title": "Async Credential Update",
-                    "description": "Enable asynchronous credential update"
-                  }
-                },
-                "title": "Credentials",
-                "description": "AWS credentials configuration"
-              }
-            }
-          }
-        }
-      }
-    }
-  ]
+  }
 }

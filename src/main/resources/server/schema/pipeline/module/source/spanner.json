@@ -22,7 +22,7 @@
           "type": "string",
           "title": "Mode",
           "description": "Execution mode",
-          "enum": ["query", "table", "changeDataCapture", "view"],
+          "enum": ["batch", "microBatch", "changeDataCapture", "view"],
           "default": "batch"
         },
         "projectId": {

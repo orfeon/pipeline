@@ -1,0 +1,90 @@
+# Attribution: metric-tree (why) decomposition of a month-over-month revenue change.
+# "Revenue fell versus last month — was it volume or price, and in which segment?"
+# The declared tree is revenue = units x AUP; units = new + repeat; AUP broken down by deal
+# status and, within each deal group, by account type. The causal edge AUP -> units credits
+# units only with its own mechanism change (the volume induced by the price move goes to AUP),
+# fitted on the daily granules of the baseline month. The drilldown then localizes the top
+# three nodes to deal_status x account_type slices on the secondary output whyRevenue.drilldown.
+sources:
+  - name: dailySales
+    module: bigquery
+    parameters:
+      query: |
+        SELECT FORMAT_DATE('%Y-%m', event_date) AS period, event_date AS day,
+               deal_status, account_type,
+               SUM(units) AS units, SUM(units_new) AS units_new, SUM(revenue) AS revenue
+        FROM `myproject.mydataset.daily_sales`
+        WHERE event_date >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH), MONTH)
+        GROUP BY period, day, deal_status, account_type
+
+transforms:
+  - name: whyRevenue
+    module: attribution
+    inputs: [dailySales]
+    parameters:
+      measures:
+        - name: revenue
+      comparison:
+        reference:
+          strategy: external
+          labelField: period
+          baselineLabel: "${args.baselineMonth}"
+          targetLabel: "${args.targetMonth}"
+      vocabulary:
+        unit: metric
+        dimensions:
+          - name: deal_status
+          - name: account_type
+        tree:
+          nodes:
+            - name: revenue
+              decomposition: product
+              volume: units
+              rate: aup
+            - name: units
+              field: units
+              decomposition: sum
+              components: [units_new, units_repeat]
+            - name: units_new
+              field: units_new
+            - name: units_repeat
+              expression: "units - units_new"
+            - name: aup
+              expression: "revenue / units"
+              breakdowns:
+                - by: deal_status
+                  decomposition: weightedAverage
+                  weight: units
+                  breakdowns:
+                    - by: account_type
+                      decomposition: weightedAverage
+                      weight: units
+      semantics:
+        basis: causalAdjusted
+        causal:
+          granularity:
+            field: day
+          edges:
+            - from: aup
+              to: units
+      output:
+        topK: 10
+        drilldown:                 # why x where: slice-localize the top 3 nodes
+          topK: 3
+          dimensions: [deal_status, account_type]
+
+sinks:
+  - name: treeReport
+    module: bigquery
+    inputs: [whyRevenue]
+    parameters:
+      table: "myproject:mydataset.revenue_tree_attribution"
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND
+  - name: sliceReport
+    module: bigquery
+    inputs: [whyRevenue.drilldown]
+    parameters:
+      table: "myproject:mydataset.revenue_tree_attribution_slices"
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND

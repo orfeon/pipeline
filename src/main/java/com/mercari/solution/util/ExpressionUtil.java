@@ -2,16 +2,19 @@ package com.mercari.solution.util;
 
 import com.google.common.collect.Sets;
 import com.mercari.solution.module.MElement;
-import net.objecthunter.exp4j.Expression;
-import net.objecthunter.exp4j.ExpressionBuilder;
-import net.objecthunter.exp4j.function.Function;
-import net.objecthunter.exp4j.operator.Operator;
 import org.apache.commons.lang3.math.NumberUtils;
+import org.apache.lucene.expressions.js.JavascriptCompiler;
+import org.apache.lucene.search.DoubleValues;
 import org.joda.time.DateTimeFieldType;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.text.ParseException;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.*;
@@ -25,7 +28,7 @@ public class ExpressionUtil {
     private static final Logger LOG = LoggerFactory.getLogger(ExpressionUtil.class);
 
     private static final String DEFAULT_SEPARATOR = "_";
-    public static final Pattern DELIMITER_PATTERN = Pattern.compile("[()+\\-*/%^<>=!&|#§$~:,]");
+    public static final Pattern DELIMITER_PATTERN = Pattern.compile("[()+\\-*/%^<>=!&|#§$~:,?]");
     public static final Pattern FIELD_NO_PATTERN = Pattern.compile("[a-zA-Z_]\\w*_([0-9]\\d*)$");
 
     private static final String REPLACEMENT_FIELD_FORMAT = "%s___%d";
@@ -34,13 +37,58 @@ public class ExpressionUtil {
     private static final Pattern PATTERN_ARRAY = Pattern.compile(REGEX_ARRAY);
 
     private static final String[] RESERVED_NAMES = {
-            "pi","π","e","φ",
-            "abs","acos","asin","atan","cbrt","ceil","cos","cosh",
-            "exp","floor","log","log10","log2","sin","sinh","sqrt","tan","tanh","signum",
-            "if","switch","max","min",
+            "pi","e",
+            "abs","acos","acosh","asin","asinh","atan","atan2","atanh",
+            "cbrt","ceil","cos","cosh","exp","floor","haversin","haversinMeters",
+            "ln","log","log10","log2","logn","pow",
+            "sin","sinh","sqrt","tan","tanh","signum",
+            "if","switch","switch3","switch4","switch5","switch6","switch7","switch8",
+            "max","min",
             "timestamp_to_date",
             "timestamp_diff_millisecond","timestamp_diff_second","timestamp_diff_minute","timestamp_diff_hour","timestamp_diff_day"};
     private static final Set<String> RESERVED_NAMES_SET = new HashSet<>(Arrays.asList(RESERVED_NAMES));
+
+    private static final Map<String, Double> CONSTANTS = Map.of(
+            "pi", Math.PI,
+            "e", Math.E);
+
+    private static final Map<String, MethodHandle> FUNCTIONS = createFunctions();
+
+    private static Map<String, MethodHandle> createFunctions() {
+        final Map<String, MethodHandle> functions = new HashMap<>(JavascriptCompiler.DEFAULT_FUNCTIONS);
+        try {
+            final MethodHandles.Lookup lookup = MethodHandles.lookup();
+            final MethodType unary = MethodType.methodType(double.class, double.class);
+            final MethodType binary = MethodType.methodType(double.class, double.class, double.class);
+
+            functions.put("cbrt", lookup.findStatic(Math.class, "cbrt", unary));
+            functions.put("signum", lookup.findStatic(Math.class, "signum", unary));
+            functions.put("log", lookup.findStatic(Math.class, "log", unary));
+            functions.put("log2", lookup.findStatic(ExpressionUtil.class, "log2", unary));
+
+            functions.put("if", lookup.findStatic(ExpressionUtil.class, "ifFunction",
+                    MethodType.methodType(double.class, double.class, double.class, double.class)));
+
+            final MethodHandle switchHandle = lookup.findStatic(ExpressionUtil.class, "switchFunction",
+                    MethodType.methodType(double.class, double[].class));
+            for(int caseNum=3; caseNum<=8; caseNum++) {
+                functions.put("switch" + caseNum, switchHandle.asCollector(double[].class, caseNum * 2));
+            }
+
+            functions.put("timestamp_to_date", lookup.findStatic(ExpressionUtil.class, "timestampToDate", binary));
+
+            final MethodHandle timestampDiffHandle = lookup.findStatic(ExpressionUtil.class, "timestampDiff",
+                    MethodType.methodType(double.class, double.class, double.class, double.class));
+            functions.put("timestamp_diff_millisecond", MethodHandles.insertArguments(timestampDiffHandle, 2, 1_000D));
+            functions.put("timestamp_diff_second", MethodHandles.insertArguments(timestampDiffHandle, 2, 1_000_000D));
+            functions.put("timestamp_diff_minute", MethodHandles.insertArguments(timestampDiffHandle, 2, 60_000_000D));
+            functions.put("timestamp_diff_hour", MethodHandles.insertArguments(timestampDiffHandle, 2, 3_600_000_000D));
+            functions.put("timestamp_diff_day", MethodHandles.insertArguments(timestampDiffHandle, 2, 86_400_000_000D));
+        } catch (final ReflectiveOperationException e) {
+            throw new IllegalStateException("Failed to register expression functions", e);
+        }
+        return Map.copyOf(functions);
+    }
 
     public static Set<String> estimateVariables(final String expression) {
         return estimateVariables(expression, true);
@@ -76,39 +124,74 @@ public class ExpressionUtil {
         return createDefaultExpression(expression, null);
     }
 
-    public static Expression createDefaultExpression(final String expression, Collection<String> variables) {
-        if(variables == null) {
-            variables = estimateVariables(expression);
+    // variables are derived by the compiler's parser; the argument remains only for call-site compatibility
+    public static Expression createDefaultExpression(final String expression, final Collection<String> variables) {
+        try {
+            return new Expression(JavascriptCompiler.compile(expression, FUNCTIONS));
+        } catch (final ParseException e) {
+            throw new IllegalArgumentException("Failed to parse expression: " + expression, e);
         }
-        return new ExpressionBuilder(expression)
-                .variables(new HashSet<>(variables))
-                .operator(
-                        new EqualOperator(),
-                        new NotEqualOperator(),
-                        new GreaterOperator(),
-                        new GreaterOrEqualOperator(),
-                        new LesserOperator(),
-                        new LesserOrEqualOperator(),
-                        new NotOperator(),
-                        new AndOperator(),
-                        new OrOperator())
-                .functions(
-                        new IfFunction(),
-                        new SwitchFunction(3),
-                        new SwitchFunction(4),
-                        new SwitchFunction(5),
-                        new SwitchFunction(6),
-                        new SwitchFunction(7),
-                        new SwitchFunction(8),
-                        new MaxFunction(),
-                        new MinFunction(),
-                        new TimestampToDateFunction(),
-                        new TimestampDiffFunction("millisecond"),
-                        new TimestampDiffFunction("second"),
-                        new TimestampDiffFunction("minute"),
-                        new TimestampDiffFunction("hour"),
-                        new TimestampDiffFunction("day"))
-                .build();
+    }
+
+    /**
+     * Compiled math expression.
+     * Stateless and thread-safe. Not serializable: hold as a transient field and recreate in setup.
+     */
+    public static class Expression {
+
+        private final org.apache.lucene.expressions.Expression expression;
+        private final Set<String> variableNames;
+
+        private Expression(final org.apache.lucene.expressions.Expression expression) {
+            this.expression = expression;
+            final Set<String> names = new HashSet<>(Arrays.asList(expression.variables));
+            names.removeAll(CONSTANTS.keySet());
+            this.variableNames = Collections.unmodifiableSet(names);
+        }
+
+        public Set<String> getVariableNames() {
+            return variableNames;
+        }
+
+        public double evaluate(final Map<String, Double> values) {
+            final DoubleValues[] functionValues = new DoubleValues[expression.variables.length];
+            for(int i=0; i<expression.variables.length; i++) {
+                final String name = expression.variables[i];
+                final Double value;
+                if(CONSTANTS.containsKey(name)) {
+                    value = CONSTANTS.get(name);
+                } else if(values != null && values.containsKey(name)) {
+                    value = values.get(name);
+                } else {
+                    throw new IllegalArgumentException("Variable value has not been set for expression: " + expression.sourceText + ", variable: " + name);
+                }
+                functionValues[i] = constantValues(value == null ? Double.NaN : value);
+            }
+            try {
+                return expression.evaluate(functionValues);
+            } catch (final IOException e) {
+                throw new IllegalStateException("Failed to evaluate expression: " + expression.sourceText, e);
+            }
+        }
+
+        @Override
+        public String toString() {
+            return expression.sourceText;
+        }
+
+    }
+
+    private static DoubleValues constantValues(final double value) {
+        return new DoubleValues() {
+            @Override
+            public double doubleValue() {
+                return value;
+            }
+            @Override
+            public boolean advanceExact(int doc) {
+                return true;
+            }
+        };
     }
 
     public static String replaceArrayFieldName(final String variable, final int index) {
@@ -246,7 +329,7 @@ public class ExpressionUtil {
             final Double value = element.getAsDouble(variable);
             values.put(variable, Optional.ofNullable(value).orElse(Double.NaN));
         }
-        double expResult = expression.setVariables(values).evaluate();
+        double expResult = expression.evaluate(values);
         return Double.isNaN(expResult) ? null : expResult;
     }
 
@@ -274,263 +357,48 @@ public class ExpressionUtil {
         };
     }
 
-    public static class EqualOperator extends Operator {
+    private static double log2(final double value) {
+        return Math.log(value) / Math.log(2D);
+    }
 
-        public EqualOperator() {
-            super("=", 2, true, Operator.PRECEDENCE_ADDITION - 1);
+    private static double ifFunction(final double condition, final double trueValue, final double falseValue) {
+        if(condition > 0) {
+            return trueValue;
         }
+        return falseValue;
+    }
 
-        @Override
-        public double apply(double... values) {
-            if(values[0] == values[1]) {
-                return 1d;
-            } else {
-                return 0d;
+    private static double switchFunction(final double... args) {
+        for(int i=0; i+1<args.length; i+=2) {
+            if(args[i] > 0) {
+                return args[i+1];
             }
         }
+        return 0d;
     }
 
-    public static class NotEqualOperator extends Operator {
-
-        public NotEqualOperator() {
-            super("!=", 2, true, Operator.PRECEDENCE_ADDITION - 1);
+    private static double timestampToDate(final double epochMicros, final double timezoneHours) {
+        final double timezoneMicros = timezoneHours * 60 * 60 * 1000 * 1000;
+        if(Double.isNaN(epochMicros) || Double.isNaN(timezoneMicros)) {
+            return Double.NaN;
         }
+        final long epochMicrosWithTz = (long) epochMicros + (long) timezoneMicros;
+        final Instant instant = Instant.ofEpochMilli(epochMicrosWithTz / 1000L);
 
-        @Override
-        public double apply(double... values) {
-            if(values[0] != values[1]) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
+        int year = instant.get(DateTimeFieldType.year());
+        int month = instant.get(DateTimeFieldType.monthOfYear());
+        int day = instant.get(DateTimeFieldType.dayOfMonth());
+        final LocalDate date = LocalDate.of(year, month, day);
+
+        return date.toEpochDay();
     }
 
-    public static class GreaterOperator extends Operator {
-
-        public GreaterOperator() {
-            super(">", 2, true, Operator.PRECEDENCE_ADDITION - 1);
+    private static double timestampDiff(final double micros1, final double micros2, final double unitMicros) {
+        final double diffMicros = micros1 - micros2;
+        if(Double.isNaN(diffMicros)) {
+            return Double.NaN;
         }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] > values[1]) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
-    }
-
-    public static class GreaterOrEqualOperator extends Operator {
-
-        public GreaterOrEqualOperator() {
-            super(">=", 2, true, Operator.PRECEDENCE_ADDITION - 1);
-        }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] >= values[1]) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
-    }
-
-    public static class LesserOperator extends Operator {
-
-        public LesserOperator() {
-            super("<", 2, true, Operator.PRECEDENCE_ADDITION - 1);
-        }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] < values[1]) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
-    }
-
-    public static class LesserOrEqualOperator extends Operator {
-
-        public LesserOrEqualOperator() {
-            super("<=", 2, true, Operator.PRECEDENCE_ADDITION - 1);
-        }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] <= values[1]) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
-    }
-
-    public static class NotOperator extends Operator {
-
-        public NotOperator() {
-            super("!", 1, true, Operator.PRECEDENCE_ADDITION - 2);
-        }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] > 0) {
-                return 0d;
-            } else {
-                return 1d;
-            }
-        }
-    }
-
-    public static class AndOperator extends Operator {
-
-        public AndOperator() {
-            super("&", 2, true, Operator.PRECEDENCE_ADDITION - 3);
-        }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] > 0 && values[1] > 0) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
-    }
-
-    public static class OrOperator extends Operator {
-
-        public OrOperator() {
-            super("|", 2, true, Operator.PRECEDENCE_ADDITION - 4);
-        }
-
-        @Override
-        public double apply(double... values) {
-            if(values[0] > 0 || values[1] > 0) {
-                return 1d;
-            } else {
-                return 0d;
-            }
-        }
-    }
-
-    public static class IfFunction extends Function {
-
-        IfFunction() {
-            super("if", 3);
-        }
-
-        @Override
-        public double apply(double... args) {
-            if(args[0] > 0) {
-                return args[1];
-            }
-            return args[2];
-        }
-
-    }
-
-    public static class SwitchFunction extends Function {
-
-        private final int caseNum;
-
-        SwitchFunction(int caseNum) {
-            super(String.format("switch%d", caseNum), caseNum * 2);
-            this.caseNum = caseNum;
-        }
-
-        @Override
-        public double apply(double... args) {
-            for(int i=0; i<caseNum; i+=2) {
-                if(args[i] > 0) {
-                    return args[i+1];
-                }
-            }
-            return 0d;
-        }
-
-    }
-
-    public static class MaxFunction extends Function {
-
-        MaxFunction() {
-            super("max", 2);
-        }
-
-        @Override
-        public double apply(double... args) {
-            return Math.max(args[0], args[1]);
-        }
-
-    }
-
-    public static class MinFunction extends Function {
-
-        MinFunction() {
-            super("min", 2);
-        }
-
-        @Override
-        public double apply(double... args) {
-            return Math.min(args[0], args[1]);
-        }
-
-    }
-
-    public static class TimestampToDateFunction extends Function {
-        TimestampToDateFunction() {
-            super("timestamp_to_date", 2);
-        }
-
-        @Override
-        public double apply(double... args) {
-            final Double epoch_micros = args[0];
-            final Double timezone_micros = args[1] * 60 * 60 * 1000 * 1000;
-            if(epoch_micros.isNaN() || timezone_micros.isNaN()) {
-                return Double.NaN;
-            }
-            final long epoch_micros_with_tz = epoch_micros.longValue() + timezone_micros.longValue();
-            final Instant instant = Instant.ofEpochMilli(epoch_micros_with_tz / 1000L);
-
-            int year = instant.get(DateTimeFieldType.year());
-            int month = instant.get(DateTimeFieldType.monthOfYear());
-            int day = instant.get(DateTimeFieldType.dayOfMonth());
-            final LocalDate date = LocalDate.of(year, month, day);
-
-            return date.toEpochDay();
-        }
-    }
-
-    public static class TimestampDiffFunction extends Function {
-
-        private final String part;
-
-        TimestampDiffFunction(final String part) {
-            super("timestamp_diff_" + part, 2);
-            this.part = part;
-        }
-
-        @Override
-        public double apply(double... args) {
-            final double diff_micros = args[0] - args[1];
-            if(Double.isNaN(diff_micros)) {
-                return Double.NaN;
-            }
-            return switch (part) {
-                case "microsecond" -> diff_micros;
-                case "millisecond" -> Double.valueOf(diff_micros / 1000L).longValue();
-                case "second" -> Double.valueOf(diff_micros / 1000000L).longValue();
-                case "minute" -> Double.valueOf(diff_micros / 60000000L).longValue();
-                case "hour" -> Double.valueOf(diff_micros / 3600000000L).longValue();
-                case "day" -> Double.valueOf(diff_micros / 86400000000L).longValue();
-                default -> throw new IllegalArgumentException("Not supported part: " + part);
-            };
-        }
-
+        return (long) (diffMicros / unitMicros);
     }
 
 }

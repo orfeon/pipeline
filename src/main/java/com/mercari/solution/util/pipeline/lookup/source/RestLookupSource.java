@@ -8,18 +8,19 @@ import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupKey;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
+import com.mercari.solution.util.pipeline.outbound.AuthProvider;
+import com.mercari.solution.util.pipeline.outbound.HttpTransport;
+import com.mercari.solution.util.pipeline.outbound.OutboundRequest;
+import com.mercari.solution.util.pipeline.outbound.RequestSpec;
+import com.mercari.solution.util.pipeline.outbound.ResponsePolicy;
+import com.mercari.solution.util.pipeline.outbound.SyncCaller;
 import com.mercari.solution.util.pipeline.lookup.PerKeyLookup;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -31,6 +32,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -216,11 +218,14 @@ public class RestLookupSource extends LookupSource {
 
     private final String baseUrl;
     private final Map<String, String> defaultHeaders;
-    private final Set<String> allowedHosts;
+    private Set<String> allowedHosts;
     private final long timeoutMillis;
     private final Map<String, TableConfig> tables;
+    private final AuthProvider.Parameters auth;
+    private final ResponsePolicy.Parameters responsePolicy;
 
-    private transient HttpClient client;
+    private transient HttpTransport transport;
+    private transient ResponsePolicy policy;
 
     private RestLookupSource(Builder builder) {
         super(builder.name);
@@ -232,6 +237,37 @@ public class RestLookupSource extends LookupSource {
         }
         this.allowedHosts = Set.copyOf(hosts);
         this.timeoutMillis = builder.timeoutMillis;
+        this.auth = builder.auth == null ? new AuthProvider.Parameters() : builder.auth;
+        this.auth.setDefaults();
+        final List<String> authErrors = this.auth.validate("auth");
+        if (!authErrors.isEmpty()) {
+            throw new IllegalArgumentException(String.join(", ", authErrors));
+        }
+        if (!this.auth.isNone() && this.allowedHosts.isEmpty()) {
+            // auth headers must not follow input-derived endpoints to arbitrary hosts
+            final Set<String> pinned = new LinkedHashSet<>();
+            if (this.baseUrl != null) {
+                final String host = hostOf(this.baseUrl);
+                if (host != null) {
+                    pinned.add(host);
+                }
+            }
+            for (final TableConfig table : builder.tables) {
+                final String host = hostOf(table.endpoint);
+                if (host != null) {
+                    pinned.add(host);
+                }
+            }
+            if (pinned.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "rest lookup source with auth requires allowedHosts when no endpoint has a static host");
+            }
+            this.allowedHosts = Set.copyOf(pinned);
+        }
+        this.responsePolicy = new ResponsePolicy.Parameters();
+        this.responsePolicy.format = ResponsePolicy.Format.text;
+        this.responsePolicy.retry = builder.retry;
+        this.responsePolicy.setDefaults();
         final Map<String, TableConfig> map = new LinkedHashMap<>();
         for (final TableConfig table : builder.tables) {
             map.put(table.name, table);
@@ -254,6 +290,20 @@ public class RestLookupSource extends LookupSource {
         private final List<String> allowedHosts = new ArrayList<>();
         private long timeoutMillis = 60_000L;
         private final List<TableConfig> tables = new ArrayList<>();
+        private AuthProvider.Parameters auth;
+        private ResponsePolicy.Retry retry;
+
+        /** Authentication provider shared with the http source/sink (basic, bearer, apiKey, oauth2, gcpOidc, gcpOauth). */
+        public Builder withAuth(AuthProvider.Parameters auth) {
+            this.auth = auth;
+            return this;
+        }
+
+        /** Retry policy for transient failures (default: 408/425/429/5xx and connection errors, 5 attempts). */
+        public Builder withRetry(ResponsePolicy.Retry retry) {
+            this.retry = retry;
+            return this;
+        }
 
         public Builder withName(String name) {
             this.name = name;
@@ -292,18 +342,28 @@ public class RestLookupSource extends LookupSource {
 
     @Override
     protected void setupInternal() {
-        if (client == null) {
-            client = HttpClient.newBuilder()
-                    .followRedirects(HttpClient.Redirect.NORMAL)
-                    .build();
+        if (transport == null) {
+            final HttpTransport.Parameters http = new HttpTransport.Parameters();
+            http.setDefaults();
+            final HttpTransport.TimeoutParameters timeout = new HttpTransport.TimeoutParameters();
+            timeout.setDefaults();
+            if (timeoutMillis > 0) {
+                timeout.request = timeoutMillis + "ms";
+            }
+            final String defaultAudience = baseUrl != null ? RequestSpec.staticOrigin(baseUrl)
+                    : tables.values().stream().map(t -> RequestSpec.staticOrigin(t.endpoint))
+                            .filter(Objects::nonNull).findFirst().orElse(null);
+            transport = new HttpTransport(http, timeout, AuthProvider.create(auth, defaultAudience));
+            policy = new ResponsePolicy(responsePolicy);
+            policy.setup();
         }
     }
 
     @Override
     protected void closeInternal() {
-        if (client != null) {
-            client.close();
-            client = null;
+        if (transport != null) {
+            transport.close();
+            transport = null;
         }
     }
 
@@ -356,44 +416,42 @@ public class RestLookupSource extends LookupSource {
             headers.put("Content-Type", "application/json");
         }
 
-        final HttpResponse<String> response = send(method, url, headers, body);
-        if (response.statusCode() == 404) {
+        final SyncCaller.Result result = send(method, url, headers, body);
+        if (result.response() != null && result.response().statusCode() == 404) {
             return List.of(); // treat "not found" as no hit (use LEFT JOIN for a default)
         }
-        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("HTTP " + method + " " + url + " returned status "
-                    + response.statusCode() + ": " + abbreviate(response.body()));
+        if (!result.succeeded()) {
+            throw new IllegalStateException("HTTP " + method + " " + url + " failed: " + result.error());
         }
-        final JsonElement root = JsonParser.parseString(
-                response.body() == null || response.body().isEmpty() ? "null" : response.body());
+        final String text = result.parsed().text();
+        final JsonElement root = JsonParser.parseString(text == null || text.isEmpty() ? "null" : text);
         return rowSources(config, root);
     }
 
-    private HttpResponse<String> send(String method, String url, Map<String, String> headers,
+    private SyncCaller.Result send(String method, String url, Map<String, String> headers,
             String body) {
-        final HttpRequest.Builder builder;
+        final Map<String, String> all = new LinkedHashMap<>(defaultHeaders);
+        all.putAll(headers);
+        final OutboundRequest request = new OutboundRequest(url, method, all,
+                body == null ? null : body.getBytes(StandardCharsets.UTF_8), 1);
         try {
-            builder = HttpRequest.newBuilder(URI.create(url));
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException(
-                    "Invalid request URL '" + url + "': " + e.getMessage(), e);
-        }
-        if (timeoutMillis > 0) {
-            builder.timeout(Duration.ofMillis(timeoutMillis));
-        }
-        defaultHeaders.forEach(builder::header);
-        headers.forEach(builder::header);
-        builder.method(method, body == null
-                ? HttpRequest.BodyPublishers.noBody()
-                : HttpRequest.BodyPublishers.ofString(body));
-        try {
-            return client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
-        } catch (IOException e) {
-            throw new IllegalStateException(
-                    "HTTP " + method + " " + url + " failed: " + e.getMessage(), e);
+            return SyncCaller.call(getName(), transport, policy, request);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("HTTP " + method + " " + url + " was interrupted", e);
+        }
+    }
+
+    private static String hostOf(String url) {
+        final String origin = url == null ? null : RequestSpec.staticOrigin(url);
+        if (origin == null) {
+            return null;
+        }
+        try {
+            final String host = URI.create(origin).getHost();
+            return host == null ? null : host.toLowerCase(Locale.ROOT);
+        } catch (IllegalArgumentException e) {
+            return null;
         }
     }
 

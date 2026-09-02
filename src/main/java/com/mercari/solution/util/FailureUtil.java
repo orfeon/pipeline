@@ -17,7 +17,6 @@ import org.apache.beam.sdk.io.gcp.pubsub.PubsubMessage;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.values.Row;
-import org.apache.commons.io.IOUtils;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -378,13 +377,13 @@ public class FailureUtil {
             if(is == null) {
                 LOG.info("BadRecord avro file is not found: " + RESOURCE_BAD_RECORD_AVRO_SCHEMA_PATH);
                 try(final InputStream iss = Files.newInputStream(Path.of(RESOURCE_RUNTIME_BAD_RECORD_AVRO_SCHEMA_PATH))) {
-                    final String schemaJson = IOUtils.toString(iss,  StandardCharsets.UTF_8);
+                    final String schemaJson = new String(iss.readAllBytes(), StandardCharsets.UTF_8);
                     return AvroSchemaUtil.convertSchema(schemaJson);
                 } catch (Throwable e) {
                     throw new IllegalArgumentException("BadRecord avro file is not found", e);
                 }
             }
-            final String schemaJson = IOUtils.toString(is,  StandardCharsets.UTF_8);
+            final String schemaJson = new String(is.readAllBytes(), StandardCharsets.UTF_8);
             return AvroSchemaUtil.convertSchema(schemaJson);
         } catch (final IOException e) {
             throw new IllegalArgumentException("Not found event descriptor file", e);

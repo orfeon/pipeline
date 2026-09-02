@@ -1,8 +1,6 @@
 package com.mercari.solution.util.pipeline.lookup.source;
 
 import com.google.protobuf.ByteString;
-import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
-import com.google.protobuf.DescriptorProtos.FileDescriptorSet;
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Message;
@@ -12,16 +10,13 @@ import com.mercari.solution.util.pipeline.lookup.CalciteValues;
 import com.mercari.solution.util.pipeline.lookup.LookupBatch;
 import com.mercari.solution.util.pipeline.lookup.LookupKey;
 import com.mercari.solution.util.pipeline.lookup.LookupSource;
+import com.mercari.solution.util.pipeline.outbound.AuthProvider;
+import com.mercari.solution.util.pipeline.outbound.GrpcSupport;
 import com.mercari.solution.util.pipeline.lookup.PerKeyLookup;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
-import io.grpc.ClientCall;
-import io.grpc.ClientInterceptor;
-import io.grpc.ClientInterceptors;
-import io.grpc.ForwardingClientCall.SimpleForwardingClientCall;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.ProtoUtils;
@@ -193,6 +188,8 @@ public class GrpcLookupSource extends LookupSource {
     private final boolean plaintext;
     private final Map<String, String> headers;
     private final long deadlineMillis;
+    private final AuthProvider.Parameters auth;
+    private transient AuthProvider authProvider;
     private final int maxInboundMessageBytes;
     private final String descriptorSetPath;
     private final Map<String, TableConfig> tables;
@@ -212,6 +209,12 @@ public class GrpcLookupSource extends LookupSource {
         this.plaintext = builder.plaintext;
         this.headers = Map.copyOf(builder.headers);
         this.deadlineMillis = builder.deadlineMillis;
+        this.auth = builder.auth == null ? new AuthProvider.Parameters() : builder.auth;
+        this.auth.setDefaults();
+        final List<String> authErrors = this.auth.validate("auth");
+        if (!authErrors.isEmpty()) {
+            throw new IllegalArgumentException(String.join(", ", authErrors));
+        }
         this.maxInboundMessageBytes = builder.maxInboundMessageBytes;
         this.descriptorSetPath = builder.descriptorSetPath;
         this.descriptorSetBytes = builder.descriptorSetBytes;
@@ -243,6 +246,13 @@ public class GrpcLookupSource extends LookupSource {
         private boolean plaintext;
         private final Map<String, String> headers = new LinkedHashMap<>();
         private long deadlineMillis = 60_000L;
+        private AuthProvider.Parameters auth;
+
+        /** Authentication provider shared with the http modules; its headers are sent as call metadata. */
+        public Builder withAuth(AuthProvider.Parameters auth) {
+            this.auth = auth;
+            return this;
+        }
         private int maxInboundMessageBytes;
         private String descriptorSetPath;
         private byte[] descriptorSetBytes;
@@ -333,7 +343,8 @@ public class GrpcLookupSource extends LookupSource {
                 channelBuilder.maxInboundMessageSize(maxInboundMessageBytes);
             }
             managedChannel = channelBuilder.build();
-            channel = withHeaders(managedChannel, headers);
+            authProvider = AuthProvider.create(auth, (plaintext ? "http://" : "https://") + target);
+            channel = withHeaders(managedChannel, headers, authProvider);
             grpcMethods = new ConcurrentHashMap<>();
         }
     }
@@ -402,20 +413,29 @@ public class GrpcLookupSource extends LookupSource {
         final CallOptions options = deadlineMillis > 0
                 ? CallOptions.DEFAULT.withDeadlineAfter(deadlineMillis, TimeUnit.MILLISECONDS)
                 : CallOptions.DEFAULT;
-        try {
-            if (config.serverStreaming) {
-                final Iterator<DynamicMessage> it = ClientCalls.blockingServerStreamingCall(
-                        channel, grpcMethod, options, request);
-                final List<DynamicMessage> out = new ArrayList<>();
-                while (it.hasNext()) {
-                    out.add(it.next());
+        boolean authRetried = false;
+        while (true) {
+            try {
+                if (config.serverStreaming) {
+                    final Iterator<DynamicMessage> it = ClientCalls.blockingServerStreamingCall(
+                            channel, grpcMethod, options, request);
+                    final List<DynamicMessage> out = new ArrayList<>();
+                    while (it.hasNext()) {
+                        out.add(it.next());
+                    }
+                    return out;
                 }
-                return out;
+                return List.of(ClientCalls.blockingUnaryCall(channel, grpcMethod, options, request));
+            } catch (StatusRuntimeException e) {
+                if (e.getStatus().getCode() == io.grpc.Status.Code.UNAUTHENTICATED
+                        && !authRetried && authProvider != null && !authProvider.isNone()) {
+                    authProvider.invalidate(); // refresh the token once, like the http modules on 401
+                    authRetried = true;
+                    continue;
+                }
+                throw new IllegalStateException(
+                        "gRPC call '" + config.method + "' failed: " + e.getStatus(), e);
             }
-            return List.of(ClientCalls.blockingUnaryCall(channel, grpcMethod, options, request));
-        } catch (StatusRuntimeException e) {
-            throw new IllegalStateException(
-                    "gRPC call '" + config.method + "' failed: " + e.getStatus(), e);
         }
     }
 
@@ -782,110 +802,14 @@ public class GrpcLookupSource extends LookupSource {
 
     /** Parses and links a protoc descriptor set (with its import graph). */
     private static Map<String, Descriptors.FileDescriptor> linkDescriptorSet(byte[] bytes) {
-        final FileDescriptorSet set;
-        try {
-            set = FileDescriptorSet.parseFrom(bytes);
-        } catch (IOException e) {
-            throw new IllegalStateException("not a valid protoc FileDescriptorSet (use"
-                    + " --descriptor_set_out --include_imports)", e);
-        }
-        final Map<String, FileDescriptorProto> protos = new LinkedHashMap<>();
-        for (final FileDescriptorProto proto : set.getFileList()) {
-            protos.put(proto.getName(), proto);
-        }
-        final Map<String, Descriptors.FileDescriptor> built = new LinkedHashMap<>();
-        for (final FileDescriptorProto proto : set.getFileList()) {
-            linkFile(proto.getName(), protos, built);
-        }
-        return built;
+        return GrpcSupport.linkDescriptorSet(bytes);
     }
 
-    private static Descriptors.FileDescriptor linkFile(String name,
-            Map<String, FileDescriptorProto> protos,
-            Map<String, Descriptors.FileDescriptor> built) {
-        final Descriptors.FileDescriptor existing = built.get(name);
-        if (existing != null) {
-            return existing;
-        }
-        final FileDescriptorProto proto = protos.get(name);
-        if (proto == null) {
-            throw new IllegalStateException("descriptor set is missing the imported proto file '"
-                    + name + "'; regenerate it with protoc --include_imports");
-        }
-        final Descriptors.FileDescriptor[] deps =
-                new Descriptors.FileDescriptor[proto.getDependencyCount()];
-        for (int i = 0; i < deps.length; i++) {
-            deps[i] = linkFile(proto.getDependency(i), protos, built);
-        }
-        final Descriptors.FileDescriptor fd;
-        try {
-            fd = Descriptors.FileDescriptor.buildFrom(proto, deps);
-        } catch (Descriptors.DescriptorValidationException e) {
-            throw new IllegalStateException(
-                    "failed to link proto file '" + name + "': " + e.getMessage(), e);
-        }
-        built.put(name, fd);
-        return fd;
-    }
-
-    /**
-     * Resolves a method by its fully-qualified name in either
-     * {@code pkg.Service/Method} (gRPC form) or {@code pkg.Service.Method} form.
-     */
     private Descriptors.MethodDescriptor resolveMethod(String fullMethodName) {
-        final String serviceName;
-        final String methodName;
-        final int slash = fullMethodName.indexOf('/');
-        if (slash >= 0) {
-            serviceName = fullMethodName.substring(0, slash);
-            methodName = fullMethodName.substring(slash + 1);
-        } else {
-            final int dot = fullMethodName.lastIndexOf('.');
-            if (dot < 0) {
-                throw new IllegalStateException(
-                        "grpc method must be 'package.Service/Method': " + fullMethodName);
-            }
-            serviceName = fullMethodName.substring(0, dot);
-            methodName = fullMethodName.substring(dot + 1);
-        }
-        for (final Descriptors.FileDescriptor fd : descriptorFiles.values()) {
-            for (final Descriptors.ServiceDescriptor service : fd.getServices()) {
-                if (service.getFullName().equals(serviceName)) {
-                    final Descriptors.MethodDescriptor method =
-                            service.findMethodByName(methodName);
-                    if (method != null) {
-                        return method;
-                    }
-                }
-            }
-        }
-        throw new IllegalStateException("method '" + fullMethodName + "' not found in the gRPC"
-                + " descriptor set (expected service '" + serviceName + "', method '"
-                + methodName + "')");
+        return GrpcSupport.resolveMethod(descriptorFiles, fullMethodName);
     }
 
-    /** Wraps the channel so every call carries the configured static headers. */
-    private static Channel withHeaders(ManagedChannel channel, Map<String, String> headers) {
-        if (headers.isEmpty()) {
-            return channel;
-        }
-        final Metadata extra = new Metadata();
-        for (final Map.Entry<String, String> e : headers.entrySet()) {
-            extra.put(Metadata.Key.of(e.getKey(), Metadata.ASCII_STRING_MARSHALLER), e.getValue());
-        }
-        final ClientInterceptor interceptor = new ClientInterceptor() {
-            @Override
-            public <Q, S> ClientCall<Q, S> interceptCall(MethodDescriptor<Q, S> method,
-                    CallOptions callOptions, Channel next) {
-                return new SimpleForwardingClientCall<>(next.newCall(method, callOptions)) {
-                    @Override
-                    public void start(Listener<S> responseListener, Metadata requestHeaders) {
-                        requestHeaders.merge(extra);
-                        super.start(responseListener, requestHeaders);
-                    }
-                };
-            }
-        };
-        return ClientInterceptors.intercept(channel, interceptor);
+    private static Channel withHeaders(ManagedChannel channel, Map<String, String> headers, AuthProvider auth) {
+        return GrpcSupport.withHeaders(channel, headers, auth);
     }
 }

@@ -1,5 +1,7 @@
 package com.mercari.solution.server.api;
 
+import com.mercari.solution.server.launch.LaunchDefaults;
+import com.mercari.solution.server.launch.LaunchSchema;
 import com.google.gson.*;
 import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.networknt.schema.SchemaRegistry;
@@ -157,7 +159,10 @@ public class SpecService {
 
         try {
             final JsonElement schema = ConfigSchema.getLaunchJsonSchema();
-            response.getWriter().println(schema.toString());
+            final JsonElement withDefaults = schema.isJsonObject()
+                    ? LaunchSchema.withDefaults(schema.getAsJsonObject(), LaunchDefaults.get())
+                    : schema;
+            response.getWriter().println(withDefaults.toString());
         } catch (Exception e) {
             response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
             final JsonObject error = new JsonObject();
@@ -428,7 +433,7 @@ public class SpecService {
      * (server/docs/module/index.yaml). The `title` field of each entry is the
      * registered module name (matches @Source/@Transform/@Sink.Module(name=...)).
      */
-    private static class ModuleIndex {
+    public static class ModuleIndex {
 
         private static final String RESOURCES_MODULE_INDEX = "server/docs/module/index.yaml";
 
@@ -450,6 +455,7 @@ public class SpecService {
                 for (final String type : List.of("sources", "transforms", "sinks")) {
                     result.add(type, toModuleArray(index.get(type)));
                 }
+                result.add("actions", toModuleArray(index.get("actions")));
                 modules = result;
             } catch (final IOException e) {
                 throw new RuntimeException("Failed to read module index: " + RESOURCES_MODULE_INDEX, e);

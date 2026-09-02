@@ -1,0 +1,20 @@
+{
+  "name": "PostgresChangeRecord",
+  "namespace": "com.mercari.solution.cdc",
+  "type": "record",
+  "fields": [
+    { "name": "lsn", "type": "long" },
+    { "name": "commitLsn", "type": "long" },
+    { "name": "commitTimestamp", "type": { "type": "long", "logicalType": "timestamp-micros" } },
+    { "name": "transactionId", "type": "long" },
+    { "name": "sequence", "type": "long" },
+    { "name": "database", "type": ["null", "string"] },
+    { "name": "schema", "type": "string" },
+    { "name": "table", "type": "string" },
+    { "name": "op", "type": "string" },
+    { "name": "keysJson", "type": { "type": "string", "sqlType": "JSON" } },
+    { "name": "oldValuesJson", "type": ["null", { "type": "string", "sqlType": "JSON" }] },
+    { "name": "newValuesJson", "type": ["null", { "type": "string", "sqlType": "JSON" }] },
+    { "name": "columnsJson", "type": ["null", { "type": "string", "sqlType": "JSON" }], "default": null }
+  ]
+}

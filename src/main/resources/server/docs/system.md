@@ -40,6 +40,8 @@ gcloud dataflow flex-template run recovery-attribute \
     --parameters=args.today="'2020-08-01T00:00:00Z'"
 ```
 
+Note the scope of template evaluation: template expressions (FreeMarker) are evaluated inside **args values** (once, at config load — as in the `today` example above) and inside module parameters that are documented as runtime templates (e.g. the select transform's `text` function, the bigquery action's `perElement` parameters). Over the rest of the config text only exact `${args.<name>}` placeholders are substituted — any other `${...}` expression written directly in a module parameter (for example in a `filter` value) is **not** evaluated and stays a literal string. When a parameter needs a computed value such as the current date, define it as an args default and reference it with `${args.<name>}`.
+
 ## context
 
 In context, module configurations for multiple contexts are defined within a single config file. By specifying the context at startup, pipeline processing can be easily switched.
@@ -135,9 +137,10 @@ This imports feature simply merges modules defined across multiple config files,
 
 | parameter | type                | description                                                                                     |
 |-----------|---------------------|-------------------------------------------------------------------------------------------------|
-| failFast  | Boolean             | Default values of variables at pipeline startup, which can also be rewritten by Template Engine |
-| union     | Boolean             | Specify pipeline execution path.                                                                |
-| sinks     | Array<FailureSink\> | Pipeline-wide dead-letter sink definitions                                                      |
+| failFast    | Boolean             | true: fail the job on the first error. false: keep running and route failed records to `sinks`  |
+| union       | Boolean             | Collect the failure records of all modules into a single dead-letter output                      |
+| sinks       | Array<FailureSink\> | Pipeline-wide dead-letter sink definitions                                                      |
+| alterConfig | String              | Config (path or text) to assemble instead when assembling this pipeline throws                  |
 
 
 In the `system.failure` parameter, behavior when errors occur can be specified across all modules.

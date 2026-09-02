@@ -35,10 +35,10 @@ This module differs from the [Files Sink Module](files.md): the Files module wri
 | compression   | optional | Enum    | File-level compression. Values: `ZIP`, `GZIP`, `BZIP2`, `ZSTD`, `LZO`, `LZOP`, `DEFLATE`, `UNCOMPRESSED`, `AUTO`. Default: `AUTO`.                                                                               |
 | codec         | optional | Enum    | Internal codec for Avro/Parquet formats. See [Codec values](#codec-values). Default: `SNAPPY`.                                                                                                                      |
 | tempDirectory | optional | String  | Temporary directory path for intermediate files. If not specified, the runner creates one automatically (may require bucket creation permission).                                                                    |
-| noSpilling    | optional | Boolean | If `true`, disables file spilling. Default: `false`.                                                                                                                                                                |
+| noSpilling    | optional | Boolean | If `true`, disables file spilling. Cannot be combined with `maxNumWritersPerBundle`. Default: `false`.                                                                                                              |
+| maxNumWritersPerBundle | optional | Integer | Maximum number of concurrently open file writers per bundle before records spill to a shuffle (Beam default: 20). Raising it reduces spilling for high-cardinality [dynamic output paths](#dynamic-output-paths) at the cost of worker memory. Cannot be combined with `noSpilling`. |
 | header        | optional | Boolean | (CSV only) If `true`, writes a CSV header row. Default: `false`.                                                                                                                                                    |
 | bom           | optional | Boolean | (CSV/JSON only) If `true`, writes a UTF-8 BOM at the beginning of the file. Default: `false`.                                                                                                                       |
-| outputEmpty   | optional | Boolean | If `true`, writes an empty file even when there are no input records. Default: `false`.                                                                                                                              |
 
 ### Format details
 
@@ -73,6 +73,32 @@ Additionally, the built-in variable `${__timestamp}` is available, representing 
 
 Example: `gs://my-bucket/${category}/${region}/data` will produce separate output directories for each unique combination of `category` and `region` field values.
 
+### Assembly-time `${input.*}` template with wildcard inputs
+
+When the sink declares a wildcard input (`inputs: [module.*]`), the reserved `${input.*}` namespace in `output` (and any other parameter) is resolved **at pipeline launch**, once per matched input: the sink fans out into one instance per input collection, each writing with its own schema. Use it to split per-source-table outputs without a runtime shuffle — e.g. the spanner source's all-tables mode:
+
+```yaml
+sources:
+  - name: db
+    module: spanner
+    parameters:
+      projectId: myproject
+      instanceId: myinstance
+      databaseId: mydatabase
+      tables:
+        excludes: ["backup_*"]
+
+sinks:
+  - name: export
+    module: storage
+    inputs: [db.*]
+    parameters:
+      format: parquet
+      output: gs://mybucket/export/${input.table}/data
+```
+
+`${input.name}` (full input name), `${input.tag}` (wildcard-matched part) and upstream-provided attributes such as `${input.table}` are available; runtime expressions like `${category}` can be combined in the same path. See the config README for details.
+
 ### Suffix template variables
 
 When `suffix` contains FreeMarker template expressions, the following variables are available for constructing dynamic file names (useful for windowed streaming output):
@@ -92,13 +118,15 @@ When `suffix` contains FreeMarker template expressions, the following variables 
 
 ## Output schema
 
-After writing, the module produces output records with the following schema (currently not connected to downstream as the module returns `PDone`):
+After writing, the module outputs one record per written file (its result, emitted after the write completes):
 
 | field     | type      | description                          |
 |-----------|-----------|--------------------------------------|
 | sink      | STRING    | The sink step name.                  |
 | path      | STRING    | The output file path that was written. |
 | timestamp | TIMESTAMP | The timestamp when writing occurred. |
+
+These are the sink's execution results (control records): other steps can `waits` on this step, and [action modules](../action/README.md) can consume the records via `inputs` — e.g. load every written file with a single [bigquery action](../action/bigquery.md) load job (`trigger: collect` + `sourceUrisField: path`), or keep the file list as a history object with the [storage action](../action/storage.md). Consuming them as data inputs of a transform/sink produces an assembly-time warning.
 
 ## Examples
 

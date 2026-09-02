@@ -126,7 +126,7 @@ substitutions:
   _REGION: "{SET YOUR GAR REPOSITORY REGION}"
   _REPOSITORY: "{SET YOUR GAR REPOSITORY NAME}"
   _VERSION: ${BRANCH_NAME}
-  _BEAM_VERSION: "2.74.0"
+  _BEAM_VERSION: "2.76.0"
 options:
   dynamic_substitutions: true
   logging: CLOUD_LOGGING_ONLY

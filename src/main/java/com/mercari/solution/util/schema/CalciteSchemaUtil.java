@@ -79,7 +79,7 @@ public class CalciteSchemaUtil {
             return null;
         }
         return switch (fieldType.getType()) {
-            case bool, string, json, int32, int64, float32, float64 -> primitiveValue;
+            case bool, string, uuid, json, int32, int64, float32, float64 -> primitiveValue;
             case date -> Date.valueOf(LocalDate.ofEpochDay((Integer)primitiveValue));
             case time -> Time.valueOf(LocalTime.ofNanoOfDay((Long) primitiveValue * 1000L));
             case timestamp -> Timestamp.valueOf(DateTimeUtil.toLocalDateTime((Long) primitiveValue));
@@ -212,7 +212,7 @@ public class CalciteSchemaUtil {
     private static SqlTypeName convertSqlTypeName(final Schema.FieldType fieldType) {
         return switch (fieldType.getType()) {
             case bool -> SqlTypeName.BOOLEAN;
-            case string, json, enumeration -> SqlTypeName.VARCHAR;
+            case string, uuid, json, enumeration -> SqlTypeName.VARCHAR;
             case bytes -> SqlTypeName.BINARY;
             case int16, int8 -> SqlTypeName.SMALLINT;
             case int32 -> SqlTypeName.INTEGER;
@@ -345,7 +345,7 @@ public class CalciteSchemaUtil {
             final RelDataTypeFactory typeFactory = opBinding.getTypeFactory();
             final RelDataType relDataType = switch (this.fieldType.getType()) {
                 case bool -> typeFactory.createSqlType(SqlTypeName.BOOLEAN);
-                case string, json -> typeFactory.createSqlType(SqlTypeName.VARCHAR);
+                case string, uuid, json -> typeFactory.createSqlType(SqlTypeName.VARCHAR);
                 case bytes ->  typeFactory.createSqlType(SqlTypeName.BINARY);
                 case int32 -> typeFactory.createSqlType(SqlTypeName.INTEGER);
                 case int64 -> typeFactory.createSqlType(SqlTypeName.BIGINT);

@@ -1,0 +1,210 @@
+# Execute Mercari Pipeline
+
+## gcloud command
+
+gcloud command allows you to execute a configuration file uploaded to GCS with parameters as follows
+
+```sh
+gcloud storage cp config.yaml gs://{path/to/config.yaml}
+
+gcloud dataflow flex-template run {job_name} \
+  --template-file-gcs-location=gs://{path/to/template_file} \
+  --parameters=config=gs://{path/to/config.yaml}
+```
+
+You can also pass the config content directly instead of uploading it to GCS.
+
+```sh
+gcloud dataflow flex-template run {job_name} \
+  --template-file-gcs-location=gs://{path/to/template_file} \
+  --parameters=config="$(cat path/to/config.yaml)"
+```
+
+## REST API
+
+You can also run template by [REST API](https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.locations.flexTemplates/launch).
+
+In the following example, instead of uploading the config file to GCS, the contents are specified directly from a local file.
+If you want to specify the contents of the config file directly via REST API, you should be aware that you need to escape the JSON string in the config file (quotes and newlines in the config break the request body if embedded as-is).
+
+```sh
+PROJECT_ID=[PROJECT_ID]
+REGION=[REGION]
+CONFIG="$(cat examples/xxx.yaml)"
+
+curl -X POST -H "Content-Type: application/json"  -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://dataflow.googleapis.com/v1b3/projects/${PROJECT_ID}/locations/${REGION}/flexTemplates:launch" -d "{
+  'launchParameter': {
+    'jobName': 'myJobName',
+    'containerSpecGcsPath': 'gs://{path/to/template_file}',
+    'parameters': {
+      'config': '$(echo "$CONFIG")',
+      'stagingLocation': 'gs://{path/to/staging}'
+    },
+    'environment': {
+      'tempLocation': 'gs://{path/to/temp}'
+    }
+  }
+}"
+```
+
+(The options `tempLocation` and `stagingLocation` are optional. If not specified, a bucket named `dataflow-staging-{region}-{project_no}` will be automatically generated and used)
+
+### Run Template in streaming mode
+
+To run Template in streaming mode, specify `streaming=true` in the parameter.
+
+```sh
+gcloud dataflow flex-template run {job_name} \
+  --template-file-gcs-location=gs://{path/to/template_file} \
+  --parameters=config=gs://{path/to/config.yaml} \
+  --parameters=streaming=true
+```
+
+## Run Pipeline locally (DirectRunner)
+
+You can run a pipeline locally using the container image built with the `direct` profile
+(see [How to Deploy Pipeline](../deploy/README.md#deploy-direct-runner-for-local-execution)).
+This is useful when you want to process small data quickly.
+The same image also runs serverlessly on
+[Cloud Run Jobs](../deploy/cloud-run-jobs.md) /
+[Worker Pools](../deploy/cloud-run-worker-pools.md) /
+[Services](../deploy/cloud-run-service.md) and on
+[Kubernetes](../deploy/kubernetes.md).
+
+For local execution, execute the following command to grant the necessary permissions.
+
+```sh
+gcloud auth application-default login
+```
+
+The following are examples of locally executed commands.
+The authentication file (and the config file, when passed as a file path) is mounted for access by the container.
+The other arguments (such as `project` and `config`) are the same as for normal execution.
+
+If you want to run in streaming mode, specify `streaming=true` in the argument as you would in normal execution.
+
+### Mac OS
+
+The config content is passed inline here, so only the gcloud credentials need to be mounted.
+
+```sh
+docker run \
+  -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
+  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
+  --config="$(cat path/to/config.yaml)"
+```
+
+### Windows OS
+
+```sh
+docker run ^
+  -v C:\Users\{YourUserName}\AppData\Roaming\gcloud:/mnt/gcloud:ro ^
+  -v C:\Users\{YourWorkingDirPath}\:/mnt/config:ro ^
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json ^
+  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct ^
+  --config=/mnt/config/{MyConfig}.yaml
+```
+
+The `-e GOOGLE_APPLICATION_CREDENTIALS=...` points ADC at the mounted gcloud credentials. It is passed
+at run time on purpose: baked into the image it would override the metadata-server credentials and
+break the same image on Cloud Run.
+
+* Note:
+  * If you use BigQuery module locally, you will need to specify the `tempLocation` argument.
+  * If the pipeline is to access an emulator running on a local machine, such as Cloud Spanner, the `--net=host` option is required.
+
+## Run Pipeline locally / on Cloud Run (Prism)
+
+The image built with the `prism` profile (see
+[How to Deploy Pipeline](../deploy/README.md#deploy-prism-runner-for-local--cloud-run-execution)) runs
+exactly like the direct image — same arguments, same mounts — with Beam's
+[Prism runner](https://beam.apache.org/documentation/runners/prism/), the portable successor of
+DirectRunner:
+
+```sh
+docker run \
+  -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
+  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/prism \
+  --config="$(cat path/to/config.yaml)"
+```
+
+Use it instead of the direct image when the pipeline has keyed stages over coarse or global keys
+(e.g. the `feature` transform's global encoding levels): DirectRunner's GroupByKey copies each key's
+buffered state per bundle and such stages slow down by orders of magnitude as rows grow, while Prism
+executes them at proper speed.
+
+* Note:
+  * The prism binary is downloaded from the Beam GitHub release at startup (outbound network
+    required; `options.prism.prismLocation` points at a pre-downloaded binary otherwise — see
+    [Prism Options](../options/prism.md)). On Windows the automatic download URL is broken (Beam
+    derives it from `os.name`): download `apache_beam-v{beam.version}-prism-windows-amd64.zip`
+    manually and set `prismLocation`.
+  * A `ManagedChannel allocation site` stack in the logs at shutdown is gRPC's channel-leak detector,
+    not a failure. The completion marker is the `Pipeline finished with state: DONE` log line.
+
+## Validate a config without running it (dry run)
+
+Add `--dryRun=true` to any of the commands above. The config is loaded (including `system.imports` and
+`${args.*}`), every module is validated and the pipeline is assembled — schemas are resolved and
+declarative plans such as the `feature` transform's are compiled against the real input schema — but
+no job is launched. The resolved output schemas and the feature plan reports (with hot-key audit SQL) are
+printed to stdout; an invalid config exits with the assembly error.
+
+```sh
+docker run \
+  -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
+  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
+  --dryRun=true \
+  --config="$(cat path/to/config.yaml)"
+```
+
+* Note:
+  * Assembly may still call external services that a module needs for schema resolution (for example a
+    BigQuery dry-run query or a Spanner schema read), so the same credentials as a real run are required.
+
+## Notes on Flex Template launches
+
+* The Flex Template launcher VM pulls the pipeline image with the **execution project's Compute Engine
+  default service account** (`<project-number>-compute@developer.gserviceaccount.com`), not with the
+  credentials of whoever launched the job. When the image lives in another project's Artifact Registry,
+  grant that account `roles/artifactregistry.reader` on the repository, or the launch fails with
+  `artifactregistry.repositories.downloadArtifacts denied` (running the launcher locally with `docker`
+  hides this because your own credentials are used).
+
+## Run on Apache Flink / Apache Spark
+
+Build the bundled jar with the `flink` or `spark` Maven profile
+(see [How to Deploy Pipeline](../deploy/README.md#build-bundled-jar-for-apache-flink--apache-spark)),
+then submit it to your cluster with `--runner` and `--config` arguments.
+The main class is `com.mercari.solution.MPipeline`.
+
+### Apache Flink
+
+```sh
+mvn clean package -DskipTests -Pflink
+
+flink run \
+  -c com.mercari.solution.MPipeline \
+  target/pipeline-bundled-{version}.jar \
+  --runner=FlinkRunner \
+  --config="$(cat path/to/config.yaml)"
+```
+
+### Apache Spark
+
+```sh
+mvn clean package -DskipTests -Pspark
+
+spark-submit \
+  --class com.mercari.solution.MPipeline \
+  --master {spark_master_url} \
+  target/pipeline-bundled-{version}.jar \
+  --runner=SparkRunner \
+  --config="$(cat path/to/config.yaml)"
+```
+
+* Note:
+  * If the pipeline uses Google Cloud modules (BigQuery, Spanner, GCS, ...), the cluster workers need Google Cloud credentials (e.g. set `GOOGLE_APPLICATION_CREDENTIALS` on the workers).

@@ -6,7 +6,6 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.schema.converter.ElementToCsvConverter;
 import org.apache.beam.sdk.io.FileIO;
-import org.apache.beam.sdk.values.KV;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 import java.io.*;
@@ -14,7 +13,7 @@ import java.nio.channels.Channels;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 
-public class CsvSink implements FileIO.Sink<KV<String, MElement>> {
+public class CsvSink implements FileIO.Sink<MElement> {
 
     private final Schema schema;
     private final List<String> fields;
@@ -67,8 +66,7 @@ public class CsvSink implements FileIO.Sink<KV<String, MElement>> {
     }
 
     @Override
-    public void write(KV<String, MElement> element) throws IOException {
-        final MElement input = element.getValue();
+    public void write(MElement input) throws IOException {
         final String line = ElementToCsvConverter.convert(schema, input, fields);
         writer.println(line);
     }

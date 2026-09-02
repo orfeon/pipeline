@@ -1,0 +1,296 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/grpc",
+  "title": "gRPC",
+  "description": "Sink module that sends each input record (or micro-batch) as a gRPC request described by a protoc descriptor set",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "https://mercari.com/pipeline/module/sink"
+    },
+    {
+      "properties": {
+        "module": {
+          "const": "grpc"
+        },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
+      },
+      "required": [
+        "inputs"
+      ]
+    }
+  ],
+  "$defs": {
+    "filter": {
+      "description": "Filter condition (JSON object or SQL-like text)",
+      "oneOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "none",
+            "basic",
+            "bearer",
+            "apiKey",
+            "oauth2",
+            "gcpOidc",
+            "gcpOauth"
+          ],
+          "default": "none"
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string",
+          "description": "Static bearer token"
+        },
+        "name": {
+          "type": "string",
+          "description": "apiKey: header / query parameter name"
+        },
+        "value": {
+          "type": "string",
+          "description": "apiKey: value (prefix included, e.g. ApiKey xxx)"
+        },
+        "in": {
+          "type": "string",
+          "enum": [
+            "header",
+            "query"
+          ],
+          "default": "header"
+        },
+        "grant": {
+          "type": "string",
+          "enum": [
+            "clientCredentials",
+            "jwtBearer",
+            "refreshToken"
+          ],
+          "default": "clientCredentials"
+        },
+        "tokenUrl": {
+          "type": "string",
+          "description": "oauth2: token endpoint"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "clientSecret": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "description": "oauth2 / gcpOauth scope"
+        },
+        "audience": {
+          "type": "string",
+          "description": "oauth2 audience / gcpOidc audience (default: origin of url)"
+        },
+        "refreshToken": { "type": "string", "description": "refreshToken grant: long-lived refresh token (use utils.secrets.get)" },
+                "refreshBeforeSeconds": {
+          "type": "integer",
+          "default": 60
+        },
+        "issuer": {
+          "type": "string",
+          "description": "jwtBearer: iss claim"
+        },
+        "subject": {
+          "type": "string",
+          "description": "jwtBearer: sub claim (default issuer)"
+        },
+        "privateKey": {
+          "type": "string",
+          "description": "jwtBearer: PKCS#8 PEM private key (RS256)"
+        },
+        "keyId": {
+          "type": "string",
+          "description": "jwtBearer: kid header"
+        },
+        "jwtLifetimeMinutes": {
+          "type": "integer",
+          "default": 60
+        },
+        "serviceAccount": {
+          "type": "string",
+          "description": "gcpOidc / gcpOauth: service account to impersonate"
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "gRPC target host:port or name-resolver URI"
+        },
+        "descriptorSetPath": {
+          "type": "string",
+          "description": "protoc descriptor set (--include_imports)"
+        },
+        "method": {
+          "type": "string",
+          "description": "package.Service/Method (unary or client-streaming)"
+        },
+        "plaintext": {
+          "type": "boolean",
+          "default": false
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Call metadata (templates on record fields)"
+        },
+        "auth": {
+          "$ref": "#/$defs/auth"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "mapping": {
+              "type": "string",
+              "enum": [
+                "fields",
+                "template"
+              ],
+              "default": "fields"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "template": {
+              "type": "string",
+              "description": "FreeMarker protobuf-JSON template"
+            },
+            "omitNulls": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "response": {
+          "type": "object",
+          "properties": {
+            "successCondition": {
+              "$ref": "#/$defs/filter"
+            },
+            "retry": {
+              "type": "object",
+              "properties": {
+                "statuses": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "UNAVAILABLE",
+                    "RESOURCE_EXHAUSTED",
+                    "DEADLINE_EXCEEDED",
+                    "ABORTED"
+                  ]
+                },
+                "maxAttempts": {
+                  "type": "integer",
+                  "default": 5
+                },
+                "initialBackoff": {
+                  "type": "string",
+                  "default": "1s"
+                },
+                "maxBackoff": {
+                  "type": "string",
+                  "default": "30s"
+                },
+                "totalTimeout": {
+                  "type": "string",
+                  "default": "5m"
+                }
+              }
+            }
+          }
+        },
+        "batch": {
+          "type": "object",
+          "properties": {
+            "maxSize": {
+              "type": "integer"
+            },
+            "maxBytes": {
+              "type": "string"
+            },
+            "maxBufferingDuration": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "shards": {
+              "type": "integer",
+              "default": 8
+            },
+            "repeatedField": {
+              "type": "string",
+              "description": "Unary method: repeated message field receiving one message per record"
+            }
+          }
+        },
+        "deadline": {
+          "type": "string",
+          "default": "60s"
+        },
+        "concurrency": {
+          "type": "integer",
+          "default": 1
+        },
+        "rate": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "number"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "second",
+                "minute"
+              ],
+              "default": "second"
+            }
+          },
+          "required": [
+            "count"
+          ]
+        },
+        "maxInboundMessageBytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target",
+        "descriptorSetPath",
+        "method"
+      ]
+    }
+  }
+}

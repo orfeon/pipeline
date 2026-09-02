@@ -91,6 +91,7 @@ public class StructToMutationConverter {
             }
             builder = switch (field.getType().getCode()) {
                 case STRING -> builder.set(fieldName).to(isNullField ? null : struct.getString(field.getName()));
+                case UUID -> builder.set(fieldName).to(isNullField ? null : struct.getUuid(field.getName()));
                 case JSON -> builder.set(fieldName).to(isNullField ? null : struct.getJson(field.getName()));
                 case PG_NUMERIC -> builder.set(fieldName).to(isNullField ? null : struct.getString(field.getName()));
                 case PG_JSONB -> builder.set(fieldName).to(isNullField ? null : struct.getPgJsonb(field.getName()));
@@ -122,6 +123,8 @@ public class StructToMutationConverter {
                 case ARRAY -> switch (field.getType().getArrayElementType().getCode()) {
                     case STRING ->
                             builder.set(fieldName).toStringArray(isNullField ? null : struct.getStringList(field.getName()));
+                    case UUID -> builder.set(fieldName).toUuidArray(
+                            isNullField ? null : struct.getUuidList(field.getName()));
                     case JSON ->
                             builder.set(fieldName).toJsonArray(isNullField ? null : struct.getJsonList(field.getName()));
                     case PG_JSONB ->
@@ -244,6 +247,7 @@ public class StructToMutationConverter {
             }
             builder = switch(struct.getColumnType(keyField).getCode()) {
                 case STRING -> builder.append(struct.getString(keyField));
+                case UUID -> builder.append(struct.getUuid(keyField));
                 case JSON -> builder.append(struct.getJson(keyField));
                 case BYTES -> builder.append(struct.getBytes(keyField));
                 case BOOL -> builder.append(struct.getBoolean(keyField));

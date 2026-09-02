@@ -1,9 +1,17 @@
 package com.mercari.solution.util.cloud.google;
 
 import com.google.dataflow.v1beta3.*;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.MessageOrBuilder;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
+import com.google.protobuf.util.JsonFormat;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -113,9 +121,18 @@ public class DataflowUtil {
             final String region,
             final String jobName,
             final int searchLimit) throws IOException {
+        return findJobByName(project, region, jobName, ListJobsRequest.Filter.ALL, searchLimit);
+    }
+
+    public static Job findJobByName(
+            final String project,
+            final String region,
+            final String jobName,
+            final ListJobsRequest.Filter filter,
+            final int searchLimit) throws IOException {
 
         Job latest = null;
-        for(final Job job : listJobs(project, region, ListJobsRequest.Filter.ALL, searchLimit)) {
+        for(final Job job : listJobs(project, region, filter, searchLimit)) {
             if(!job.getName().equals(jobName)) {
                 continue;
             }
@@ -151,6 +168,44 @@ public class DataflowUtil {
             }
         }
         return messages;
+    }
+
+    /** The job's autoscaling events (worker pool size changes with the service's reason), oldest first. */
+    public static List<AutoscalingEvent> listAutoscalingEvents(
+            final String project,
+            final String region,
+            final String jobId,
+            final int limit) throws IOException {
+
+        final List<AutoscalingEvent> events = new ArrayList<>();
+        try(final MessagesV1Beta3Client client = MessagesV1Beta3Client.create()) {
+            String pageToken = "";
+            do {
+                final ListJobMessagesRequest request = ListJobMessagesRequest.newBuilder()
+                        .setProjectId(project)
+                        .setLocation(region)
+                        .setJobId(jobId)
+                        .setMinimumImportance(JobMessageImportance.JOB_MESSAGE_DETAILED)
+                        .setPageSize(100)
+                        .setPageToken(pageToken)
+                        .build();
+                final ListJobMessagesResponse response = client.listJobMessagesCallable().call(request);
+                events.addAll(response.getAutoscalingEventsList());
+                pageToken = response.getNextPageToken();
+            } while(pageToken != null && !pageToken.isEmpty() && events.size() < limit);
+        }
+        return events.size() > limit ? events.subList(events.size() - limit, events.size()) : events;
+    }
+
+    /** The job's current metric updates (ElementCount, ExecutionStepProgress, ... per step). */
+    public static JobMetrics getJobMetrics(final String project, final String region, final String jobId) throws IOException {
+        try(final MetricsV1Beta3Client client = MetricsV1Beta3Client.create()) {
+            return client.getJobMetrics(GetJobMetricsRequest.newBuilder()
+                    .setProjectId(project)
+                    .setLocation(region)
+                    .setJobId(jobId)
+                    .build());
+        }
     }
 
     /**
@@ -248,6 +303,72 @@ public class DataflowUtil {
             }
         }
         return result.toString();
+    }
+
+    /** Console URL of a job, shared by the launch API result and the action docs. */
+    public static String consoleUrl(final Job job) {
+        return "https://console.cloud.google.com/dataflow/jobs/" + job.getLocation() + "/" + job.getId()
+                + "?project=" + job.getProjectId();
+    }
+
+    /**
+     * The REST (proto JSON) representation of a Dataflow message as a nested map, for the action
+     * envelope payload: field names as in the REST API, enums as names, integral numbers as
+     * {@code Long} and other numbers as {@code Double} (proto JSON prints int64 as strings; those
+     * stay strings, as the v1b3 discovery document types them).
+     */
+    public static Map<String, Object> toPayload(final MessageOrBuilder message) {
+        try {
+            final String json = JsonFormat.printer().omittingInsignificantWhitespace().print(message);
+            final Object value = toValue(JsonParser.parseString(json));
+            if(value instanceof Map<?, ?> map) {
+                @SuppressWarnings("unchecked")
+                final Map<String, Object> result = (Map<String, Object>) map;
+                return result;
+            }
+            return new LinkedHashMap<>();
+        } catch (final InvalidProtocolBufferException e) {
+            throw new IllegalStateException("Failed to serialize dataflow message", e);
+        }
+    }
+
+    public static Object toValue(final JsonElement element) {
+        if(element == null || element.isJsonNull()) {
+            return null;
+        }
+        if(element.isJsonObject()) {
+            final Map<String, Object> map = new LinkedHashMap<>();
+            for(final Map.Entry<String, JsonElement> entry : ((JsonObject) element).entrySet()) {
+                final Object value = toValue(entry.getValue());
+                if(value != null) {
+                    map.put(entry.getKey(), value);
+                }
+            }
+            return map;
+        }
+        if(element.isJsonArray()) {
+            final List<Object> list = new ArrayList<>();
+            for(final JsonElement e : (JsonArray) element) {
+                list.add(toValue(e));
+            }
+            return list;
+        }
+        final JsonPrimitive primitive = element.getAsJsonPrimitive();
+        if(primitive.isBoolean()) {
+            return primitive.getAsBoolean();
+        }
+        if(primitive.isNumber()) {
+            final String text = primitive.getAsString();
+            if(text.matches("-?\\d+")) {
+                try {
+                    return Long.parseLong(text);
+                } catch (final NumberFormatException ignored) {
+                    // fall through to double
+                }
+            }
+            return primitive.getAsDouble();
+        }
+        return primitive.getAsString();
     }
 
     public static Instant toInstant(final Timestamp timestamp) {

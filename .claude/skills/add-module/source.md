@@ -52,9 +52,11 @@ usually rely on the connector's own error semantics.
 
 ## Reference implementations
 
-- `HttpSource.java` (~80 lines) — minimal: Parameters validate/setDefaults, seed `Create`, util transform,
-  failure tag. **Best starting template.**
-- `CreateSource.java` — schema construction, `select` post-processing, both batch and streaming.
+- `HttpSource.java` — seed-driven source on the shared `util/pipeline/outbound/` core: per-request DoFn
+  (`RequestRenderer` + `SyncCaller` + `ResponsePolicy`), typed outputs via `response.schema`, tagged
+  outputs per request (`<name>.<request>`), pagination loop, chained requests with `Reshuffle`,
+  `GenerateSequence` polling in streaming. Shows failure tags and multi-output tuples.
+- `CreateSource.java` — simplest full source. **Best starting template** for a seed/generate source.
 - `PubSubSource.java` — streaming source: formats (json/avro/protobuf), attributes, timestamp handling.
 - `JdbcSource.java` / `PostgresSource.java` — DB-backed batch source with query splitting.
 - `StorageSource.java` — file formats with schema inference.

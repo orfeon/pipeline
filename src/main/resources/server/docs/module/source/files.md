@@ -45,7 +45,7 @@ Each matched file produces a record with the following fields:
 | resource            | STRING    | The full resource path (e.g. `gs://bucket/path/to/file.csv`).                                      |
 | sizeBytes           | INT64     | File size in bytes.                                                                                 |
 | isDirectory         | BOOLEAN   | Whether the resource is a directory.                                                                |
-| lastModified        | TIMESTAMP | Last modification timestamp.                                                                        |
+| lastModified        | TIMESTAMP | Last modification timestamp. **Not available on GCS**: Beam's GCS file system does not report it, so the value is the epoch (`1970-01-01T00:00:00Z`) — derive a time from the file name or path instead when matching `gs://` files. |
 | schema              | STRING    | The URI scheme of the resource (e.g. `gs`, `s3`, `file`).                                           |
 | isReadSeekEfficient | BOOLEAN   | Whether the file supports efficient random access reads.                                            |
 | checksum            | STRING    | File checksum (format depends on the file system).                                                  |
@@ -146,8 +146,8 @@ sources:
       pattern: "gs://my-bucket/logs/**/*.log"
       filter:
         key: filename
-        op: contains
-        value: "error"
+        op: match
+        value: ".*error.*"
 
 transforms:
   - name: file_info

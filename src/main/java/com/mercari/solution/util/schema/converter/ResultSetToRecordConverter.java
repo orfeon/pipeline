@@ -7,7 +7,6 @@ import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
-import org.apache.commons.compress.utils.IOUtils;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Days;
@@ -292,7 +291,7 @@ public class ResultSetToRecordConverter {
                 if(resultSet.wasNull() || blob == null) {
                     return null;
                 } else {
-                    byte[] bytes = IOUtils.toByteArray(blob.getBinaryStream());
+                    byte[] bytes = blob.getBinaryStream().readAllBytes();
                     return ByteBuffer.wrap(bytes);
                 }
             }
@@ -469,7 +468,7 @@ public class ResultSetToRecordConverter {
                             if (v == null) {
                                 continue;
                             }
-                            list.add(ByteBuffer.wrap(IOUtils.toByteArray(v.getBinaryStream())));
+                            list.add(ByteBuffer.wrap(v.getBinaryStream().readAllBytes()));
                         }
                         break;
                     }

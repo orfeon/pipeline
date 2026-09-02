@@ -22,7 +22,8 @@ public class TemplateUtil {
             "bigtable", new BigtableFunctions(),
             "gcp", new GcpFunctions(),
             "oauth", new OAuthFunctions(),
-            "secrets", new SecretFunctions()
+            "secrets", new SecretFunctions(),
+            "json", new JsonFunctions()
     );
 
     public static Template createSafeTemplate(final String name, final String template) {
@@ -32,6 +33,7 @@ public class TemplateUtil {
         templateConfig.setTemplateExceptionHandler(new ImputeSameVariablesTemplateExceptionHandler());
         templateConfig.setLogTemplateExceptions(false);
         templateConfig.setSharedVariable("statics", BeansWrapper.getDefaultInstance().getStaticModels());
+        templateConfig.setURLEscapingCharset("UTF-8"); // enables the ?url built-in
         try {
             templateConfig.setSharedVariable("utils", UTILS);
             return new Template(name, new StringReader(template), templateConfig);
@@ -44,6 +46,7 @@ public class TemplateUtil {
         final Configuration templateConfig = new Configuration(Configuration.VERSION_2_3_34);
         templateConfig.setNumberFormat("computer");
         templateConfig.setSharedVariable("statics", BeansWrapper.getDefaultInstance().getStaticModels());
+        templateConfig.setURLEscapingCharset("UTF-8"); // enables the ?url built-in
         //templateConfig.setObjectWrapper(new CSVWrapper(Configuration.VERSION_2_3_30));
         try {
             templateConfig.setSharedVariable("utils", UTILS);
@@ -67,11 +70,43 @@ public class TemplateUtil {
         }
     }
 
+    /** Expands the text as a strict template when it contains template syntax; null and plain text are returned as they are. */
+    public static String executeStrictTemplateIfNeeded(final String text, final Map<?, ?> data) {
+        if(text == null || !isTemplateText(text)) {
+            return text;
+        }
+        return executeStrictTemplate(text, data);
+    }
+
     public static boolean isTemplateText(final String text) {
         if(text == null) {
             return false;
         }
         return text.contains("${") && text.contains("}");
+    }
+
+    // Pipeline-assembly-time template expressions over the reserved `input` namespace,
+    // e.g. ${input.table}. Only these expressions are resolved when a module declares
+    // wildcard inputs; every other ${...} is left for runtime per-element evaluation.
+    private static final java.util.regex.Pattern INPUT_TEMPLATE_PATTERN =
+            java.util.regex.Pattern.compile("\\$\\{\\s*input\\.[^}]+}");
+
+    public static boolean containsInputTemplate(final String text) {
+        if(text == null) {
+            return false;
+        }
+        return INPUT_TEMPLATE_PATTERN.matcher(text).find();
+    }
+
+    public static String executeInputTemplate(final String text, final Map<String, Object> input) {
+        final java.util.regex.Matcher matcher = INPUT_TEMPLATE_PATTERN.matcher(text);
+        final StringBuilder sb = new StringBuilder();
+        while(matcher.find()) {
+            final String resolved = executeStrictTemplate(matcher.group(), Map.of("input", input));
+            matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(resolved));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
     }
 
     public static List<String> extractTemplateArgs(final String text, final Schema inputSchema) {

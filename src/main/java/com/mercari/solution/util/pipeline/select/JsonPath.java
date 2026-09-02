@@ -59,17 +59,19 @@ public class JsonPath implements SelectFunction {
                 }
                 default -> Schema.FieldType.type(type);
             };
-            if(jsonObject.has("mode")) {
-                final String modeString = jsonObject.get("mode").getAsString();
-                final Schema.Mode mode = Schema.Mode.valueOf(modeString);
-                outputFieldType = switch (mode) {
-                    case nullable -> outputFieldType.withNullable(true);
-                    case required -> outputFieldType.withNullable(false);
-                    case repeated -> Schema.FieldType.array(outputFieldType);
-                };
-            }
         } else {
             outputFieldType = Schema.FieldType.STRING.withNullable(true);
+        }
+        // mode applies whether or not an explicit type is given (the default type is string);
+        // parsed leniently (case-insensitive), as in schema field definitions
+        if(jsonObject.has("mode")) {
+            final String modeString = jsonObject.get("mode").getAsString();
+            final Schema.Mode mode = Schema.Mode.of(modeString);
+            outputFieldType = switch (mode) {
+                case nullable -> outputFieldType.withNullable(true);
+                case required -> outputFieldType.withNullable(false);
+                case repeated -> Schema.FieldType.array(outputFieldType);
+            };
         }
 
         return new JsonPath(name, field, path, inputField, outputFieldType, ignore);

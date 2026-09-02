@@ -43,6 +43,7 @@ public class StructToMapConverter {
             case PG_JSONB -> struct.getPgJsonb(field.getName());
             case BYTES -> struct.getBytes(field.getName()).toBase64();
             case STRING, PG_NUMERIC -> struct.getString(field.getName());
+            case UUID -> struct.getUuid(field.getName()).toString();
             case INT64 -> struct.getLong(field.getName());
             case FLOAT32 -> struct.getFloat(field.getName());
             case FLOAT64 -> struct.getDouble(field.getName());
@@ -59,6 +60,7 @@ public class StructToMapConverter {
             case ARRAY -> switch (field.getType().getArrayElementType().getCode()) {
                 case BOOL -> struct.getBooleanList(field.getName());
                 case STRING -> struct.getStringList(field.getName());
+                case UUID -> struct.getUuidList(field.getName()).stream().map(v -> v == null ? null : v.toString()).toList();
                 case JSON -> struct.getJsonList(field.getName());
                 case PG_JSONB -> struct.getPgJsonbList(field.getName());
                 case BYTES -> struct.getBytesList(field.getName())

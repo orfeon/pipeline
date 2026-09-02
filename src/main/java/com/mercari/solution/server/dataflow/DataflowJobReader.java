@@ -9,6 +9,7 @@ import com.google.dataflow.v1beta3.JobState;
 import com.google.dataflow.v1beta3.JobView;
 import com.google.dataflow.v1beta3.ListJobsRequest;
 import com.mercari.solution.server.ServerVersion;
+import com.mercari.solution.server.launch.LaunchDefaults;
 import com.mercari.solution.util.cloud.google.DataflowUtil;
 import com.mercari.solution.util.cloud.google.LoggingUtil;
 
@@ -26,8 +27,7 @@ public class DataflowJobReader {
 
     public static final String VERSION_LABEL = "mercari-pipeline-version";
 
-    private static final String ENV_DATAFLOW_PROJECT = "MERCARI_PIPELINE_DATAFLOW_PROJECT";
-    private static final String ENV_DATAFLOW_REGION = "MERCARI_PIPELINE_DATAFLOW_REGION";
+    private static final String RUNNER = "dataflow";
 
     // Dataflow job ids look like 2026-07-17_22_25_11-1234567890123456789
     private static final Pattern JOB_ID_PATTERN = Pattern
@@ -59,6 +59,10 @@ public class DataflowJobReader {
                     result.append(config).append("\n");
                 }
                 result.append("```\n");
+            } else if (job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_QUEUED
+                    || job.getCurrentState() == com.google.dataflow.v1beta3.JobState.JOB_STATE_PENDING) {
+                result.append("\n(the job has not started yet: its pipeline parameters, including the config, appear once it leaves the ")
+                        .append(job.getCurrentState().name()).append(" state)\n");
             } else {
                 result.append("\nNo 'config' parameter found on the job "
                         + "(the job may not have been launched from a mercari/pipeline flex template).\n");
@@ -141,6 +145,11 @@ public class DataflowJobReader {
         }
     }
 
+    /** The job for an id or exact name (active jobs first), full view; null when not found. */
+    public static Job resolve(final String jobIdOrName, final String project, final String region) throws Exception {
+        return resolveJob(jobIdOrName, project, region);
+    }
+
     private static Job resolveJob(final String jobIdOrName, final String project, final String region)
             throws Exception {
 
@@ -151,7 +160,12 @@ public class DataflowJobReader {
         if (JOB_ID_PATTERN.matcher(key).matches()) {
             return DataflowUtil.getJob(project, region, key, JobView.JOB_VIEW_ALL);
         }
-        final Job byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
+        // active jobs first (running / queued / pending): a job launched a moment ago is found even when the
+        // project has more terminated jobs than the search limit covers
+        Job byName = DataflowUtil.findJobByName(project, region, key, com.google.dataflow.v1beta3.ListJobsRequest.Filter.ACTIVE, NAME_SEARCH_LIMIT);
+        if (byName == null) {
+            byName = DataflowUtil.findJobByName(project, region, key, NAME_SEARCH_LIMIT);
+        }
         if (byName == null) {
             return null;
         }
@@ -172,15 +186,15 @@ public class DataflowJobReader {
 
     private static String jobNotFoundMessage(final String jobIdOrName, final String project, final String region) {
         return String.format("Dataflow job not found: '%s' (project=%s, region=%s). "
-                        + "Specify a job id or exact job name; use listRecentFailedJobs to discover jobs.",
+                        + "Specify a job id or exact job name; use listFailedJobs to discover jobs.",
                 jobIdOrName, project, region);
     }
 
-    private static String resolveProject(final String projectArg) {
+    public static String resolveProject(final String projectArg) {
         if (projectArg != null && !projectArg.isBlank()) {
             return projectArg.trim();
         }
-        final String env = System.getenv(ENV_DATAFLOW_PROJECT);
+        final String env = LaunchDefaults.get().fromEnv(RUNNER, LaunchDefaults.KEY_PROJECT);
         if (env != null && !env.isBlank()) {
             return env.trim();
         }
@@ -189,19 +203,21 @@ public class DataflowJobReader {
             return defaultProject;
         }
         throw new IllegalArgumentException(
-                "project could not be resolved: pass it explicitly or set " + ENV_DATAFLOW_PROJECT);
+                "project could not be resolved: pass it explicitly or set "
+                        + LaunchDefaults.envName(RUNNER, LaunchDefaults.KEY_PROJECT));
     }
 
-    private static String resolveRegion(final String regionArg) {
+    public static String resolveRegion(final String regionArg) {
         if (regionArg != null && !regionArg.isBlank()) {
             return regionArg.trim();
         }
-        final String env = System.getenv(ENV_DATAFLOW_REGION);
+        final String env = LaunchDefaults.get().fromEnv(RUNNER, LaunchDefaults.KEY_REGION);
         if (env != null && !env.isBlank()) {
             return env.trim();
         }
         throw new IllegalArgumentException(
-                "region could not be resolved: pass it explicitly or set " + ENV_DATAFLOW_REGION);
+                "region could not be resolved: pass it explicitly or set "
+                        + LaunchDefaults.envName(RUNNER, LaunchDefaults.KEY_REGION));
     }
 
 }

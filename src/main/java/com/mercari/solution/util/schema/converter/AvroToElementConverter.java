@@ -27,7 +27,9 @@ public class AvroToElementConverter {
         final Schema.FieldType fieldType = switch (avroFieldSchema.getType()) {
             case BOOLEAN -> Schema.FieldType.BOOLEAN;
             case STRING -> {
-                if(AvroSchemaUtil.isSqlTypeJson(avroFieldSchema)) {
+                if(LogicalTypes.uuid().equals(avroFieldSchema.getLogicalType())) {
+                    yield Schema.FieldType.UUID;
+                } else if(AvroSchemaUtil.isSqlTypeJson(avroFieldSchema)) {
                     yield Schema.FieldType.JSON;
                 } else {
                     yield Schema.FieldType.STRING;

@@ -90,6 +90,11 @@ public abstract class Source extends Module<PBegin> {
         }
     }
 
+    /** Registered module names (the @Source.Module(name=...) values). */
+    public static java.util.Set<String> moduleNames() {
+        return new java.util.TreeSet<>(sources.keySet());
+    }
+
     public static @NonNull Source create(
             @NonNull SourceConfig config,
             @NonNull PipelineOptions options,

@@ -1,0 +1,97 @@
+{
+  "$id": "https://mercari.com/pipeline/module/sink/tasks",
+  "title": "Tasks",
+  "description": "Sink module that enqueues each input record as a Google Cloud Tasks HTTP task",
+  "type": "object",
+  "allOf": [
+    { "$ref": "https://mercari.com/pipeline/module/sink" },
+    {
+      "properties": {
+        "module": { "const": "tasks" },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
+      },
+      "required": ["inputs"]
+    }
+  ],
+  "$defs": {
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "queue": {
+          "type": "string",
+          "description": "Cloud Tasks queue resource name. Supports FreeMarker templates on record fields",
+          "example": "projects/{project}/locations/{location}/queues/{queue}"
+        },
+        "target": {
+          "type": "object",
+          "description": "HTTP target of each task. Omit to use the queue-level HTTP target (tasks:buffer)",
+          "properties": {
+            "url": { "type": "string", "description": "Target URL (template on record fields)" },
+            "method": { "type": "string", "enum": ["POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"], "default": "POST" },
+            "params": { "type": "object", "description": "Query parameters (values are templates)", "additionalProperties": { "type": "string" } },
+            "headers": { "type": "object", "description": "Request headers (values are templates)", "additionalProperties": { "type": "string" } },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "enum": ["none", "gcpOidc", "gcpOauth"], "default": "none" },
+                "serviceAccount": { "type": "string", "description": "Service account email whose token is attached by Cloud Tasks" },
+                "audience": { "type": "string", "description": "OIDC audience (default: url without query)" },
+                "scope": { "type": "string", "description": "OAuth scope (default: cloud-platform)" }
+              }
+            }
+          },
+          "required": ["url"]
+        },
+        "body": {
+          "type": "object",
+          "properties": {
+            "format": { "type": "string", "enum": ["json", "ndjson", "template", "form", "bytes", "avro", "protobuf", "none"], "default": "json" },
+            "fields": { "type": "array", "items": { "type": "string" }, "description": "Restrict json/ndjson/form to these fields" },
+            "wrapper": { "type": "string", "description": "json batch: wrap the array, e.g. {\"records\": ${body}}" },
+            "compression": { "type": "string", "enum": ["none", "gzip"], "default": "none" },
+            "template": { "type": "string", "description": "FreeMarker template for format=template" },
+            "omitNulls": { "type": "boolean", "default": false, "description": "Drop null fields from the JSON body" },
+            "maxBytes": { "type": "string", "description": "Body size guard (100KB, 1MB); batches are split, single records routed to failureSinks" }
+          }
+        },
+        "task": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Template for the task name (named tasks are deduplicated by Cloud Tasks)" },
+            "hashId": { "type": "boolean", "default": true, "description": "SHA-256 the rendered id" },
+            "scheduleTime": { "type": "string", "description": "Field reference or template producing the dispatch time (RFC 3339 / epoch)" },
+            "delay": { "type": "string", "description": "Relative dispatch delay (PT10M, 10m, 2h, 1d). Exclusive with scheduleTime" },
+            "dispatchDeadline": { "type": "string", "description": "Per-attempt deadline of the target call, 15s-30m" }
+          }
+        },
+        "batch": {
+          "type": "object",
+          "description": "Pack several records into one task (GroupIntoBatches)",
+          "properties": {
+            "maxSize": { "type": "integer", "description": "Maximum records per task" },
+            "maxBytes": { "type": "string", "description": "Approximate maximum bytes per task (1MB)" },
+            "maxBufferingDuration": { "type": "string", "description": "Streaming: flush incomplete batches after this duration (10s, PT1M)" },
+            "key": { "type": "string", "description": "Template; records sharing the rendered key share a task" },
+            "shards": { "type": "integer", "default": 8, "description": "Random groups when key is omitted" }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "description": "Retry policy of the createTask RPC",
+          "properties": {
+            "maxAttempts": { "type": "integer", "default": 5 },
+            "initialRetryDelaySeconds": { "type": "number", "default": 0.5 },
+            "maxRetryDelaySeconds": { "type": "number", "default": 10 },
+            "totalTimeoutSeconds": { "type": "number", "default": 60 }
+          }
+        },
+        "onAlreadyExists": { "type": "string", "enum": ["success", "fail"], "default": "success" },
+        "concurrency": { "type": "integer", "default": 1, "description": "createTask calls in flight per bundle" },
+        "endpoint": { "type": "string", "description": "Custom gRPC endpoint host:port (emulator)" }
+      },
+      "required": ["queue"]
+    }
+  }
+}

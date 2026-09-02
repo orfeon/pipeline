@@ -290,7 +290,7 @@ public class BigQuerySource extends Source {
                     .orElseGet(() -> BigQueryUtil.getPreferReadMethod(tableSchema));
             read = read.withMethod(method);
 
-            errorHandler.apply(read);
+            read = errorHandler.apply(read);
 
             return KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
         } else if(parameters.table != null || (parameters.datasetId != null)) {
@@ -312,17 +312,25 @@ public class BigQuerySource extends Source {
                     .orElse(BigQueryIO.TypedRead.Method.DIRECT_READ);
             read = read.withMethod(method);
 
-            errorHandler.apply(read);
+            read = errorHandler.apply(read);
 
             return switch (runner) {
                 case direct -> {
-                    final TableSchema tableSchema = BigQueryUtil.getTableSchemaFromTable(tableReference);
-                    final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(tableSchema);
+                    final Table table = BigQueryUtil.getTable(tableReference);
+                    final org.apache.avro.Schema avroSchema = AvroSchemaUtil.withDoc(
+                            AvroSchemaUtil.convertSchema(table.getSchema()), table.getDescription());
                     yield KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
                 }
                 case dataflow -> {
-                    final org.apache.avro.Schema avroSchema = BigQueryUtil.getTableSchemaFromTableStorage(
+                    org.apache.avro.Schema avroSchema = BigQueryUtil.getTableSchemaFromTableStorage(
                             tableReference, parameters.queryRunProjectId, parameters.fields, parameters.rowRestriction);
+                    // the read session schema carries no descriptions; take them from the table metadata
+                    try {
+                        final Table table = BigQueryUtil.getTable(tableReference);
+                        avroSchema = AvroSchemaUtil.mergeDescriptions(avroSchema, table);
+                    } catch (final Exception e) {
+                        LOG.warn("Failed to get field descriptions of table: {}, cause: {}", tableReference, e.getMessage());
+                    }
                     yield KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
                 }
                 default -> throw new IllegalArgumentException();

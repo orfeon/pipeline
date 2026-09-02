@@ -58,6 +58,48 @@ public class PubSubSinkTest {
     }
 
     @Test
+    public void testDynamicTopicTemplate() throws Exception {
+        // dynamic topic: writeMessagesDynamic without .to() reads the message topic field,
+        // and the message PCollection gets a topic-preserving coder
+        final String configJson = config("""
+                {
+                  "topic": "projects/myproject/topics/topic_${value}",
+                  "format": "json"
+                }
+                """);
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+    }
+
+    @Test
+    public void testDynamicTopicTemplateWithOrderingKeyFields() throws Exception {
+        // orderingKeyFields + dynamic topic: schema coder (preserves topic and ordering key)
+        // and withOrderingKey on the write
+        final String configJson = config("""
+                {
+                  "topic": "projects/myproject/topics/topic_${value}",
+                  "format": "json",
+                  "orderingKeyFields": ["value"]
+                }
+                """);
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+    }
+
+    @Test
+    public void testStaticTopicWithOrderingKeyFields() throws Exception {
+        final String configJson = config("""
+                {
+                  "topic": "projects/myproject/topics/mytopic",
+                  "format": "json",
+                  "orderingKeyFields": ["value"]
+                }
+                """);
+        final Config config = Config.load(configJson);
+        MPipeline.apply(pipeline, config);
+    }
+
+    @Test
     public void testMissingFormatStillFailsWithoutEncoding() throws Exception {
         final String configJson = config("""
                 {

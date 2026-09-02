@@ -1,114 +1,474 @@
 {
   "$id": "https://mercari.com/pipeline/module/source/http",
   "title": "HTTP",
-  "description": "Get http response",
+  "description": "Source module that fetches records from HTTP/REST APIs (typed rows, pagination, chaining, polling)",
   "type": "object",
   "allOf": [
-    { "$ref": "https://mercari.com/pipeline/module/source" },
+    {
+      "$ref": "https://mercari.com/pipeline/module/source"
+    },
     {
       "properties": {
-        "module": { "const": "http2" },
-        "parameters": { "$ref": "#/$defs/parameters" }
+        "module": {
+          "const": "http"
+        },
+        "parameters": {
+          "$ref": "#/$defs/parameters"
+        }
       }
     }
   ],
   "$defs": {
-    "parameters": {
-      "title": "Http Source Parameters",
-      "description": "create module can specify data directly in elements, or it can generate data by specifying a range from and to. You can also process the generated data by specifying a select parameter.",
+    "filter": {
+      "description": "Filter condition (JSON object, list of conditions, or SQL-like text)",
+      "oneOf": [
+        {
+          "type": "object"
+        },
+        {
+          "type": "array"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "auth": {
+      "type": "object",
       "properties": {
-        "requests": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "none",
+            "basic",
+            "bearer",
+            "apiKey",
+            "oauth2",
+            "gcpOidc",
+            "gcpOauth"
+          ],
+          "default": "none"
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "in": {
+          "type": "string",
+          "enum": [
+            "header",
+            "query"
+          ],
+          "default": "header"
+        },
+        "grant": {
+          "type": "string",
+          "enum": [
+            "clientCredentials",
+            "jwtBearer",
+            "refreshToken"
+          ],
+          "default": "clientCredentials"
+        },
+        "tokenUrl": {
+          "type": "string"
+        },
+        "clientId": {
+          "type": "string"
+        },
+        "clientSecret": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string"
+        },
+        "refreshToken": { "type": "string", "description": "refreshToken grant: long-lived refresh token (use utils.secrets.get)" },
+                "refreshBeforeSeconds": {
+          "type": "integer",
+          "default": 60
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "privateKey": {
+          "type": "string"
+        },
+        "keyId": {
+          "type": "string"
+        },
+        "jwtLifetimeMinutes": {
+          "type": "integer",
+          "default": 60
+        },
+        "serviceAccount": {
+          "type": "string"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "URL template (parent record / item fields and loop vars available)"
+        },
+        "method": {
+          "type": "string",
+          "default": "GET"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "auth": {
+          "$ref": "#/$defs/auth"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "body": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "none",
+            "template",
+            "json",
+            "ndjson",
+            "form",
+            "multipart"
+          ],
+          "default": "none"
+        },
+        "template": {
+          "type": "string"
+        },
+        "fields": {
           "type": "array",
-          "title": "Http Requests Content",
-          "description": "Specify the http requests contents",
+          "items": {
+            "type": "string"
+          }
+        },
+        "omitNulls": {
+          "type": "boolean",
+          "default": false
+        },
+        "compression": {
+          "type": "string",
+          "enum": [
+            "none",
+            "gzip"
+          ],
+          "default": "none"
+        },
+        "contentType": {
+          "type": "string"
+        },
+        "parts": {
+          "type": "array",
           "items": {
             "type": "object",
             "properties": {
-              "endpoint": {
-                "type": "string",
-                "title": "Request Endpoint",
-                "description": ""
-              },
-              "method": {
-                "type": "string",
-                "title": "Request Method",
-                "enum": ["GET", "POST"]
-              },
-              "params": {
-                "type": "object",
-                "title": "Request Params",
-                "description": "",
-                "additionalProperties": {
-                  "type": ["string","number"]
-                }
-              },
-              "headers": {
-                "type": "object",
-                "title": "Request Headers",
-                "additionalProperties": {
-                  "type": "string"
-                }
-              },
-              "body": {
-                "type": "string",
-                "title": "Request Body"
-              },
-              "format": {
-                "type": "string",
-                "title": "Response Format",
-                "enum": ["json", "text", "bytes"]
-              },
-              "loop": {
-                "type": "object",
-                "title": "Request Loop",
-                "properties": {
-                  "condition": {
-                    "type": "array",
-                    "title": "Loop condition",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "key": {
-                          "type": "string"
-                        },
-                        "op": {
-                          "type": "string",
-                          "enum": ["=","!=",">",">=","<","<="]
-                        },
-                        "value": {
-                          "type": ["string", "number"]
-                        }
-                      },
-                      "required": ["key", "op", "value"]
-                    }
-                  },
-                  "vars": {
-                    "type": "object",
-                    "title": "Loop variables",
-                    "additionalProperties": {
-                      "type": "string"
-                    }
-                  },
-                  "feeds": {
-                    "type": "object",
-                    "title": "Loop variables feed mappings",
-                    "additionalProperties": {
-                      "type": ["string", "number"]
-                    }
-                  }
-                }
-              },
               "name": {
-                "type": "string",
-                "title": "Label"
+                "type": "string"
+              },
+              "field": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              },
+              "filename": {
+                "type": "string"
+              },
+              "contentType": {
+                "type": "string"
               }
             },
-            "required": ["endpoint", "method"]
+            "required": [
+              "name"
+            ]
+          }
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "json",
+            "text",
+            "bytes",
+            "none"
+          ],
+          "default": "json"
+        },
+        "schema": {
+          "type": "object",
+          "description": "Emit typed records with this schema"
+        },
+        "itemsPath": {
+          "type": "string",
+          "description": "JSON pointer to the array to fan out (/items, / for a top-level array)"
+        },
+        "success": {
+          "type": "object",
+          "properties": {
+            "statusCodes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "condition": {
+              "$ref": "#/$defs/filter"
+            }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "statusCodes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "default": [
+                408,
+                425,
+                429,
+                500,
+                502,
+                503,
+                504
+              ]
+            },
+            "condition": {
+              "$ref": "#/$defs/filter"
+            },
+            "respectRetryAfter": {
+              "type": "boolean",
+              "default": true
+            },
+            "maxAttempts": {
+              "type": "integer",
+              "default": 5
+            },
+            "initialBackoff": {
+              "type": "string",
+              "default": "1s"
+            },
+            "maxBackoff": {
+              "type": "string",
+              "default": "30s"
+            },
+            "totalTimeout": {
+              "type": "string",
+              "default": "5m"
+            }
+          }
+        }
+      }
+    },
+    "loop": {
+      "type": "object",
+      "description": "Pagination",
+      "properties": {
+        "vars": {
+          "type": "object",
+          "description": "Initial loop variables"
+        },
+        "next": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
           },
-          "minItems": 1
+          "description": "Templates producing the next variable values from the response"
+        },
+        "until": {
+          "$ref": "#/$defs/filter"
+        },
+        "maxIterations": {
+          "type": "integer",
+          "default": 10000
         }
       },
-      "required": ["requests"]
+      "required": [
+        "until"
+      ]
+    },
+    "rate": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string",
+          "enum": [
+            "second",
+            "minute"
+          ],
+          "default": "second"
+        }
+      },
+      "required": [
+        "count"
+      ]
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Request name (required with several requests; output tag <step>.<name>)"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "body": {
+          "$ref": "#/$defs/body"
+        },
+        "response": {
+          "$ref": "#/$defs/response"
+        },
+        "loop": {
+          "$ref": "#/$defs/loop"
+        },
+        "rate": {
+          "$ref": "#/$defs/rate"
+        },
+        "input": {
+          "type": "string",
+          "description": "Parent request name: run once per parent record"
+        },
+        "foreach": {
+          "type": "string",
+          "description": "With input: JSON pointer into the parent's raw response; run once per array element"
+        }
+      },
+      "required": [
+        "target"
+      ]
+    },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/request"
+          },
+          "minItems": 1,
+          "description": "Several requests (exclusive with the single-request form)"
+        },
+        "target": {
+          "$ref": "#/$defs/target",
+          "description": "Single-request form"
+        },
+        "body": {
+          "$ref": "#/$defs/body"
+        },
+        "response": {
+          "$ref": "#/$defs/response"
+        },
+        "loop": {
+          "$ref": "#/$defs/loop"
+        },
+        "rate": {
+          "$ref": "#/$defs/rate"
+        },
+        "auth": {
+          "$ref": "#/$defs/auth",
+          "description": "Default auth for every request"
+        },
+        "timeout": {
+          "type": "object",
+          "properties": {
+            "connect": {
+              "type": "string",
+              "default": "10s"
+            },
+            "request": {
+              "type": "string",
+              "default": "60s"
+            }
+          }
+        },
+        "http": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "enum": [
+                "HTTP_2",
+                "HTTP_1_1"
+              ],
+              "default": "HTTP_2"
+            },
+            "followRedirects": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "never",
+                "always"
+              ],
+              "default": "normal"
+            },
+            "proxy": {
+              "type": "string"
+            },
+            "allowedHosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "polling": {
+          "type": "object",
+          "properties": {
+            "interval": {
+              "type": "string",
+              "description": "Streaming: repeat root requests every interval (1m, PT30S)"
+            }
+          },
+          "required": [
+            "interval"
+          ]
+        }
+      }
     }
   }
 }

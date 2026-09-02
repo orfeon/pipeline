@@ -20,6 +20,7 @@ import org.threeten.bp.Duration;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -81,6 +82,29 @@ public class SpannerUtil {
             "  INFORMATION_SCHEMA.TABLES " +
             "WHERE " +
             "  TABLE_TYPE != 'VIEW' ";
+
+    private static final String EXTRACT_ALL_BASE_TABLE_SCHEMA_QUERY = """
+            SELECT
+              C.TABLE_SCHEMA,
+              C.TABLE_NAME,
+              ARRAY_AGG(STRUCT(C.COLUMN_NAME, C.ORDINAL_POSITION, C.SPANNER_TYPE, C.IS_NULLABLE)) AS FIELDS
+            FROM
+              INFORMATION_SCHEMA.COLUMNS C
+            JOIN
+              INFORMATION_SCHEMA.TABLES T
+            ON
+              C.TABLE_CATALOG = T.TABLE_CATALOG
+              AND C.TABLE_SCHEMA = T.TABLE_SCHEMA
+              AND C.TABLE_NAME = T.TABLE_NAME
+            WHERE
+              T.TABLE_TYPE = 'BASE TABLE'
+              AND C.TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA','SPANNER_SYS','PG_CATALOG')
+              AND NOT STARTS_WITH(C.TABLE_NAME, 'CDC_Partitions_Metadata_')
+            GROUP BY
+              C.TABLE_SCHEMA, C.TABLE_NAME
+            ORDER BY
+              C.TABLE_SCHEMA, C.TABLE_NAME
+            """;
 
 
     /**
@@ -326,6 +350,54 @@ public class SpannerUtil {
         }
     }
 
+    /** All base table names in the database plus struct types for the tables the filter accepted. */
+    public record BaseTables(List<String> allTables, Map<String, Type> matchedTypes) {}
+
+    /**
+     * Lists all base tables (excluding views and system tables), converting struct types only for
+     * tables accepted by {@code tableFilter} — a filtered-out table with a column type the
+     * pipeline does not support must not fail the launch.
+     * Table keys are schema-qualified except for the default schema ({@code sch1.Users} / {@code Users});
+     * the returned map preserves TABLE_SCHEMA, TABLE_NAME order. GoogleSQL dialect databases only.
+     */
+    public static BaseTables getBaseTableTypesFromDatabase(final String projectId,
+                                                           final String instanceId,
+                                                           final String databaseId,
+                                                           final boolean emulator,
+                                                           final Predicate<String> tableFilter) {
+
+        final DatabaseId database = DatabaseId.of(projectId, instanceId, databaseId);
+        try(final Spanner spanner = connectSpanner(projectId, 1, 1, 1, false, emulator)) {
+            final DatabaseClient client = spanner.getDatabaseClient(database);
+            if(!Dialect.GOOGLE_STANDARD_SQL.equals(client.getDialect())) {
+                throw new IllegalArgumentException(
+                        "listing all tables is currently supported only for GoogleSQL dialect databases: " + database);
+            }
+            try(final ReadOnlyTransaction transaction = client.singleUseReadOnlyTransaction();
+                final ResultSet resultSet = transaction.executeQuery(Statement.of(EXTRACT_ALL_BASE_TABLE_SCHEMA_QUERY))) {
+
+                final List<String> allTables = new ArrayList<>();
+                final Map<String, Type> types = new LinkedHashMap<>();
+                while(resultSet.next()) {
+                    final Struct struct = resultSet.getCurrentRowAsStruct();
+                    final String tableSchema = struct.getString("TABLE_SCHEMA");
+                    final String tableName = struct.getString("TABLE_NAME");
+                    final String table = tableSchema.isEmpty() ? tableName : tableSchema + "." + tableName;
+                    allTables.add(table);
+                    if(!tableFilter.test(table)) {
+                        continue;
+                    }
+                    final List<Struct> fields = struct.getStructList("FIELDS")
+                            .stream()
+                            .sorted(Comparator.comparingLong(s -> s.getLong("ORDINAL_POSITION")))
+                            .toList();
+                    types.put(table, convertTypeFromInformationSchema(fields, null));
+                }
+                return new BaseTables(allTables, types);
+            }
+        }
+    }
+
     public static Map<String, org.apache.avro.Schema> getAvroSchemasFromDatabase(
             final String projectId,
             final String instanceId,
@@ -487,10 +559,15 @@ public class SpannerUtil {
                 LOG.info("skipField: " + struct.getString("COLUMN_NAME"));
                 continue;
             }
-            builder.addField(Schema.Field.of(
+            Schema.Field field = Schema.Field.of(
                     struct.getString("COLUMN_NAME"),
                     convertFieldType(struct.getString("SPANNER_TYPE")))
-                    .withNullable("YES".equals(struct.getString("IS_NULLABLE"))));
+                    .withNullable("YES".equals(struct.getString("IS_NULLABLE")));
+            final String spannerType = struct.getString("SPANNER_TYPE").trim().toUpperCase();
+            if("UUID".equals(spannerType) || "ARRAY<UUID>".equals(spannerType)) {
+                field = field.withOptions(RowSchemaUtil.createSpannerTypeOptions("UUID"));
+            }
+            builder.addField(field);
         }
         return builder.build();
     }
@@ -703,6 +780,9 @@ public class SpannerUtil {
             case BOOLEAN:
                 return "BOOL";
             case STRING: {
+                if(RowSchemaUtil.hasSpannerType(fieldOptions, "UUID")) {
+                    return "UUID";
+                }
                 if(fieldOptions.hasOption("sqlType")) {
                     final String sqlType = fieldOptions.getValue("sqlType");
                     switch (sqlType.toUpperCase()) {
@@ -755,6 +835,9 @@ public class SpannerUtil {
                 return "BOOL";
             case ENUM:
             case STRING: {
+                if(LogicalTypes.uuid().equals(fieldSchema.getLogicalType())) {
+                    return "UUID";
+                }
                 if(AvroSchemaUtil.isSqlTypeJson(fieldSchema)) {
                     return "JSON";
                 }
@@ -808,6 +891,8 @@ public class SpannerUtil {
         switch (type) {
             case "INT64":
                 return Schema.FieldType.INT64;
+            case "FLOAT32":
+                return Schema.FieldType.FLOAT;
             case "FLOAT64":
                 return Schema.FieldType.DOUBLE;
             case "NUMERIC":
@@ -815,6 +900,7 @@ public class SpannerUtil {
                 return Schema.FieldType.DECIMAL;
             case "BOOL":
                 return Schema.FieldType.BOOLEAN;
+            case "UUID":
             case "JSON":
                 return Schema.FieldType.STRING;
             case "DATE":
@@ -841,6 +927,8 @@ public class SpannerUtil {
         switch (type) {
             case "INT64":
                 return nullable ? AvroSchemaUtil.NULLABLE_LONG : AvroSchemaUtil.REQUIRED_LONG;
+            case "FLOAT32":
+                return nullable ? AvroSchemaUtil.NULLABLE_FLOAT : AvroSchemaUtil.REQUIRED_FLOAT;
             case "FLOAT64":
                 return nullable ? AvroSchemaUtil.NULLABLE_DOUBLE : AvroSchemaUtil.REQUIRED_DOUBLE;
             case "NUMERIC":
@@ -850,6 +938,8 @@ public class SpannerUtil {
                 return nullable ? AvroSchemaUtil.NULLABLE_BOOLEAN : AvroSchemaUtil.REQUIRED_BOOLEAN;
             case "JSON":
                 return nullable ? AvroSchemaUtil.NULLABLE_JSON : AvroSchemaUtil.REQUIRED_JSON;
+            case "UUID":
+                return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_UUID_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_UUID_TYPE;
             case "DATE":
                 return nullable ? AvroSchemaUtil.NULLABLE_LOGICAL_DATE_TYPE : AvroSchemaUtil.REQUIRED_LOGICAL_DATE_TYPE;
             case "TIMESTAMP":
@@ -876,6 +966,8 @@ public class SpannerUtil {
         switch (type) {
             case "INT64":
                 return Type.int64();
+            case "FLOAT32":
+                return Type.float32();
             case "FLOAT64":
                 return Type.float64();
             case "NUMERIC":
@@ -886,6 +978,8 @@ public class SpannerUtil {
                 return Type.bool();
             case "JSON":
                 return Type.json();
+            case "UUID":
+                return Type.uuid();
             case "DATE":
                 return Type.date();
             case "TIMESTAMP":

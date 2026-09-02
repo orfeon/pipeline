@@ -20,17 +20,7 @@ import com.google.common.io.ByteStreams;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.util.domain.file.JsonUtil;
-import org.apache.avro.Schema;
-import org.apache.avro.file.DataFileStream;
-import org.apache.avro.generic.GenericDatumReader;
-import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.io.DatumReader;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
-import org.apache.parquet.avro.AvroSchemaConverter;
-import org.apache.parquet.hadoop.ParquetFileReader;
-import org.apache.parquet.io.DelegatingSeekableInputStream;
-import org.apache.parquet.io.InputFile;
-import org.apache.parquet.io.SeekableInputStream;
 
 import java.io.*;
 import java.net.URI;
@@ -200,22 +190,29 @@ public class StorageUtil {
             prefix = object;
         }
         try {
-            Storage.Objects.List list = storage()
-                    .objects()
-                    .list(bucket)
-                    .setPrefix(prefix);
-            if(matchGlob != null) {
-                list = list.setMatchGlob(matchGlob);
-            }
-            final List<StorageObject> objects = list
-                    .execute()
-                    .getItems();
-            if(objects == null) {
-                return new ArrayList<>();
-            }
+            final Storage storage = storage();
+            final List<StorageObject> objects = new ArrayList<>();
+            String pageToken = null;
+            do {
+                Storage.Objects.List list = storage
+                        .objects()
+                        .list(bucket)
+                        .setPrefix(prefix);
+                if(matchGlob != null) {
+                    list = list.setMatchGlob(matchGlob);
+                }
+                if(pageToken != null) {
+                    list = list.setPageToken(pageToken);
+                }
+                final com.google.api.services.storage.model.Objects response = list.execute();
+                if(response.getItems() != null) {
+                    objects.addAll(response.getItems());
+                }
+                pageToken = response.getNextPageToken();
+            } while (pageToken != null);
             return objects;
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new RuntimeException("Failed to list files in gs://" + bucket + "/" + prefix, e);
         }
     }
 
@@ -326,75 +323,6 @@ public class StorageUtil {
         return sb.toString();
     }
 
-    public static Schema getAvroSchema(final String gcsPath) {
-        final String[] paths = parseGcsPath(gcsPath);
-        return getAvroSchema(paths[0], paths[1]);
-    }
-
-    public static Schema getAvroSchema(final StorageObject object) {
-        return getAvroSchema(object.getBucket(), object.getName());
-    }
-
-    public static Schema getAvroSchema(final String bucket, final String object) {
-        final DatumReader<GenericRecord> datumReader = new GenericDatumReader<>();
-        try(final InputStream is = readStream(bucket, object);
-            final DataFileStream<GenericRecord> dataFileReader = new DataFileStream<>(is, datumReader)) {
-            return dataFileReader.getSchema();
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    public static Schema getParquetSchema(final String gcsPath) {
-        final String[] paths = parseGcsPath(gcsPath);
-        return getParquetSchema(paths[0], paths[1]);
-    }
-
-    public static Schema getParquetSchema(final StorageObject object) {
-        return getParquetSchema(object.getBucket(), object.getName());
-    }
-
-    public static Schema getParquetSchema(final String bucket, final String object) {
-        InputFile inputFile = new InputFile() {
-            @Override
-            public long getLength() throws IOException {
-                return 0;
-            }
-
-            @Override
-            public SeekableInputStream newStream() throws IOException {
-                return null;
-            }
-        };
-
-        // TODO
-        /*
-        try {
-            final InputStream is = storage()
-                    .objects()
-                    .get(bucket, object)
-                    .executeMediaAsInputStream();
-
-            com.google.cloud.storage.Storage storage = StorageOptions.newBuilder().build().getService();
-            storage.reader()
-
-
-            final ParquetMetadata metadata = ParquetFileReader.readFooter(inputFile, ParquetReadOptions.builder().build(), is);
-            MessageType messageType = metadata.getFileMetaData().getSchema();
-            return new AvroSchemaConverter().convert(messageType);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed", e);
-        }
-
-         */
-
-        try(final ParquetFileReader f = ParquetFileReader.open(new ParquetStream(readBytes(storage(), bucket, object)))) {
-            return new AvroSchemaConverter().convert(f.getFooter().getFileMetaData().getSchema());
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     public static InputStream readStream(final Storage storage, final String gcsPath) {
         final String[] paths = parseGcsPath(gcsPath);
         try {
@@ -421,14 +349,6 @@ public class StorageUtil {
         }
     }
 
-    private static InputStream readStream(final String bucket, final String object) {
-        try {
-            return storage().objects().get(bucket, object).executeMediaAsInputStream();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     public static String[] parseGcsPath(String gcsPath) {
         if(gcsPath == null) {
             throw new IllegalArgumentException("gcsPath must not be null");
@@ -436,7 +356,7 @@ public class StorageUtil {
         if(!gcsPath.startsWith("gs://")) {
             throw new IllegalArgumentException("gcsPath must start with gs://");
         }
-        final String[] paths = gcsPath.replaceAll("gs://", "").split("/", 2);
+        final String[] paths = gcsPath.substring("gs://".length()).split("/", 2);
         if(paths.length != 2) {
             throw new IllegalArgumentException("Illegal gcsPath: " + gcsPath);
         }
@@ -450,7 +370,7 @@ public class StorageUtil {
         if(!gcsPath.startsWith("gs://")) {
             throw new IllegalArgumentException("gcsPath must start with gs://");
         }
-        final String[] paths = gcsPath.replaceAll("gs://", "").split("/");
+        final String[] paths = gcsPath.substring("gs://".length()).split("/");
         if(paths.length < 2) {
             throw new IllegalArgumentException("Illegal gcsPath: " + gcsPath);
         }
@@ -464,7 +384,7 @@ public class StorageUtil {
         if(!gcsPath.startsWith("gs://")) {
             throw new IllegalArgumentException("gcsPath must start with gs://");
         }
-        final String[] paths = gcsPath.replaceAll("gs://", "").split("/");
+        final String[] paths = gcsPath.substring("gs://".length()).split("/");
         if(paths.length < 2) {
             throw new IllegalArgumentException("Illegal gcsPath: " + gcsPath);
         }
@@ -510,50 +430,6 @@ public class StorageUtil {
             }
         } catch (final IOException | InterruptedException e) {
             throw new RuntimeException(e);
-        }
-    }
-
-    public static class ParquetStream implements InputFile {
-        private final byte[] data;
-
-        public static class SeekableByteArrayInputStream extends ByteArrayInputStream {
-
-            public SeekableByteArrayInputStream(byte[] buf) {
-                super(buf);
-            }
-
-            public void setPos(int pos) {
-                this.pos = pos;
-            }
-
-            public int getPos() {
-                return this.pos;
-            }
-        }
-
-        public ParquetStream(final byte[] data) {
-            this.data = data;
-        }
-
-        @Override
-        public long getLength() {
-            return this.data.length;
-        }
-
-        @Override
-        public SeekableInputStream newStream() {
-            return new DelegatingSeekableInputStream(new SeekableByteArrayInputStream(this.data)) {
-
-                @Override
-                public void seek(long newPos) {
-                    ((SeekableByteArrayInputStream) this.getStream()).setPos(Long.valueOf(newPos).intValue());
-                }
-
-                @Override
-                public long getPos() {
-                    return Integer.valueOf(((SeekableByteArrayInputStream) this.getStream()).getPos()).longValue();
-                }
-            };
         }
     }
 

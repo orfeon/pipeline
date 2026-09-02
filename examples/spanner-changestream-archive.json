@@ -1,0 +1,28 @@
+{
+  "sources": [
+    {
+      "name": "changeStream",
+      "module": "spanner",
+      "parameters": {
+        "mode": "changeDataCapture",
+        "projectId": "myproject",
+        "instanceId": "myinstance",
+        "databaseId": "mydatabase",
+        "changeStream": {
+          "changeStreamName": "TEST_STREAM"
+        }
+      }
+    }
+  ],
+  "sinks": [
+    {
+      "name": "archive",
+      "module": "storage",
+      "inputs": ["changeStream"],
+      "parameters": {
+        "output": "gs://mybucket/cdc/spanner/",
+        "format": "avro"
+      }
+    }
+  ]
+}

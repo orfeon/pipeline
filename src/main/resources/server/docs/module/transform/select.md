@@ -3,7 +3,7 @@ type: Transform Module
 title: Select Transform Module
 description: Filters rows and transforms field values. Supports 27 select functions (pass, cast, rename, constant, replace, expression, text, concat, nullif, uuid, hash, event_timestamp, current_timestamp, struct, json, json_path, http, scrape, generate, bytes_encode, bytes_decode, base64_encode, base64_decode, reshape, tokenize_encode, tokenize_decode, lag) with implicit function detection, FreeMarker templates, mathematical expressions, nested structs, and stateful windowed operations. Works in both batch and streaming modes.
 tags: [transform, select, filter, batch, streaming, field, projection]
-timestamp: 2026-06-23T00:00:00Z
+timestamp: 2026-09-01T00:00:00Z
 ---
 
 # Select Transform Module
@@ -12,10 +12,10 @@ Transform Module for filtering rows by specified filter conditions and transform
 
 Supports:
 
-- **Row filtering** - Filter records using [Filter](../common/filter.md) conditions.
+- **Row filtering** - Filter records using [Filter](../common/filter.md) conditions, on the input fields (`filter`) or on the computed output fields (`outputFilter`).
 - **Field projection** - Select, rename, and reorder fields.
 - **Type casting** - Convert field values to different types.
-- **Computed fields** - Create new fields using mathematical expressions (exp4j) or FreeMarker templates.
+- **Computed fields** - Create new fields using mathematical expressions (Lucene expressions) or FreeMarker templates.
 - **Nested structures** - Build nested elements and JSON objects.
 - **Stateful operations** - Access previous row values (lag) and compute windowed aggregations using `groupFields`.
 - **Array flattening** - Unnest array fields into multiple records.
@@ -34,13 +34,14 @@ Supports:
 
 ## Select transform module parameters
 
-At least one of `filter` or `select` is required.
+At least one of `filter`, `select` or `outputFilter` is required.
 
 | parameter    | optional           | type                                   | description                                                                                                                                                                                                                   |
 |--------------|--------------------|----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| filter       | selective required | [Filter](../common/filter.md)          | Filter condition for rows. Records that do not match are discarded. At least one of `filter` or `select` is required.                                                                                                         |
-| select       | selective required | Array<[SelectField](#select-fields)\>  | List of field definitions for projecting, renaming, transforming, or computing output fields. At least one of `filter` or `select` is required. When specified, only the defined fields are included in the output.             |
+| filter       | selective required | [Filter](../common/filter.md)          | Filter condition for rows, evaluated on the **input** fields before `select`. Records that do not match are discarded.                                                                                                         |
+| select       | selective required | Array<[SelectField](#select-fields)\>  | List of field definitions for projecting, renaming, transforming, or computing output fields. When specified, only the defined fields are included in the output.             |
 | flattenField | optional           | String                                 | Name of an array field to flatten (unnest). Each array element produces a separate output record. Applied after `select`.                                                                                                     |
+| outputFilter | selective required | [Filter](../common/filter.md)          | Filter condition for rows, evaluated on the **output** fields after `select` and `flattenField` — use it to filter on computed fields (the `filter` parameter only sees input fields). Records that do not match are discarded (not treated as failures). Field names are validated against the output schema at assembly time (also for the SQL-like text form), and an empty condition is rejected. Note the [aggregation](aggregation.md) module's `filter` applies to aggregation results but **before** that module's own `select`. |
 | groupFields  | optional           | Array<String\>                         | Field names for grouping. Required when using stateful select functions (e.g. `lag`, windowed aggregations). Records are grouped by these fields and stateful functions operate within each group independently.                |
 
 ## Processing flow
@@ -48,6 +49,7 @@ At least one of `filter` or `select` is required.
 1. **Filter** - If `filter` is specified, records not matching the condition are discarded.
 2. **Select** - If `select` is specified, each select field function is applied in order. Output fields from earlier functions can be referenced by later functions.
 3. **Flatten** - If `flattenField` is specified, the named array field is unnested into multiple records.
+4. **Output filter** - If `outputFilter` is specified, output records not matching the condition are discarded. Stateful functions still observe the record (the state is updated before the output filter applies).
 
 When `groupFields` is specified and select functions include stateful functions, records are grouped by key and processed with per-key state (ordered by event time in batch mode).
 
@@ -120,6 +122,10 @@ Casts a field value to a different type.
   type: string
 ```
 
+UUID values can be cast to `bytes` using their standard 16-byte representation,
+and 16-byte fields can be cast back to `uuid`. Casting a byte sequence whose
+length is not 16 to `uuid` produces an error.
+
 ### constant
 
 Creates a field with a constant value.
@@ -159,7 +165,7 @@ Maps input values to replacement values using a mapping table.
 
 ### expression
 
-Evaluates a mathematical expression using [exp4j](https://www.objecthunter.net/exp4j/) syntax. Input field names are available as variables.
+Evaluates a mathematical expression using [Lucene expressions](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) (JavaScript-like) syntax. Input field names are available as variables. All values are evaluated as double precision numbers.
 
 | parameter  | optional | type   | description                                                    |
 |------------|----------|--------|----------------------------------------------------------------|
@@ -171,7 +177,22 @@ Evaluates a mathematical expression using [exp4j](https://www.objecthunter.net/e
   expression: "price * quantity * (1 + tax_rate)"
 ```
 
-Supported operators and functions: `+`, `-`, `*`, `/`, `%`, `^`, `abs()`, `ceil()`, `floor()`, `sqrt()`, `log()`, `log2()`, `log10()`, `sin()`, `cos()`, `tan()`, `min()`, `max()`, etc.
+Supported syntax:
+
+- Arithmetic operators: `+`, `-`, `*`, `/`, `%`
+- Comparison operators: `<`, `<=`, `==`, `!=`, `>=`, `>` (result is `1` for true, `0` for false)
+- Boolean operators: `&&`, `||`, `!` (non-zero is true)
+- Ternary operator: `condition ? valueIfTrue : valueIfFalse`
+- Math functions: `abs()`, `ceil()`, `floor()`, `sqrt()`, `cbrt()`, `pow(base, exp)`, `exp()`,
+  `log()` (natural), `log2()`, `log10()`, `logn(base, x)`, `min()`, `max()`, `signum()`,
+  `sin()`, `cos()`, `tan()`, `asin()`, `acos()`, `atan()`, `atan2()`, `sinh()`, `cosh()`, `tanh()`
+- Conditional functions: `if(condition, valueIfTrue, valueIfFalse)`,
+  `switchN(cond1, value1, ..., condN, valueN)` for N = 3..8 (e.g. `switch3(...)`), returning the value of the first true condition (or `0`)
+- Timestamp functions: `timestamp_to_date(epochMicros, timezoneHours)`,
+  `timestamp_diff_millisecond(a, b)`, `timestamp_diff_second(a, b)`, `timestamp_diff_minute(a, b)`, `timestamp_diff_hour(a, b)`, `timestamp_diff_day(a, b)` (arguments are epoch microseconds)
+- Constants: `pi`, `e`
+
+Note: `^` is bitwise XOR, not exponentiation. Use `pow(base, exp)` for powers.
 
 ### text
 
@@ -368,26 +389,30 @@ Extracts values from a JSON string field using [JSONPath](https://goessner.net/a
 
 ### http
 
-Sends an HTTP request per record and returns the response. Supports FreeMarker templates for dynamic endpoints and bodies.
+Calls an HTTP endpoint once per record and returns the response as the field value. Uses the same `target` / `body` / `response` blocks as the [http sink](../sink/http.md) and [http source](../source/http.md): authentication providers with token caching, declarative success / retry classification, request templates over the record's fields.
 
-| parameter | optional | type                | description                                                        |
-|-----------|----------|---------------------|--------------------------------------------------------------------|
-| endpoint  | required | String              | URL endpoint. Supports FreeMarker template expressions.            |
-| method    | optional | String              | HTTP method. Values: `get`, `post`, `put`, `delete`. Default: `get`. |
-| body      | optional | String              | Request body. Supports FreeMarker template expressions.            |
-| headers   | optional | Map<String,String\> | HTTP request headers.                                              |
-| type      | optional | String              | Response type. Values: `string`, `bytes`. Default: `string`.       |
+| parameter | optional | type | description |
+|-----------|----------|------|-------------|
+| target    | required | [Target](../sink/http.md#target-parameters) | `url` (template on record fields), `method` (default `GET`), `params`, `headers`, `auth`. |
+| body      | optional | [Body](../sink/http.md#body-parameters) | `json` / `form` (of the record fields, optionally restricted with `fields`), `template`, `multipart`, … Default: no body. |
+| response  | optional | [Response](../sink/http.md#response-parameters) | `format` (`text` default, `json`, `bytes`), `schema` (typed struct output), `success`, `retry`. |
+| timeout   | optional | [Timeout](../sink/http.md#timeout-parameters) | Connect / request timeouts. |
+| http      | optional | [Http](../sink/http.md#http-parameters) | Client options; `allowedHosts` is required when `auth` is set and the url host is a template. |
+
+Output type: STRING (`text` / `json` body text), BYTES (`format: bytes`), or a STRUCT of `response.schema`. A `404` response yields `null`; other failures (after retries) fail the record. For keyed enrichment of many records prefer the [query](query.md) transform's `rest` lookup source (batching per distinct key, LEFT JOIN semantics, caching).
 
 ```yaml
-- name: api_response
+- name: profile
   func: http
-  endpoint: "https://api.example.com/users/${user_id}"
-  method: get
-  headers:
-    Authorization: "Bearer ${token}"
+  target:
+    url: "https://api.example.com/users/${user_id}"
+    auth: { type: gcpOidc }
+  response:
+    schema:
+      fields:
+        - { name: name, type: string }
+        - { name: plan, type: string }
 ```
-
-Output type: STRING or BYTES.
 
 ### scrape
 
@@ -708,6 +733,7 @@ The following type names can be used in the `type` parameter:
 |-------------------|----------------------------|
 | `bool`, `boolean` | Boolean                    |
 | `string`          | String                     |
+| `uuid`            | UUID                       |
 | `bytes`           | Byte array                 |
 | `int32`, `integer`| 32-bit integer             |
 | `int64`, `long`   | 64-bit integer             |
@@ -1156,4 +1182,40 @@ transforms:
             key: status
             op: "="
             value: "cancelled"
+```
+
+### Example 18: Output filter on computed fields
+
+Extract fields from a path with FreeMarker templates, then keep only the records whose
+computed fields match — the `filter` parameter only sees input fields, so conditions on
+computed fields go in `outputFilter`.
+
+```yaml
+transforms:
+  - name: targets
+    module: select
+    inputs:
+      - files
+    parameters:
+      filter:                      # input filter: validate the raw path structure
+        - key: path
+          op: match
+          value: "^datasets/[^/]+/[^/]+/.+$"
+      select:
+        - name: table
+          text: '${path?split("/")[1]}'
+        - name: frequency
+          text: '${path?split("/")[2]}'
+      outputFilter:                # output filter: conditions on the computed fields
+        and:
+          - key: frequency
+            op: in
+            value: [daily, weekly, monthly]
+          - or:
+              - key: table
+                op: match
+                value: "^dim_.*"
+              - key: table
+                op: in
+                value: [events, users]
 ```

@@ -1,43 +1,46 @@
 package com.mercari.solution.server.mcp.tool;
 
-import com.mercari.solution.server.dataflow.DataflowJobReader;
+import com.mercari.solution.server.job.JobReader;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.ServletContext;
 
-
+/** Deduplicated error picture of a job, whatever the runner. */
 @Tool.Module(
     name = "list-job-errors",
-    title = "List Dataflow Job Errors",
+    openWorld = true,
+    title = "List Job Errors",
     description = """
-        Collect the error information of a Dataflow job: job status, error job messages from the
-        Dataflow service, and deduplicated worker error logs (including exception stack traces)
-        from Cloud Logging.
-        Parameters: 'jobIdOrName' (required), 'project' (optional), 'region' (optional).
-        Use this when diagnosing why a job failed. If the result contains Java stack traces,
-        pass them to tool: 'resolve-stack-trace' to see the failing source code.
+        Collect the error information of a launched job: for a Dataflow job (id or exact name) the job
+        status, the error job messages from the Dataflow service and the deduplicated worker error logs
+        (with exception stack traces) from Cloud Logging; for a Cloud Run Job execution (execution name,
+        runner 'direct' / 'prism') the execution status / conditions and its deduplicated error logs.
+        Use this first when diagnosing why a job failed. If the result contains Java stack traces, pass
+        them to resolve-stack-trace to see the failing source code; use get-job-logs for surrounding context.
         """,
     inputSchema = """
         {
           "type": "object",
           "properties": {
-            "jobIdOrName": {
+            "job": {
               "type": "string",
-              "title": "Job Id or Name",
-              "description": "Dataflow job id or exact job name."
+              "description": "Dataflow job id / exact job name, or a Cloud Run execution name (projects/.../jobs/.../executions/...)."
+            },
+            "runner": {
+              "type": "string",
+              "enum": ["dataflow", "direct", "prism"],
+              "description": "Force the runner (default: inferred from the job reference)."
             },
             "project": {
               "type": "string",
-              "title": "Project",
               "description": "GCP project id. Defaults to the server's configured project."
             },
             "region": {
               "type": "string",
-              "title": "Region",
-              "description": "Dataflow region. Defaults to the server's configured region."
+              "description": "Region. Defaults to the server's configured region."
             }
           },
-          "required": ["jobIdOrName"]
+          "required": ["job"]
         }
         """,
     outputSchema = """
@@ -49,26 +52,24 @@ import jakarta.servlet.ServletContext;
 public class ListJobErrorsTool implements Tool {
 
     @Override
-    public void init(ServletContext servletContext) {
+    public void init(final ServletContext servletContext) {
     }
 
     @Override
     public McpSchema.CallToolResult sync(
             final McpSyncServerExchange exchange,
             final McpSchema.CallToolRequest request) {
-
-        final Object jobIdOrName = request.arguments().get("jobIdOrName");
-        if (jobIdOrName == null) {
-            return McpSchema.CallToolResult.builder()
-                    .addTextContent("list-job-errors mcp tool requires jobIdOrName parameter")
-                    .isError(true)
-                    .build();
+        // 'jobIdOrName' kept as an alias of 'job' for older clients
+        final String job = GetJobTool.optionalString(request, "job") != null
+                ? GetJobTool.optionalString(request, "job") : GetJobTool.optionalString(request, "jobIdOrName");
+        if (job == null) {
+            return McpSchema.CallToolResult.builder().addTextContent("list-job-errors mcp tool requires job parameter").isError(true).build();
         }
-        final String result = DataflowJobReader.listJobErrors(
-                jobIdOrName.toString(),
-                GetDataflowJobTool.optionalString(request, "project"),
-                GetDataflowJobTool.optionalString(request, "region"));
-        return McpSchema.CallToolResult.builder().addTextContent(result).isError(false).build();
+        final String result = JobReader.listJobErrors(job,
+                GetJobTool.optionalString(request, "runner"),
+                GetJobTool.optionalString(request, "project"),
+                GetJobTool.optionalString(request, "region"));
+        return McpSchema.CallToolResult.builder().addTextContent(result).isError(result.startsWith("ERROR")).build();
     }
 
 }

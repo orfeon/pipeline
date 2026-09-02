@@ -25,25 +25,18 @@
                 <i class="bi bi-diagram-3"></i> Mercari Pipeline
             </span>
         <div class="d-flex gap-2">
-            <button id="btn-agent" class="btn btn-outline-success btn-sm" title="Chat with AI Agent">
-                <i class="bi bi-robot"></i> Agent
-            </button>
-            <div class="vr mx-1"></div>
             <button id="btn-dryrun" class="btn btn-outline-info btn-sm" title="Dry run the pipeline">
                 <i class="bi bi-check-circle"></i> Dry Run
             </button>
             <button id="btn-run" class="btn btn-outline-warning btn-sm" title="Run the pipeline locally">
                 <i class="bi bi-play-fill"></i> Run
             </button>
-            <button id="btn-launch" class="btn btn-primary btn-sm" title="Launch on Dataflow">
+            <button id="btn-launch" class="btn btn-primary btn-sm" title="Launch on Dataflow / Cloud Run / Dataproc">
                 <i class="bi bi-rocket-takeoff"></i> Launch
             </button>
             <div class="vr mx-2"></div>
-            <button id="btn-edit" class="btn btn-outline-light btn-sm" title="Edit configuration as YAML/JSON">
-                <i class="bi bi-pencil-square"></i> Edit
-            </button>
-            <button id="btn-workspace-clear" class="btn btn-outline-danger btn-sm" title="Clear the canvas and the saved workspace">
-                <i class="bi bi-trash"></i> Clear
+            <button id="btn-agent" class="btn btn-outline-success btn-sm" title="Toggle the agent pane (Ctrl+L)">
+                <i class="bi bi-robot"></i> Agent
             </button>
         </div>
     </div>
@@ -53,60 +46,155 @@
 <div class="main-container">
     <!-- Left Pane - Module Menu -->
     <aside id="left-pane" class="left-pane">
-        <!-- Settings Buttons -->
-        <div class="settings-buttons d-flex gap-2 mb-3">
-            <button id="btn-system" class="btn btn-outline-secondary btn-sm flex-fill">
-                <i class="bi bi-gear me-1"></i> System
-            </button>
-            <button id="btn-options" class="btn btn-outline-secondary btn-sm flex-fill">
-                <i class="bi bi-sliders me-1"></i> Options
-            </button>
-        </div>
-
-        <!-- Module Categories - Collapsible -->
-        <div class="module-categories mt-3">
+        <!-- Explorer, upper: module catalog (Canvas: add a node / Config: insert a snippet) -->
+        <div class="explorer-section explorer-catalog">
+        <div class="explorer-title text-muted"><i class="bi bi-grid me-1"></i> Modules</div>
+        <div class="module-categories">
             <div class="module-category">
-                <h6 class="module-category-header text-muted px-2 mb-2" data-bs-toggle="collapse" data-bs-target="#collapse-sources" role="button">
+                <h6 class="module-category-header text-muted px-2 mb-2 collapsed" aria-expanded="false" data-bs-toggle="collapse" data-bs-target="#collapse-sources" role="button">
                     <i class="bi bi-box-arrow-in-right me-1"></i> Sources
                     <i class="bi bi-chevron-down float-end collapse-icon"></i>
                 </h6>
-                <div id="collapse-sources" class="collapse show">
+                <div id="collapse-sources" class="collapse">
                     <div id="source-modules" class="module-list">
                     </div>
                 </div>
             </div>
 
             <div class="module-category mt-3">
-                <h6 class="module-category-header text-muted px-2 mb-2" data-bs-toggle="collapse" data-bs-target="#collapse-transforms" role="button">
+                <h6 class="module-category-header text-muted px-2 mb-2 collapsed" aria-expanded="false" data-bs-toggle="collapse" data-bs-target="#collapse-transforms" role="button">
                     <i class="bi bi-arrow-left-right me-1"></i> Transforms
                     <i class="bi bi-chevron-down float-end collapse-icon"></i>
                 </h6>
-                <div id="collapse-transforms" class="collapse show">
+                <div id="collapse-transforms" class="collapse">
                     <div id="transform-modules" class="module-list">
                     </div>
                 </div>
             </div>
 
             <div class="module-category mt-3">
-                <h6 class="module-category-header text-muted px-2 mb-2" data-bs-toggle="collapse" data-bs-target="#collapse-sinks" role="button">
+                <h6 class="module-category-header text-muted px-2 mb-2 collapsed" aria-expanded="false" data-bs-toggle="collapse" data-bs-target="#collapse-sinks" role="button">
                     <i class="bi bi-box-arrow-right me-1"></i> Sinks
                     <i class="bi bi-chevron-down float-end collapse-icon"></i>
                 </h6>
-                <div id="collapse-sinks" class="collapse show">
+                <div id="collapse-sinks" class="collapse">
                     <div id="sink-modules" class="module-list">
                     </div>
                 </div>
             </div>
+
+            <div class="module-category mt-3">
+                <h6 class="module-category-header text-muted px-2 mb-2 collapsed" aria-expanded="false" data-bs-toggle="collapse" data-bs-target="#collapse-actions" role="button">
+                    <i class="bi bi-lightning-charge me-1"></i> Actions
+                    <i class="bi bi-chevron-down float-end collapse-icon"></i>
+                </h6>
+                <div id="collapse-actions" class="collapse">
+                    <div id="action-modules" class="module-list">
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div>
+
+        <!-- Explorer, lower: outline of this pipeline (system / options / modules with state badges) -->
+        <div class="explorer-section explorer-outline">
+            <div class="explorer-title text-muted"><i class="bi bi-list-nested me-1"></i> Pipeline</div>
+            <div id="outline" class="outline"></div>
         </div>
     </aside>
 
     <!-- Resize Handle -->
     <div id="resize-handle" class="resize-handle"></div>
 
-    <!-- Right Pane - Pipeline Graph Editor -->
-    <main id="right-pane" class="right-pane">
-        <div id="drawflow" class="drawflow-container"></div>
+    <!-- Center Pane - Canvas | Config views of the same pipeline -->
+    <main id="center-pane" class="center-pane">
+        <div class="view-bar d-flex align-items-center">
+            <ul class="nav nav-tabs view-tabs" role="tablist">
+                <li class="nav-item">
+                    <button id="tab-canvas" class="nav-link active" type="button" data-view="canvas" role="tab">
+                        <i class="bi bi-diagram-3"></i> Canvas
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button id="tab-editor" class="nav-link" type="button" data-view="editor" role="tab">
+                        <i class="bi bi-file-earmark-code"></i> Config
+                    </button>
+                </li>
+            </ul>
+            <div class="ms-auto d-flex align-items-center gap-2 pe-2">
+                <div id="editor-toolbar" class="d-flex align-items-center gap-2 d-none">
+                    <select id="editor-format" class="form-select form-select-sm w-auto" title="Config format">
+                        <option value="yaml">YAML</option>
+                        <option value="json">JSON</option>
+                    </select>
+                </div>
+                <button type="button" class="btn btn-outline-danger btn-sm" id="btn-workspace-clear" title="Clear the config, the canvas and the saved workspace">
+                    <i class="bi bi-trash"></i> Clear
+                </button>
+            </div>
+        </div>
+        <div id="view-canvas" class="view-pane">
+            <div id="drawflow" class="drawflow-container"></div>
+        </div>
+        <div id="view-editor" class="view-pane d-none">
+            <div id="config-editor" class="config-editor"></div>
+            <div id="config-diff" class="config-editor d-none"></div>
+            <div id="editor-status" class="editor-status text-danger small d-none"></div>
+        </div>
     </main>
+
+    <!-- Resize Handle (agent pane) -->
+    <div id="agent-resize-handle" class="resize-handle"></div>
+
+    <!-- Right Pane - Agent (the pipeline's co-author; a peer of the canvas, not a modal) -->
+    <aside id="agent-pane" class="agent-pane">
+        <div class="agent-pane-header d-flex align-items-center px-2">
+            <span class="fw-semibold small"><i class="bi bi-robot me-1"></i> Agent</span>
+            <div class="ms-auto d-flex gap-1">
+                <button type="button" class="btn btn-outline-warning btn-sm d-none" id="btn-agent-undo" title="Undo the last accepted proposal">
+                    <i class="bi bi-arrow-counterclockwise"></i>
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-agent-clear" title="Clear chat history">
+                    <i class="bi bi-trash"></i>
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-agent-close" title="Hide the agent pane (Ctrl+L)">
+                    <i class="bi bi-layout-sidebar-reverse"></i>
+                </button>
+            </div>
+        </div>
+        <div id="agent-chat-messages" class="agent-chat-messages flex-grow-1"></div>
+        <!-- Pending proposal: Accept / Reject -->
+        <div id="agent-pending" class="agent-pending d-none">
+            <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-file-diff text-primary"></i>
+                <span id="agent-pending-summary" class="small flex-grow-1"></span>
+                <button type="button" class="btn btn-success btn-sm" id="btn-agent-accept" title="Apply the proposed config">
+                    <i class="bi bi-check-lg"></i> Accept
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-agent-reject" title="Discard the proposal">
+                    <i class="bi bi-x-lg"></i> Reject
+                </button>
+            </div>
+            <div id="agent-pending-modules" class="agent-pending-modules"></div>
+        </div>
+        <!-- Input area -->
+        <div class="agent-chat-input-area border-top p-2">
+            <div id="agent-context" class="agent-context small text-muted d-none">
+                <i class="bi bi-crosshair me-1"></i><span id="agent-context-name"></span>
+                <button type="button" class="btn-close btn-close-sm ms-1" id="btn-agent-context-clear" title="Drop the selection context" aria-label="Clear"></button>
+            </div>
+            <div class="position-relative">
+                <div id="agent-mention" class="agent-mention d-none"></div>
+                <div class="input-group">
+                    <textarea id="agent-chat-input" class="form-control" rows="2"
+                              placeholder="Describe your pipeline... (@module to reference one)" style="resize: none;"></textarea>
+                    <button id="btn-agent-send" class="btn btn-success" type="button" title="Send message">
+                        <i class="bi bi-send"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </aside>
 </div>
 
 <!-- Module Configuration Modal -->
@@ -196,52 +284,6 @@
     </div>
 </div>
 
-<!-- Edit Configuration Modal -->
-<div class="modal fade" id="editConfigModal" tabindex="-1" aria-labelledby="editConfigModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-xl">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="editConfigModalLabel">
-                    <i class="bi bi-pencil-square me-2"></i> Edit Pipeline Configuration
-                </h5>
-                <button type="button" class="btn btn-outline-danger btn-sm ms-auto me-2" id="btn-clear-config">
-                    <i class="bi bi-trash"></i> Clear
-                </button>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <div class="mb-3">
-                    <label for="edit-format" class="form-label">Format</label>
-                    <select id="edit-format" class="form-select form-select-sm" style="width: auto; display: inline-block;">
-                        <option value="yaml">YAML</option>
-                        <option value="json">JSON</option>
-                    </select>
-                </div>
-                <div class="mb-3">
-                    <div id="edit-content" class="monaco-container monaco-xl"></div>
-                    <div class="form-text">Edit the pipeline configuration directly. Changes will be applied to the visual editor when saved.</div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <input type="file" id="file-import" accept=".yaml,.yml,.json" style="display: none;">
-                <button type="button" class="btn btn-outline-secondary" id="btn-import-config">
-                    <i class="bi bi-upload"></i> Import
-                </button>
-                <button type="button" class="btn btn-outline-secondary" id="btn-copy-config">
-                    <i class="bi bi-clipboard"></i> Copy
-                </button>
-                <button type="button" class="btn btn-outline-secondary" id="btn-download-config">
-                    <i class="bi bi-download"></i> Download
-                </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" id="btn-apply-config">
-                    <i class="bi bi-check-lg"></i> Apply
-                </button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- Launch Configuration Modal -->
 <div class="modal fade" id="launchModal" tabindex="-1" aria-labelledby="launchModalLabel" aria-hidden="true">
     <div class="modal-dialog">
@@ -293,7 +335,7 @@
 
 <!-- System Settings Modal -->
 <div class="modal fade" id="systemModal" tabindex="-1" aria-labelledby="systemModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="systemModalLabel">
@@ -303,6 +345,9 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
+                <div id="system-snippets" class="snippet-chips mb-2">
+                    <span class="text-muted small me-1">Insert:</span>
+                </div>
                 <div id="system-yaml-editor" class="monaco-container monaco-md"></div>
             </div>
             <div class="modal-footer">
@@ -327,6 +372,9 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
+                <div id="options-snippets" class="snippet-chips mb-2">
+                    <span class="text-muted small me-1">Insert:</span>
+                </div>
                 <div id="options-yaml-editor" class="monaco-container monaco-md"></div>
             </div>
             <div class="modal-footer">
@@ -334,48 +382,6 @@
                 <button type="button" class="btn btn-primary" id="btn-apply-options">
                     <i class="bi bi-check-lg"></i> Apply
                 </button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Agent Chat Modal -->
-<div class="modal fade" id="agentModal" tabindex="-1" aria-labelledby="agentModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable" style="height: 80vh;">
-        <div class="modal-content" style="height: 80vh;">
-            <div class="modal-header py-2">
-                <h5 class="modal-title" id="agentModalLabel">
-                    <i class="bi bi-robot me-2"></i> Pipeline Builder Agent
-                </h5>
-                <div class="ms-auto me-3 d-flex gap-2">
-                    <button type="button" class="btn btn-outline-warning btn-sm d-none" id="btn-agent-undo" title="Undo the last config applied to the canvas">
-                        <i class="bi bi-arrow-counterclockwise"></i> Undo apply
-                    </button>
-                    <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-agent-clear" title="Clear chat history">
-                        <i class="bi bi-trash"></i> Clear
-                    </button>
-                </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body p-0 d-flex flex-column" style="overflow: hidden;">
-                <!-- Messages area -->
-                <div id="agent-chat-messages" class="agent-chat-messages flex-grow-1">
-                    <div class="agent-welcome text-center text-muted py-5">
-                        <i class="bi bi-robot" style="font-size: 3rem;"></i>
-                        <p class="mt-3">How can I help you build your pipeline?</p>
-                        <p class="small">Describe what data you want to process and I'll generate the configuration.</p>
-                    </div>
-                </div>
-                <!-- Input area -->
-                <div class="agent-chat-input-area border-top p-3">
-                    <div class="input-group">
-                        <textarea id="agent-chat-input" class="form-control" rows="2"
-                                  placeholder="Describe your pipeline..." style="resize: none;"></textarea>
-                        <button id="btn-agent-send" class="btn btn-success" type="button" title="Send message">
-                            <i class="bi bi-send"></i>
-                        </button>
-                    </div>
-                </div>
             </div>
         </div>
     </div>

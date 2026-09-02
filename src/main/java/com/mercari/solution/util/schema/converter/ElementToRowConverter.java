@@ -43,6 +43,11 @@ public class ElementToRowConverter {
                         .setOption("sqlType", org.apache.beam.sdk.schemas.Schema.FieldType.STRING, "JSON")
                         .build());
             }
+            if(Schema.Type.uuid.equals(field.getFieldType().getType())
+                    || (Schema.Type.array.equals(field.getFieldType().getType())
+                    && Schema.Type.uuid.equals(field.getFieldType().getArrayValueType().getType()))) {
+                optionsList.add(RowSchemaUtil.createSpannerTypeOptions("UUID"));
+            }
             if(field.getFieldType().getDefaultValue() != null) {
                 optionsList.add(RowSchemaUtil.createDefaultValueOptions(field.getFieldType().getDefaultValue()));
             }
@@ -73,7 +78,7 @@ public class ElementToRowConverter {
     public static org.apache.beam.sdk.schemas.Schema.FieldType convertFieldType(final Schema.FieldType fieldType) {
         final org.apache.beam.sdk.schemas.Schema.FieldType rowFieldType = switch (fieldType.getType()) {
             case bytes -> org.apache.beam.sdk.schemas.Schema.FieldType.BYTES;
-            case string, json -> org.apache.beam.sdk.schemas.Schema.FieldType.STRING;
+            case string, uuid, json -> org.apache.beam.sdk.schemas.Schema.FieldType.STRING;
             case int8 -> org.apache.beam.sdk.schemas.Schema.FieldType.BYTE;
             case int16 -> org.apache.beam.sdk.schemas.Schema.FieldType.INT16;
             case int32 -> org.apache.beam.sdk.schemas.Schema.FieldType.INT32;

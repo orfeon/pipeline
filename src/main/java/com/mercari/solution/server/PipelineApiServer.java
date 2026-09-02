@@ -1,6 +1,7 @@
 package com.mercari.solution.server;
 
 import com.mercari.solution.server.api.AgentService;
+import com.mercari.solution.server.api.FeatureService;
 import com.mercari.solution.server.api.LaunchService;
 import com.mercari.solution.server.api.PipelineService;
 import com.mercari.solution.server.api.SpecService;
@@ -39,11 +40,26 @@ public class PipelineApiServer extends HttpServlet {
             final HttpServletRequest request,
             final HttpServletResponse response) throws ServletException, IOException {
 
-        switch (request.getPathInfo()) {
+        // every API response is JSON text; without an explicit charset the servlet writer defaults to ISO-8859-1
+        // and non-ASCII (e.g. Japanese in feature diagnostics) is mangled
+        response.setCharacterEncoding("UTF-8");
+        if (response.getContentType() == null) {
+            response.setContentType("application/json; charset=UTF-8");
+        }
+        final String path = request.getPathInfo();
+        if (path == null || path.isBlank() || "/".equals(path)) {
+            // GET /api without a sub-path (e.g. a browser or health probe): not a route
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            response.setContentType("application/json");
+            response.getWriter().println("{\"status\":\"error\",\"error\":\"unknown api path; use /api/spec, /api/pipeline, /api/launch, /api/agent or /api/feature\"}");
+            return;
+        }
+        switch (path) {
             case "/spec" -> SpecService.serve(request, response);
             case "/pipeline" -> PipelineService.serve(request, response);
             case "/launch" -> LaunchService.serve(request, response);
             case "/agent" -> AgentService.serve(request, response);
+            case "/feature" -> FeatureService.serve(request, response);
             default -> {
                 // Handle dynamic paths like /api/spec/{type}/{name}
                 final String pathInfo = request.getPathInfo();

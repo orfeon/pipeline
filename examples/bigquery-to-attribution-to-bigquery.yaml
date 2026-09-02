@@ -1,0 +1,44 @@
+# Attribution: KPI change root cause analysis (week over week).
+# "GMV dropped versus last week — which category x region x client is responsible?"
+# Feeds two weeks of daily leaf aggregates; the timeShift reference anchors the two
+# comparison windows at the max event date, and the attribution transform localizes
+# the difference to a ranked set of dimension-value slices.
+sources:
+  - name: dailyKpi
+    module: bigquery
+    parameters:
+      query: |
+        SELECT category, region, client, TIMESTAMP(event_date) AS ts, SUM(gmv) AS gmv
+        FROM `myproject.mydataset.daily_kpi`
+        WHERE event_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY) AND CURRENT_DATE()
+        GROUP BY category, region, client, event_date
+
+transforms:
+  - name: gmvAttribution
+    module: attribution
+    inputs: [dailyKpi]
+    parameters:
+      measures:
+        - name: gmv
+      comparison:
+        reference:
+          strategy: timeShift
+          timeShift:
+            offset: P7D
+            timeField: ts
+      vocabulary:
+        dimensions:
+          - name: category
+          - name: region
+          - name: client
+      output:
+        topK: 5
+
+sinks:
+  - name: report
+    module: bigquery
+    inputs: [gmvAttribution]
+    parameters:
+      table: "myproject:mydataset.gmv_attribution"
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND

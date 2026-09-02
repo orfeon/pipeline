@@ -117,6 +117,61 @@ public class GrpcLookupSourceTest {
     }
 
     @Test
+    public void testAuthProviderMetadataAndUnauthenticatedRefresh() throws Exception {
+        // a static bearer token can't refresh; use a tiny token server: token-1 first, token-2 after
+        final java.util.concurrent.atomic.AtomicInteger issued = new java.util.concurrent.atomic.AtomicInteger();
+        final com.sun.net.httpserver.HttpServer tokenServer = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        tokenServer.createContext("/token", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            final byte[] body = ("{\"access_token\":\"token-" + issued.incrementAndGet() + "\",\"expires_in\":3600}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (java.io.OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        tokenServer.start();
+        // a dedicated gRPC server: tests run in parallel and the shared one must stay unauthenticated
+        final DynamicGrpcTestServer authServer = new DynamicGrpcTestServer();
+        final Path authDescriptorSetPath = authServer.writeDescriptorSet(Files.createTempDirectory("grpc-lookup-auth-test"));
+        try {
+            authServer.requiredToken.set("token-2");   // token-1 is rejected → the source must refresh once
+            final com.mercari.solution.util.pipeline.outbound.AuthProvider.Parameters auth =
+                    new com.mercari.solution.util.pipeline.outbound.AuthProvider.Parameters();
+            auth.type = com.mercari.solution.util.pipeline.outbound.AuthProvider.Type.oauth2;
+            auth.tokenUrl = "http://127.0.0.1:" + tokenServer.getAddress().getPort() + "/token";
+            auth.clientId = "id";
+            auth.clientSecret = "secret";
+            final Query2 query = Query2.builder()
+                    .withInput("INPUT", userInputSchema())
+                    .withSource(GrpcLookupSource.builder()
+                            .withName("grpc")
+                            .withTarget("localhost:" + authServer.port())
+                            .withPlaintext(true)
+                            .withDescriptorSetPath(authDescriptorSetPath.toString())
+                            .withAuth(auth)
+                            .withTable(usersTable())
+                            .build())
+                    .withSql("SELECT i.userId AS userId, u.name AS name FROM INPUT AS i JOIN grpc.users AS u ON u.id = i.userId")
+                    .build();
+            query.setup();
+            try {
+                final List<MElement> outputs = query.execute(List.of(userInput(1L), userInput(2L)), TIMESTAMP);
+                Assertions.assertEquals(2, outputs.size());
+                Assertions.assertEquals("alice", byUser(outputs, 1L).getAsString("name"));
+                Assertions.assertEquals(2, issued.get());
+                Assertions.assertEquals(List.of("Bearer token-1", "Bearer token-2", "Bearer token-2"), authServer.seenAuthorizations);
+            } finally {
+                query.teardown();
+            }
+        } finally {
+            authServer.shutdown();
+            tokenServer.stop(0);
+        }
+    }
+
+    @Test
     public void testRowsFromFanOutAndLeftJoin() {
         // ClassifyResponse does not echo the key: the 'text' column is prepended
         // to the derived schema and filled from the request key. One term fans
