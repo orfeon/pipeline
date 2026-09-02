@@ -418,23 +418,10 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-Xmx4096m,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
+        <!-- No baked GOOGLE_APPLICATION_CREDENTIALS: a set env var overrides the metadata-server ADC and
+             breaks the image on Cloud Run; local docker runs pass it with -e next to the gcloud mount. -->
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
       </properties>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>com.google.cloud.tools</groupId>
-            <artifactId>jib-maven-plugin</artifactId>
-            <configuration>
-              <container>
-                <environment>
-                  <GOOGLE_APPLICATION_CREDENTIALS>/mnt/gcloud/application_default_credentials.json</GOOGLE_APPLICATION_CREDENTIALS>
-                </environment>
-              </container>
-            </configuration>
-          </plugin>
-        </plugins>
-      </build>
       <dependencies>
         <dependency>
           <groupId>org.apache.beam</groupId>

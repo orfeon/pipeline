@@ -90,6 +90,7 @@ The config content is passed inline here, so only the gcloud credentials need to
 ```sh
 docker run \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
   --config="$(cat path/to/config.yaml)"
 ```
@@ -100,9 +101,14 @@ docker run \
 docker run ^
   -v C:\Users\{YourUserName}\AppData\Roaming\gcloud:/mnt/gcloud:ro ^
   -v C:\Users\{YourWorkingDirPath}\:/mnt/config:ro ^
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json ^
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct ^
   --config=/mnt/config/{MyConfig}.yaml
 ```
+
+The `-e GOOGLE_APPLICATION_CREDENTIALS=...` points ADC at the mounted gcloud credentials. It is passed
+at run time on purpose: baked into the image it would override the metadata-server credentials and
+break the same image on Cloud Run.
 
 * Note:
   * If you use BigQuery module locally, you will need to specify the `tempLocation` argument.
@@ -119,6 +125,7 @@ printed to stdout; an invalid config exits with the assembly error.
 ```sh
 docker run \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
   --dryRun=true \
   --config="$(cat path/to/config.yaml)"

@@ -114,6 +114,7 @@ mvn clean package -DskipTests -Pserver -Dimage="{region}-docker.pkg.dev/{deploy_
 docker run \
   -p "8080:8080" \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/server
 ```
 
