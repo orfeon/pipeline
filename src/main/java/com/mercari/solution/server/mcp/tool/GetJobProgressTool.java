@@ -18,7 +18,7 @@ import jakarta.servlet.ServletContext;
         when the job runs a feature transform, the feature plan's stages with their keys mapped to the
         Dataflow stages. Use it for "the job is slow / stays on one worker / seems stuck" questions;
         use list-job-errors for failures and get-job-logs for log context. For a Cloud Run Job execution
-        (runner 'direct') it returns the execution summary.
+        (runner 'direct' / 'prism') it returns the execution summary.
         """,
     inputSchema = """
         {
@@ -30,7 +30,7 @@ import jakarta.servlet.ServletContext;
             },
             "runner": {
               "type": "string",
-              "enum": ["dataflow", "direct"],
+              "enum": ["dataflow", "direct", "prism"],
               "description": "Force the runner (default: inferred from the job reference)."
             },
             "project": {

@@ -38,7 +38,7 @@ The source tools read `MERCARI_PIPELINE_SOURCES_PATH` (or `WEB-INF/sources` in t
 |---|---|---|---|
 | `run-pipeline` | `runPipeline` | `config`, `dryRun?`, `args?` | **`dryRun: true`**: assembles the whole config (module validation, schema resolution, feature plan compilation against the real input schemas) and returns every step's resolved schema (`spec.modules`) plus `featurePlans` (the feature transforms' plans with stages, columns, availability status, hot-key audit SQL, diagnostics). **`dryRun: false`**: runs the pipeline inside the server with DirectRunner and returns `debug` sink outputs — for small test data only |
 | `validate-feature` | `validateFeature` | `config` or `parameters`, `name?`, `inputSchema?`, `args?`, `format?` | a feature transform's `validate --expand` report without a full config |
-| `launch-pipeline` | `launchPipeline` | `config`, `runner` (dataflow / direct / spark), `environment?`, `parameters?`, `args?` | submits the config — Dataflow Flex Template, a pre-created Cloud Run Job, a Cloud Run Worker Pool or Dataproc Serverless — and returns the job (`id`, `name`, `project`, `location`, `state`, `consoleUrl`). Launch parameters default from the config's `options`, then the server's `MERCARI_PIPELINE_LAUNCH_*` environment |
+| `launch-pipeline` | `launchPipeline` | `config`, `runner` (dataflow / direct / prism / spark), `environment?`, `parameters?`, `args?` | submits the config — Dataflow Flex Template, a pre-created Cloud Run Job, a Cloud Run Worker Pool or Dataproc Serverless — and returns the job (`id`, `name`, `project`, `location`, `state`, `consoleUrl`). Launch parameters default from the config's `options`, then the server's `MERCARI_PIPELINE_LAUNCH_*` environment |
 
 Template arguments: the config refers to them as `${args.<name>}`; defaults come from the config's
 `args` / `system.args` block and `args` passed to the tool override them. A placeholder that is left
@@ -79,8 +79,10 @@ forces it. `project` / `region` default to the server's launch configuration.
 
 **Launch and follow a job**
 
-1. `launch-pipeline` with `runner: dataflow` (Flex Template) or `runner: direct` (a pre-created Cloud
-   Run Job — quicker to iterate on), template arguments in `args`, sizing in `parameters`
+1. `launch-pipeline` with `runner: dataflow` (Flex Template), `runner: direct` (a pre-created Cloud
+   Run Job — quicker to iterate on) or `runner: prism` (the same with the prism image — the choice for
+   subset runs of pipelines with coarse-key stages such as `feature`, which DirectRunner crawls on),
+   template arguments in `args`, sizing in `parameters`
    (`workerMachineType`, `numWorkers`, `maxNumWorkers`, `diskSizeGb`, `jobName`).
 2. `get-job` with the returned id / execution name until it finishes.
 3. If it looks slow or stays on one worker: `get-job-progress`.
@@ -178,6 +180,7 @@ export MERCARI_PIPELINE_LAUNCH_PROJECT=<project>
 export MERCARI_PIPELINE_LAUNCH_REGION=<region>
 export MERCARI_PIPELINE_LAUNCH_DATAFLOW_TEMPLATE_LOCATION=gs://<bucket>/templates/dataflow.json
 export MERCARI_PIPELINE_LAUNCH_DIRECT_JOB=<cloud run job>
+export MERCARI_PIPELINE_LAUNCH_PRISM_JOB=<cloud run job built from the prism image>   # optional
 mvn jetty:run -Pserver
 ```
 

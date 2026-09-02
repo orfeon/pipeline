@@ -20,7 +20,9 @@ import java.util.function.Supplier;
  *   <li>the config {@code options} (runner-specific block first, then the common {@code options.gcp}),</li>
  *   <li>the environment: {@code MERCARI_PIPELINE_LAUNCH_<RUNNER>_<KEY>} then {@code MERCARI_PIPELINE_LAUNCH_<KEY>}
  *       (legacy {@code MERCARI_PIPELINE_DATAFLOW_*} / {@code MERCARI_PIPELINE_TEMP_LOCATION} names are still read,
- *       with a deprecation warning),</li>
+ *       with a deprecation warning). The keys that identify <i>what</i> runs — the Cloud Run Job and the image
+ *       ({@link #RUNNER_ONLY_KEYS}) — exist only under a runner name: a job built from the direct image must never
+ *       serve a {@code prism} launch by falling back to a common variable,</li>
  *   <li>the runtime environment the server runs in: {@code GOOGLE_CLOUD_PROJECT} and the GCE metadata server
  *       (project, region, default service account).</li>
  * </ol>
@@ -40,6 +42,15 @@ public class LaunchDefaults {
     public static final String KEY_STAGING_LOCATION = "STAGING_LOCATION";
     public static final String KEY_TEMP_LOCATION = "TEMP_LOCATION";
     public static final String KEY_LABELS = "LABELS";
+    /** The pre-created Cloud Run Job a {@code cloudRunJob} launch executes (name only). */
+    public static final String KEY_JOB = "JOB";
+    /** The image a {@code cloudRunWorkerPool} launch deploys. */
+    public static final String KEY_IMAGE = "IMAGE";
+    /**
+     * Keys read only as {@code MERCARI_PIPELINE_LAUNCH_<RUNNER>_<KEY>}: the job / image decide which runner
+     * actually executes the pipeline, so a common {@code MERCARI_PIPELINE_LAUNCH_JOB} / {@code _IMAGE} is ignored.
+     */
+    public static final Set<String> RUNNER_ONLY_KEYS = Set.of(KEY_JOB, KEY_IMAGE);
 
     /**
      * Legacy env var names, keyed by "<runner>/<key>" or "<key>" (common). Read as a fallback with a warning.
@@ -118,11 +129,12 @@ public class LaunchDefaults {
     public String fromEnv(final String runner, final String key) {
         String value = env(envName(runner, key));
         if(value == null) {
-            value = env(envName(key));
-        }
-        if(value == null) {
             value = legacy(runner + "/" + key);
         }
+        if(value != null || RUNNER_ONLY_KEYS.contains(key)) {
+            return value;
+        }
+        value = env(envName(key));
         if(value == null) {
             value = legacy(key);
         }
@@ -130,6 +142,11 @@ public class LaunchDefaults {
             value = fromRuntime(key);
         }
         return value;
+    }
+
+    /** {@code true} when {@code key} is read under its runner name only (see {@link #RUNNER_ONLY_KEYS}). */
+    public static boolean isRunnerOnly(final String key) {
+        return RUNNER_ONLY_KEYS.contains(key);
     }
 
     /**
@@ -150,7 +167,7 @@ public class LaunchDefaults {
         return resolve(runner, key, explicit).orElseThrow(() -> new IllegalArgumentException(
                 "Could not resolve " + key.toLowerCase(Locale.ROOT).replace('_', ' ') + " for the " + runner
                         + " launch: specify it in the launch parameters or set the environment variable "
-                        + envName(runner, key) + " (or " + envName(key) + ")"));
+                        + envName(runner, key) + (isRunnerOnly(key) ? "" : " (or " + envName(key) + ")")));
     }
 
     /**

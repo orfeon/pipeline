@@ -17,6 +17,7 @@ options still take precedence).
 | `dataflow` | `flexTemplate` (default) | `flexTemplates.launch` with the deployed dataflow image | Flex Template spec on GCS ([deploy](README.md#deploy-cloud-dataflow-flex-template)) |
 | `direct` | `cloudRunJob` (default) | `jobs.run` on a **pre-created** Cloud Run Job built from the direct image, overriding its container args with `--config=…` / `--args.*` | the job exists ([Cloud Run Jobs](cloud-run-jobs.md#launch-from-the-pipeline-builder)) |
 | `direct` | `cloudRunWorkerPool` | creates a Cloud Run Worker Pool running the config until you delete it | direct image URI ([Worker Pools](cloud-run-worker-pools.md#launch-from-the-pipeline-builder)) |
+| `prism` | `cloudRunJob` (default) / `cloudRunWorkerPool` | the same two targets with a job / image built from the **prism** profile (Beam's portable local runner) — prefer it over `direct` for pipelines with keyed stages over coarse or global keys, such as `feature` transforms; in-memory, so subset-sized inputs | a prism job exists / prism image URI ([Cloud Run Jobs](cloud-run-jobs.md#running-with-the-prism-image), [Deploy Prism](README.md#deploy-prism-runner-for-local--cloud-run-execution)) |
 | `spark` | `dataprocServerless` (default) | Dataproc Serverless batch with the bundled jar | jar on GCS ([deploy](README.md#build-bundled-jar-for-apache-flink--apache-spark)) |
 
 ### How each value is resolved
@@ -48,7 +49,10 @@ permissions listed below for every target the clients may use.
 
 ### Launch (`MERCARI_PIPELINE_LAUNCH[_<RUNNER>]_<KEY>`)
 
-Common keys accept a runner-specific override (`_DATAFLOW_`, `_DIRECT_`, `_SPARK_`).
+Common keys accept a runner-specific override (`_DATAFLOW_`, `_DIRECT_`, `_PRISM_`, `_SPARK_`). `JOB` and
+`IMAGE` exist only under a runner name (`_DIRECT_JOB`, `_PRISM_JOB`, `_DIRECT_IMAGE`, `_PRISM_IMAGE`): a common
+`MERCARI_PIPELINE_LAUNCH_JOB` / `_IMAGE` is not read, because the job / image decides which runner executes the
+pipeline.
 
 | Variable | Meaning |
 |---|---|
@@ -64,6 +68,7 @@ Common keys accept a runner-specific override (`_DATAFLOW_`, `_DIRECT_`, `_SPARK
 | `MERCARI_PIPELINE_LAUNCH_DIRECT_TASK_TIMEOUT` | Default task timeout override for Cloud Run Job executions, seconds |
 | `MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE` | Direct image URI for worker pools |
 | `MERCARI_PIPELINE_LAUNCH_DIRECT_CPU` / `_MEMORY` / `_INSTANCES` | Worker pool sizing defaults (`4` / `6Gi` / `1`) |
+| `MERCARI_PIPELINE_LAUNCH_PRISM_JOB` / `_TASK_TIMEOUT` / `_IMAGE` / `_CPU` / `_MEMORY` / `_INSTANCES` | The same keys for `prism` launches: the Cloud Run Job built from the prism image, and the prism image / sizing for worker pools. A `prism` launch never falls back to the `_DIRECT_` job / image (nor to a common one): without `_PRISM_JOB` (or `jobName`) it fails naming the variable to set |
 | `MERCARI_PIPELINE_LAUNCH_SPARK_JARS` / `_VERSION` | Bundled jar (`gs://…`) and Dataproc Serverless runtime version (`3.0`) |
 
 Every launched Dataflow job / worker pool carries the labels `mercari-pipeline-version` and

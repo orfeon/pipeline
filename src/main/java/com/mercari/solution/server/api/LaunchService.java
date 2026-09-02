@@ -58,6 +58,8 @@ public class LaunchService {
                 new DataflowInProcessLauncher(),
                 new CloudRunJobLauncher(cloudRun, stager),
                 new CloudRunWorkerPoolLauncher(cloudRun, stager),
+                new CloudRunJobLauncher("prism", cloudRun, stager),
+                new CloudRunWorkerPoolLauncher("prism", cloudRun, stager),
                 new DataprocServerlessLauncher());
     }
 

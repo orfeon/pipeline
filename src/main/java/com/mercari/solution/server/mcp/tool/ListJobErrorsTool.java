@@ -14,7 +14,7 @@ import jakarta.servlet.ServletContext;
         Collect the error information of a launched job: for a Dataflow job (id or exact name) the job
         status, the error job messages from the Dataflow service and the deduplicated worker error logs
         (with exception stack traces) from Cloud Logging; for a Cloud Run Job execution (execution name,
-        runner 'direct') the execution status / conditions and its deduplicated error logs.
+        runner 'direct' / 'prism') the execution status / conditions and its deduplicated error logs.
         Use this first when diagnosing why a job failed. If the result contains Java stack traces, pass
         them to resolve-stack-trace to see the failing source code; use get-job-logs for surrounding context.
         """,
@@ -28,7 +28,7 @@ import jakarta.servlet.ServletContext;
             },
             "runner": {
               "type": "string",
-              "enum": ["dataflow", "direct"],
+              "enum": ["dataflow", "direct", "prism"],
               "description": "Force the runner (default: inferred from the job reference)."
             },
             "project": {

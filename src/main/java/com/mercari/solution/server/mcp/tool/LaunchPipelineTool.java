@@ -10,7 +10,7 @@ import jakarta.servlet.ServletContext;
 
 /**
  * MCP counterpart of {@code POST /api/launch}: submit a config to a runner / environment target
- * (Dataflow Flex Template, Cloud Run Job, Cloud Run Worker Pool, Dataproc Serverless).
+ * (Dataflow Flex Template, Cloud Run Job / Worker Pool of the direct or prism image, Dataproc Serverless).
  */
 @Tool.Module(
     name = "launch-pipeline",
@@ -20,7 +20,10 @@ import jakarta.servlet.ServletContext;
         Submit a pipeline config to an execution target and return the created job:
         runner 'dataflow' (environment 'flexTemplate', default) launches a Dataflow Flex Template job;
         runner 'direct' launches a pre-created Cloud Run Job ('cloudRunJob', default) or creates a Cloud Run
-        Worker Pool ('cloudRunWorkerPool'); runner 'spark' submits a Dataproc Serverless batch.
+        Worker Pool ('cloudRunWorkerPool') from the direct (DirectRunner) image; runner 'prism' does the same
+        with the prism image (Beam's portable local runner — prefer it over 'direct' for pipelines with keyed
+        stages over coarse or global keys, e.g. feature transforms; it runs in memory, so keep the input to
+        what the job's memory holds); runner 'spark' submits a Dataproc Serverless batch.
         Validate first (run-pipeline with dryRun=true), then launch; afterwards follow the job with
         get-job / get-job-progress / get-job-logs / list-job-errors (pass the returned job id, or the execution name for Cloud Run).
         Launch parameters not given are resolved from the config's options, then the server's
@@ -37,11 +40,11 @@ import jakarta.servlet.ServletContext;
             },
             "runner": {
               "type": "string",
-              "description": "dataflow | direct | spark"
+              "description": "dataflow | direct | prism | spark"
             },
             "environment": {
               "type": "string",
-              "description": "flexTemplate (dataflow) | cloudRunJob | cloudRunWorkerPool (direct) | dataprocServerless (spark). Defaults to the runner's default environment."
+              "description": "flexTemplate (dataflow) | cloudRunJob | cloudRunWorkerPool (direct, prism) | dataprocServerless (spark). Defaults to the runner's default environment."
             },
             "parameters": {
               "type": "object",

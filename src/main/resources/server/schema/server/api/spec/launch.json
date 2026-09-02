@@ -201,6 +201,120 @@
       ]
     },
     {
+      "$id": "https://mercari.com/server/api/spec/launch/prism",
+      "type": "object",
+      "title": "Prism",
+      "description": "Run pipeline with Beam's Prism runner (portable local runner) in a serverless container (the image built with the prism profile). Prefer it over Direct for pipelines with keyed stages over coarse or global keys (e.g. feature transforms); it executes in memory, so size the input to the container's memory",
+      "properties": {
+        "project": {
+          "type": "string",
+          "title": "Project",
+          "description": "Google Cloud project of the Cloud Run resource (default: config options.gcp.project, then the server environment)",
+          "x-launch-default": "PROJECT"
+        },
+        "region": {
+          "type": "string",
+          "title": "Region",
+          "description": "Cloud Run region (default: config options.gcp.workerRegion, then the server environment)",
+          "x-launch-default": "REGION"
+        }
+      },
+      "oneOf": [
+        {
+          "$id": "https://mercari.com/server/api/spec/launch/prism/cloudRunJob",
+          "required": [
+            "jobName"
+          ],
+          "type": "object",
+          "title": "Cloud Run Job",
+          "description": "Execute a pre-created Cloud Run Job (prism image) with this config as its container arguments. The job's image, service account, cpu and memory come from the job definition; see deploy/cloud-run-jobs.md",
+          "properties": {
+            "jobName": {
+              "type": "string",
+              "title": "Job name",
+              "description": "Name of the pre-created Cloud Run Job built from the prism image (default: MERCARI_PIPELINE_LAUNCH_PRISM_JOB)",
+              "x-launch-default": "JOB"
+            },
+            "taskTimeout": {
+              "type": "integer",
+              "title": "Task timeout (seconds)",
+              "description": "Overrides the job's task timeout for this execution (default: MERCARI_PIPELINE_LAUNCH_PRISM_TASK_TIMEOUT, then the job's value)",
+              "x-launch-default": "TASK_TIMEOUT"
+            },
+            "taskCount": {
+              "type": "integer",
+              "title": "Task count",
+              "description": "Number of tasks (each runs the same pipeline; keep 1 unless the pipeline shards itself)",
+              "default": 1
+            },
+            "env": {
+              "type": "string",
+              "title": "Extra env vars",
+              "description": "Additional container environment variables for this execution, as K=V,K=V"
+            },
+            "wait": {
+              "type": "integer",
+              "title": "Wait (seconds)",
+              "description": "Wait up to this many seconds for the execution to complete before responding (0 = return immediately)"
+            }
+          }
+        },
+        {
+          "$id": "https://mercari.com/server/api/spec/launch/prism/cloudRunWorkerPool",
+          "required": [
+            "image"
+          ],
+          "type": "object",
+          "title": "Cloud Run Worker Pool",
+          "description": "Deploy the prism image as a Cloud Run Worker Pool running this config (streaming / long-running pipelines). The pool keeps running until you delete it: gcloud run worker-pools delete <name>",
+          "properties": {
+            "name": {
+              "type": "string",
+              "title": "Worker pool name",
+              "description": "Name of the worker pool to create (default: mp-<config name>-<timestamp>)"
+            },
+            "image": {
+              "type": "string",
+              "title": "Image",
+              "description": "prism image URI (default: MERCARI_PIPELINE_LAUNCH_PRISM_IMAGE)",
+              "x-launch-default": "IMAGE"
+            },
+            "serviceAccount": {
+              "type": "string",
+              "title": "Service account",
+              "description": "Service account the pool runs as (default: the server environment's service account)",
+              "x-launch-default": "SERVICE_ACCOUNT"
+            },
+            "cpu": {
+              "type": "string",
+              "title": "CPU",
+              "description": "CPU per instance (default: 4)",
+              "x-launch-default": "CPU"
+            },
+            "memory": {
+              "type": "string",
+              "title": "Memory",
+              "description": "Memory per instance, e.g. 8Gi (default: 6Gi; the JVM heap takes 50% of it, the prism process holds the shuffle state in the rest)",
+              "x-launch-default": "MEMORY"
+            },
+            "instances": {
+              "type": "integer",
+              "title": "Instances",
+              "description": "Manual instance count. Each instance runs an independent copy of the pipeline: more than 1 only makes sense for Pub/Sub sources",
+              "default": 1,
+              "x-launch-default": "INSTANCES"
+            },
+            "replaceExisting": {
+              "type": "boolean",
+              "title": "Replace existing",
+              "description": "Deploy a new revision if a worker pool of this name already exists (otherwise the launch fails)",
+              "default": false
+            }
+          }
+        }
+      ]
+    },
+    {
       "$id": "https://mercari.com/server/api/spec/launch/spark",
       "required": [
         "jars"

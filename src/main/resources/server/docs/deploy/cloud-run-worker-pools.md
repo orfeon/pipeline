@@ -78,8 +78,8 @@ Multiple instances process the queue in parallel (one config per instance at a t
 
 ## Launch from the Pipeline Builder
 
-The Builder UI's **Launch** (runner `Direct`, environment `Cloud Run Worker Pool`) deploys the
-direct image as a new worker pool running the current config — the Pattern 1 form above, with
+The Builder UI's **Launch** (runner `Direct` or `Prism`, environment `Cloud Run Worker Pool`) deploys
+the direct (or prism) image as a new worker pool running the current config — the Pattern 1 form above, with
 `--config` pointing at the config staged to `MERCARI_PIPELINE_LAUNCH_STAGING_LOCATION` (or inlined
 as `data:…`). One launch is one pool; the name defaults to `mp-<config name>-<timestamp>` and an
 existing name is only redeployed when *Replace existing* is checked.
@@ -91,6 +91,8 @@ MERCARI_PIPELINE_LAUNCH_DIRECT_SERVICE_ACCOUNT={service_account_email}   # defau
 MERCARI_PIPELINE_LAUNCH_DIRECT_CPU=4
 MERCARI_PIPELINE_LAUNCH_DIRECT_MEMORY=6Gi
 MERCARI_PIPELINE_LAUNCH_DIRECT_INSTANCES=1
+# the same keys under _PRISM_ serve launches with runner Prism (image built with the prism profile)
+MERCARI_PIPELINE_LAUNCH_PRISM_IMAGE={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/prism:latest
 ```
 
 **The pool is not stopped by the Builder.** It keeps running — and billing — until you delete it

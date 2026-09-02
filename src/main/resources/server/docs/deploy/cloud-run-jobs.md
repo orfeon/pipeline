@@ -64,6 +64,10 @@ coarse or global keys), which DirectRunner slows down on by orders of magnitude.
   at shutdown is gRPC's channel-leak detector, not a failure.
 * A Cloud Run Job pins the image **digest** when created or updated: after pushing a new image to the
   same tag, run `gcloud run jobs update {job_name} --image=...` again to pick it up.
+* Keep the prism job separate from the direct one (e.g. `{job_name}-prism`): the Pipeline Builder /
+  MCP launch selects the job by runner (`MERCARI_PIPELINE_LAUNCH_PRISM_JOB`, see
+  [Launch from the Pipeline Builder](#launch-from-the-pipeline-builder)), and the job's image is what
+  decides which runner executes the pipeline.
 
 ## Specify the config
 
@@ -113,8 +117,8 @@ For scheduled runs, trigger the job from
 
 ## Launch from the Pipeline Builder
 
-The Builder UI's **Launch** (runner `Direct`, environment `Cloud Run Job`) executes an existing
-job like the `gcloud run jobs execute --args=...` form above: it calls `jobs.run` on the job with
+The Builder UI's **Launch** (runner `Direct` or `Prism`, environment `Cloud Run Job`) executes an
+existing job like the `gcloud run jobs execute --args=...` form above: it calls `jobs.run` on the job with
 this launch's `--config=...` / `--args.*` as container-argument overrides (plus an optional task
 timeout, task count and extra env vars). It never creates, updates or deletes the job — the
 image, service account, cpu, memory and network stay whatever you set when you created it, and
@@ -126,6 +130,8 @@ will do), then tell the server which job to run:
 
 ```sh
 MERCARI_PIPELINE_LAUNCH_DIRECT_JOB={job_name}
+# the job built from the prism image, for launches with runner Prism (optional)
+MERCARI_PIPELINE_LAUNCH_PRISM_JOB={job_name}-prism
 # project / region default to the ones the server itself runs in; override with
 MERCARI_PIPELINE_LAUNCH_PROJECT={project}
 MERCARI_PIPELINE_LAUNCH_REGION={region}
@@ -134,7 +140,9 @@ MERCARI_PIPELINE_LAUNCH_STAGING_LOCATION=gs://{bucket}/{prefix}
 ```
 
 The modal shows these as the form's defaults; a different job name, project or region can be
-typed per launch. The server's service account needs `roles/run.invoker` on the job (and the
+typed per launch. The runner chosen in the modal only selects which job (and which
+`MERCARI_PIPELINE_LAUNCH_<RUNNER>_*` defaults) the launch goes to — the job's image is what runs
+the pipeline. The server's service account needs `roles/run.invoker` on the job (and the
 job's own service account needs read access to the staging bucket if one is configured). The
 full list of variables and roles is in [server.md](server.md).
 

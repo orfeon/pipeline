@@ -13,9 +13,10 @@ import jakarta.servlet.ServletContext;
     description = """
         Get the status of a launched pipeline job. Dataflow: pass the job id (e.g.
         '2026-07-17_22_25_11-123...') or the exact job name; returns state, timing, SDK version, labels and
-        the pipeline config recovered from the job's launch parameters. Cloud Run Job (runner 'direct'):
-        pass the execution name from launch-pipeline (projects/.../jobs/.../executions/...) — or, with
-        runner 'direct' and no job, list the latest executions of the server's configured Cloud Run Job;
+        the pipeline config recovered from the job's launch parameters. Cloud Run Job (runner 'direct' or
+        'prism'): pass the execution name from launch-pipeline (projects/.../jobs/.../executions/...) — or,
+        with runner 'direct' / 'prism' and no job, list the latest executions of the Cloud Run Job the
+        server has configured for that runner;
         returns state (RUNNING | SUCCEEDED | FAILED | CANCELLED), timings, task counts, conditions,
         log and console links. The runner is inferred from the reference; set 'runner' to force it.
         """,
@@ -25,12 +26,12 @@ import jakarta.servlet.ServletContext;
           "properties": {
             "job": {
               "type": "string",
-              "description": "Dataflow job id / exact job name, or a Cloud Run execution name (projects/{project}/locations/{region}/jobs/{job}/executions/{execution}); omit with runner 'direct' to list the latest executions."
+              "description": "Dataflow job id / exact job name, or a Cloud Run execution name (projects/{project}/locations/{region}/jobs/{job}/executions/{execution}); omit with runner 'direct' / 'prism' to list the latest executions."
             },
             "runner": {
               "type": "string",
-              "enum": ["dataflow", "direct"],
-              "description": "Force the runner (default: inferred from the job reference; 'direct' = Cloud Run Job)."
+              "enum": ["dataflow", "direct", "prism"],
+              "description": "Force the runner (default: inferred from the job reference; 'direct' / 'prism' = the Cloud Run Job of that image)."
             },
             "project": {
               "type": "string",
