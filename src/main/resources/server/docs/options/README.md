@@ -9,7 +9,7 @@ The following items can be defined as options.
 | streaming | Boolean                         | Specify whether the dataflow job starts in streaming mode or not.                                          |
 | dataflow  | [Dataflow Options](dataflow.md) | Specify [Cloud Dataflow runner](https://beam.apache.org/documentation/runners/dataflow/) specific options. |
 | direct    | [Direct Options](direct.md)     | Specify [Direct runner](https://beam.apache.org/documentation/runners/direct/) specific options.           |
-| prism     | Prism Options                   | Specify [Prism runner](https://beam.apache.org/documentation/runners/prism/) specific options.             |
+| prism     | [Prism Options](prism.md)       | Specify [Prism runner](https://beam.apache.org/documentation/runners/prism/) specific options.             |
 | portable  | [Portable Options](portable.md) | Specify portable runner (job service) specific options.                                                    |
 | flink     | [Flink Options](flink.md)       | Specify [Apache Flink runner](https://beam.apache.org/documentation/runners/flink/) specific options.      |
 | spark     | [Spark Options](spark.md)       | Specify [Apache Spark runner](https://beam.apache.org/documentation/runners/spark/) specific options.      |

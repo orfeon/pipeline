@@ -71,6 +71,27 @@ Kubernetes cluster:
 | [Cloud Run Services](cloud-run-service.md) | HTTP-triggered runs (serve mode): Cloud Scheduler, Pub/Sub push, request-carried data via the `request` source |
 | [Kubernetes](kubernetes.md) | the same patterns as Job/CronJob/Deployment on GKE or any cluster |
 
+## Deploy Prism Runner (for local / Cloud Run execution)
+
+The `prism` profile builds the same self-contained image with Beam's
+[Prism runner](https://beam.apache.org/documentation/runners/prism/) — the portable successor of
+DirectRunner — as the entrypoint. It runs everywhere the direct image runs (local docker, all three
+Cloud Run forms, Kubernetes) with the same arguments.
+
+```sh
+mvn clean package -DskipTests -Pprism -Dimage={region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/prism:latest
+```
+
+Prefer it over the direct image when the pipeline has heavy keyed stages (GroupByKey over coarse or
+global keys, e.g. the `feature` transform's global encoding levels): DirectRunner's GroupByKey copies
+each key's buffered state per bundle and such stages slow down by orders of magnitude as rows grow,
+while Prism executes them at proper speed.
+
+* The image does not bundle the prism binary: the runner downloads it from the Beam GitHub release at
+  startup, so the runtime needs outbound network access (otherwise point
+  `options.prism.prismLocation` at a pre-downloaded binary — see [Prism Options](../options/prism.md)).
+* See [How to Execute Pipeline](../exec/README.md#run-pipeline-locally--on-cloud-run-prism) for how to run it.
+
 ## Build bundled jar for Apache Flink / Apache Spark
 
 The `flink` and `spark` Maven profiles skip the container build and instead produce a bundled ("fat") jar

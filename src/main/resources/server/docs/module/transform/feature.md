@@ -434,6 +434,11 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   between-key variance truncates to zero is fully shrunk to its parent (logged at run time).
 - `atRowCreation` / `event_date THH:MM` availability needs per-row filtering that is not implemented yet.
 - Rows whose key fields contain null bypass keyed evaluation (their keyed features are null).
+- DirectRunner (the `direct` image) is unsuited to keyed stages over coarse or global keys — a
+  shrinkage lattice's global level, a `share` denominator: its GroupByKey copies each key's buffered
+  state per bundle, slowing such stages by orders of magnitude as rows grow. Run those pipelines on
+  Dataflow, or locally / on Cloud Run with the `prism` image (Beam's portable local runner), which
+  executes them at proper speed.
 
 ## Example
 

@@ -1,4 +1,4 @@
-# Run Pipeline on Cloud Run Jobs (DirectRunner)
+# Run Pipeline on Cloud Run Jobs (DirectRunner / Prism)
 
 The container image built with the `direct` profile
 (see [Deploy Direct Runner](README.md#deploy-direct-runner-for-local-execution))
@@ -44,6 +44,21 @@ gcloud run jobs create {job_name} \
   (tune with the `options.direct.targetParallelism` config option).
 * `--max-retries`: the process exits non-zero when the pipeline fails, which triggers
   Cloud Run's task retry. Set it to 0 unless the pipeline is safe to re-run (e.g. idempotent sinks).
+
+## Running with the Prism image
+
+The job definition is identical with the `prism` profile image (Beam's portable local runner —
+see [Deploy Prism Runner](README.md#deploy-prism-runner-for-local--cloud-run-execution)): swap
+`--image` and keep the arguments. Prefer it when the pipeline has heavy keyed stages (GroupByKey over
+coarse or global keys), which DirectRunner slows down on by orders of magnitude.
+
+* The container downloads the prism binary from the Beam GitHub release at startup, so the job needs
+  outbound network access (or set `options.prism.prismLocation`).
+* The process waits for the pipeline result: `Pipeline finished with state: DONE` in the logs marks a
+  completed run, and a failed pipeline fails the execution. A `ManagedChannel allocation site` stack
+  at shutdown is gRPC's channel-leak detector, not a failure.
+* A Cloud Run Job pins the image **digest** when created or updated: after pushing a new image to the
+  same tag, run `gcloud run jobs update {job_name} --image=...` again to pick it up.
 
 ## Specify the config
 

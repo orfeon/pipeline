@@ -90,11 +90,12 @@ See [How to Execute Pipeline](src/main/resources/server/docs/exec/README.md) for
 |----------------------|----------------|----------------------------------------------------------------|
 | `dataflow` (default) | DataflowRunner | FlexTemplate container image                                   |
 | `direct`             | DirectRunner   | Container image for local execution, Cloud Run (Jobs / Worker Pools / Services) and Kubernetes |
+| `prism`              | PrismRunner    | Same targets as `direct` with Beam's portable local runner — prefer it for heavy keyed stages (coarse/global-key GroupByKey) |
 | `flink`              | FlinkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `spark`              | SparkRunner    | Bundled jar (`target/pipeline-bundled-{version}.jar`)          |
 | `server`             | —              | Pipeline API server container image (WAR on Jetty)             |
 
-(Other profiles: `prism`, `portable`, `dataflow-gpu`.)
+(Other profiles: `portable`, `dataflow-gpu`.)
 
 ## Pipeline API Server
 
