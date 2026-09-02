@@ -359,8 +359,13 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   this execution (`shuffles` is the linear count). Sizing: the branches of a wave run concurrently, so give
   the job enough workers for their combined work (`numWorkers` at least the number of heavy branches)
   and size `diskSizeGb` for the keys that spill at the same time; a wave of one stage costs nothing extra.
-  `engine.parallelWaves: false` restores the linear chain (for an A/B run — the outputs are identical);
-  `engine.rowId` names a natural key and drops the Reshuffle that pins random row ids. A row column that
+  `engine.parallelWaves: false` restores the linear chain (for an A/B run — the outputs are identical:
+  a row that fails in one branch under `failFast: false` is dropped from the output and routed to the
+  failure sink, exactly as the linear chain drops it at the failing stage);
+  `engine.rowId` names a natural key and drops the Reshuffle that pins random row ids (null key components
+  become a deterministic token; rows sharing a row id are rejected as failures, all of them). The field
+  names `__rowId` and `__partial` are reserved by the merge — an input field with either name is rejected
+  at validation. A row column that
   reads an earlier stage and is only consumed by the output is evaluated in the last keyed stage, which
   then depends on that earlier stage — a wave of its own; put such columns in the block that consumes them
   when that matters. Streaming runs the linear chain. A fused stage keeps one

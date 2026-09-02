@@ -122,6 +122,25 @@ public final class FeatureValues {
         sb.append(s.length()).append(':').append(s).append('\u0001');
     }
 
+    /**
+     * Like {@link #key} but a null component becomes a token instead of nulling the whole key, so the key is
+     * a deterministic function of the row (a row id must survive a retry; rows genuinely colliding on it
+     * then surface through the fan-out merge's uniqueness rejection). The token cannot collide with a
+     * value: {@link #appendKeyComponent} always starts a component with its length.
+     */
+    static String keyWithNullTokens(final Map<String, Object> row, final List<String> keys) {
+        final StringBuilder sb = new StringBuilder();
+        for (final String k : keys) {
+            final Object v = row.get(k);
+            if (v == null) {
+                sb.append('\u0000').append('\u0001');
+            } else {
+                appendKeyComponent(sb, v);
+            }
+        }
+        return sb.toString();
+    }
+
     static Object cast(final Double value, final com.mercari.solution.module.Schema.FieldType type) {
         if (value == null) return null;
         return switch (type.getType()) {

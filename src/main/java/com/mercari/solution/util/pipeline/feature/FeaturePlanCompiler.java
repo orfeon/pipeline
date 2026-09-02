@@ -122,6 +122,13 @@ public final class FeaturePlanCompiler {
         for (final String f : spec.engine.rowId) {
             if (!inputFields.containsKey(f)) diagnostics.error("engine.rowId", "engine", "engine.rowId field '" + f + "' is not an input field");
         }
+        // the fan-out merge rides these keys in the row map (FeatureStages): an input field with either name
+        // would make every base row look like a partial (or collide with the row id) in ANY engine mode
+        for (final String f : List.of(FeatureStages.ROW_ID_FIELD, FeatureStages.PARTIAL_FIELD)) {
+            if (inputFields.containsKey(f)) {
+                diagnostics.error("input.reserved", "lineage", "input field '" + f + "' is reserved by the feature engine (fan-out merge); rename it upstream");
+            }
+        }
         if (spec.timeField != null && inputFields.get(spec.timeField).getType() != null) {
             final String timeType = inputFields.get(spec.timeField).getType().getType().name();
             if (!List.of("timestamp", "datetime", "date", "string").contains(timeType)) {

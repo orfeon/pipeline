@@ -97,12 +97,7 @@ public final class FeatureStages {
         final FeatureSpec.ContextDef groupBy = groupByContext(plan);
 
         // execution waves (engine doc §9.4): the groupBy stage is the finalize, not a stage of the chain
-        final List<List<Stage>> waves = new ArrayList<>();
-        for (final List<Integer> wave : plan.getWaves()) {
-            final List<Stage> stages = new ArrayList<>();
-            for (final int i : wave) if (plan.getStages().get(i).kind() != StageKind.groupBy) stages.add(plan.getStages().get(i));
-            if (!stages.isEmpty()) waves.add(stages);
-        }
+        final List<List<Stage>> waves = plan.getEngineWaves();
         // streaming stays linear: the fan-out merge is a GroupByKey (the stateful merge is the streaming follow-up, §9.4.6)
         final boolean parallel = spec.engine.parallelWaves
                 && !com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)
@@ -123,13 +118,13 @@ public final class FeatureStages {
                 .withOutputTags(elementTag, TupleTagList.of(elementFailureTag)));
         failures.add(elements.get(elementFailureTag));
         PCollection<MElement> current = elements.get(elementTag).setCoder(elementCoder);
-        if (parallel && spec.engine.rowId.isEmpty() && waves.get(0).size() >= 2) {
-            // random row ids are pinned before the first fan-out: every branch must see the id a retry may recompute
-            current = current.apply("RowId_Pin", Reshuffle.viaRandomKey());
-        }
 
-        final Wiring wiring = new Wiring(plan, columns, inputSchema, waves, elementCoder, kvCoder, sortKvCoder, sorter, loggings, failFast, failures);
+        final Wiring wiring = new Wiring(plan, columns, elementCoder, kvCoder, sortKvCoder, sorter, loggings, failFast, failures);
         PCollection<MElement> pending = null; // base + partials of the last wave, merged inside the groupBy finalize
+        int pendingBranches = 0;
+        // a declared engine.rowId is a deterministic function of the row; a random id must ride a GroupByKey
+        // or a Reshuffle before any fan-out reads it (a retry must not recompute what a branch already saw)
+        boolean pinned = !spec.engine.rowId.isEmpty();
         if (!parallel) {
             for (final Stage stage : plan.getStages()) {
                 if (stage.kind() != StageKind.groupBy) current = wiring.applyStage(current, stage);
@@ -139,15 +134,23 @@ public final class FeatureStages {
                 final List<Stage> wave = waves.get(w);
                 if (wave.size() == 1) {
                     current = wiring.applyStage(current, wave.get(0));
+                    // a keyed stage's GroupByKey materialises the row ids like the pin Reshuffle would
+                    if (wave.get(0).kind() != StageKind.row && wave.get(0).kind() != StageKind.fit) pinned = true;
                     continue;
+                }
+                if (!pinned) {
+                    // random row ids are pinned before the first fan-out: every branch must see the id a retry may
+                    // recompute (a fit / row stage between the id assignment and the fan-out is no barrier)
+                    current = current.apply("RowId_Pin", Reshuffle.viaRandomKey());
+                    pinned = true;
                 }
                 // the row columns the wave's stages host are placed in their first consumer's stage by the scheduler
                 // and carried on by the linear chain; the other branches read the wave input, so every row column
                 // computable from it (input fields, earlier waves, such row columns) is evaluated on it first
                 current = wiring.applyRows(current, "Wave" + (w + 1) + "_Rows", w);
                 // fan-out: every branch reads the wave input and emits only its own columns (+ row id + merge key)
-                final Stage foldInto = w + 1 < waves.size() && waves.get(w + 1).size() == 1 ? wiring.foldTarget(waves.get(w + 1).get(0), w) : null;
-                final boolean foldGroupBy = foldInto == null && w + 1 == waves.size() && groupBy != null && wiring.keysAvailable(groupBy.keys(), w);
+                final Stage foldInto = w + 1 < waves.size() && waves.get(w + 1).size() == 1 ? plan.getFoldTarget(waves.get(w + 1).get(0), w) : null;
+                final boolean foldGroupBy = foldInto == null && w + 1 == waves.size() && groupBy != null && plan.keysAvailable(groupBy.keys(), w);
                 final List<String> carry = foldInto != null ? foldInto.keys() : foldGroupBy ? groupBy.keys() : List.of();
                 final List<PCollection<MElement>> pieces = new ArrayList<>();
                 pieces.add(current);
@@ -160,12 +163,13 @@ public final class FeatureStages {
                     // the merge rides the next stage's GroupByKey: the pieces are keyed by that stage's key and the
                     // rows are reassembled by row id inside each group (ContextStageDoFn)
                     // (a variance-components estimate of that stage reads the wave input, not the flattened pieces)
-                    current = wiring.applyStage(PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections()), foldInto, current);
+                    current = wiring.applyStage(PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections()), foldInto, current, wave.size());
                     w++;
                 } else if (foldGroupBy) {
                     pending = PCollectionList.of(pieces).apply(name + "_FanIn", Flatten.pCollections());
+                    pendingBranches = wave.size();
                 } else {
-                    current = wiring.merge(name + "_Merge", pieces);
+                    current = wiring.merge(name + "_Merge", pieces, wave.size());
                 }
             }
         }
@@ -183,7 +187,7 @@ public final class FeatureStages {
                     .apply("Finalize_Group", GroupByKey.create())
                     .apply("Finalize", ParDo
                             .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, spec.output.nullPolicy,
-                                    groupBy.keys(), spec.output.parentFields, spec.output.childName, loggings, failFast, failureTag))
+                                    groupBy.keys(), spec.output.parentFields, spec.output.childName, pendingBranches, loggings, failFast, failureTag))
                             .withOutputTags(outputTag, TupleTagList.of(failureTag)));
         }
         failures.add(finalized.get(failureTag));
@@ -194,9 +198,6 @@ public final class FeatureStages {
     private static final class Wiring {
         private final FeaturePlan plan;
         private final Map<String, OutputColumn> columns;
-        private final Set<String> inputNames = new HashSet<>();
-        /** wave index of every column (by the stage it is evaluated in) */
-        private final Map<String, Integer> waveOfColumn = new HashMap<>();
         private final Coder<MElement> elementCoder;
         private final KvCoder<String, MElement> kvCoder;
         private final KvCoder<String, KV<Long, MElement>> sortKvCoder;
@@ -205,15 +206,11 @@ public final class FeatureStages {
         private final boolean failFast;
         private final List<PCollection<BadRecord>> failures;
 
-        Wiring(final FeaturePlan plan, final Map<String, OutputColumn> columns, final Schema inputSchema, final List<List<Stage>> waves,
+        Wiring(final FeaturePlan plan, final Map<String, OutputColumn> columns,
                final Coder<MElement> elementCoder, final KvCoder<String, MElement> kvCoder, final KvCoder<String, KV<Long, MElement>> sortKvCoder,
                final KeyedSpillSorter sorter, final List<Logging> loggings, final boolean failFast, final List<PCollection<BadRecord>> failures) {
             this.plan = plan;
             this.columns = columns;
-            for (final Schema.Field f : inputSchema.getFields()) inputNames.add(f.getName());
-            for (int w = 0; w < waves.size(); w++) {
-                for (final Stage stage : waves.get(w)) for (final String name : stage.columnNames()) waveOfColumn.put(name, w);
-            }
             this.elementCoder = elementCoder;
             this.kvCoder = kvCoder;
             this.sortKvCoder = sortKvCoder;
@@ -237,47 +234,16 @@ public final class FeatureStages {
             return new TupleTag<>() {};
         }
 
-        /**
-         * The fields every branch of wave {@code w} reads from its input: input fields, columns of earlier waves and
-         * the wave's prelude row columns ({@link #preludeColumns}).
-         */
-        Set<String> waveInputFields(final int w) {
-            final Set<String> fields = new HashSet<>(inputNames);
-            for (final Map.Entry<String, Integer> e : waveOfColumn.entrySet()) if (e.getValue() < w) fields.add(e.getKey());
-            for (final OutputColumn c : preludeColumns(w)) fields.add(c.getCanonicalName());
-            return fields;
-        }
-
-        /** Every key is on the wave input (input field, earlier wave, prelude row column): the base rows carry it. */
-        boolean keysAvailable(final List<String> keys, final int w) {
-            return waveInputFields(w).containsAll(keys);
-        }
-
-        /**
-         * The next stage when the merge of wave {@code w} can ride its GroupByKey: a single context stage whose key
-         * the base rows already carry. Its variance-components estimate, if any, is taken over the wave input (the
-         * flattened pieces would count the partial rows too), so the fields it reads must be on the wave input.
-         */
-        Stage foldTarget(final Stage next, final int w) {
-            if (next.kind() != StageKind.context || !keysAvailable(next.keys(), w)) return null;
-            final List<OutputColumn> stageColumns = new ArrayList<>();
-            for (final String name : next.columnNames()) stageColumns.add(columns.get(name));
-            final Set<String> available = waveInputFields(w);
-            for (final VarianceComponents.LevelSpec spec : VarianceComponents.specsOf(stageColumns, columns)) {
-                if (!available.containsAll(spec.keys())) return null;
-                if (spec.field() != null && !available.contains(spec.field())) return null;
-                if (spec.offsetColumn() != null && !available.contains(spec.offsetColumn())) return null;
-                if (spec.foldKeys() != null && !available.containsAll(spec.foldKeys())) return null;
-            }
-            return next;
-        }
-
         PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage) {
-            return applyStage(current, stage, current);
+            return applyStage(current, stage, current, 0);
         }
 
-        /** One stage on {@code current}; a variance-components estimate of its columns is computed over {@code estimateInput}. */
-        PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage, final PCollection<MElement> estimateInput) {
+        /**
+         * One stage on {@code current}; a variance-components estimate of its columns is computed over
+         * {@code estimateInput}. A folded fan-out merge passes {@code fanInBranches} — the branch count of
+         * the wave riding this stage's GroupByKey; 0 means the input carries plain rows (no reassembly).
+         */
+        PCollection<MElement> applyStage(final PCollection<MElement> current, final Stage stage, final PCollection<MElement> estimateInput, final int fanInBranches) {
             final List<OutputColumn> stageColumns = new ArrayList<>();
             for (final String name : stage.columnNames()) stageColumns.add(columns.get(name));
             final StageEvaluator evaluator = new StageEvaluator(stageColumns);
@@ -298,7 +264,7 @@ public final class FeatureStages {
                         .apply(label + "_Key", ParDo.of(new KeyDoFn(stage.keys()))).setCoder(kvCoder)
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
-                                .of(new ContextStageDoFn(evaluator, lambdas, loggings, failFast, failureTag))
+                                .of(new ContextStageDoFn(evaluator, lambdas, fanInBranches, loggings, failFast, failureTag))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 // keyed replay: group by key, then sort each key's rows by event time inside the DoFn
@@ -320,40 +286,28 @@ public final class FeatureStages {
             return outputs.get(outputTag).setCoder(elementCoder);
         }
 
-        /**
-         * The row columns hosted by the stages of wave {@code w} that the wave input can evaluate (their inputs are
-         * input fields, columns of earlier waves or such row columns), in expansion order (dependencies first).
-         */
-        List<OutputColumn> preludeColumns(final int w) {
-            final Set<String> available = new HashSet<>(inputNames);
-            for (final Map.Entry<String, Integer> e : waveOfColumn.entrySet()) if (e.getValue() < w) available.add(e.getKey());
-            final List<OutputColumn> prelude = new ArrayList<>();
-            for (final OutputColumn c : plan.getColumns()) {
-                final Integer at = waveOfColumn.get(c.getCanonicalName());
-                if (at == null || at != w || !FeaturePlanCompiler.isRowColumn(c)) continue;
-                if (available.containsAll(c.getInputs())) {
-                    prelude.add(c);
-                    available.add(c.getCanonicalName());
-                }
-            }
-            return prelude;
-        }
-
-        /** Evaluates {@link #preludeColumns} on the wave input before its fan-out (no-op when there are none). */
+        /** Evaluates {@link FeaturePlan#getPreludeColumns} on the wave input before its fan-out (no-op when there are none). */
         PCollection<MElement> applyRows(final PCollection<MElement> current, final String name, final int w) {
-            final List<OutputColumn> prelude = preludeColumns(w);
+            final List<OutputColumn> prelude = plan.getPreludeColumns(w);
             if (prelude.isEmpty()) return current;
             final TupleTag<MElement> outputTag = outputTag();
             final TupleTag<BadRecord> failureTag = failureTag();
+            // a variance-components compose column in the prelude reads the same lambdas the linear chain
+            // would (getPreludeColumns guards that the estimate's fields are on the wave input)
+            final List<VarianceComponents.LevelSpec> specs = VarianceComponents.specsOf(prelude, columns);
+            final PCollectionView<Map<String, Double>> lambdas = specs.isEmpty() ? null
+                    : VarianceComponents.estimate(current, specs, name + "_Vc");
+            final List<PCollectionView<?>> sideInputs = lambdas == null ? List.of() : List.of(lambdas);
             final PCollectionTuple outputs = current.apply(name, ParDo
-                    .of(new RowStageDoFn(new StageEvaluator(prelude), null, loggings, failFast, failureTag))
+                    .of(new RowStageDoFn(new StageEvaluator(prelude), lambdas, loggings, failFast, failureTag))
+                    .withSideInputs(sideInputs)
                     .withOutputTags(outputTag, TupleTagList.of(failureTag)));
             failures.add(outputs.get(failureTag));
             return outputs.get(outputTag).setCoder(elementCoder);
         }
 
         /** Row-id merge of a wave: the base rows and every branch's partial rows, grouped by row id and reassembled. */
-        PCollection<MElement> merge(final String name, final List<PCollection<MElement>> pieces) {
+        PCollection<MElement> merge(final String name, final List<PCollection<MElement>> pieces, final int branches) {
             final List<PCollection<KV<String, MElement>>> keyed = new ArrayList<>();
             for (int i = 0; i < pieces.size(); i++) {
                 keyed.add(pieces.get(i).apply(name + "_Key" + i, ParDo.of(new RowIdKeyDoFn())).setCoder(kvCoder));
@@ -363,61 +317,86 @@ public final class FeatureStages {
             final PCollectionTuple outputs = PCollectionList.of(keyed)
                     .apply(name + "_Flatten", Flatten.pCollections())
                     .apply(name + "_Group", GroupByKey.create())
-                    .apply(name, ParDo.of(new MergeDoFn(failFast, failureTag)).withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                    .apply(name, ParDo.of(new MergeDoFn(branches, failFast, failureTag)).withOutputTags(outputTag, TupleTagList.of(failureTag)));
             failures.add(outputs.get(failureTag));
             return outputs.get(outputTag).setCoder(elementCoder);
         }
     }
 
+    /** A merge piece the reassembly rejects, with why (turned into failure records by {@link #rejectionRecords}). */
+    record Rejection(MElement piece, String message) {}
+
     /**
      * Reassembles the rows of a group from base rows and partial rows sharing a row id (the fan-out merge):
      * a base row takes the columns of its partials; rows without a row id (no fan-out) pass as they are.
-     * A row id with two base rows ({@code engine.rowId} not unique) and a partial without a base are rejected.
+     * Rejected, all their pieces: a row id with two base rows ({@code engine.rowId} not unique — merging its
+     * partials onto an arbitrary survivor would corrupt it), a partial without a base, and a base with fewer
+     * partials than {@code branches} (a branch failed the row; the linear chain would have dropped it at
+     * that stage instead of emitting it with the branch's columns null).
      */
-    static List<MElement> coalesce(final Iterable<MElement> pieces, final List<MElement> rejected) {
+    static List<MElement> coalesce(final Iterable<MElement> pieces, final int branches, final List<Rejection> rejected) {
         final List<MElement> rows = new ArrayList<>();
-        final Map<String, Map<String, Object>> bases = new LinkedHashMap<>();
-        final Map<String, Instant> timestamps = new HashMap<>();
+        final Map<String, MElement> bases = new LinkedHashMap<>();
         final Map<String, List<MElement>> partials = new HashMap<>();
+        Set<String> duplicates = null;
         for (final MElement e : pieces) {
-            final Map<String, Object> map = e.asPrimitiveMap();
-            final Object id = map == null ? null : map.get(ROW_ID_FIELD);
+            // probes are per-field reads: the group is large and most pieces need no full map copy
+            final Object id = e.getPrimitiveValue(ROW_ID_FIELD);
             if (id == null) {
                 rows.add(e);
                 continue;
             }
-            if (map.containsKey(PARTIAL_FIELD)) {
-                partials.computeIfAbsent(id.toString(), k -> new ArrayList<>()).add(e);
-                continue;
+            final String key = id.toString();
+            if (e.getPrimitiveValue(PARTIAL_FIELD) != null) {
+                partials.computeIfAbsent(key, k -> new ArrayList<>()).add(e);
+            } else if (bases.putIfAbsent(key, e) != null) {
+                if (duplicates == null) duplicates = new HashSet<>();
+                duplicates.add(key);
+                rejected.add(new Rejection(e, "Fan-out merge: engine.rowId is not unique (row id " + key + ")"));
             }
-            if (bases.putIfAbsent(id.toString(), map) != null) {
-                rejected.add(e);
-                continue;
-            }
-            timestamps.put(id.toString(), e.getTimestamp());
         }
-        for (final Map.Entry<String, Map<String, Object>> base : bases.entrySet()) {
-            final Map<String, Object> row = base.getValue();
+        if (duplicates != null) {
+            for (final String id : duplicates) {
+                final String message = "Fan-out merge: engine.rowId is not unique (row id " + id + ")";
+                rejected.add(new Rejection(bases.remove(id), message));
+                final List<MElement> parts = partials.remove(id);
+                if (parts != null) for (final MElement part : parts) rejected.add(new Rejection(part, message));
+            }
+        }
+        for (final Map.Entry<String, MElement> base : bases.entrySet()) {
             final List<MElement> parts = partials.remove(base.getKey());
-            if (parts != null) {
-                for (final MElement part : parts) {
-                    for (final Map.Entry<String, Object> v : part.asPrimitiveMap().entrySet()) {
-                        if (!PARTIAL_FIELD.equals(v.getKey())) row.put(v.getKey(), v.getValue());
-                    }
+            final int count = parts == null ? 0 : parts.size();
+            if (count != branches) {
+                final String message = "Fan-out merge: " + count + " of " + branches + " branches produced row id "
+                        + base.getKey() + " (a branch failed the row); dropped like the linear chain would";
+                rejected.add(new Rejection(base.getValue(), message));
+                if (parts != null) for (final MElement part : parts) rejected.add(new Rejection(part, message));
+                continue;
+            }
+            final Map<String, Object> row = base.getValue().asPrimitiveMap();
+            for (final MElement part : parts) {
+                for (final Map.Entry<String, Object> v : part.asPrimitiveMap().entrySet()) {
+                    if (!PARTIAL_FIELD.equals(v.getKey())) row.put(v.getKey(), v.getValue());
                 }
             }
-            rows.add(MElement.of(row, timestamps.get(base.getKey())));
+            rows.add(MElement.of(row, base.getValue().getTimestamp()));
         }
-        for (final List<MElement> orphans : partials.values()) rejected.addAll(orphans);
+        for (final List<MElement> orphans : partials.values()) {
+            for (final MElement orphan : orphans) {
+                rejected.add(new Rejection(orphan,
+                        "Fan-out merge: a partial row has no base row (row id " + orphan.getPrimitiveValue(ROW_ID_FIELD) + ")"));
+            }
+        }
         return rows;
     }
 
-    /** The message of a rejected merge piece. */
-    static String rejectionMessage(final MElement piece) {
-        final Map<String, Object> map = piece.asPrimitiveMap();
-        return map != null && map.containsKey(PARTIAL_FIELD)
-                ? "Fan-out merge: a partial row has no base row (row id " + map.get(ROW_ID_FIELD) + ")"
-                : "Fan-out merge: engine.rowId is not unique (row id " + (map == null ? null : map.get(ROW_ID_FIELD)) + ")";
+    /** The failure records of a merge's rejections — one construction site for all three merge-path DoFns. */
+    static List<BadRecord> rejectionRecords(final List<Rejection> rejected, final boolean failFast) {
+        final List<BadRecord> records = new ArrayList<>(rejected.size());
+        for (final Rejection r : rejected) {
+            records.add(Module.processError(r.message(), r.piece(), new IllegalStateException(r.message()), failFast));
+        }
+        return records;
     }
 
     /** Restrictions of the Beam engine that the compiler does not impose (engine doc §6, §9.2). */
@@ -1053,9 +1032,12 @@ public final class FeatureStages {
                 }
                 final Instant ts = Instant.ofEpochMilli(millis);
                 if (rowIdFields != null) {
-                    // a row with a null rowId component falls back to a random id (it cannot be matched by its fields anyway)
-                    final String id = rowIdFields.isEmpty() ? null : FeatureValues.key(values, rowIdFields);
-                    values.put(ROW_ID_FIELD, id != null ? id : UUID.randomUUID().toString());
+                    // a declared engine.rowId must be deterministic across retries (null components become a
+                    // token; rows genuinely colliding on it surface through the merge's uniqueness rejection);
+                    // only the undeclared random id may differ per attempt, and the engine pins it (RowId_Pin)
+                    values.put(ROW_ID_FIELD, rowIdFields.isEmpty()
+                            ? UUID.randomUUID().toString()
+                            : FeatureValues.keyWithNullTokens(values, rowIdFields));
                 }
                 c.outputWithTimestamp(MElement.of(values, ts), ts);
             } catch (final Throwable e) {
@@ -1092,22 +1074,24 @@ public final class FeatureStages {
         public void processElement(final ProcessContext c) {
             final MElement element = c.element();
             if (element == null) return;
-            final Map<String, Object> values = element.asPrimitiveMap();
+            // per-field reads: copying the whole (wide) row map to keep a handful of columns is the hot path
             final Map<String, Object> partial = new HashMap<>();
-            partial.put(ROW_ID_FIELD, values.get(ROW_ID_FIELD));
+            partial.put(ROW_ID_FIELD, element.getPrimitiveValue(ROW_ID_FIELD));
             partial.put(PARTIAL_FIELD, true);
-            for (final String name : columns) partial.put(name, values.get(name));
-            for (final String name : carry) partial.put(name, values.get(name));
+            for (final String name : columns) partial.put(name, element.getPrimitiveValue(name));
+            for (final String name : carry) partial.put(name, element.getPrimitiveValue(name));
             c.output(MElement.of(partial, c.timestamp()));
         }
     }
 
     /** Reassembles one row from its base and partial rows (row-id merge of a wave). */
     static class MergeDoFn extends DoFn<KV<String, Iterable<MElement>>, MElement> {
+        private final int branches;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
-        MergeDoFn(final boolean failFast, final TupleTag<BadRecord> failureTag) {
+        MergeDoFn(final int branches, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+            this.branches = branches;
             this.failFast = failFast;
             this.failureTag = failureTag;
         }
@@ -1122,11 +1106,9 @@ public final class FeatureStages {
         public void processElement(final ProcessContext c) {
             final KV<String, Iterable<MElement>> kv = c.element();
             if (kv == null) return;
-            final List<MElement> rejected = new ArrayList<>();
-            for (final MElement row : coalesce(kv.getValue(), rejected)) c.outputWithTimestamp(row, row.getTimestamp());
-            for (final MElement piece : rejected) {
-                c.output(failureTag, Module.processError(rejectionMessage(piece), piece, new IllegalStateException(rejectionMessage(piece)), failFast));
-            }
+            final List<Rejection> rejected = new ArrayList<>();
+            for (final MElement row : coalesce(kv.getValue(), branches, rejected)) c.outputWithTimestamp(row, row.getTimestamp());
+            for (final BadRecord record : rejectionRecords(rejected, failFast)) c.output(failureTag, record);
         }
     }
 
@@ -1234,9 +1216,13 @@ public final class FeatureStages {
     }
 
     static class ContextStageDoFn extends StageDoFn<KV<String, Iterable<MElement>>> {
+        /** Branch count of a fan-out wave folded into this stage's GroupByKey; 0 = the input carries plain rows. */
+        private final int fanInBranches;
+
         ContextStageDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
-                         final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+                         final int fanInBranches, final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
+            this.fanInBranches = fanInBranches;
         }
 
         // rows are re-emitted at their own event time after the GroupByKey moved them to the window end
@@ -1250,10 +1236,15 @@ public final class FeatureStages {
             final KV<String, Iterable<MElement>> kv = c.element();
             if (kv == null) return;
             // a folded fan-out merge delivers base and partial rows: reassemble them by row id first
-            final List<MElement> rejected = new ArrayList<>();
-            final List<MElement> elements = coalesce(kv.getValue(), rejected);
-            for (final MElement piece : rejected) {
-                c.output(failureTag, Module.processError(rejectionMessage(piece), piece, new IllegalStateException(rejectionMessage(piece)), failFast));
+            // (a plain context stage skips the reassembly — and its per-element probes — entirely)
+            final List<MElement> elements;
+            if (fanInBranches > 0) {
+                final List<Rejection> rejected = new ArrayList<>();
+                elements = coalesce(kv.getValue(), fanInBranches, rejected);
+                for (final BadRecord record : rejectionRecords(rejected, failFast)) c.output(failureTag, record);
+            } else {
+                elements = new ArrayList<>();
+                kv.getValue().forEach(elements::add);
             }
             try {
                 prepare(c);
@@ -1518,18 +1509,21 @@ public final class FeatureStages {
         private final List<String> keys;
         private final List<String> parentFields;
         private final String childName;
+        /** Branch count of a fan-out wave folded into the finalize GroupByKey; 0 = the input carries plain rows. */
+        private final int fanInBranches;
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
 
         GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
-                            final List<String> keys, final List<String> parentFields, final String childName,
+                            final List<String> keys, final List<String> parentFields, final String childName, final int fanInBranches,
                             final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy, Finalizer.outputFieldNames(outputSchema, childName));
             this.outputSchema = outputSchema;
             this.keys = keys;
             this.parentFields = parentFields;
             this.childName = childName;
+            this.fanInBranches = fanInBranches;
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
@@ -1550,10 +1544,15 @@ public final class FeatureStages {
             final KV<String, Iterable<MElement>> kv = c.element();
             if (kv == null) return;
             // a folded fan-out merge delivers base and partial rows: reassemble them by row id first
-            final List<MElement> rejected = new ArrayList<>();
-            final List<MElement> elements = coalesce(kv.getValue(), rejected);
-            for (final MElement piece : rejected) {
-                c.output(failureTag, Module.processError(rejectionMessage(piece), piece, new IllegalStateException(rejectionMessage(piece)), failFast));
+            // (a plain grouped finalize skips the reassembly — and its per-element probes — entirely)
+            final List<MElement> elements;
+            if (fanInBranches > 0) {
+                final List<Rejection> rejected = new ArrayList<>();
+                elements = coalesce(kv.getValue(), fanInBranches, rejected);
+                for (final BadRecord record : rejectionRecords(rejected, failFast)) c.output(failureTag, record);
+            } else {
+                elements = new ArrayList<>();
+                kv.getValue().forEach(elements::add);
             }
             if (elements.isEmpty()) return;
             if (NULL_KEY.equals(kv.getKey())) {

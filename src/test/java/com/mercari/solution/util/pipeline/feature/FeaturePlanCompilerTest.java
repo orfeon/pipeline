@@ -451,6 +451,34 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testReservedInputFieldRejected() {
+        // the fan-out merge rides __rowId / __partial in the row map: an input field with either name would
+        // make every base row look like a partial, in the linear chain too
+        final FeaturePlan bad = compile(
+                SOURCES.replace("      - {name: category, type: string}\n", "      - {name: category, type: string}\n      - {name: __rowId, type: string}\n"),
+                SPEC.replace("[session_id, seller_id, category", "[session_id, seller_id, category, __rowId"));
+        Assertions.assertTrue(hasCode(bad, "input.reserved"), bad::describe);
+    }
+
+    @Test
+    public void testDagShuffleEstimateFoldsIntoContextStage() {
+        // a context block reading both keyed stages lands in a wave of its own: a single context stage whose
+        // key (session_id) the base rows carry, so the wave-1 merge rides its GroupByKey and the estimate
+        // counts RowId_Pin + the wave-1 branches + the folded stage — one less than the linear chain
+        final String rel = "  - name: rel\n    scope: context\n    context: session\n    inputs: [recent_n5_sold_count, enc__seller_id__count]\n    ops: [zscore]\n";
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("output:\n", rel + "output:\n"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(2, plan.getWaves().size(), plan::describe);
+        Assertions.assertEquals(5, plan.getShuffleCount(), plan::describe);
+        Assertions.assertEquals(3, plan.getDagShuffleEstimate(), plan::describe);
+        // a declared engine.rowId removes the pinning Reshuffle from the estimate too
+        final FeaturePlan declared = compile(SOURCES,
+                SPEC.replace("output:\n", rel + "engine: {rowId: [session_id, seller_id]}\noutput:\n"));
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        Assertions.assertEquals(2, declared.getDagShuffleEstimate(), declared::describe);
+    }
+
+    @Test
     public void testStageDependenciesAndWaves() {
         // the levels of a shrinkage lattice are independent keyed stages: the seller level (fused with the
         // sequence block), the global level and the context stage form one wave; the category stage hosts the
