@@ -1,0 +1,54 @@
+# Profile: compare two years of the same dataset.
+# Both inputs are scanned now and become comparison groups (mode: compare): the report gets
+# per-input sub-profiles, compare-bar chips and PSI/KS drift metrics against the baseline.
+# The object form of `output` also writes the mergeable sketch binaries as a separate JSON;
+# its CPC / Theta / frequent-items sketches are readable by BigQuery `bqutil.datasketches`
+# UDFs (the KLL quantile sketches are the doubles variant, which those UDFs do not read).
+# Same column list and filter as examples/bigquery-to-profile.yaml, so that report can serve
+# as a `compareWith` target — see the commented parameter at the end.
+sources:
+  - name: trips2021
+    module: bigquery
+    parameters:
+      query: |
+        SELECT
+          vendor_id, pickup_datetime, dropoff_datetime, passenger_count, trip_distance,
+          rate_code, store_and_fwd_flag, payment_type,
+          fare_amount, extra, mta_tax, tip_amount, tolls_amount, total_amount,
+          pickup_location_id, dropoff_location_id
+        FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2021`
+        TABLESAMPLE SYSTEM (1 PERCENT)
+        WHERE pickup_datetime >= '2021-01-01' AND pickup_datetime < '2022-01-01'
+  - name: trips2022
+    module: bigquery
+    parameters:
+      query: |
+        SELECT
+          vendor_id, pickup_datetime, dropoff_datetime, passenger_count, trip_distance,
+          rate_code, store_and_fwd_flag, payment_type,
+          fare_amount, extra, mta_tax, tip_amount, tolls_amount, total_amount,
+          pickup_location_id, dropoff_location_id
+        FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2022`
+        TABLESAMPLE SYSTEM (1 PERCENT)
+        WHERE pickup_datetime >= '2022-01-01' AND pickup_datetime < '2023-01-01'
+
+sinks:
+  - name: tripsCompare
+    module: profile
+    inputs: [trips2021, trips2022]
+    parameters:
+      output:
+        report: gs://mybucket/reports/taxi/trips-2021-vs-2022.html
+        sketches: gs://mybucket/reports/taxi/trips-2021-vs-2022.sketches.json
+      mode: compare
+      baseline: trips2021
+      keys: [pickup_location_id]
+      compare:
+        - [fare_amount, total_amount]
+      report:
+        title: NYC yellow taxi trips, 2021 vs 2022
+      # compareWith aligns the WHOLE profile of this run (the union of both inputs) with a
+      # report written earlier by this module, field by field, without re-scanning that data.
+      # It must exist before the run (checked at pipeline construction). To try it, run
+      # examples/bigquery-to-profile.yaml first and uncomment:
+      # compareWith: gs://mybucket/reports/taxi/trips-2022.html

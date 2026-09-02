@@ -45,6 +45,10 @@ Try to find and arrange a configuration file that is similar to the data process
     * [Protobuf deserialize](spanner-to-protobuf-to-avro.json)
     * [Decrypt secret data](spanner-to-decrypt-to-avro.json)
     * [SetOperation: Replace Spanner Table](setoperation-replace-spanner.json)
+  * Data Observation
+    * [Profile: BigQuery dataset to HTML report (keys / segments / time / compare)](bigquery-to-profile.yaml)
+    * [Profile: two years of BigQuery data as comparison groups, with sketch binaries](bigquery-to-profile-compare.yaml)
+    * [Profile: nested STRUCT columns as dot paths, raw values hidden](bigquery-to-profile-nested.yaml)
   * Data Flow Control
     * [Partition](avro-to-partition-to-spanner.json)
 * Streaming processing
