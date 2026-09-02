@@ -876,6 +876,87 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(FM_BLOCK.replace("fields: [seller_id, category, condition_grade]", "fields: [seller_id, start_price]"))), "factorization.fields"));
     }
 
+    private static final String DISCRETIZE_BLOCK = """
+                  - name: price_bin
+                    scope: population
+                    type: discretize
+                    input: start_price
+                    bins: 4
+                    fit: {artifact: "gs://bucket/features", window: "trailing(P3Y)"}
+                  - name: by_bin
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [price_bin]
+                    targets:
+                      - {stats: [count]}
+                      - {field: sold, stats: [mean]}
+            """;
+
+    @Test
+    public void testDiscretizeExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(DISCRETIZE_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "discretize.fit.window"));
+        final OutputColumn c = column(plan, "price_bin");
+        Assertions.assertEquals("discretize", c.getOperator());
+        Assertions.assertEquals(FeatureSpec.Scope.population, c.getScope());
+        Assertions.assertEquals(Schema.FieldType.INT64.getType(), c.getFieldType().getType());
+        Assertions.assertEquals("static", c.getCoordinates().get("fit"));
+        Assertions.assertEquals("quantile", c.getCoordinates().get("method"));
+        Assertions.assertEquals("4", c.getCoordinates().get("bins"));
+        Assertions.assertEquals("start_price", c.getCoordinates().get("field"));
+        Assertions.assertEquals("gs://bucket/features", c.getCoordinates().get("artifactUri"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+        Assertions.assertFalse(c.isIntermediate());
+        // the fitted bins key an encoding: the fit stage runs before the keyed stage that reads the bins
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.columnNames().contains("price_bin"), plan::describe);
+        final FeaturePlan.Stage keyed = plan.getStages().stream().filter(s -> s.keys().equals(List.of("price_bin"))).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.index() < keyed.index(), plan::describe);
+        Assertions.assertNotNull(column(plan, "by_bin__price_bin__count"));
+
+        // (inserted lines carry the text block's 8-space property indentation; withEncoding strips 4)
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("bins: 4", "bins: 4\n        method: tree\n        target: sold"))), "discretize.method"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("input: start_price", "input: condition_grade"))), "discretize.input"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("bins: 4", "bins: 1"))), "discretize.bins"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("fit: {artifact", "fit: {mode: expanding, artifact"))), "discretize.fit.mode"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("bins: 4", "bins: 4\n        target: sold"))), "discretize.target"));
+    }
+
+    private static final String QUANTILE_BLOCK = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: final_price, stats: [quantile, q25, quantile90]}
+            """;
+
+    @Test
+    public void testQuantileStat() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(QUANTILE_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        for (final String stat : List.of("quantile", "q25", "quantile90")) {
+            final OutputColumn c = column(plan, "enc__seller_id__final_price__" + stat);
+            Assertions.assertEquals("encoding", c.getOperator());
+            Assertions.assertEquals(stat, c.getCoordinates().get("stat"));
+            Assertions.assertEquals("expanding", c.getCoordinates().get("fit"));
+            Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), c.getFieldType().getType());
+        }
+        Assertions.assertEquals(0.5, OperatorCatalog.quantileProbability("quantile"));
+        Assertions.assertEquals(0.25, OperatorCatalog.quantileProbability("q25"));
+        Assertions.assertEquals(0.9, OperatorCatalog.quantileProbability("quantile90"));
+        Assertions.assertNull(OperatorCatalog.quantileProbability("q101"));
+        Assertions.assertNull(OperatorCatalog.quantileProbability("mean"));
+        // needs the per-key value distribution: rejected in the lookup fit modes, unknown tokens are unknown stats
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_BLOCK.replace("type: encoding", "type: encoding\n        fit: {mode: static}"))), "encoding.stat.static"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_BLOCK.replace("type: encoding", "type: encoding\n        fit: {mode: fold}"))), "encoding.stat.static"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_BLOCK.replace("quantile90", "q101"))), "encoding.stat"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_BLOCK.replace("field: final_price, ", ""))), "encoding.stat.target"));
+    }
+
     @Test
     public void testPredictAtLiteralEventTime() {
         // predictAt: "event_time" is the literal event time (offset 0), not the pre-event keyword
@@ -1013,8 +1094,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(0.25, (Double) ContextEvaluator.apply("shareOfTotal", List.of(2.0, 3.0, 5.0), 0, true), 1e-9);
         Assertions.assertEquals(0.2, (Double) ContextEvaluator.apply("shareOfTotal", List.of(2.0, 3.0, 5.0), 0, false), 1e-9);
 
-        // quantile is not implemented: compile error rather than a runtime crash
-        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("stats: [mean]", "stats: [quantile]")), "encoding.stat.unsupported"));
+        // quantile is an expanding-only statistic (see testQuantileStat); an unknown token is a compile error rather than a runtime crash
+        Assertions.assertFalse(compile(SOURCES, SPEC.replace("stats: [mean]", "stats: [quantile]")).getDiagnostics().hasErrors());
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("stats: [mean]", "stats: [percentile]")), "encoding.stat"));
 
         // parent placement requires the grouping context: a non-groupBy context stays on the children
         final String twoContexts = SPEC

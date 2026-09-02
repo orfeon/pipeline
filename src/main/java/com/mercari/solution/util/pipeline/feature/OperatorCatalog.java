@@ -106,13 +106,29 @@ public final class OperatorCatalog {
     public record Stat(String name, boolean requiresTarget, Schema.FieldType output) {}
 
     public static Stat stat(final String name) {
+        if (name == null) return null;
         return switch (name) {
             case "count" -> new Stat(name, false, I64);
             case "share" -> new Stat(name, false, F64);
-            case "mean", "rate", "std", "quantile" -> new Stat(name, true, F64);
+            case "mean", "rate", "std" -> new Stat(name, true, F64);
             case "distribution" -> new Stat(name, true, Schema.FieldType.map(F64));
-            default -> null;
+            default -> quantileProbability(name) == null ? null : new Stat(name, true, F64);
         };
+    }
+
+    private static final java.util.regex.Pattern QUANTILE = java.util.regex.Pattern.compile("^(?:quantile|q)(\\d{1,3})$");
+
+    /**
+     * The probability of a quantile stat token — {@code quantile} (the median), {@code quantile<NN>} or
+     * {@code q<NN>} with NN a percentage 0..100 (e.g. {@code q90}) — or null for any other stat.
+     */
+    public static Double quantileProbability(final String stat) {
+        if (stat == null) return null;
+        if ("quantile".equals(stat)) return 0.5;
+        final java.util.regex.Matcher m = QUANTILE.matcher(stat);
+        if (!m.matches()) return null;
+        final int percent = Integer.parseInt(m.group(1));
+        return percent > 100 ? null : percent / 100d;
     }
 
     public static List<String> datetimeDerivations() {
@@ -122,8 +138,11 @@ public final class OperatorCatalog {
     /** Populations types implemented by the v0 engine; the rest parse but fail compilation. */
     public static boolean isImplemented(final Scope scope, final String name) {
         if (scope != Scope.population) return get(scope, name) != null;
-        return "encoding".equals(name) || "factorization".equals(name);
+        return "encoding".equals(name) || "factorization".equals(name) || "discretize".equals(name);
     }
+
+    /** Population types implemented by the engine, for diagnostics. */
+    public static final String IMPLEMENTED_POPULATION_TYPES = "encoding | factorization | discretize";
 
     public static boolean isNumeric(final Schema.FieldType type) {
         if (type == null) return false;

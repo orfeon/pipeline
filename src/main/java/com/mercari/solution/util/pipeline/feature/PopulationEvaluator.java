@@ -26,13 +26,17 @@ public class PopulationEvaluator extends SequenceEvaluator {
         super(columns, forceScan);
     }
 
-    /** Stats that need information outside the key's own history and are not available yet. */
+    /** Stats the expanding (per-key replay) engine can serve; the rest parse but are rejected. */
     public static boolean isSupported(final String stat) {
+        if (stat == null) return false;
         return switch (stat) {
             case "count", "sum", "mean", "rate", "std", "distribution" -> true;
-            default -> false;
+            default -> OperatorCatalog.quantileProbability(stat) != null;
         };
     }
+
+    /** The stats a target may request, for diagnostics. */
+    public static final String AVAILABLE_STATS = "count | share | mean | rate | std | distribution | quantile (median) | quantile<NN> / q<NN>";
 
     @Override
     String incrementalStat(final OutputColumn c) {
@@ -69,6 +73,12 @@ public class PopulationEvaluator extends SequenceEvaluator {
             v -= b;
         }
         acc.n += sign;
+        if (OperatorCatalog.quantileProbability(plan.stat) != null) {
+            if (acc.order == null) acc.order = new OrderStatistics();
+            if (sign > 0) acc.order.add(v);
+            else acc.order.remove(v);
+            return;
+        }
         acc.sum += sign * v;
         acc.sumSq += sign * v * v;
     }
@@ -93,7 +103,11 @@ public class PopulationEvaluator extends SequenceEvaluator {
                 }
                 yield dist;
             }
-            default -> throw new IllegalStateException("unsupported encoding stat: " + plan.stat);
+            default -> {
+                final Double p = OperatorCatalog.quantileProbability(plan.stat);
+                if (p == null) throw new IllegalStateException("unsupported encoding stat: " + plan.stat);
+                yield acc == null || acc.order == null ? null : acc.order.quantile(p);
+            }
         };
     }
 
@@ -121,6 +135,8 @@ public class PopulationEvaluator extends SequenceEvaluator {
             return dist;
         }
         double n = 0, sum = 0, sumSq = 0;
+        final Double probability = OperatorCatalog.quantileProbability(stat);
+        final double[] values = probability == null ? null : new double[window.size()];
         for (final Past p : window) {
             Double v = FeatureValues.toDouble(p.values().get(plan.field));
             if (v == null) continue;
@@ -129,9 +145,15 @@ public class PopulationEvaluator extends SequenceEvaluator {
                 if (b == null) continue;
                 v -= b;
             }
+            if (values != null) values[(int) n] = v;
             n++;
             sum += v;
             sumSq += v * v;
+        }
+        if (probability != null) {
+            if (n == 0) return null;
+            java.util.Arrays.sort(values, 0, (int) n);
+            return OrderStatistics.quantile(probability, values, (int) n);
         }
         return switch (stat) {
             case "sum" -> sum;

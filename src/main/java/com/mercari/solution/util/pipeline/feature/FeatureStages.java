@@ -416,7 +416,7 @@ public final class FeatureStages {
             }
             if (c.getScope() == FeatureSpec.Scope.population && "encoding".equals(c.getOperator())
                     && !PopulationEvaluator.isSupported(c.getCoordinates().get("stat"))) {
-                errors.add(c.getCanonicalName() + ": stat '" + c.getCoordinates().get("stat") + "' is not implemented yet (available: count | share | mean | rate | std | distribution)");
+                errors.add(c.getCanonicalName() + ": stat '" + c.getCoordinates().get("stat") + "' is not implemented yet (available: " + PopulationEvaluator.AVAILABLE_STATS + ")");
             }
         }
         return errors;
@@ -553,6 +553,30 @@ public final class FeatureStages {
         final List<OutputColumn> fmColumns = new ArrayList<>();
         for (final OutputColumn c : stageColumns) if ("fm".equals(c.getOperator())) fmColumns.add(c);
 
+        // discretize blocks: gather the input values on one worker, fit the quantile edges (or load the artifact)
+        final List<DiscretizeSpec> binSpecs = discretizeSpecs(stageColumns);
+        final Map<String, PCollectionView<List<Discretization>>> binViews = new LinkedHashMap<>();
+        final Map<String, DiscretizeSpec> binLoad = new LinkedHashMap<>();
+        for (final DiscretizeSpec spec : binSpecs) {
+            if (spec.artifactUri() != null && !spec.refit() && Discretization.exists(spec.artifactUri(), planHash, spec.block())) {
+                binLoad.put(spec.block(), spec);
+                LOG.info("feature fit: block {} loads discretization artifact {}", spec.block(), Discretization.artifactPath(spec.artifactUri(), planHash, spec.block()));
+                continue;
+            }
+            if (com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
+                throw new IllegalStateException("discretize in streaming requires an existing artifact for plan " + planHash);
+            }
+            final PCollectionView<List<Discretization>> view = fitInput
+                    .apply(label + "_Bins_" + spec.block() + "_Values", ParDo.of(new ExtractValuesDoFn(spec.field())))
+                    .setCoder(org.apache.beam.sdk.coders.DoubleCoder.of())
+                    .apply(label + "_Bins_" + spec.block() + "_Gather", Combine.globally(new GatherDoublesFn()).withoutDefaults())
+                    .apply(label + "_Bins_" + spec.block() + "_Fit", ParDo.of(new FitDiscretizeDoFn(spec, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Discretization.class))
+                    .apply(label + "_Bins_" + spec.block() + "_View", View.asList());
+            binViews.put(spec.block(), view);
+            sideInputs.add(view);
+        }
+
         // fitted statistics are extracted from the stage INPUT: a target / offset produced by a column of
         // this same stage would read null for every row, so reject the fusion explicitly
         final Set<String> stageProduced = new HashSet<>();
@@ -566,16 +590,113 @@ public final class FeatureStages {
             if (stageProduced.contains(spec.target())) sameStageDeps.add(spec.target());
             if (spec.offsetColumn() != null && stageProduced.contains(spec.offsetColumn())) sameStageDeps.add(spec.offsetColumn());
         }
+        for (final DiscretizeSpec spec : binSpecs) {
+            if (stageProduced.contains(spec.field())) sameStageDeps.add(spec.field());
+        }
         if (!sameStageDeps.isEmpty()) {
-            throw new IllegalStateException("fit.mode static targets/offsets " + sameStageDeps
+            throw new IllegalStateException("fit.mode static targets/offsets/inputs " + sameStageDeps
                     + " are computed in the same fit stage and would read null; split them into a separate feature step");
         }
 
         return input.apply(label, ParDo
                 .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, loadBlocks, planHash,
-                        fmSpecs, fmColumns, fmViews, fmLoad, loggings, failFast, failureTag))
+                        fmSpecs, fmColumns, fmViews, fmLoad, binSpecs, binViews, binLoad, loggings, failFast, failureTag))
                 .withSideInputs(sideInputs)
                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+    }
+
+    /** One discretize block of a fit stage, rebuilt from its output column's coordinates. */
+    record DiscretizeSpec(String block, String column, String field, String method, Integer bins, Integer minSamplesPerBin,
+                          String artifactUri, boolean refit) implements Serializable {}
+
+    static List<DiscretizeSpec> discretizeSpecs(final List<OutputColumn> stageColumns) {
+        final List<DiscretizeSpec> specs = new ArrayList<>();
+        for (final OutputColumn c : stageColumns) {
+            if (!"discretize".equals(c.getOperator())) continue;
+            final Map<String, String> k = c.getCoordinates();
+            specs.add(new DiscretizeSpec(c.getBlock(), c.getCanonicalName(), k.get("field"), k.get("method"),
+                    k.containsKey("bins") ? Integer.parseInt(k.get("bins")) : null,
+                    k.containsKey("minSamplesPerBin") ? Integer.parseInt(k.get("minSamplesPerBin")) : null,
+                    k.get("artifactUri"), "true".equals(k.get("refit"))));
+        }
+        return specs;
+    }
+
+    static class ExtractValuesDoFn extends DoFn<MElement, Double> {
+        private final String field;
+
+        ExtractValuesDoFn(final String field) {
+            this.field = field;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Double v = FeatureValues.toDouble(element.asPrimitiveMap().get(field));
+            if (v != null && !v.isNaN()) c.output(v);
+        }
+    }
+
+    /** Growable double buffer: the gathered fit values of a discretize block (sorted in memory on one worker). */
+    static final class Doubles implements Serializable {
+        double[] values = new double[16];
+        int size;
+
+        void add(final double v) {
+            if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
+            values[size++] = v;
+        }
+    }
+
+    static class GatherDoublesFn extends Combine.CombineFn<Double, Doubles, Doubles> {
+        @Override
+        public Doubles createAccumulator() { return new Doubles(); }
+
+        @Override
+        public Doubles addInput(final Doubles acc, final Double v) {
+            acc.add(v);
+            return acc;
+        }
+
+        @Override
+        public Doubles mergeAccumulators(final Iterable<Doubles> accs) {
+            final Doubles out = new Doubles();
+            for (final Doubles a : accs) for (int i = 0; i < a.size; i++) out.add(a.values[i]);
+            return out;
+        }
+
+        @Override
+        public Doubles extractOutput(final Doubles acc) { return acc; }
+
+        @Override
+        public Coder<Doubles> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Double> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(Doubles.class);
+        }
+
+        @Override
+        public Coder<Doubles> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<Double> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(Doubles.class);
+        }
+    }
+
+    static class FitDiscretizeDoFn extends DoFn<Doubles, Discretization> {
+        private final DiscretizeSpec spec;
+        private final String planHash;
+
+        FitDiscretizeDoFn(final DiscretizeSpec spec, final String planHash) {
+            this.spec = spec;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final Doubles values = c.element();
+            LOG.info("discretize {}: fitting {} edges on {} values", spec.block(), spec.method(), values.size);
+            final Discretization d = Discretization.fitQuantile(values.values, values.size, spec.bins(), spec.minSamplesPerBin());
+            if (spec.artifactUri() != null) Discretization.write(spec.artifactUri(), planHash, spec.block(), d);
+            c.output(d);
+        }
     }
 
     /** One factorization block of a fit stage, rebuilt from its output columns' coordinates. */
@@ -715,6 +836,7 @@ public final class FeatureStages {
         private static final Map<String, Map<String, VarianceComponents.KeyStats>> ARTIFACT_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
         private static final Map<String, Factorization.Model> FM_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+        private static final Map<String, Discretization> BINS_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
 
         private final List<FitLevel> levels;
         private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
@@ -724,9 +846,13 @@ public final class FeatureStages {
         private final List<OutputColumn> fmColumns;
         private final Map<String, PCollectionView<List<Factorization.Model>>> fmViews;
         private final Map<String, FmSpec> fmLoad;
+        private final List<DiscretizeSpec> binSpecs;
+        private final Map<String, PCollectionView<List<Discretization>>> binViews;
+        private final Map<String, DiscretizeSpec> binLoad;
         private transient Map<String, VarianceComponents.KeyStats> loaded;
         private transient Map<String, Double> loadedLambdas;
         private transient Map<String, Factorization.Model> loadedModels;
+        private transient Map<String, Discretization> loadedBins;
 
         FitApplyDoFn(final StageEvaluator evaluator, final List<FitLevel> levels,
                      final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
@@ -734,6 +860,8 @@ public final class FeatureStages {
                      final Map<String, String> loadBlocks, final String planHash,
                      final List<FmSpec> fmSpecs, final List<OutputColumn> fmColumns,
                      final Map<String, PCollectionView<List<Factorization.Model>>> fmViews, final Map<String, FmSpec> fmLoad,
+                     final List<DiscretizeSpec> binSpecs, final Map<String, PCollectionView<List<Discretization>>> binViews,
+                     final Map<String, DiscretizeSpec> binLoad,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.levels = levels;
@@ -744,6 +872,9 @@ public final class FeatureStages {
             this.fmColumns = fmColumns;
             this.fmViews = fmViews;
             this.fmLoad = fmLoad;
+            this.binSpecs = binSpecs;
+            this.binViews = binViews;
+            this.binLoad = binLoad;
         }
 
         @Setup
@@ -760,6 +891,23 @@ public final class FeatureStages {
                 final String path = Factorization.artifactPath(spec.artifactUri(), planHash, spec.block());
                 loadedModels.put(spec.block(), FM_CACHE.computeIfAbsent(path, p ->
                         Factorization.read(spec.artifactUri(), planHash, spec.block(), spec.fields(), spec.fieldWeighted(), spec.k())));
+            }
+            loadedBins = new HashMap<>();
+            for (final DiscretizeSpec spec : binLoad.values()) {
+                final String path = Discretization.artifactPath(spec.artifactUri(), planHash, spec.block());
+                loadedBins.put(spec.block(), BINS_CACHE.computeIfAbsent(path, p -> Discretization.read(spec.artifactUri(), planHash, spec.block())));
+            }
+        }
+
+        private void applyDiscretize(final ProcessContext c, final Map<String, Object> values) {
+            for (final DiscretizeSpec spec : binSpecs) {
+                Discretization d = loadedBins.get(spec.block());
+                if (d == null) {
+                    final PCollectionView<List<Discretization>> view = binViews.get(spec.block());
+                    final List<Discretization> fitted = view == null ? List.of() : c.sideInput(view);
+                    d = fitted.isEmpty() ? null : fitted.get(0);
+                }
+                values.put(spec.column(), d == null ? null : d.bin(FeatureValues.toDouble(values.get(spec.field()))));
             }
         }
 
@@ -835,6 +983,7 @@ public final class FeatureStages {
                     if (level.sumSqColumn() != null) values.put(level.sumSqColumn(), stats == null ? 0d : stats.sumSq);
                 }
                 applyFactorization(c, values);
+                applyDiscretize(c, values);
                 evaluator.evaluateRowColumns(values);
                 c.output(MElement.of(values, c.timestamp()));
             } catch (final Throwable e) {

@@ -52,6 +52,8 @@ public class SequenceEvaluator implements Serializable {
         double n, sum, sumSq;
         Double max, min;
         Map<String, Long> valueCounts;
+        /** quantile statistics: the visible values as an order-statistic multiset (supports eviction) */
+        OrderStatistics order;
     }
 
     static final class ColumnState {

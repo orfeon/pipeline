@@ -144,6 +144,11 @@ public class FeatureSpec implements Serializable {
         public Integer epochs;
         public Double reg;
         public Long seed;
+        // discretize
+        public String method;
+        public Integer bins;
+        public Integer minSamplesPerBin;
+        public String target;
 
         public String location() {
             return "features." + name;
@@ -449,6 +454,10 @@ public class FeatureSpec implements Serializable {
         def.variant = Json.string(o, "variant");
         def.fields = Json.strings(o, "fields");
         def.latentDim = Json.integer(o, "latentDim");
+        def.method = Json.string(o, "method");
+        def.bins = Json.integer(o, "bins");
+        def.minSamplesPerBin = Json.integer(o, "minSamplesPerBin");
+        def.target = Json.string(o, "target");
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");
             def.taskTarget = Json.string(task, "target") != null ? Json.string(task, "target") : Json.string(task, "field");
