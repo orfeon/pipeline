@@ -73,7 +73,7 @@ forces it. `project` / `region` default to the server's launch configuration.
    (shared parameter docs such as `module/common/filter.md` by `path`).
 2. Write the config; `run-pipeline` with `dryRun: true`. Fix every error; read the diagnostics and,
    for a `feature` transform, the `featurePlans` report (availability status of each column, stages and
-   shuffles, hot-key audit SQL to run on your warehouse before a large backfill).
+   shuffles with their dependency `waves` — how deep the chain would be if independent stages ran in parallel —, hot-key audit SQL to run on your warehouse before a large backfill).
 3. Optionally `run-pipeline` without `dryRun` on a test config (a `create` source with a few records
    and a `debug` sink) to see actual output rows.
 

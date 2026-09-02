@@ -119,6 +119,16 @@ public final class FeaturePlanCompiler {
         if (spec.timeField != null && !inputFields.containsKey(spec.timeField)) {
             inputFields.put(spec.timeField, FieldContract.synthetic(spec.timeField, Schema.FieldType.TIMESTAMP, AvailableAt.atEventTime()));
         }
+        for (final String f : spec.engine.rowId) {
+            if (!inputFields.containsKey(f)) diagnostics.error("engine.rowId", "engine", "engine.rowId field '" + f + "' is not an input field");
+        }
+        // the fan-out merge rides these keys in the row map (FeatureStages): an input field with either name
+        // would make every base row look like a partial (or collide with the row id) in ANY engine mode
+        for (final String f : List.of(FeatureStages.ROW_ID_FIELD, FeatureStages.PARTIAL_FIELD)) {
+            if (inputFields.containsKey(f)) {
+                diagnostics.error("input.reserved", "lineage", "input field '" + f + "' is reserved by the feature engine (fan-out merge); rename it upstream");
+            }
+        }
         if (spec.timeField != null && inputFields.get(spec.timeField).getType() != null) {
             final String timeType = inputFields.get(spec.timeField).getType().getType().name();
             if (!List.of("timestamp", "datetime", "date", "string").contains(timeType)) {
@@ -1785,7 +1795,9 @@ public final class FeaturePlanCompiler {
         for (final OutputColumn c : columns) scheduler.add(c);
         final List<FeaturePlan.Stage> stages = scheduler.build();
         if (spec.output.groupBy != null && contexts.containsKey(spec.output.groupBy)) {
-            stages.add(new FeaturePlan.Stage(stages.size(), FeaturePlan.StageKind.groupBy, contexts.get(spec.output.groupBy).keys(), List.of("output"), List.of()));
+            final List<Integer> all = new ArrayList<>();
+            for (final FeaturePlan.Stage s : stages) all.add(s.index());
+            stages.add(new FeaturePlan.Stage(stages.size(), FeaturePlan.StageKind.groupBy, contexts.get(spec.output.groupBy).keys(), List.of("output"), List.of(), all));
         }
         return stages;
     }
@@ -1832,7 +1844,7 @@ public final class FeaturePlanCompiler {
                 return kind == k && keys.equals(stageKeys);
             }
 
-            FeaturePlan.Stage build(final int index) {
+            FeaturePlan.Stage build(final int index, final List<Integer> dependsOn) {
                 // inside a stage the columns keep the expansion order (dependencies first)
                 final List<String> ordered = new ArrayList<>(names);
                 ordered.sort(Comparator.comparingInt(order::get));
@@ -1843,7 +1855,7 @@ public final class FeaturePlanCompiler {
                 }
                 // a keyed stage replays sequence and population columns together: its kind names the heavier one
                 final FeaturePlan.StageKind k = kind == FeaturePlan.StageKind.sequence && population ? FeaturePlan.StageKind.population : kind;
-                return new FeaturePlan.Stage(index, k, keys, blocks, ordered);
+                return new FeaturePlan.Stage(index, k, keys, blocks, ordered, dependsOn);
             }
         }
 
@@ -1854,6 +1866,8 @@ public final class FeaturePlanCompiler {
         /** row columns → the earliest stage their own dependencies allow (they may move earlier down to it) */
         private final Map<String, Integer> rowEarliest = new HashMap<>();
         private final Map<String, Integer> fitStageOf = new HashMap<>();
+        /** every dependency of a placed column (row / history / strict reads), mapped to stages in build */
+        private final Map<String, Set<String>> depsOf = new HashMap<>();
 
         StageScheduler() {
             for (final OutputColumn c : columns) order.put(c.canonicalName, order.size());
@@ -1949,6 +1963,10 @@ public final class FeaturePlanCompiler {
 
         /** Puts a column in a stage after pulling the row columns it reads into that stage (or the one before). */
         private void place(final OutputColumn c, final int target, final Set<String> strict) {
+            final Set<String> deps = new LinkedHashSet<>(c.inputs);
+            deps.addAll(c.pastInputs);
+            deps.addAll(strict);
+            depsOf.put(c.canonicalName, deps);
             for (final String dep : c.inputs) if (!strict.contains(dep)) placeRow(dep, target);
             for (final String dep : c.pastInputs) if (!strict.contains(dep)) placeRow(dep, target);
             for (final String dep : strict) placeRow(dep, target - 1);
@@ -1988,8 +2006,40 @@ public final class FeaturePlanCompiler {
                 if (rowEarliest.containsKey(c.canonicalName) && !stageOf.containsKey(c.canonicalName)) placeRow(c.canonicalName, slots.size() - 1);
             }
             final List<FeaturePlan.Stage> stages = new ArrayList<>();
-            for (final Slot slot : slots) stages.add(slot.build(stages.size()));
+            for (final Slot slot : slots) stages.add(slot.build(stages.size(), dependsOn(slot, stages.size())));
             return stages;
+        }
+
+        /**
+         * Stages whose keyed / fit columns the columns of this slot need (engine doc §9.4: the edges of the stage
+         * DAG). A row column is not a node: it is followed through to its own dependencies, because the linear chain
+         * places it in its first consumer's stage and carries the value forward, while a branch evaluating the same
+         * columns from the stage input would simply recompute it. Input fields have no stage; a dependency inside
+         * the same stage is not an edge.
+         */
+        private List<Integer> dependsOn(final Slot slot, final int index) {
+            final TreeSet<Integer> deps = new TreeSet<>();
+            final Set<String> visited = new HashSet<>();
+            for (final String name : slot.names) collectDeps(name, index, deps, visited);
+            return List.copyOf(deps);
+        }
+
+        private void collectDeps(final String name, final int index, final TreeSet<Integer> deps, final Set<String> visited) {
+            if (!visited.add(name)) return;
+            for (final String dep : depsOf.getOrDefault(name, Set.of())) {
+                final Integer at = stageOf.get(dep);
+                if (at == null) continue; // input field
+                final OutputColumn d = columnsByCanonical.get(dep);
+                if (d != null && isRowColumn(d)) {
+                    collectDeps(dep, index, deps, visited);
+                    continue;
+                }
+                if (at == index) continue;
+                if (at > index) {
+                    throw new IllegalStateException("feature stage scheduling: " + name + " (stage " + index + ") reads " + dep + " from a later stage " + at);
+                }
+                deps.add(at);
+            }
         }
     }
 

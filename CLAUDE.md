@@ -116,7 +116,8 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
 - `pipeline/feature/` — the `feature` transform: `FeaturePlanCompiler` (pure compile layer: sources
   contract, availability-time algebra, DAG expansion, leak checks, `describe()` = validate --expand) and
   `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &
-  population). Spec in repo-root `work-feature.md`, engine design in `work-feature-engine-beam.md`
+  population; stages run wave by wave — the independent stages of a wave branch in parallel and are merged
+  back by row id, `engine.parallelWaves: false` = linear chain). Spec in repo-root `work-feature.md`, engine design in `work-feature-engine-beam.md`
   (uncommitted working docs). Keep examples/tests domain-neutral.
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
   http action, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
