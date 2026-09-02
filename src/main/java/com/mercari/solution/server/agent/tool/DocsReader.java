@@ -34,8 +34,8 @@ public class DocsReader {
         select,strategy,expression,schema,schema-migration,logging,template,union,bigtable}.md,
         module/failure/pubsub.md, README.md (the config file structure reference), system.md (the
         config's system block) and options/README.md (pipeline options, with per-runner pages
-        options/dataflow.md, options/direct.md, options/flink.md, options/spark.md, options/portable.md,
-        options/gcp.md, options/aws.md, options/beamsql.md). Use listModules first to discover module names.
+        options/dataflow.md, options/direct.md, options/prism.md, options/flink.md, options/spark.md,
+        options/portable.md, options/gcp.md, options/aws.md, options/beamsql.md). Use listModules first to discover module names.
     """)
     public String readDocs(
             @P(name = "module", description = "Module id '{type}/{name}', e.g. 'source/bigquery' (alternative to path).", required = false) String module,

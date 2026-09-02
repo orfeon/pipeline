@@ -90,6 +90,7 @@ The config content is passed inline here, so only the gcloud credentials need to
 ```sh
 docker run \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
   --config="$(cat path/to/config.yaml)"
 ```
@@ -100,13 +101,48 @@ docker run \
 docker run ^
   -v C:\Users\{YourUserName}\AppData\Roaming\gcloud:/mnt/gcloud:ro ^
   -v C:\Users\{YourWorkingDirPath}\:/mnt/config:ro ^
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json ^
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct ^
   --config=/mnt/config/{MyConfig}.yaml
 ```
 
+The `-e GOOGLE_APPLICATION_CREDENTIALS=...` points ADC at the mounted gcloud credentials. It is passed
+at run time on purpose: baked into the image it would override the metadata-server credentials and
+break the same image on Cloud Run.
+
 * Note:
   * If you use BigQuery module locally, you will need to specify the `tempLocation` argument.
   * If the pipeline is to access an emulator running on a local machine, such as Cloud Spanner, the `--net=host` option is required.
+
+## Run Pipeline locally / on Cloud Run (Prism)
+
+The image built with the `prism` profile (see
+[How to Deploy Pipeline](../deploy/README.md#deploy-prism-runner-for-local--cloud-run-execution)) runs
+exactly like the direct image — same arguments, same mounts — with Beam's
+[Prism runner](https://beam.apache.org/documentation/runners/prism/), the portable successor of
+DirectRunner:
+
+```sh
+docker run \
+  -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
+  --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/prism \
+  --config="$(cat path/to/config.yaml)"
+```
+
+Use it instead of the direct image when the pipeline has keyed stages over coarse or global keys
+(e.g. the `feature` transform's global encoding levels): DirectRunner's GroupByKey copies each key's
+buffered state per bundle and such stages slow down by orders of magnitude as rows grow, while Prism
+executes them at proper speed.
+
+* Note:
+  * The prism binary is downloaded from the Beam GitHub release at startup (outbound network
+    required; `options.prism.prismLocation` points at a pre-downloaded binary otherwise — see
+    [Prism Options](../options/prism.md)). On Windows the automatic download URL is broken (Beam
+    derives it from `os.name`): download `apache_beam-v{beam.version}-prism-windows-amd64.zip`
+    manually and set `prismLocation`.
+  * A `ManagedChannel allocation site` stack in the logs at shutdown is gRPC's channel-leak detector,
+    not a failure. The completion marker is the `Pipeline finished with state: DONE` log line.
 
 ## Validate a config without running it (dry run)
 
@@ -119,6 +155,7 @@ printed to stdout; an invalid config exits with the assembly error.
 ```sh
 docker run \
   -v ~/.config/gcloud:/mnt/gcloud:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/mnt/gcloud/application_default_credentials.json \
   --rm {region}-docker.pkg.dev/{deploy_project}/{template_repo_name}/direct \
   --dryRun=true \
   --config="$(cat path/to/config.yaml)"

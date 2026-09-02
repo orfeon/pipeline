@@ -18,8 +18,8 @@ import java.nio.charset.StandardCharsets;
         "module/common/filter.md". Use this tool to follow such references.
         Available documents include: README.md (the config file structure reference),
         system.md (the config's system block reference), options/README.md (pipeline options,
-        with per-runner pages options/dataflow.md, options/direct.md, options/flink.md,
-        options/spark.md, options/portable.md, options/gcp.md, options/aws.md,
+        with per-runner pages options/dataflow.md, options/direct.md, options/prism.md,
+        options/flink.md, options/spark.md, options/portable.md, options/gcp.md, options/aws.md,
         options/beamsql.md), module/README.md (module list), shared parameter docs
         module/common/{filter,select,strategy,expression,schema,schema-migration,logging,
         template,union,bigtable}.md, and module/failure/pubsub.md (dead-letter sink).
