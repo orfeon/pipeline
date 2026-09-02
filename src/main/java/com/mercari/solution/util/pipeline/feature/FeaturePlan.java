@@ -32,6 +32,21 @@ public class FeaturePlan implements Serializable {
         public int columns() {
             return columnNames.size();
         }
+        /** Keyed stages (context / sequence / population / groupBy) are one GroupByKey in the engine. */
+        public boolean isKeyed() {
+            return kind != StageKind.row && kind != StageKind.fit;
+        }
+        /** Sequence / population stages replay each key's rows in time order (batch only). */
+        public boolean isReplay() {
+            return kind == StageKind.sequence || kind == StageKind.population;
+        }
+        /**
+         * A key-less replay stage: every row under ONE key — one worker thread (a shrinkage lattice's
+         * global level, a share denominator; a key-less context / groupBy is rejected at parse time).
+         */
+        public boolean runsUnderSingleKey() {
+            return isReplay() && keys.isEmpty();
+        }
         public String describe() {
             return "#" + index + " " + kind + (keys.isEmpty() ? "" : " key=" + keys) + " blocks=" + blocks + " columns=" + columns()
                     + " deps=" + dependsOn;
@@ -108,7 +123,7 @@ public class FeaturePlan implements Serializable {
     public int getShuffleCount() {
         int count = 0;
         for (final Stage s : stages) {
-            if (s.kind != StageKind.row && s.kind != StageKind.fit) count++;
+            if (s.isKeyed()) count++;
         }
         return count;
     }
@@ -253,10 +268,6 @@ public class FeaturePlan implements Serializable {
         return true;
     }
 
-    private static boolean isKeyedStage(final Stage s) {
-        return s.kind != StageKind.row && s.kind != StageKind.fit;
-    }
-
     /**
      * Shuffle count of the parallel wave execution (engine doc §9.4.2), mirroring the engine's wave loop
      * over the shared wave geometry above: one shuffle per keyed single-stage wave; per fan-out wave one
@@ -274,7 +285,7 @@ public class FeaturePlan implements Serializable {
         for (int w = 0; w < waves.size(); w++) {
             final List<Stage> wave = waves.get(w);
             if (wave.size() == 1) {
-                if (isKeyedStage(wave.get(0))) {
+                if (wave.get(0).isKeyed()) {
                     count++;
                     pinned = true; // its GroupByKey materialises the row ids like the pin Reshuffle would
                 }
@@ -284,7 +295,7 @@ public class FeaturePlan implements Serializable {
                 count++; // RowId_Pin
                 pinned = true;
             }
-            if (wave.stream().anyMatch(FeaturePlan::isKeyedStage)) count++;
+            if (wave.stream().anyMatch(Stage::isKeyed)) count++;
             final Stage foldInto = w + 1 < waves.size() && waves.get(w + 1).size() == 1 ? getFoldTarget(waves.get(w + 1).get(0), w) : null;
             if (foldInto != null) {
                 count++; // the folded stage's own GroupByKey
@@ -305,7 +316,7 @@ public class FeaturePlan implements Serializable {
     public List<AuditQuery> getAuditQueries() {
         final Map<List<String>, List<String>> byKeys = new java.util.LinkedHashMap<>();
         for (final Stage s : stages) {
-            if (s.kind == StageKind.row || s.kind == StageKind.fit) continue;
+            if (!s.isKeyed()) continue;
             byKeys.computeIfAbsent(s.keys, k -> new ArrayList<>()).add("#" + s.index + " " + s.kind);
         }
         final List<AuditQuery> queries = new ArrayList<>();

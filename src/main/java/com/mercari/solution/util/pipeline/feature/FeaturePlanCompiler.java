@@ -80,9 +80,29 @@ public final class FeaturePlanCompiler {
             finalizeColumns();
         }
         final List<FeaturePlan.Stage> stages = buildStages();
+        hintGlobalKeyStages(stages);
         final Schema outputSchema = buildSchema();
         final String hash = hash(sourcesDocument, parameters);
         return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash);
+    }
+
+    /**
+     * S4 (engine doc §9.4.5): a key-less replay stage ({@link FeaturePlan.Stage#runsUnderSingleKey}) puts
+     * every row under one key — one worker thread. The hint points at {@code fit.mode static} / {@code fold}
+     * (a parallel Combine); the modeling trade-off — the values change — lives in the feature docs,
+     * "Performance and sizing". One hint per stage, at the blocks that force the global level; never
+     * applied automatically.
+     */
+    private void hintGlobalKeyStages(final List<FeaturePlan.Stage> stages) {
+        for (final FeaturePlan.Stage s : stages) {
+            if (!s.runsUnderSingleKey()) continue;
+            diagnostics.hint("encoding.globalKey", "features." + String.join(",", s.blocks()),
+                    "stage #" + s.index() + " evaluates every row under one key (a single worker thread"
+                            + (spec.engine.parallelWaves ? " — the critical path once the waves run in parallel" : "")
+                            + "); a global / very coarse encoding can move its statistics to fit.mode static"
+                            + " (streaming-capable with an artifact) or fold (batch only) — the values change:"
+                            + " see the feature docs, Performance and sizing");
+        }
     }
 
     // ------------------------------------------------------------------------------------------

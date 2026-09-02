@@ -402,8 +402,7 @@ public final class FeatureStages {
     /** Restrictions of the Beam engine that the compiler does not impose (engine doc §6, §9.2). */
     public static List<String> engineConstraints(final FeaturePlan plan, final boolean streaming) {
         final List<String> errors = new ArrayList<>();
-        final boolean keyed = plan.getStages().stream().anyMatch(s ->
-                s.kind() == FeaturePlan.StageKind.sequence || s.kind() == FeaturePlan.StageKind.population);
+        final boolean keyed = plan.getStages().stream().anyMatch(FeaturePlan.Stage::isReplay);
         if (streaming && keyed) {
             errors.add("sequence / population features are supported in batch only (time-sorted keyed state)");
         }
