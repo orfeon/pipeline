@@ -72,7 +72,7 @@ Four module kinds are auto-discovered by scanning their packages (Guava `ClassPa
 `compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
-`pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2`.
+`pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2` `profile`.
 
 **Actions** (`module/action/`, `@Action.Service(name=…)`): `bigquery` `vertexai` `storage` `tasks` `http` `dataflow` `build`.
 The fourth module kind, declared in the `actions` config section (`ActionConfig`: `module` = service
