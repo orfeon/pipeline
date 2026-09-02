@@ -300,6 +300,10 @@ public class ProfileSink extends Sink {
         parameters.validate();
         parameters.setDefaults();
         parameters.resolveOutput(getName(), inputs.getPipeline().getOptions());
+        if(parameters.compareWith != null && !RenderDoFn.exists(parameters.compareWith)) {
+            // read only at render time, after the whole input has been scanned — fail before that
+            throw new IllegalModuleException("parameters.compareWith target not found: " + parameters.compareWith);
+        }
 
         final PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()
@@ -780,6 +784,14 @@ public class ProfileSink extends Sink {
 
         private static boolean isUri(final String path) {
             return URI_PATTERN.matcher(path).matches();
+        }
+
+        static boolean exists(final String path) {
+            try {
+                return isUri(path) ? ResourceUtil.exists(path) : Files.exists(Paths.get(path));
+            } catch (final Exception e) {
+                return false;
+            }
         }
     }
 }

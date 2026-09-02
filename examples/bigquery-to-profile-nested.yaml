@@ -1,0 +1,36 @@
+# Profile: nested STRUCT columns as dot paths, raw values hidden.
+# Reads one month of the public Google Analytics sample (sessions with STRUCT columns
+# `totals`, `trafficSource`, `device`, `geoNetwork`). The profile flattens structs to dot
+# paths up to depth 3 — each leaf gets its own card and can be declared as a key, segment
+# or comparison field (here `device.deviceCategory` and `geoNetwork.country` are segments);
+# a struct nested deeper is skipped and listed in the report appendix.
+# `values: hide` keeps raw values (top-K labels, sample rows, value-bearing sketches) out of
+# the report — the setting for reports shared more widely than the data itself.
+# Set `output` to your bucket and it runs.
+sources:
+  - name: sessions
+    module: bigquery
+    parameters:
+      query: |
+        SELECT
+          fullVisitorId, visitNumber, TIMESTAMP_SECONDS(visitStartTime) AS visitStartedAt,
+          channelGrouping, totals, trafficSource, device, geoNetwork
+        FROM `bigquery-public-data.google_analytics_sample.ga_sessions_*`
+        WHERE _TABLE_SUFFIX BETWEEN '20170701' AND '20170731'
+
+sinks:
+  - name: sessionsProfile
+    module: profile
+    inputs: [sessions]
+    parameters:
+      output: gs://mybucket/reports/analytics/sessions-2017-07.html
+      values: hide
+      keys: [fullVisitorId]
+      segments: [device.deviceCategory, geoNetwork.country]
+      time:
+        field: visitStartedAt
+        granularity: day
+      compare:
+        - [totals.pageviews, totals.hits]
+      report:
+        title: GA sample sessions, July 2017

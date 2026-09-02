@@ -1,14 +1,14 @@
 # Profile: observe a BigQuery dataset and write one self-contained HTML report.
-# Runs as-is against a public dataset (NYC yellow taxi trips, 2022): the query keeps the
-# scan small with TABLESAMPLE, and the sink profiles every column in one pass with
-# DataSketches (quantiles/histograms, distinct counts, top-K values, correlations, samples).
-# Replace `output` with your bucket. Each declared parameter adds a report section:
+# Reads the public NYC yellow taxi trips (2022) — set `output` to your bucket and it runs.
+# TABLESAMPLE keeps the scan small; the half-open date filter drops the few stray rows the
+# table holds outside 2022 (they would otherwise add empty years to the time axis).
+# The sink profiles every column in one pass with DataSketches (quantiles/histograms,
+# distinct counts, top-K values, correlations, row samples). Each declared parameter adds
+# a report section:
 #   keys     → key diagnostics (distinct with bounds, keyness, containment between keys)
 #   segments → per-group sub-profiles + a compare bar that overlays group distributions
 #   time     → time-evolution view (per-bucket sub-profiles)
 #   compare  → declared numeric pairs with overlaid distributions, Q-Q plot and PSI/KS
-# Real-environment checks this example covers: NUMERIC (decimal) columns profiled as numbers,
-# TIMESTAMP columns as time buckets, top-K bounding of a segment field, gs:// output.
 sources:
   - name: trips
     module: bigquery
@@ -21,7 +21,7 @@ sources:
           pickup_location_id, dropoff_location_id
         FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2022`
         TABLESAMPLE SYSTEM (1 PERCENT)
-        WHERE pickup_datetime BETWEEN '2022-01-01' AND '2022-12-31'
+        WHERE pickup_datetime >= '2022-01-01' AND pickup_datetime < '2023-01-01'
 
 sinks:
   - name: tripsProfile

@@ -1044,7 +1044,7 @@ function renderVenn(s, venn) {
   const sketchesText = document.getElementById("profile-sketches").textContent;
   const hasSketches = sketchesText && sketchesText.trim() !== "{}";
   s.append(el('<p class="samples">embedded sketch binaries: ' + (hasSketches
-    ? "yes (" + Math.round(sketchesText.length / 1024) + " KB base64; mergeable with future reports and BigQuery bqutil.datasketches UDFs)"
+    ? "yes (" + Math.round(sketchesText.length / 1024) + " KB base64; mergeable with future reports; CPC/Theta/frequent-items readable by BigQuery bqutil.datasketches)"
     : "not embedded") + "</p>"));
 })();
 

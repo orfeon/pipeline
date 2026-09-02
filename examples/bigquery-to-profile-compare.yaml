@@ -1,29 +1,36 @@
-# Profile: compare two years of the same dataset, and compare against a past report.
-# Both inputs are scanned now and become comparison groups (mode: compare) with PSI/KS drift
-# metrics against the baseline; `compareWith` additionally aligns this run field-by-field with
-# a report produced earlier by this module (for example examples/bigquery-to-profile.yaml),
-# without re-scanning that data. The object form of `output` also writes the mergeable sketch
-# binaries as a separate JSON (readable by BigQuery `bqutil.datasketches` UDFs).
-# Run examples/bigquery-to-profile.yaml first so the compareWith target exists, or drop the line.
+# Profile: compare two years of the same dataset.
+# Both inputs are scanned now and become comparison groups (mode: compare): the report gets
+# per-input sub-profiles, compare-bar chips and PSI/KS drift metrics against the baseline.
+# The object form of `output` also writes the mergeable sketch binaries as a separate JSON;
+# its CPC / Theta / frequent-items sketches are readable by BigQuery `bqutil.datasketches`
+# UDFs (the KLL quantile sketches are the doubles variant, which those UDFs do not read).
+# Same column list and filter as examples/bigquery-to-profile.yaml, so that report can serve
+# as a `compareWith` target — see the commented parameter at the end.
 sources:
   - name: trips2021
     module: bigquery
     parameters:
       query: |
         SELECT
-          vendor_id, pickup_datetime, passenger_count, trip_distance, payment_type,
-          fare_amount, tip_amount, total_amount, pickup_location_id
+          vendor_id, pickup_datetime, dropoff_datetime, passenger_count, trip_distance,
+          rate_code, store_and_fwd_flag, payment_type,
+          fare_amount, extra, mta_tax, tip_amount, tolls_amount, total_amount,
+          pickup_location_id, dropoff_location_id
         FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2021`
         TABLESAMPLE SYSTEM (1 PERCENT)
+        WHERE pickup_datetime >= '2021-01-01' AND pickup_datetime < '2022-01-01'
   - name: trips2022
     module: bigquery
     parameters:
       query: |
         SELECT
-          vendor_id, pickup_datetime, passenger_count, trip_distance, payment_type,
-          fare_amount, tip_amount, total_amount, pickup_location_id
+          vendor_id, pickup_datetime, dropoff_datetime, passenger_count, trip_distance,
+          rate_code, store_and_fwd_flag, payment_type,
+          fare_amount, extra, mta_tax, tip_amount, tolls_amount, total_amount,
+          pickup_location_id, dropoff_location_id
         FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2022`
         TABLESAMPLE SYSTEM (1 PERCENT)
+        WHERE pickup_datetime >= '2022-01-01' AND pickup_datetime < '2023-01-01'
 
 sinks:
   - name: tripsCompare
@@ -38,6 +45,10 @@ sinks:
       keys: [pickup_location_id]
       compare:
         - [fare_amount, total_amount]
-      compareWith: gs://mybucket/reports/taxi/trips-2022.html
       report:
         title: NYC yellow taxi trips, 2021 vs 2022
+      # compareWith aligns the WHOLE profile of this run (the union of both inputs) with a
+      # report written earlier by this module, field by field, without re-scanning that data.
+      # It must exist before the run (checked at pipeline construction). To try it, run
+      # examples/bigquery-to-profile.yaml first and uncomment:
+      # compareWith: gs://mybucket/reports/taxi/trips-2022.html
