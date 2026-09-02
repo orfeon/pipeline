@@ -31,11 +31,23 @@ public class JobReaderTest {
         final JobReader.Ref listing = JobReader.resolve(null, "direct", "p", "r");
         Assertions.assertEquals(JobReader.Runner.direct, listing.runner());
         Assertions.assertNull(listing.id());
+        // prism is the same Cloud Run shape under its own runner (own configured job); an execution name is accepted as is
+        final JobReader.Ref prism = JobReader.resolve(null, "prism", "p", "r");
+        Assertions.assertEquals(JobReader.Runner.prism, prism.runner());
+        Assertions.assertTrue(prism.runner().isCloudRun());
+        Assertions.assertFalse(JobReader.Runner.dataflow.isCloudRun());
+        final JobReader.Ref prismExecution = JobReader.resolve("projects/p/locations/r/jobs/pipeline-prism/executions/pipeline-prism-abc12", "prism", null, null);
+        Assertions.assertEquals(JobReader.Runner.prism, prismExecution.runner());
+        Assertions.assertEquals("p", prismExecution.project());
         Assertions.assertThrows(IllegalArgumentException.class, () -> JobReader.resolve(null, null, "p", "r"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> JobReader.resolve("x", "flink", "p", "r"));
         // a short execution id needs the configured Cloud Run Job
         Assumptions.assumeTrue(System.getenv("MERCARI_PIPELINE_LAUNCH_DIRECT_JOB") == null && System.getenv("MERCARI_PIPELINE_LAUNCH_JOB") == null);
         Assertions.assertThrows(IllegalArgumentException.class, () -> JobReader.resolve("pipeline-abc12", "direct", "p", "r"));
+        Assumptions.assumeTrue(System.getenv("MERCARI_PIPELINE_LAUNCH_PRISM_JOB") == null);
+        final IllegalArgumentException prismShort = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> JobReader.resolve("pipeline-abc12", "prism", "p", "r"));
+        Assertions.assertTrue(prismShort.getMessage().contains("MERCARI_PIPELINE_LAUNCH_PRISM_JOB"), prismShort.getMessage());
     }
 
     @Test

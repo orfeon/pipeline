@@ -163,7 +163,9 @@ the pipeline. Pass the config (or just the step's `parameters`) and optionally t
 
 Submit a validated config to an execution target and return the created job.
 
-- `config` (required), `runner` (required: `dataflow` | `direct` | `spark`), `environment` (optional:
+- `config` (required), `runner` (required: `dataflow` | `direct` | `prism` | `spark` — `prism` is the
+  Cloud Run choice for pipelines with keyed stages over coarse or global keys, e.g. `feature`, on
+  subset-sized inputs), `environment` (optional:
   `flexTemplate` | `cloudRunJob` | `cloudRunWorkerPool` | `dataprocServerless`), `parameters` (optional JSON
   object: `project`, `region`, `jobName`, `serviceAccount`, `templateLocation`, `workerMachineType`, ...),
   `args` (optional JSON object of template arguments).
@@ -220,7 +222,7 @@ implementation behavior when you can check the source instead.
 Deployed pipelines run as Cloud Dataflow jobs. These read-only tools inspect them:
 
 - `getJob` — job status (a Dataflow job by id / name, or a Cloud Run Job execution by its execution
-  name; `runner: direct` with no job lists the latest executions) plus, for Dataflow, the pipeline config recovered from the job's launch
+  name; `runner: direct` / `prism` with no job lists the latest executions of that runner's job) plus, for Dataflow, the pipeline config recovered from the job's launch
   parameters. Accepts a job id or an exact job name. Use this first when the user asks about a
   specific job ("why did job X fail", "what config is job Y running").
 - `listJobErrors` — full error picture of a job: Dataflow service error messages plus

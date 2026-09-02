@@ -9,11 +9,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * {@code direct/cloudRunJob}: run a <b>pre-created</b> Cloud Run Job built from the {@code direct}
- * image, overriding its container args with {@code --config=...} / {@code --args.*} for this launch.
- * The job's resources (image, service account, cpu, memory, network) are owned by whoever created
- * it (see {@code docs/deploy/cloud-run-jobs.md}); only what {@code jobs.run} can override is exposed:
- * args, task timeout, task count and extra env vars.
+ * {@code direct/cloudRunJob} and {@code prism/cloudRunJob}: run a <b>pre-created</b> Cloud Run Job built
+ * from the {@code direct} / {@code prism} image, overriding its container args with {@code --config=...} /
+ * {@code --args.*} for this launch. The job's resources (image, service account, cpu, memory, network)
+ * are owned by whoever created it (see {@code docs/deploy/cloud-run-jobs.md}); only what {@code jobs.run}
+ * can override is exposed: args, task timeout, task count and extra env vars. The runner only selects
+ * which job (and which {@code MERCARI_PIPELINE_LAUNCH_<RUNNER>_*} defaults) the launch goes to: the
+ * job's image decides whether DirectRunner or Prism executes the pipeline.
  */
 public class CloudRunJobLauncher implements Launcher {
 
@@ -24,6 +26,7 @@ public class CloudRunJobLauncher implements Launcher {
     /** Below the Builder request timeout of 300s: a launch must answer before the browser gives up. */
     static final int MAX_WAIT_SECONDS = 240;
 
+    private final String runner;
     private final CloudRunUtil cloudRun;
     private final ConfigStager stager;
 
@@ -32,13 +35,19 @@ public class CloudRunJobLauncher implements Launcher {
     }
 
     public CloudRunJobLauncher(final CloudRunUtil cloudRun, final ConfigStager stager) {
+        this("direct", cloudRun, stager);
+    }
+
+    /** @param runner {@code direct} or {@code prism}: the image profile the target job was built with. */
+    public CloudRunJobLauncher(final String runner, final CloudRunUtil cloudRun, final ConfigStager stager) {
+        this.runner = runner;
         this.cloudRun = cloudRun;
         this.stager = stager;
     }
 
     @Override
     public String runner() {
-        return "direct";
+        return runner;
     }
 
     @Override
@@ -108,7 +117,7 @@ public class CloudRunJobLauncher implements Launcher {
             if(e.isNotFound()) {
                 throw new IllegalArgumentException("Cloud Run Job " + job + " was not found in " + project + "/" + region
                         + ". Create it first with `gcloud run jobs create " + job + " --project=" + project + " --region=" + region
-                        + " --image=<direct image> ...` (see docs/deploy/cloud-run-jobs.md), or launch a different job with jobName", e);
+                        + " --image=<" + runner + " image> ...` (see docs/deploy/cloud-run-jobs.md), or launch a different job with jobName", e);
             }
             throw e;
         }

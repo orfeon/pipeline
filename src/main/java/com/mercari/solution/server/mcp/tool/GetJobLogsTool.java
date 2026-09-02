@@ -13,7 +13,7 @@ import jakarta.servlet.ServletContext;
     description = """
         Read the Cloud Logging entries of a launched job: the worker / harness / launcher logs of a
         Dataflow job (by id or exact name) or the container logs of a Cloud Run Job execution (by execution
-        name; runner 'direct'). Returns the latest entries (oldest first) at or above 'minSeverity'
+        name; runner 'direct' / 'prism'). Returns the latest entries (oldest first) at or above 'minSeverity'
         (default INFO), optionally only those containing 'contains'. Use list-job-errors for the
         deduplicated error summary; use this to see what happened around an error (INFO / WARNING context,
         the feature plan report, progress messages) or to grep for a specific text.
@@ -28,13 +28,13 @@ import jakarta.servlet.ServletContext;
             },
             "runner": {
               "type": "string",
-              "enum": ["dataflow", "direct"],
+              "enum": ["dataflow", "direct", "prism"],
               "description": "Force the runner (default: inferred from the job reference)."
             },
             "minSeverity": {
               "type": "string",
               "enum": ["DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL"],
-              "description": "Lowest severity to include (default INFO). Cloud Run container stdout carries severity DEFAULT, so for runner 'direct' any threshold below WARNING returns all lines; WARNING and above still filter (stderr maps to ERROR)."
+              "description": "Lowest severity to include (default INFO). Cloud Run container stdout carries severity DEFAULT, so for runner 'direct' / 'prism' any threshold below WARNING returns all lines; WARNING and above still filter (stderr maps to ERROR)."
             },
             "contains": {
               "type": "string",

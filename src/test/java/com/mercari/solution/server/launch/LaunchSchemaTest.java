@@ -48,6 +48,8 @@ public class LaunchSchemaTest {
         Assertions.assertEquals("dataflow/inProcess", LaunchService.findLauncher("dataflow", "inProcess").key());
         Assertions.assertEquals("direct/cloudRunJob", LaunchService.findLauncher("direct", null).key());
         Assertions.assertEquals("direct/cloudRunWorkerPool", LaunchService.findLauncher("direct", "cloudRunWorkerPool").key());
+        Assertions.assertEquals("prism/cloudRunJob", LaunchService.findLauncher("prism", null).key());
+        Assertions.assertEquals("prism/cloudRunWorkerPool", LaunchService.findLauncher("prism", "cloudRunWorkerPool").key());
         Assertions.assertEquals("spark/dataprocServerless", LaunchService.findLauncher("spark", null).key());
         Assertions.assertThrows(IllegalArgumentException.class, () -> LaunchService.findLauncher("flink", null));
         Assertions.assertThrows(IllegalArgumentException.class, () -> LaunchService.findLauncher("direct", "gce"));
@@ -62,6 +64,7 @@ public class LaunchSchemaTest {
                 "MERCARI_PIPELINE_LAUNCH_DIRECT_JOB", "mp-job",
                 "MERCARI_PIPELINE_LAUNCH_DIRECT_TASK_TIMEOUT", "1800",
                 "MERCARI_PIPELINE_LAUNCH_DIRECT_INSTANCES", "3",
+                "MERCARI_PIPELINE_LAUNCH_PRISM_JOB", "mp-job-prism",
                 "MERCARI_PIPELINE_DATAFLOW_TEMPLATE_LOCATION", "gs://legacy/template.json"));
         final JsonObject original = schema();
         final JsonObject filled = LaunchSchema.withDefaults(original, defaults);
@@ -87,6 +90,15 @@ public class LaunchSchemaTest {
         Assertions.assertEquals(1, pool.getAsJsonObject("properties").getAsJsonObject("instances").get("default").getAsInt());
         Assertions.assertFalse(pool.getAsJsonObject("properties").getAsJsonObject("image").has(HINT));
 
+        // prism resolves its own runner-specific keys and falls back to the common ones (project), never to _DIRECT_
+        final JsonObject prism = runner(filled, "prism");
+        Assertions.assertEquals("env-project", prism.getAsJsonObject("properties").getAsJsonObject("project").get(HINT).getAsString());
+        Assertions.assertFalse(prism.getAsJsonObject("properties").getAsJsonObject("region").has(HINT));
+        final JsonObject prismJob = environment(prism, "cloudRunJob");
+        Assertions.assertEquals("mp-job-prism", prismJob.getAsJsonObject("properties").getAsJsonObject("jobName").get(HINT).getAsString());
+        Assertions.assertFalse(prismJob.getAsJsonObject("properties").getAsJsonObject("taskTimeout").has(HINT));
+        Assertions.assertFalse(environment(prism, "cloudRunWorkerPool").getAsJsonObject("properties").getAsJsonObject("instances").has(HINT));
+
         // the classpath schema itself is untouched
         Assertions.assertFalse(runner(original, "direct").getAsJsonObject("properties").getAsJsonObject("region").has(HINT));
     }
@@ -98,6 +110,8 @@ public class LaunchSchemaTest {
         Assertions.assertFalse(environment(runner(schema, "dataflow"), "flexTemplate").has("required"));
         Assertions.assertEquals("jobName", environment(runner(schema, "direct"), "cloudRunJob").getAsJsonArray("required").get(0).getAsString());
         Assertions.assertEquals("image", environment(runner(schema, "direct"), "cloudRunWorkerPool").getAsJsonArray("required").get(0).getAsString());
+        Assertions.assertEquals("jobName", environment(runner(schema, "prism"), "cloudRunJob").getAsJsonArray("required").get(0).getAsString());
+        Assertions.assertEquals("image", environment(runner(schema, "prism"), "cloudRunWorkerPool").getAsJsonArray("required").get(0).getAsString());
     }
 
     @Test
@@ -117,7 +131,7 @@ public class LaunchSchemaTest {
         final JsonObject schema = schema();
         Assertions.assertTrue(runner(schema, "flink").get(LaunchSchema.X_HIDDEN).getAsBoolean());
         Assertions.assertTrue(environment(runner(schema, "dataflow"), "inProcess").get(LaunchSchema.X_HIDDEN).getAsBoolean());
-        for(final String visible : List.of("dataflow", "direct", "spark")) {
+        for(final String visible : List.of("dataflow", "direct", "prism", "spark")) {
             Assertions.assertFalse(runner(schema, visible).has(LaunchSchema.X_HIDDEN), visible);
         }
     }

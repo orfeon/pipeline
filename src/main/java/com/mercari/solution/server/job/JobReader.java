@@ -11,7 +11,9 @@ import com.mercari.solution.util.cloud.google.LoggingUtil;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -19,12 +21,20 @@ import java.util.regex.Pattern;
 /**
  * Runner-agnostic job observation shared by the MCP tools ({@code get-job}, {@code list-job-errors},
  * {@code get-job-logs}, {@code list-failed-jobs}) and the agent tools: Dataflow jobs (delegating to
- * {@link DataflowJobReader}) and Cloud Run Job executions (the {@code direct/cloudRunJob} launch target).
+ * {@link DataflowJobReader}) and Cloud Run Job executions (the {@code direct/cloudRunJob} and
+ * {@code prism/cloudRunJob} launch targets — the runner picks which configured job's defaults apply).
  * All methods return LLM-consumable text and never throw: failures come back as ERROR strings.
  */
 public final class JobReader {
 
-    public enum Runner { dataflow, direct }
+    public enum Runner {
+        dataflow, direct, prism;
+
+        /** Cloud Run Job executions (direct / prism image) as opposed to Dataflow jobs. */
+        public boolean isCloudRun() {
+            return this != dataflow;
+        }
+    }
 
     /** A resolved job reference: Dataflow job id / name, or a Cloud Run execution resource name (null = the job's latest executions). */
     public record Ref(Runner runner, String id, String project, String region) {}
@@ -58,21 +68,21 @@ public final class JobReader {
             }
             return new Ref(runner, key, projectArg, regionArg);
         }
-        // Cloud Run Job executions
+        // Cloud Run Job executions (direct / prism image)
         if (execution != null && execution.matches()) {
             return new Ref(runner, key, execution.group(1), execution.group(2));
         }
         final LaunchDefaults defaults = LaunchDefaults.get();
-        final String project = defaults.require("direct", LaunchDefaults.KEY_PROJECT, projectArg);
-        final String region = defaults.require("direct", LaunchDefaults.KEY_REGION, regionArg);
+        final String project = defaults.require(runner.name(), LaunchDefaults.KEY_PROJECT, projectArg);
+        final String region = defaults.require(runner.name(), LaunchDefaults.KEY_REGION, regionArg);
         if (key == null || key.isBlank()) {
             return new Ref(runner, null, project, region);
         }
-        // a short execution id ('<job>-abc12') of the server's configured Cloud Run Job
-        final String jobName = defaults.resolve("direct", KEY_JOB).orElse(null);
+        // a short execution id ('<job>-abc12') of the server's configured Cloud Run Job for this runner
+        final String jobName = defaults.resolve(runner.name(), KEY_JOB).orElse(null);
         if (jobName == null) {
             throw new IllegalArgumentException("Cloud Run execution '" + key + "' needs its job: pass the full execution name"
-                    + " (projects/.../jobs/<job>/executions/<execution>) or set " + LaunchDefaults.envName("direct", KEY_JOB));
+                    + " (projects/.../jobs/<job>/executions/<execution>) or set " + LaunchDefaults.envName(runner.name(), KEY_JOB));
         }
         return new Ref(runner, CloudRunUtil.jobName(project, region, jobName) + "/executions/" + key, project, region);
     }
@@ -82,7 +92,8 @@ public final class JobReader {
         return switch (runnerArg.trim().toLowerCase()) {
             case "dataflow" -> Runner.dataflow;
             case "direct", "cloudrunjob", "cloud-run", "cloudrun", "run" -> Runner.direct;
-            default -> throw new IllegalArgumentException("unknown runner: " + runnerArg + " (dataflow | direct)");
+            case "prism" -> Runner.prism;
+            default -> throw new IllegalArgumentException("unknown runner: " + runnerArg + " (dataflow | direct | prism)");
         };
     }
 
@@ -103,10 +114,10 @@ public final class JobReader {
             if (ref.id() != null) {
                 return "## Cloud Run Job execution\n" + formatExecution(summarizeExecution(cloudRun.getExecution(ref.id()), ref.project()));
             }
-            final String jobName = LaunchDefaults.get().resolve("direct", KEY_JOB)
-                    .orElseThrow(() -> new IllegalArgumentException("no Cloud Run Job to list: pass an execution name or set " + LaunchDefaults.envName("direct", KEY_JOB)));
+            final String jobName = LaunchDefaults.get().resolve(ref.runner().name(), KEY_JOB)
+                    .orElseThrow(() -> new IllegalArgumentException("no Cloud Run Job to list: pass an execution name or set " + LaunchDefaults.envName(ref.runner().name(), KEY_JOB)));
             final JsonObject list = cloudRun.listExecutions(CloudRunUtil.jobName(ref.project(), ref.region(), jobName), limit == null || limit <= 0 ? 5 : Math.min(limit, 100));
-            final StringBuilder sb = new StringBuilder("## Latest executions of Cloud Run Job " + jobName + " (" + ref.project() + "/" + ref.region() + ")\n");
+            final StringBuilder sb = new StringBuilder("## Latest executions of Cloud Run Job " + jobName + " (" + ref.runner() + " image, " + ref.project() + "/" + ref.region() + ")\n");
             if (!list.has("executions") || !list.get("executions").isJsonArray() || list.getAsJsonArray("executions").isEmpty()) {
                 return sb.append("No executions.\n").toString();
             }
@@ -132,7 +143,7 @@ public final class JobReader {
             return DataflowJobReader.listJobErrors(ref.id(), ref.project(), ref.region());
         }
         if (ref.id() == null) {
-            return "ERROR: list-job-errors needs one execution: pass its execution name (get-job with runner: direct lists the latest ones)";
+            return "ERROR: list-job-errors needs one execution: pass its execution name (get-job with runner: direct / prism lists the latest ones)";
         }
         try {
             final JsonObject execution = CLOUD_RUN.getExecution(ref.id());
@@ -186,7 +197,7 @@ public final class JobReader {
                 title = "Dataflow job " + dataflowJob.getId() + " (" + dataflowJob.getName() + ")";
             } else {
                 if (ref.id() == null) {
-                    return "ERROR: get-job-logs needs one execution: pass its execution name (get-job with runner: direct lists the latest ones)";
+                    return "ERROR: get-job-logs needs one execution: pass its execution name (get-job with runner: direct / prism lists the latest ones)";
                 }
                 final Matcher m = EXECUTION_NAME.matcher(ref.id());
                 m.matches();
@@ -195,7 +206,7 @@ public final class JobReader {
                 title = "Cloud Run Job execution " + m.group(4) + " (job " + m.group(3) + ")";
             }
             // container stdout has severity DEFAULT: for Cloud Run the thresholds below WARNING are not applied
-            final String shownSeverity = ref.runner() == Runner.direct && LoggingUtil.containerSeverityDropped(severity)
+            final String shownSeverity = ref.runner().isCloudRun() && LoggingUtil.containerSeverityDropped(severity)
                     ? "DEFAULT (container stdout carries no severity)" : severity;
             final List<LogEntry> entries = LoggingUtil.listEntries(project, filter, max, true);
             final StringBuilder sb = new StringBuilder("## Logs of ").append(title)
@@ -215,41 +226,51 @@ public final class JobReader {
 
     public static String listFailedJobs(final Integer hours, final String projectArg, final String regionArg) {
         final String dataflow = DataflowJobReader.listRecentFailedJobs(hours, projectArg, regionArg);
-        // the configured Cloud Run Job (direct launches), when there is one
+        // the configured Cloud Run Jobs (direct / prism launches), when there are any; one job configured for
+        // both runners (the common MERCARI_PIPELINE_LAUNCH_JOB) is listed once
         final LaunchDefaults defaults = LaunchDefaults.get();
-        final Optional<String> jobName = defaults.resolve("direct", KEY_JOB);
-        if (jobName.isEmpty()) {
+        final Map<Runner, String> jobNames = new LinkedHashMap<>();
+        for (final Runner runner : List.of(Runner.direct, Runner.prism)) {
+            defaults.resolve(runner.name(), KEY_JOB)
+                    .filter(job -> !jobNames.containsValue(job))
+                    .ifPresent(job -> jobNames.put(runner, job));
+        }
+        if (jobNames.isEmpty()) {
             return dataflow;
         }
         // a Dataflow-side failure (e.g. no Dataflow project configured) must not hide the Cloud Run findings
         final StringBuilder sb = new StringBuilder(dataflow.startsWith("ERROR")
                 ? "## Failed Dataflow jobs\n(not listed: " + dataflow.substring("ERROR:".length()).trim() + ")\n" : dataflow);
-        try {
-            final String project = defaults.require("direct", LaunchDefaults.KEY_PROJECT, projectArg);
-            final String region = defaults.require("direct", LaunchDefaults.KEY_REGION, regionArg);
-            final int windowHours = Optional.ofNullable(hours).filter(h -> h > 0).orElse(24);
-            final Instant threshold = Instant.now().minus(windowHours, ChronoUnit.HOURS);
-            final JsonObject list = CLOUD_RUN.listExecutions(CloudRunUtil.jobName(project, region, jobName.get()), 50);
-            final JsonArray failed = new JsonArray();
-            if (list.has("executions") && list.get("executions").isJsonArray()) {
-                for (final JsonElement e : list.getAsJsonArray("executions")) {
-                    final JsonObject summary = summarizeExecution(e.getAsJsonObject(), project);
-                    final String created = summary.has("createTime") ? summary.get("createTime").getAsString() : null;
-                    if ("FAILED".equals(summary.get("state").getAsString()) && created != null && Instant.parse(created).isAfter(threshold)) {
-                        failed.add(summary);
+        for (final Map.Entry<Runner, String> entry : jobNames.entrySet()) {
+            final Runner runner = entry.getKey();
+            final String jobName = entry.getValue();
+            try {
+                final String project = defaults.require(runner.name(), LaunchDefaults.KEY_PROJECT, projectArg);
+                final String region = defaults.require(runner.name(), LaunchDefaults.KEY_REGION, regionArg);
+                final int windowHours = Optional.ofNullable(hours).filter(h -> h > 0).orElse(24);
+                final Instant threshold = Instant.now().minus(windowHours, ChronoUnit.HOURS);
+                final JsonObject list = CLOUD_RUN.listExecutions(CloudRunUtil.jobName(project, region, jobName), 50);
+                final JsonArray failed = new JsonArray();
+                if (list.has("executions") && list.get("executions").isJsonArray()) {
+                    for (final JsonElement e : list.getAsJsonArray("executions")) {
+                        final JsonObject summary = summarizeExecution(e.getAsJsonObject(), project);
+                        final String created = summary.has("createTime") ? summary.get("createTime").getAsString() : null;
+                        if ("FAILED".equals(summary.get("state").getAsString()) && created != null && Instant.parse(created).isAfter(threshold)) {
+                            failed.add(summary);
+                        }
                     }
                 }
+                sb.append("\n\n## Failed executions of Cloud Run Job ").append(jobName).append(" (").append(runner).append(" image) in the last ")
+                        .append(windowHours).append(" hours (project=").append(project).append(", region=").append(region).append(")\n");
+                if (failed.isEmpty()) {
+                    sb.append("None.\n");
+                } else {
+                    for (final JsonElement e : failed) sb.append(formatExecution(e.getAsJsonObject())).append('\n');
+                    sb.append("Use list-job-errors with the execution name to see why an execution failed.\n");
+                }
+            } catch (final Throwable e) {
+                sb.append("\n\n(Cloud Run Job ").append(jobName).append(" executions not listed: ").append(e.getMessage()).append(")\n");
             }
-            sb.append("\n\n## Failed executions of Cloud Run Job ").append(jobName.get()).append(" in the last ").append(windowHours)
-                    .append(" hours (project=").append(project).append(", region=").append(region).append(")\n");
-            if (failed.isEmpty()) {
-                sb.append("None.\n");
-            } else {
-                for (final JsonElement e : failed) sb.append(formatExecution(e.getAsJsonObject())).append('\n');
-                sb.append("Use list-job-errors with the execution name to see why an execution failed.\n");
-            }
-        } catch (final Throwable e) {
-            sb.append("\n\n(Cloud Run Job executions not listed: ").append(e.getMessage()).append(")\n");
         }
         return sb.toString();
     }
@@ -268,7 +289,7 @@ public final class JobReader {
         } catch (final IllegalArgumentException e) {
             return "ERROR: " + e.getMessage();
         }
-        if (ref.runner() == Runner.direct) {
+        if (ref.runner().isCloudRun()) {
             return getJob(job, runnerArg, projectArg, regionArg, null);
         }
         try {

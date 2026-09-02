@@ -12,7 +12,7 @@ import jakarta.servlet.ServletContext;
     title = "List Recently Failed Jobs",
     description = """
         List the pipeline jobs that failed recently: Dataflow jobs in the project / region, plus the
-        failed executions of the server's configured Cloud Run Job (direct launches) when there is one.
+        failed executions of the server's configured Cloud Run Jobs (direct / prism launches) when there are any.
         Use this when the user mentions a failure but does not know the job id, or to check whether
         anything failed lately; then list-job-errors with the job id / execution name.
         """,

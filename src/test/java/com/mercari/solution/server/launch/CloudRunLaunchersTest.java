@@ -216,6 +216,69 @@ public class CloudRunLaunchersTest {
     }
 
     @Test
+    public void testPrismCloudRunJobUsesItsOwnJobAndDefaults() throws Exception {
+        final CloudRunJobLauncher launcher = new CloudRunJobLauncher("prism", client(), new ConfigStager());
+        Assertions.assertEquals("prism/cloudRunJob", launcher.key());
+        Assertions.assertTrue(launcher.isDefaultEnvironment());
+
+        // the prism job and its task timeout come from the _PRISM_ keys, not the _DIRECT_ ones; project is common
+        final JsonObject job = launcher.launch(request(Map.of(
+                "MERCARI_PIPELINE_LAUNCH_PROJECT", "p",
+                "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1",
+                "MERCARI_PIPELINE_LAUNCH_DIRECT_JOB", "mp-job",
+                "MERCARI_PIPELINE_LAUNCH_DIRECT_TASK_TIMEOUT", "600",
+                "MERCARI_PIPELINE_LAUNCH_PRISM_JOB", "mp-job-prism",
+                "MERCARI_PIPELINE_LAUNCH_PRISM_TASK_TIMEOUT", "3600"), new JsonObject(), null));
+
+        final Received run = received().get(0);
+        Assertions.assertEquals("/v2/projects/p/locations/asia-northeast1/jobs/mp-job-prism:run", run.path());
+        Assertions.assertEquals("3600s", run.body().getAsJsonObject("overrides").get("timeout").getAsString());
+        Assertions.assertEquals("prism", job.get("runner").getAsString());
+        Assertions.assertEquals("cloudRunJob", job.get("environment").getAsString());
+        Assertions.assertEquals("mp-job-prism", job.get("job").getAsString());
+        Assertions.assertEquals("projects/p/locations/asia-northeast1/jobs/mp-job-prism/executions/mp-job-abc12", job.get("name").getAsString());
+
+        // without a prism job the launch fails naming the prism variable (the direct job is not a fallback)
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> launcher.launch(request(Map.of(
+                        "MERCARI_PIPELINE_LAUNCH_PROJECT", "p",
+                        "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1",
+                        "MERCARI_PIPELINE_LAUNCH_DIRECT_JOB", "mp-job"), new JsonObject(), null)));
+        Assertions.assertTrue(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_PRISM_JOB"), e.getMessage());
+    }
+
+    @Test
+    public void testPrismWorkerPoolUsesThePrismImage() throws Exception {
+        final CloudRunWorkerPoolLauncher launcher = new CloudRunWorkerPoolLauncher("prism", client(), new ConfigStager());
+        Assertions.assertEquals("prism/cloudRunWorkerPool", launcher.key());
+        final JsonObject parameters = new JsonObject();
+        parameters.addProperty("name", "mp-test");
+
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> launcher.launch(request(Map.of(
+                        "MERCARI_PIPELINE_LAUNCH_PROJECT", "p",
+                        "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1",
+                        "MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE", "asia-northeast1-docker.pkg.dev/p/repo/direct:latest"), parameters, null)));
+        Assertions.assertTrue(e.getMessage().startsWith("prism image is required"), e.getMessage());
+        Assertions.assertTrue(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_PRISM_IMAGE"), e.getMessage());
+        Assertions.assertTrue(received().isEmpty());
+
+        final JsonObject job = launcher.launch(request(Map.of(
+                "MERCARI_PIPELINE_LAUNCH_PROJECT", "p",
+                "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1",
+                "MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE", "asia-northeast1-docker.pkg.dev/p/repo/direct:latest",
+                "MERCARI_PIPELINE_LAUNCH_PRISM_IMAGE", "asia-northeast1-docker.pkg.dev/p/repo/prism:latest",
+                "MERCARI_PIPELINE_LAUNCH_PRISM_MEMORY", "16Gi"), parameters, null));
+        final Received create = received().get(0);
+        Assertions.assertEquals("/v2/projects/p/locations/asia-northeast1/workerPools", create.path());
+        final JsonObject container = create.body().getAsJsonObject("template").getAsJsonArray("containers").get(0).getAsJsonObject();
+        Assertions.assertEquals("asia-northeast1-docker.pkg.dev/p/repo/prism:latest", container.get("image").getAsString());
+        Assertions.assertEquals("16Gi", container.getAsJsonObject("resources").getAsJsonObject("limits").get("memory").getAsString());
+        Assertions.assertEquals("prism", job.get("runner").getAsString());
+        Assertions.assertEquals("cloudRunWorkerPool", job.get("environment").getAsString());
+    }
+
+    @Test
     public void testCloudRunJobNotFoundIsExplained() throws Exception {
         final CloudRunJobLauncher launcher = new CloudRunJobLauncher(client(), new ConfigStager());
         final JsonObject parameters = new JsonObject();

@@ -79,8 +79,10 @@ forces it. `project` / `region` default to the server's launch configuration.
 
 **Launch and follow a job**
 
-1. `launch-pipeline` with `runner: dataflow` (Flex Template) or `runner: direct` (a pre-created Cloud
-   Run Job — quicker to iterate on), template arguments in `args`, sizing in `parameters`
+1. `launch-pipeline` with `runner: dataflow` (Flex Template), `runner: direct` (a pre-created Cloud
+   Run Job — quicker to iterate on) or `runner: prism` (the same with the prism image — the choice for
+   subset runs of pipelines with coarse-key stages such as `feature`, which DirectRunner crawls on),
+   template arguments in `args`, sizing in `parameters`
    (`workerMachineType`, `numWorkers`, `maxNumWorkers`, `diskSizeGb`, `jobName`).
 2. `get-job` with the returned id / execution name until it finishes.
 3. If it looks slow or stays on one worker: `get-job-progress`.
@@ -178,6 +180,7 @@ export MERCARI_PIPELINE_LAUNCH_PROJECT=<project>
 export MERCARI_PIPELINE_LAUNCH_REGION=<region>
 export MERCARI_PIPELINE_LAUNCH_DATAFLOW_TEMPLATE_LOCATION=gs://<bucket>/templates/dataflow.json
 export MERCARI_PIPELINE_LAUNCH_DIRECT_JOB=<cloud run job>
+export MERCARI_PIPELINE_LAUNCH_PRISM_JOB=<cloud run job built from the prism image>   # optional
 mvn jetty:run -Pserver
 ```
 
