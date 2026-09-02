@@ -34,7 +34,7 @@ import jakarta.servlet.ServletContext;
             "minSeverity": {
               "type": "string",
               "enum": ["DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL"],
-              "description": "Lowest severity to include (default INFO). Cloud Run container stdout carries severity DEFAULT, so for runner 'direct' the DEBUG / INFO thresholds return all lines; WARNING and above still filter (stderr maps to ERROR)."
+              "description": "Lowest severity to include (default INFO). Cloud Run container stdout carries severity DEFAULT, so for runner 'direct' any threshold below WARNING returns all lines; WARNING and above still filter (stderr maps to ERROR)."
             },
             "contains": {
               "type": "string",

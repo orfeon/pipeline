@@ -36,6 +36,7 @@ public class LoggingUtilTest {
                 + " AND resource.labels.job_name=\"myjob\""
                 + " AND labels.\"run.googleapis.com/execution_name\"=\"myjob-abc12\"", filter);
         Assertions.assertEquals(filter, LoggingUtil.createCloudRunJobLogFilter("myjob", "myjob-abc12", "DEBUG", null, null));
+        Assertions.assertEquals(filter, LoggingUtil.createCloudRunJobLogFilter("myjob", "myjob-abc12", "NOTICE", null, null));
         Assertions.assertTrue(LoggingUtil.containerSeverityDropped("INFO"));
         Assertions.assertTrue(LoggingUtil.containerSeverityDropped(null));
         Assertions.assertFalse(LoggingUtil.containerSeverityDropped("WARNING"));

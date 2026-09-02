@@ -194,7 +194,7 @@ public final class JobReader {
                 filter = LoggingUtil.createCloudRunJobLogFilter(m.group(3), m.group(4), severity, null, contains);
                 title = "Cloud Run Job execution " + m.group(4) + " (job " + m.group(3) + ")";
             }
-            // container stdout has severity DEFAULT: for Cloud Run the DEBUG / INFO thresholds are not applied
+            // container stdout has severity DEFAULT: for Cloud Run the thresholds below WARNING are not applied
             final String shownSeverity = ref.runner() == Runner.direct && LoggingUtil.containerSeverityDropped(severity)
                     ? "DEFAULT (container stdout carries no severity)" : severity;
             final List<LogEntry> entries = LoggingUtil.listEntries(project, filter, max, true);

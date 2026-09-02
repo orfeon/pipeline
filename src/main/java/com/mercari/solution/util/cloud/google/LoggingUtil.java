@@ -75,15 +75,15 @@ public class LoggingUtil {
         filter.append(" AND resource.labels.job_name=\"").append(job).append("\"");
         filter.append(" AND labels.\"run.googleapis.com/execution_name\"=\"").append(execution).append("\"");
         // a container's plain stdout lines are ingested with severity DEFAULT (only stderr maps to ERROR),
-        // so a DEBUG / INFO threshold would exclude every ordinary log line — those thresholds drop the clause
+        // so any threshold below WARNING would exclude every ordinary log line — those thresholds drop the clause
         appendCommonFilter(filter, containerSeverityDropped(minSeverity) ? null : minSeverity, since, contains);
         return filter.toString();
     }
 
-    /** True when {@code minSeverity} would exclude the DEFAULT-severity stdout lines of a container (DEBUG / INFO / none). */
+    /** True when {@code minSeverity} would exclude the DEFAULT-severity stdout lines of a container (below WARNING). */
     public static boolean containerSeverityDropped(final String minSeverity) {
         return minSeverity == null || minSeverity.isBlank()
-                || List.of("DEFAULT", "DEBUG", "INFO").contains(minSeverity.trim().toUpperCase());
+                || List.of("DEFAULT", "DEBUG", "INFO", "NOTICE").contains(minSeverity.trim().toUpperCase());
     }
 
     private static void appendCommonFilter(final StringBuilder filter, final String minSeverity, final Instant since, final String contains) {
