@@ -377,6 +377,20 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   column every past row of the key keeps a small entry skeleton (~40 bytes) even after all other fields are
   removed, so size hot keys by row count × the unbounded column's fields (the hint lists them), plus the
   skeleton.
+- **Fix the worker pool for a parallel batch run.** Dataflow's default autoscaler sees the fan-out as one
+  fused stage and scales the job *down* right as the branches start, so raising `numWorkers` alone does
+  nothing. For full runs (and any measurement) pass `options.dataflow.autoscalingAlgorithm: NONE` with
+  `numWorkers` = `maxNumWorkers` sized for wave 1's combined work; on a measured production plan this alone
+  took the job from 15 to 9 minutes with the identical output.
+- **Global and very coarse keys are the remaining critical path.** A keyed stage with no key (a shrinkage
+  lattice's global level, an encoding `keySet` without keys, `share` denominators) processes every row
+  under one key — one worker thread, however many workers the job has — and once the waves run in parallel
+  it is what the job waits for (the `encoding.global-key` hint lists such stages). Where the statistics are
+  encoding sufficient statistics, `fit.mode: static` / `fold` computes them as a parallel Combine instead —
+  but this is a modeling change, not a drop-in: `fold` is out-of-fold over the whole batch (other folds
+  include later events), `static` freezes a training period's statistics (and matches how a serving path
+  would consume them). The values change, so treat it as a feature-design decision and validate by model
+  metrics, not by output diffing.
 - Keyed statistics (sequence `aggregate`, population encodings) are evaluated incrementally (O(n) per
   key). A window `filter` of the form `f = $self.f` over a pre-event field is automatically evaluated as
   an **additional partition key**, so hot entities split across workers; rows whose `f` is null bypass

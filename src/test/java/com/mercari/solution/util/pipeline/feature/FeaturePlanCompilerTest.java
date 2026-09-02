@@ -479,6 +479,17 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testGlobalKeyStageHint() {
+        // a single-key stage (a lattice's global level, a share denominator) is one worker thread and the
+        // critical path of a parallel-wave run: the S4 hint points at fit.mode static / fold
+        final FeaturePlan lattice = compile(SOURCES, withEncoding(LATTICE_ENC));
+        Assertions.assertTrue(hasCode(lattice, "encoding.global-key"), lattice::describe);
+        // no share statistic, no hierarchy: no global stage, no hint
+        final FeaturePlan noGlobal = compile(SOURCES, SPEC.replace("stats: [count, share]", "stats: [count]"));
+        Assertions.assertFalse(hasCode(noGlobal, "encoding.global-key"), noGlobal::describe);
+    }
+
+    @Test
     public void testStageDependenciesAndWaves() {
         // the levels of a shrinkage lattice are independent keyed stages: the seller level (fused with the
         // sequence block), the global level and the context stage form one wave; the category stage hosts the

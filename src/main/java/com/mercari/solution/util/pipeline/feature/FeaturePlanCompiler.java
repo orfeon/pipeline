@@ -80,9 +80,34 @@ public final class FeaturePlanCompiler {
             finalizeColumns();
         }
         final List<FeaturePlan.Stage> stages = buildStages();
+        hintGlobalKeyStages(stages);
         final Schema outputSchema = buildSchema();
         final String hash = hash(sourcesDocument, parameters);
         return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash);
+    }
+
+    /**
+     * S4 (engine doc §9.4.5): a keyed stage with no key evaluates every row under ONE key — a single worker
+     * thread however many workers the job has, and the critical path once the waves run in parallel. The
+     * statistics of a global / very coarse encoding level can be computed as a parallel Combine instead
+     * ({@code fit.mode static} / {@code fold}) — a modeling change (out-of-fold or a fixed training period),
+     * not a drop-in, so it is a hint, never applied automatically.
+     */
+    private void hintGlobalKeyStages(final List<FeaturePlan.Stage> stages) {
+        final List<String> global = new ArrayList<>();
+        for (final FeaturePlan.Stage s : stages) {
+            if (s.keys().isEmpty()
+                    && (s.kind() == FeaturePlan.StageKind.population || s.kind() == FeaturePlan.StageKind.sequence)) {
+                global.add("#" + s.index() + " (blocks " + s.blocks() + ")");
+            }
+        }
+        if (!global.isEmpty()) {
+            diagnostics.hint("encoding.global-key", "features", "stage(s) " + String.join(", ", global)
+                    + " evaluate every row under one key (a single worker thread — the critical path of a parallel-wave run);"
+                    + " consider fit.mode static / fold for global / very coarse encodings: the statistics become a parallel"
+                    + " Combine, but the values change (out-of-fold or a fixed training period) — see the feature docs,"
+                    + " Performance and sizing");
+        }
     }
 
     // ------------------------------------------------------------------------------------------
