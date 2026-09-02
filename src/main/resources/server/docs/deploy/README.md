@@ -90,6 +90,10 @@ while Prism executes them at proper speed.
 * The image does not bundle the prism binary: the runner downloads it from the Beam GitHub release at
   startup, so the runtime needs outbound network access (otherwise point
   `options.prism.prismLocation` at a pre-downloaded binary — see [Prism Options](../options/prism.md)).
+* Prism executes **in memory** (no disk spill): the container memory must fit the pipeline's working
+  set, which grows roughly linearly with the input. When the data outgrows the machine (a Cloud Run
+  Job caps at 32 GiB), run on Dataflow instead — prism is the subset-verification / reproduction tier,
+  not the full-production one.
 * See [How to Execute Pipeline](../exec/README.md#run-pipeline-locally--on-cloud-run-prism) for how to run it.
 
 ## Build bundled jar for Apache Flink / Apache Spark
