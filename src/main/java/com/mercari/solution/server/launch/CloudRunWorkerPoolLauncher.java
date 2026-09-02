@@ -22,7 +22,7 @@ import java.util.Map;
  */
 public class CloudRunWorkerPoolLauncher implements Launcher {
 
-    public static final String KEY_IMAGE = "IMAGE";
+    public static final String KEY_IMAGE = LaunchDefaults.KEY_IMAGE;
     public static final String KEY_CPU = "CPU";
     public static final String KEY_MEMORY = "MEMORY";
     public static final String KEY_INSTANCES = "INSTANCES";

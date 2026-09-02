@@ -19,7 +19,7 @@ import java.util.Map;
  */
 public class CloudRunJobLauncher implements Launcher {
 
-    public static final String KEY_JOB = "JOB";
+    public static final String KEY_JOB = LaunchDefaults.KEY_JOB;
     public static final String KEY_TASK_TIMEOUT = "TASK_TIMEOUT";
 
     private static final Duration WAIT_INTERVAL = Duration.ofSeconds(5);

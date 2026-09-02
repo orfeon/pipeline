@@ -171,8 +171,10 @@ Submit a validated config to an execution target and return the created job.
   `args` (optional JSON object of template arguments).
 - Only call it when the user explicitly asks to launch / run on Dataflow or Cloud Run, and only after
   `runPipeline` with `dryRun: true` succeeded on the same config. Never launch speculatively.
-- Report the returned job id and `consoleUrl`; follow the job with `getJob` / `getJobLogs` / `listJobErrors`. For Cloud Run Jobs (`direct`) the Cloud Run Job must
-  already exist; a missing one is reported as an error with the `gcloud` command to create it.
+- Report the returned job id and `consoleUrl`; follow the job with `getJob` / `getJobLogs` / `listJobErrors`. For Cloud Run Jobs (`direct`, `prism`) the Cloud Run Job must
+  already exist, one per runner (the server's `MERCARI_PIPELINE_LAUNCH_DIRECT_JOB` / `_PRISM_JOB`, or `jobName`): the job's image
+  is what runs the pipeline, so never pass the direct job as `jobName` of a `prism` launch — a missing prism job is reported as an
+  error with the `gcloud` command to create it, and the answer is to create it (or fall back to `direct` / `dataflow` explicitly).
 
 ### readDocs
 

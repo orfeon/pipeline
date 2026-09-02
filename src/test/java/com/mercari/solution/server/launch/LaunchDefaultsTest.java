@@ -86,6 +86,26 @@ public class LaunchDefaultsTest {
     }
 
     @Test
+    public void testJobAndImageAreRunnerOnly() {
+        // the job / image decide which runner runs: a common variable must not serve every runner
+        final LaunchDefaults defaults = LaunchDefaults.of(Map.of(
+                "MERCARI_PIPELINE_LAUNCH_JOB", "shared-job",
+                "MERCARI_PIPELINE_LAUNCH_IMAGE", "shared-image",
+                "MERCARI_PIPELINE_LAUNCH_DIRECT_JOB", "direct-job",
+                "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1"));
+        Assertions.assertEquals("direct-job", defaults.fromEnv("direct", LaunchDefaults.KEY_JOB));
+        Assertions.assertNull(defaults.fromEnv("prism", LaunchDefaults.KEY_JOB));
+        Assertions.assertNull(defaults.fromEnv("direct", LaunchDefaults.KEY_IMAGE));
+        Assertions.assertNull(defaults.fromEnv("prism", LaunchDefaults.KEY_IMAGE));
+        Assertions.assertEquals("asia-northeast1", defaults.fromEnv("prism", LaunchDefaults.KEY_REGION), "other keys still fall back");
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
+                () -> defaults.require("prism", LaunchDefaults.KEY_JOB));
+        Assertions.assertTrue(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_PRISM_JOB"), e.getMessage());
+        Assertions.assertFalse(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_JOB "), "the common name is not an option: " + e.getMessage());
+        Assertions.assertFalse(e.getMessage().contains("(or "), e.getMessage());
+    }
+
+    @Test
     public void testRequireMessageNamesEnvVars() {
         final LaunchDefaults defaults = LaunchDefaults.of(Map.of());
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,

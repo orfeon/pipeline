@@ -49,7 +49,10 @@ permissions listed below for every target the clients may use.
 
 ### Launch (`MERCARI_PIPELINE_LAUNCH[_<RUNNER>]_<KEY>`)
 
-Common keys accept a runner-specific override (`_DATAFLOW_`, `_DIRECT_`, `_PRISM_`, `_SPARK_`).
+Common keys accept a runner-specific override (`_DATAFLOW_`, `_DIRECT_`, `_PRISM_`, `_SPARK_`). `JOB` and
+`IMAGE` exist only under a runner name (`_DIRECT_JOB`, `_PRISM_JOB`, `_DIRECT_IMAGE`, `_PRISM_IMAGE`): a common
+`MERCARI_PIPELINE_LAUNCH_JOB` / `_IMAGE` is not read, because the job / image decides which runner executes the
+pipeline.
 
 | Variable | Meaning |
 |---|---|
@@ -65,7 +68,7 @@ Common keys accept a runner-specific override (`_DATAFLOW_`, `_DIRECT_`, `_PRISM
 | `MERCARI_PIPELINE_LAUNCH_DIRECT_TASK_TIMEOUT` | Default task timeout override for Cloud Run Job executions, seconds |
 | `MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE` | Direct image URI for worker pools |
 | `MERCARI_PIPELINE_LAUNCH_DIRECT_CPU` / `_MEMORY` / `_INSTANCES` | Worker pool sizing defaults (`4` / `6Gi` / `1`) |
-| `MERCARI_PIPELINE_LAUNCH_PRISM_JOB` / `_TASK_TIMEOUT` / `_IMAGE` / `_CPU` / `_MEMORY` / `_INSTANCES` | The same keys for `prism` launches: the Cloud Run Job built from the prism image, and the prism image / sizing for worker pools. Keep them separate from the `_DIRECT_` ones — a job's image decides which runner executes the pipeline, so pointing both runners at one job makes the `direct` / `prism` choice in the modal meaningless (a common `MERCARI_PIPELINE_LAUNCH_JOB` does exactly that) |
+| `MERCARI_PIPELINE_LAUNCH_PRISM_JOB` / `_TASK_TIMEOUT` / `_IMAGE` / `_CPU` / `_MEMORY` / `_INSTANCES` | The same keys for `prism` launches: the Cloud Run Job built from the prism image, and the prism image / sizing for worker pools. A `prism` launch never falls back to the `_DIRECT_` job / image (nor to a common one): without `_PRISM_JOB` (or `jobName`) it fails naming the variable to set |
 | `MERCARI_PIPELINE_LAUNCH_SPARK_JARS` / `_VERSION` | Bundled jar (`gs://…`) and Dataproc Serverless runtime version (`3.0`) |
 
 Every launched Dataflow job / worker pool carries the labels `mercari-pipeline-version` and

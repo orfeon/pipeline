@@ -238,13 +238,17 @@ public class CloudRunLaunchersTest {
         Assertions.assertEquals("mp-job-prism", job.get("job").getAsString());
         Assertions.assertEquals("projects/p/locations/asia-northeast1/jobs/mp-job-prism/executions/mp-job-abc12", job.get("name").getAsString());
 
-        // without a prism job the launch fails naming the prism variable (the direct job is not a fallback)
+        // without a prism job the launch fails naming the prism variable: neither the direct job nor a common
+        // MERCARI_PIPELINE_LAUNCH_JOB is a fallback (that would run the direct image under runner prism)
+        final int callsBefore = received().size();
         final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class,
                 () -> launcher.launch(request(Map.of(
                         "MERCARI_PIPELINE_LAUNCH_PROJECT", "p",
                         "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1",
+                        "MERCARI_PIPELINE_LAUNCH_JOB", "mp-job",
                         "MERCARI_PIPELINE_LAUNCH_DIRECT_JOB", "mp-job"), new JsonObject(), null)));
         Assertions.assertTrue(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_PRISM_JOB"), e.getMessage());
+        Assertions.assertEquals(callsBefore, received().size(), "nothing was run");
     }
 
     @Test
@@ -258,6 +262,7 @@ public class CloudRunLaunchersTest {
                 () -> launcher.launch(request(Map.of(
                         "MERCARI_PIPELINE_LAUNCH_PROJECT", "p",
                         "MERCARI_PIPELINE_LAUNCH_REGION", "asia-northeast1",
+                        "MERCARI_PIPELINE_LAUNCH_IMAGE", "asia-northeast1-docker.pkg.dev/p/repo/direct:latest",
                         "MERCARI_PIPELINE_LAUNCH_DIRECT_IMAGE", "asia-northeast1-docker.pkg.dev/p/repo/direct:latest"), parameters, null)));
         Assertions.assertTrue(e.getMessage().startsWith("prism image is required"), e.getMessage());
         Assertions.assertTrue(e.getMessage().contains("MERCARI_PIPELINE_LAUNCH_PRISM_IMAGE"), e.getMessage());

@@ -126,6 +126,35 @@ public class LaunchSchemaTest {
         Assertions.assertEquals("{\"a\":1}", map.get("filter"));
     }
 
+    /** The prism block is served by the same launcher classes as direct: every field the launchers read must be offered by both. */
+    @Test
+    public void testPrismMirrorsDirect() {
+        final JsonObject schema = schema();
+        final JsonObject direct = runner(schema, "direct");
+        final JsonObject prism = runner(schema, "prism");
+        Assertions.assertEquals(direct.getAsJsonObject("properties").keySet(), prism.getAsJsonObject("properties").keySet());
+        final List<String> directEnvironments = new java.util.ArrayList<>();
+        direct.getAsJsonArray("oneOf").forEach(e -> directEnvironments.add(LaunchSchema.idSuffix(e.getAsJsonObject())));
+        final List<String> prismEnvironments = new java.util.ArrayList<>();
+        prism.getAsJsonArray("oneOf").forEach(e -> prismEnvironments.add(LaunchSchema.idSuffix(e.getAsJsonObject())));
+        Assertions.assertEquals(directEnvironments, prismEnvironments);
+        for(final String name : directEnvironments) {
+            final JsonObject d = environment(direct, name);
+            final JsonObject p = environment(prism, name);
+            Assertions.assertEquals(d.get("required"), p.get("required"), name + ".required");
+            final JsonObject dp = d.getAsJsonObject("properties");
+            final JsonObject pp = p.getAsJsonObject("properties");
+            Assertions.assertEquals(dp.keySet(), pp.keySet(), name + ".properties");
+            for(final String property : dp.keySet()) {
+                // descriptions differ (image name, memory split); the contract — type, default, launch-default key — must not
+                for(final String facet : List.of("type", "default", LaunchSchema.X_LAUNCH_DEFAULT)) {
+                    Assertions.assertEquals(dp.getAsJsonObject(property).get(facet), pp.getAsJsonObject(property).get(facet),
+                            name + "." + property + "." + facet);
+                }
+            }
+        }
+    }
+
     @Test
     public void testHiddenTargets() {
         final JsonObject schema = schema();
