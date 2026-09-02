@@ -28,6 +28,35 @@ public class LoggingUtilTest {
     }
 
     @Test
+    public void testCloudRunJobLogFilterDropsInfoAndDebugThresholds() {
+        // container stdout is ingested with severity DEFAULT (only stderr maps to ERROR): an INFO / DEBUG
+        // threshold would exclude every ordinary line, reading a job's logs back as empty
+        final String filter = LoggingUtil.createCloudRunJobLogFilter("myjob", "myjob-abc12", "INFO", null, null);
+        Assertions.assertEquals("resource.type=\"cloud_run_job\""
+                + " AND resource.labels.job_name=\"myjob\""
+                + " AND labels.\"run.googleapis.com/execution_name\"=\"myjob-abc12\"", filter);
+        Assertions.assertEquals(filter, LoggingUtil.createCloudRunJobLogFilter("myjob", "myjob-abc12", "DEBUG", null, null));
+        Assertions.assertTrue(LoggingUtil.containerSeverityDropped("INFO"));
+        Assertions.assertTrue(LoggingUtil.containerSeverityDropped(null));
+        Assertions.assertFalse(LoggingUtil.containerSeverityDropped("WARNING"));
+    }
+
+    @Test
+    public void testCloudRunJobLogFilterKeepsHigherThresholdsAndContains() {
+        final String filter = LoggingUtil.createCloudRunJobLogFilter("myjob", "myjob-abc12", "ERROR", null, "spill");
+        Assertions.assertTrue(filter.contains(" AND severity>=ERROR"), filter);
+        Assertions.assertTrue(filter.contains("textPayload:\"spill\""), filter);
+    }
+
+    @Test
+    public void testDataflowLogFilterKeepsInfoThreshold() {
+        // Dataflow entries carry real severities: the threshold stays
+        final String filter = LoggingUtil.createDataflowLogFilter("2026-01-01_00_00_00-1", "INFO", null, null);
+        Assertions.assertTrue(filter.contains("resource.type=\"dataflow_step\""), filter);
+        Assertions.assertTrue(filter.contains(" AND severity>=INFO"), filter);
+    }
+
+    @Test
     public void testExtractText() {
         final LogEntry stringEntry = LogEntry.newBuilder(Payload.StringPayload.of("plain error")).build();
         Assertions.assertEquals("plain error", LoggingUtil.extractText(stringEntry));
