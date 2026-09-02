@@ -214,11 +214,11 @@
         },
         "prismLocation": {
           "type": "string",
-          "description": "Path or URL of the Prism binary"
+          "description": "Path of an unzipped Prism binary, or a Beam GitHub release URL. Default: the binary bundled in the prism image (MERCARI_PIPELINE_PRISM_LOCATION), else the runner downloads its own version. An empty string re-enables the download."
         },
         "prismVersionOverride": {
           "type": "string",
-          "description": "Prism version to download instead of the default"
+          "description": "Prism release version to download instead of the SDK's own. Only consulted when prismLocation is unset / empty (the prism image sets it to the bundled binary)."
         }
       }
     },

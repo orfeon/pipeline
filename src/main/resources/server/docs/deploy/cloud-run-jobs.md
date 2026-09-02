@@ -52,10 +52,9 @@ see [Deploy Prism Runner](README.md#deploy-prism-runner-for-local--cloud-run-exe
 `--image` and keep the arguments. Prefer it when the pipeline has heavy keyed stages (GroupByKey over
 coarse or global keys), which DirectRunner slows down on by orders of magnitude.
 
-* The prism binary is bundled in the image (`/opt/prism/...`, selected by the entrypoint's
-  `--prismLocation`), so the job needs no outbound network access to start and no writable `$HOME`.
-  A config's `options.prism.prismLocation` overrides it; do not pass `--prismLocation` in `--args`
-  as well — a flag duplicated from the entrypoint fails argument parsing.
+* The prism binary is bundled in the image, so the job needs no outbound network access to start and
+  no writable `$HOME` (`options.prism.prismLocation` or `--prismLocation` in `--args` overrides it — see
+  [Prism Options](../options/prism.md#the-bundled-binary-prism-image)).
 * Prism executes in memory (no disk spill): size `--memory` to the pipeline's working set — it grows
   roughly linearly with the input, split between the JVM (heap capped at 50% by the entrypoint) and
   the prism Go process holding the GBK / shuffle state. A sudden loss of every gRPC channel early in

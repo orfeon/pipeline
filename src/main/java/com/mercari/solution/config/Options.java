@@ -106,6 +106,11 @@ public class Options implements Serializable {
         pipelineOptions.as(ApplicationNameOptions.class).setAppName("Mercari Pipeline " + version);
 
         if(options == null) {
+            // a config without an options block still gets the runner defaults that come from the
+            // environment rather than the config (the prism image's bundled binary)
+            if(OptionUtil.getRunner(pipelineOptions) == MPipeline.Runner.prism) {
+                PrismOptions.setOptions(pipelineOptions, null);
+            }
             return;
         }
 
