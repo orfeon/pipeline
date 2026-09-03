@@ -851,6 +851,307 @@ public class ProfileSinkTest {
         }
     }
 
+    @Test
+    public void testTargetAssociation() throws Exception {
+        final Path reportPath = tempDir.resolve("report_target.html");
+        final String output = reportPath.toString().replace('\\', '/');
+
+        // sold_flag is positive exactly for cat0/cat1 rows (200 of 500); score is high on positive rows
+        final StringBuilder elements = new StringBuilder();
+        for(int i = 0; i < ROWS; i++) {
+            if(i > 0) {
+                elements.append(",");
+            }
+            final boolean positive = i % 5 < 2;
+            final boolean nullFlag = i % 50 == 49;   // 10 rows with a null target
+            elements.append(String.format(
+                    "{ \"id\": %d, \"score\": %d, \"category\": \"cat%d\", \"sold_flag\": %s, \"created_at\": \"%s\" }",
+                    i, (positive ? 100 : 0) + i % 50, i % 5, nullFlag ? "null" : String.valueOf(positive),
+                    Instant.parse("2025-01-01T00:00:00Z").plusSeconds(i * 3600L)));
+        }
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": { "type": "element", "elements": [%s] },
+                      "schema": {
+                        "fields": [
+                          { "name": "id", "type": "long" },
+                          { "name": "score", "type": "long" },
+                          { "name": "category", "type": "string" },
+                          { "name": "sold_flag", "type": "boolean" },
+                          { "name": "created_at", "type": "timestamp" }
+                        ]
+                      }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "profile",
+                      "module": "profile",
+                      "inputs": ["create"],
+                      "parameters": {
+                        "output": "%s",
+                        "target": "sold_flag",
+                        "segments": ["category"]
+                      }
+                    }
+                  ]
+                }
+                """.formatted(elements, output);
+        final Config config = Config.load(configJson);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);
+        PAssert.that(outputs.get("profile").getCollection()).satisfies(results -> {
+            int count = 0;
+            for(final MElement result : results) {
+                Assertions.assertEquals((long) ROWS, result.getAsLong("rows"));
+                count++;
+            }
+            Assertions.assertEquals(1, count);
+            return null;
+        });
+        pipeline.run();
+
+        final String html = Files.readString(reportPath);
+        final JsonObject payload = extractJsonBlock(html, "profile-payload");
+        final JsonObject manifest = extractJsonBlock(html, "profile-manifest");
+
+        // class totals: 10 null-target rows are excluded from the rate
+        final JsonObject target = payload.getAsJsonObject("target");
+        Assertions.assertEquals("sold_flag", target.get("field").getAsString());
+        Assertions.assertEquals("true", target.get("positive").getAsString());
+        final long positiveRows = target.get("positiveRows").getAsLong();
+        final long negativeRows = target.get("negativeRows").getAsLong();
+        Assertions.assertEquals(10L, target.get("nullRows").getAsLong());
+        Assertions.assertEquals(ROWS - 10, positiveRows + negativeRows);
+        Assertions.assertEquals(200L, positiveRows);   // the null-target rows (i % 50 == 49) are all cat4, i.e. negative
+        Assertions.assertEquals(positiveRows / (double) (positiveRows + negativeRows), target.get("rate").getAsDouble(), 1e-9);
+
+        final Map<String, JsonObject> targetFields = new HashMap<>();
+        for(final JsonElement f : target.getAsJsonArray("fields")) {
+            targetFields.put(f.getAsJsonObject().get("path").getAsString(), f.getAsJsonObject());
+        }
+        Assertions.assertFalse(targetFields.containsKey("sold_flag"), "the target field must not relate to itself");
+        Assertions.assertEquals(java.util.Set.of("id", "score", "category", "created_at"), targetFields.keySet());
+
+        // category: cat0/cat1 are 100% positive, the rest 0% → perfectly separating (leak-level IV)
+        final JsonObject category = targetFields.get("category");
+        final JsonArray labels = category.getAsJsonArray("labels");
+        Assertions.assertEquals("(other)", labels.get(labels.size() - 1).getAsString());
+        final JsonArray categoryPositive = category.getAsJsonArray("positive");
+        final JsonArray categoryNegative = category.getAsJsonArray("negative");
+        for(int l = 0; l < labels.size() - 1; l++) {
+            final String label = labels.get(l).getAsString();
+            final long expectedPositive = "cat0".equals(label) || "cat1".equals(label) ? 100L : 0L;
+            Assertions.assertEquals(expectedPositive, categoryPositive.get(l).getAsLong(), "positive count for " + label);
+            Assertions.assertEquals(expectedPositive == 0 ? ("cat4".equals(label) ? 90L : 100L) : 0L,
+                    categoryNegative.get(l).getAsLong(), "negative count for " + label);
+        }
+        Assertions.assertTrue(category.get("iv").getAsDouble() > 0.5, "iv: " + category.get("iv"));
+        Assertions.assertTrue(category.get("leak").getAsBoolean());
+        Assertions.assertEquals(1.0, category.get("tvd").getAsDouble(), 1e-9);
+        Assertions.assertFalse(category.has("ks"));
+
+        // score: 100-149 on positive rows, 0-49 on negative rows → strongly positive point-biserial r
+        final JsonObject score = targetFields.get("score");
+        Assertions.assertEquals(65, score.getAsJsonArray("edges").size());
+        Assertions.assertEquals(64, score.getAsJsonArray("positive").size());
+        Assertions.assertTrue(score.get("pointBiserial").getAsDouble() > 0.9, "point-biserial: " + score.get("pointBiserial"));
+        Assertions.assertTrue(score.get("ks").getAsDouble() > 0.99, "ks: " + score.get("ks"));
+        Assertions.assertTrue(score.get("meanPositive").getAsDouble() > score.get("meanNegative").getAsDouble() + 90);
+        Assertions.assertTrue(score.get("iv").getAsDouble() > 0.5);
+        long scorePositive = 0;
+        for(final JsonElement c : score.getAsJsonArray("positive")) {
+            scorePositive += c.getAsLong();
+        }
+        Assertions.assertEquals(positiveRows, scorePositive, 3);
+
+        // stat-strip annotation and the suppressed target suggestion
+        final Map<String, JsonObject> fields = new HashMap<>();
+        for(final JsonElement field : payload.getAsJsonArray("fields")) {
+            fields.put(field.getAsJsonObject().get("path").getAsString(), field.getAsJsonObject());
+        }
+        Assertions.assertTrue(fields.get("category").getAsJsonObject("target").get("iv").getAsDouble() > 0.5);
+        Assertions.assertFalse(fields.get("sold_flag").has("target"));
+        for(final JsonElement suggestion : payload.getAsJsonArray("suggestions")) {
+            Assertions.assertNotEquals("target", suggestion.getAsJsonObject().get("kind").getAsString());
+        }
+
+        // the target appears as a comparison axis (positive / negative groups over the shared overlay edges)
+        final JsonArray comparisons = payload.getAsJsonArray("comparisons");
+        Assertions.assertEquals(2, comparisons.size());
+        final JsonObject segmentsAxis = comparisons.get(0).getAsJsonObject();
+        final JsonObject targetAxis = comparisons.get(1).getAsJsonObject();
+        Assertions.assertEquals("target", targetAxis.get("kind").getAsString());
+        Assertions.assertEquals("sold_flag", targetAxis.get("field").getAsString());
+        final JsonObject positiveGroup = targetAxis.getAsJsonArray("groups").get(0).getAsJsonObject();
+        final JsonObject negativeGroup = targetAxis.getAsJsonArray("groups").get(1).getAsJsonObject();
+        Assertions.assertEquals("positive", positiveGroup.get("value").getAsString());
+        Assertions.assertEquals(positiveRows, positiveGroup.get("rows").getAsLong());
+        Assertions.assertEquals(negativeRows, negativeGroup.get("rows").getAsLong());
+        final JsonObject positiveScore = positiveGroup.getAsJsonObject("fields").getAsJsonObject("score");
+        Assertions.assertEquals(positiveRows, positiveScore.get("count").getAsLong());
+        Assertions.assertEquals(64, positiveScore.getAsJsonArray("hist").size());
+        Assertions.assertFalse(positiveGroup.getAsJsonObject("fields").has("sold_flag"));
+        Assertions.assertTrue(fields.get("score").has("overlay"));
+
+        // per-segment target rate from the group sub-profiles
+        Assertions.assertEquals("segments", segmentsAxis.get("kind").getAsString());
+        for(final JsonElement g : segmentsAxis.getAsJsonArray("groups")) {
+            final JsonObject group = g.getAsJsonObject();
+            final String value = group.get("value").getAsString();
+            final double expected = "cat0".equals(value) || "cat1".equals(value) ? 1.0 : 0.0;
+            Assertions.assertEquals(expected, group.get("targetRate").getAsDouble(), 1e-9, "target rate of " + value);
+        }
+
+        Assertions.assertEquals("sold_flag", manifest.getAsJsonObject("expandedParameters").get("target").getAsString());
+    }
+
+    @Test
+    public void testNumericTargetWithPositiveValueMergesAndSerializes() throws Exception {
+        final Schema schema = Schema.builder()
+                .withField("x", Schema.FieldType.FLOAT64)
+                .withField("label", Schema.FieldType.INT64)
+                .withField("s", Schema.FieldType.STRING)
+                .withField("b", Schema.FieldType.BOOLEAN)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", false, false)
+                .withTarget("label", 1.0);
+        Assertions.assertEquals("1", spec.getTarget().positiveLabel());
+        final ProfileCombineFn fn = new ProfileCombineFn(spec);
+
+        ProfileAccumulator single = fn.createAccumulator();
+        ProfileAccumulator first = fn.createAccumulator();
+        ProfileAccumulator second = fn.createAccumulator();
+        for(int i = 0; i < 900; i++) {
+            final ProfileRow row = ProfileRow.of(spec, targetElement(i));
+            single = fn.addInput(single, row);
+            if(i < 450) {
+                first = fn.addInput(first, row);
+            } else {
+                second = fn.addInput(second, row);
+            }
+        }
+        first = roundTrip(first);
+        ProfileAccumulator merged = fn.mergeAccumulators(List.of(first, second));
+        merged = fn.addInput(merged, ProfileRow.of(spec, targetElement(900)));
+        single = fn.addInput(single, ProfileRow.of(spec, targetElement(900)));
+        merged = roundTrip(merged);
+
+        Assertions.assertEquals(single.getTargetPositiveRows(), merged.getTargetPositiveRows());
+        Assertions.assertEquals(single.getTargetNegativeRows(), merged.getTargetNegativeRows());
+        Assertions.assertEquals(301L, single.getTargetPositiveRows());   // i % 3 == 0
+        Assertions.assertEquals(0L, single.getTargetNullRows());
+        for(final ProfileAccumulator acc : List.of(single, merged)) {
+            final ProfileAccumulator.TargetStats x = acc.getField(0).getTarget();
+            Assertions.assertNull(acc.getField(1).getTarget(), "the target field has no split");
+            Assertions.assertEquals(301L, x.positiveCount);
+            Assertions.assertEquals(600L, x.negativeCount);
+            Assertions.assertEquals(x.positiveCount, x.getKllPositive().getN());
+            Assertions.assertEquals(x.negativeCount, x.getKllNegative().getN());
+            Assertions.assertEquals(single.getField(0).getTarget().positive.mean, x.positive.mean, 1e-9);
+            final ProfileAccumulator.TargetStats s = acc.getField(2).getTarget();
+            Assertions.assertEquals(151L, s.getFiPositive().getEstimate("v0"));   // even i with i % 3 == 0
+            Assertions.assertEquals(0L, s.getFiNegative().getEstimate("v0"));
+            final ProfileAccumulator.TargetStats b = acc.getField(3).getTarget();
+            Assertions.assertEquals(301L, b.truePositive);
+            Assertions.assertEquals(0L, b.trueNegative);
+        }
+
+        final ProfileRenderer.Config config = new ProfileRenderer.Config();
+        config.title = "target";
+        final ProfileRenderer.Result result = ProfileRenderer.render(merged, config);
+        final JsonObject payload = JsonParser.parseString(result.payloadJson).getAsJsonObject();
+        final JsonObject target = payload.getAsJsonObject("target");
+        Assertions.assertEquals("1", target.get("positive").getAsString());
+        final Map<String, JsonObject> targetFields = new HashMap<>();
+        for(final JsonElement f : target.getAsJsonArray("fields")) {
+            targetFields.put(f.getAsJsonObject().get("path").getAsString(), f.getAsJsonObject());
+        }
+        // classes 10..19 vs 0..9 with p = 1/3: r = 10 / sqrt(8.25 + 100 * 2/9) * sqrt(2/9) ≈ 0.85
+        Assertions.assertEquals(0.853, targetFields.get("x").get("pointBiserial").getAsDouble(), 0.01);
+        Assertions.assertTrue(targetFields.get("s").get("iv").getAsDouble() > 0.5);
+        Assertions.assertEquals(1.0, targetFields.get("s").get("tvd").getAsDouble(), 1e-9);
+        final JsonObject b = targetFields.get("b");
+        Assertions.assertEquals("true", b.getAsJsonArray("labels").get(0).getAsString());
+        Assertions.assertEquals(301L, b.getAsJsonArray("positive").get(0).getAsLong());
+        Assertions.assertEquals(0L, b.getAsJsonArray("negative").get(0).getAsLong());
+        Assertions.assertTrue(result.html.contains("\"kind\":\"target\""));
+    }
+
+    private static MElement targetElement(final int i) {
+        final boolean positive = i % 3 == 0;
+        final Map<String, Object> values = new HashMap<>();
+        values.put("x", (positive ? 10d : 0d) + i % 10);
+        values.put("label", positive ? 1L : 0L);
+        values.put("s", "v" + (positive ? i % 2 : 2 + i % 2));
+        values.put("b", positive);
+        return MElement.of(values, java.time.Instant.parse("2025-01-01T00:00:00Z").toEpochMilli());
+    }
+
+    @Test
+    public void testTargetDeclarationIsValidated() throws Exception {
+        final Schema schema = Schema.builder()
+                .withField("flag", Schema.FieldType.BOOLEAN)
+                .withField("label", Schema.FieldType.INT64)
+                .withField("status", Schema.FieldType.STRING)
+                .withField("created_at", Schema.FieldType.TIMESTAMP)
+                .build();
+        final java.util.function.Supplier<ProfileSpec> spec = () -> ProfileSpec.of(schema, null, null, null, "default", false, false);
+
+        Assertions.assertEquals(Boolean.TRUE, spec.get().withTarget("flag", null).getTarget().positive);
+        Assertions.assertEquals(Boolean.FALSE, spec.get().withTarget("flag", "false").getTarget().positive);
+        Assertions.assertEquals(Boolean.FALSE, spec.get().withTarget("flag", "false").getTarget().classOf(Boolean.TRUE));
+        Assertions.assertEquals("sold", spec.get().withTarget("status", "sold").getTarget().positive);
+        Assertions.assertNull(spec.get().withTarget("status", "sold").getTarget().classOf(null));
+        Assertions.assertNull(spec.get().withTarget("status", "sold").getTarget().classOf(ProfileRow.Marker.ERROR));
+        Assertions.assertEquals(1.0, spec.get().withTarget("label", 1L).getTarget().positive);
+
+        assertMessage(() -> spec.get().withTarget("label", null), "target.positive is required for the numeric field label");
+        assertMessage(() -> spec.get().withTarget("label", "sold"), "must be a number");
+        assertMessage(() -> spec.get().withTarget("label", true), "must be a number");
+        assertMessage(() -> spec.get().withTarget("status", null), "target.positive is required for the string field status");
+        assertMessage(() -> spec.get().withTarget("created_at", null), "must be a bool, numeric or string field");
+        assertMessage(() -> spec.get().withTarget("missing", null), "target field not found");
+        assertMessage(() -> spec.get().withTarget("flag", "yes"), "must be true or false");
+
+        // the same rule surfaces from the sink configuration
+        final String configJson = """
+                {
+                  "sources": [
+                    {
+                      "name": "create",
+                      "module": "create",
+                      "parameters": { "type": "element", "elements": [{ "label": 1 }] },
+                      "schema": { "fields": [{ "name": "label", "type": "long" }] }
+                    }
+                  ],
+                  "sinks": [
+                    {
+                      "name": "profile",
+                      "module": "profile",
+                      "inputs": ["create"],
+                      "parameters": { "output": "%s", "target": "label" }
+                    }
+                  ]
+                }
+                """.formatted(tempDir.resolve("target_invalid.html").toString().replace('\\', '/'));
+        final Config config = Config.load(configJson);
+        final Throwable e = Assertions.assertThrows(Throwable.class, () -> MPipeline.apply(pipeline, config));
+        boolean found = false;
+        for(Throwable t = e; t != null; t = t.getCause()) {
+            found |= t.getMessage() != null && t.getMessage().contains("parameters.target: target.positive is required");
+        }
+        Assertions.assertTrue(found, "unexpected error: " + e);
+    }
+
+    private static void assertMessage(final org.junit.jupiter.api.function.Executable executable, final String expected) {
+        final IllegalArgumentException e = Assertions.assertThrows(IllegalArgumentException.class, executable);
+        Assertions.assertTrue(e.getMessage().contains(expected), "unexpected message: " + e.getMessage());
+    }
+
     private static JsonObject extractJsonBlock(final String html, final String id) {
         final String marker = "<script type=\"application/json\" id=\"" + id + "\">";
         final int start = html.indexOf(marker);

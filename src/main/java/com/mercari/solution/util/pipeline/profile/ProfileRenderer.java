@@ -282,7 +282,8 @@ public class ProfileRenderer {
         payload.addProperty("errorRows", accumulator.getErrorCount());
         payload.addProperty("topKShow", config.topKShow);
 
-        final boolean withOverlay = !config.axes.isEmpty();
+        final boolean withTarget = spec.getTarget() != null && spec.getTarget().fieldStats;
+        final boolean withOverlay = !config.axes.isEmpty() || withTarget;
         final JsonArray fields = new JsonArray();
         for(int i = 0; i < accumulator.getFieldCount(); i++) {
             final JsonObject field = buildField(spec.getFields().get(i), accumulator.getField(i), accumulator, params, config, bins);
@@ -296,6 +297,9 @@ public class ProfileRenderer {
         }
         payload.add("fields", fields);
 
+        if(withTarget) {
+            payload.add("target", buildTarget(accumulator, spec, config, fields));
+        }
         if(withOverlay) {
             final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit, groupTotals);
             annotateBaselineDrift(comparisons, fields, config);
@@ -798,13 +802,251 @@ public class ProfileRenderer {
                 final JsonObject groupJson = new JsonObject();
                 groupJson.addProperty("value", groupLabel(axis, value, g, config.showValues));
                 groupJson.addProperty("rows", group.getRowCount());
+                if(spec.getTarget() != null && group.getTargetRate() != null) {
+                    // per-group target rate (the group spec counts the class totals)
+                    groupJson.addProperty("targetPositive", group.getTargetPositiveRows());
+                    groupJson.addProperty("targetRate", group.getTargetRate());
+                }
                 groupJson.add("fields", buildGroupFields(accumulator, group, spec, config));
                 groupsJson.add(groupJson);
             }
             axisJson.add("groups", groupsJson);
             axes.add(axisJson);
         }
+        if(spec.getTarget() != null && spec.getTarget().fieldStats) {
+            axes.add(buildTargetAxis(accumulator, spec, config));
+        }
         return axes;
+    }
+
+    // ---- target (binary outcome) ----
+
+    /** Information value above which a field separates the classes suspiciously well (possible leakage). */
+    private static final double IV_LEAK_THRESHOLD = 0.5;
+
+    /**
+     * The target as a synthetic comparison axis with the two classes as groups, so the compare bar
+     * can overlay positive-vs-negative distributions on every field card with the same client
+     * code as segments. Built from the global accumulator's class split, not from sub-profiles.
+     */
+    private static JsonObject buildTargetAxis(
+            final ProfileAccumulator accumulator, final ProfileSpec spec, final Config config) {
+
+        final ProfileSpec.TargetSpec target = spec.getTarget();
+        final JsonObject axisJson = new JsonObject();
+        axisJson.addProperty("kind", "target");
+        axisJson.addProperty("field", target.path);
+        axisJson.addProperty("positive", target.positiveLabel());
+        axisJson.addProperty("truncatedGroups", 0);
+        final JsonArray groups = new JsonArray();
+        for(final boolean positiveClass : new boolean[] { true, false }) {
+            final JsonObject groupJson = new JsonObject();
+            groupJson.addProperty("value", positiveClass ? "positive" : "negative");
+            groupJson.addProperty("rows", positiveClass ? accumulator.getTargetPositiveRows() : accumulator.getTargetNegativeRows());
+            final JsonObject fields = new JsonObject();
+            for(int i = 0; i < spec.getFields().size(); i++) {
+                final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
+                final ProfileAccumulator.FieldAccumulator globalField = accumulator.getField(i);
+                final ProfileAccumulator.TargetStats stats = globalField.getTarget();
+                if(stats == null) {
+                    continue;   // the target field itself
+                }
+                final JsonObject o = new JsonObject();
+                final long count = positiveClass ? stats.positiveCount : stats.negativeCount;
+                o.addProperty("count", count);
+                o.addProperty("nulls", positiveClass ? stats.nullPositive : stats.nullNegative);
+                switch (fieldSpec.profileType) {
+                    case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
+                        final ProfileAccumulator.Moments moments = positiveClass ? stats.positive : stats.negative;
+                        final KllDoublesSketch kll = positiveClass ? stats.getKllPositive() : stats.getKllNegative();
+                        if(count > 0 && moments.n > 0) {
+                            o.addProperty("mean", moments.mean);
+                        }
+                        final double[] edges = overlayEdges(globalField, config.overlayBins);
+                        if(edges != null && edges.length > 2 && kll != null && !kll.isEmpty()) {
+                            o.add("hist", scaledCounts(pmfOverEdges(kll, edges), count));
+                        }
+                    }
+                    case STRING -> {
+                        final List<String> labels = overlayLabels(globalField, config.overlayTopK);
+                        final ItemsSketch<String> fi = positiveClass ? stats.getFiPositive() : stats.getFiNegative();
+                        if(labels != null && fi != null) {
+                            final JsonArray topK = new JsonArray();
+                            for(final String label : labels) {
+                                topK.add(fi.getEstimate(label));
+                            }
+                            o.add("topK", topK);
+                        }
+                    }
+                    case BOOL -> {
+                        final long trues = positiveClass ? stats.truePositive : stats.trueNegative;
+                        o.addProperty("trueCount", trues);
+                        o.addProperty("falseCount", count - trues);
+                    }
+                }
+                fields.add(fieldSpec.path, o);
+            }
+            groupJson.add("fields", fields);
+            groups.add(groupJson);
+        }
+        axisJson.add("groups", groups);
+        return axisJson;
+    }
+
+    private static JsonArray scaledCounts(final double[] shares, final long count) {
+        final JsonArray counts = new JsonArray();
+        for(final double share : shares) {
+            counts.add(Math.round(share * count));
+        }
+        return counts;
+    }
+
+    /**
+     * The target block: class totals plus, per field, the positive rate over the field's bins
+     * (shared equal-width edges for numeric-like fields, global top-K labels + other for strings,
+     * true/false for bools), the information value (PSI between the positive and negative
+     * distributions), the binned KS separation, the point-biserial correlation for numeric-like
+     * fields and the positive rate among the field's null rows. The per-field IV is also
+     * annotated on the top-level field objects for the stat strips.
+     */
+    private static JsonObject buildTarget(
+            final ProfileAccumulator accumulator,
+            final ProfileSpec spec,
+            final Config config,
+            final JsonArray fieldsJson) {
+
+        final ProfileSpec.TargetSpec target = spec.getTarget();
+        final JsonObject result = new JsonObject();
+        result.addProperty("field", target.path);
+        result.addProperty("positive", target.positiveLabel());
+        result.addProperty("positiveRows", accumulator.getTargetPositiveRows());
+        result.addProperty("negativeRows", accumulator.getTargetNegativeRows());
+        result.addProperty("nullRows", accumulator.getTargetNullRows());
+        final Double rate = accumulator.getTargetRate();
+        if(rate != null) {
+            result.addProperty("rate", rate);
+        }
+
+        final java.util.Map<String, JsonObject> fieldMap = new java.util.HashMap<>();
+        for(final JsonElement field : fieldsJson) {
+            fieldMap.put(field.getAsJsonObject().get("path").getAsString(), field.getAsJsonObject());
+        }
+
+        final JsonArray fields = new JsonArray();
+        for(int i = 0; i < spec.getFields().size(); i++) {
+            final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
+            final ProfileAccumulator.FieldAccumulator field = accumulator.getField(i);
+            final ProfileAccumulator.TargetStats stats = field.getTarget();
+            if(stats == null) {
+                continue;
+            }
+            final JsonObject o = new JsonObject();
+            o.addProperty("path", fieldSpec.path);
+            o.addProperty("type", fieldSpec.profileType.name().toLowerCase());
+            o.addProperty("count", stats.positiveCount + stats.negativeCount);
+            final long nulls = stats.nullPositive + stats.nullNegative;
+            if(nulls > 0) {
+                final JsonObject nullRate = new JsonObject();
+                nullRate.addProperty("rows", nulls);
+                nullRate.addProperty("rate", (double) stats.nullPositive / nulls);
+                o.add("nulls", nullRate);
+            }
+
+            double[] positiveShares = null;
+            double[] negativeShares = null;
+            if(stats.positiveCount > 0 && stats.negativeCount > 0) {
+                switch (fieldSpec.profileType) {
+                    case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
+                        final double[] edges = overlayEdges(field, config.overlayBins);
+                        final KllDoublesSketch kllPositive = stats.getKllPositive();
+                        final KllDoublesSketch kllNegative = stats.getKllNegative();
+                        if(edges != null && kllPositive != null && !kllPositive.isEmpty()
+                                && kllNegative != null && !kllNegative.isEmpty()) {
+                            positiveShares = pmfOverEdges(kllPositive, edges);
+                            negativeShares = pmfOverEdges(kllNegative, edges);
+                            o.add("edges", toJsonArray(edges));
+                        }
+                        // point-biserial correlation: standardized mean difference between the classes
+                        final ProfileAccumulator.Moments p = stats.positive;
+                        final ProfileAccumulator.Moments q = stats.negative;
+                        final double n = p.n + q.n;
+                        if(p.n > 0 && q.n > 0) {
+                            final double mean = (p.n * p.mean + q.n * q.mean) / n;
+                            final double m2 = p.m2 + q.m2 + p.n * (p.mean - mean) * (p.mean - mean) + q.n * (q.mean - mean) * (q.mean - mean);
+                            final double sd = Math.sqrt(m2 / n);
+                            if(sd > 0 && Double.isFinite(sd)) {
+                                final double r = (p.mean - q.mean) / sd * Math.sqrt(p.n * q.n / (n * n));
+                                if(Double.isFinite(r)) {
+                                    o.addProperty("pointBiserial", r);
+                                }
+                            }
+                            o.addProperty("meanPositive", p.mean);
+                            o.addProperty("meanNegative", q.mean);
+                        }
+                    }
+                    case STRING -> {
+                        final List<String> labels = overlayLabels(field, config.overlayTopK);
+                        final ItemsSketch<String> fiPositive = stats.getFiPositive();
+                        final ItemsSketch<String> fiNegative = stats.getFiNegative();
+                        if(labels != null && !labels.isEmpty() && fiPositive != null && fiNegative != null) {
+                            final JsonArray labelsJson = new JsonArray();
+                            positiveShares = new double[labels.size() + 1];
+                            negativeShares = new double[labels.size() + 1];
+                            double positiveSum = 0d;
+                            double negativeSum = 0d;
+                            for(int l = 0; l < labels.size(); l++) {
+                                labelsJson.add(config.showValues ? labels.get(l) : "#" + (l + 1));
+                                positiveShares[l] = (double) fiPositive.getEstimate(labels.get(l)) / stats.positiveCount;
+                                negativeShares[l] = (double) fiNegative.getEstimate(labels.get(l)) / stats.negativeCount;
+                                positiveSum += positiveShares[l];
+                                negativeSum += negativeShares[l];
+                            }
+                            labelsJson.add("(other)");
+                            positiveShares[labels.size()] = Math.max(0d, 1d - positiveSum);
+                            negativeShares[labels.size()] = Math.max(0d, 1d - negativeSum);
+                            o.add("labels", labelsJson);
+                        }
+                    }
+                    case BOOL -> {
+                        final JsonArray labelsJson = new JsonArray();
+                        labelsJson.add("true");
+                        labelsJson.add("false");
+                        o.add("labels", labelsJson);
+                        positiveShares = new double[] {
+                                (double) stats.truePositive / stats.positiveCount,
+                                1d - (double) stats.truePositive / stats.positiveCount };
+                        negativeShares = new double[] {
+                                (double) stats.trueNegative / stats.negativeCount,
+                                1d - (double) stats.trueNegative / stats.negativeCount };
+                    }
+                }
+            }
+            if(positiveShares != null) {
+                // aligned class counts per bin: the per-bin positive rate is positive / (positive + negative)
+                o.add("positive", scaledCounts(positiveShares, stats.positiveCount));
+                o.add("negative", scaledCounts(negativeShares, stats.negativeCount));
+                final double iv = psi(positiveShares, negativeShares);
+                o.addProperty("iv", iv);
+                if(o.has("edges")) {
+                    o.addProperty("ks", binnedKs(positiveShares, negativeShares));
+                } else {
+                    // categories have no order: total variation distance instead of KS
+                    o.addProperty("tvd", totalVariation(positiveShares, negativeShares));
+                }
+                if(iv > IV_LEAK_THRESHOLD) {
+                    o.addProperty("leak", true);
+                }
+                final JsonObject fieldJson = fieldMap.get(fieldSpec.path);
+                if(fieldJson != null) {
+                    final JsonObject annotation = new JsonObject();
+                    annotation.addProperty("iv", iv);
+                    fieldJson.add("target", annotation);
+                }
+            }
+            fields.add(o);
+        }
+        result.add("fields", fields);
+        return result;
     }
 
     private static int countGroups(final java.util.Map<String, ProfileAccumulator> subProfiles, final ProfileAxis axis) {
@@ -904,6 +1146,15 @@ public class ProfileRenderer {
             shares[i] = counts.get(i).getAsDouble() / total;
         }
         return shares;
+    }
+
+    /** Half the L1 distance between two aligned share distributions (total variation distance, in [0, 1]). */
+    private static double totalVariation(final double[] sharesA, final double[] sharesB) {
+        double sum = 0d;
+        for(int i = 0; i < sharesA.length; i++) {
+            sum += Math.abs(sharesA[i] - sharesB[i]);
+        }
+        return sum / 2;
     }
 
     /** Max |cumulative share A − cumulative share B| over aligned bins (binned KS statistic). */
@@ -1480,7 +1731,7 @@ public class ProfileRenderer {
                     "the only timestamp field in the dataset",
                     "time: " + timestampFields.getFirst()));
         }
-        if(!targetCandidates.isEmpty()) {
+        if(!targetCandidates.isEmpty() && spec.getTarget() == null) {
             suggestions.add(suggestion("target", List.of(targetCandidates.getFirst()),
                     "flag-like field name",
                     "target: " + targetCandidates.getFirst()));

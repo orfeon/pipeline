@@ -72,6 +72,15 @@ section.tab.active { display: block; }
 .comparebar .chip .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .comparebar .chip.on { border-color: var(--accent); background: var(--accent-bg); }
 .comparebar .chip .n { color: var(--muted); }
+.comparebar .quick { border: 1px dashed var(--line); background: none; color: var(--muted);
+  border-radius: 12px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+.comparebar .quick:hover { color: var(--accent); border-color: var(--accent); }
+table.data th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+table.data th.sortable:hover { color: var(--accent); }
+table.data th.sortable.asc::after { content: " ▲"; font-size: 9px; }
+table.data th.sortable.desc::after { content: " ▼"; font-size: 9px; }
+table.data td.clickable { cursor: pointer; color: var(--accent); }
+table.data td.clickable:hover { background: var(--accent-bg); }
 table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
 table.data th, table.data td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); }
 table.data th { color: var(--muted); font-weight: 600; font-size: 12px; }
@@ -118,6 +127,7 @@ noscript th, noscript td { border: 1px solid var(--line); padding: 4px 8px; font
   <section class="tab" id="tab-overview"></section>
   <section class="tab" id="tab-fields"></section>
   <section class="tab" id="tab-relations"></section>
+  <section class="tab" id="tab-target"></section>
   <section class="tab" id="tab-segments"></section>
   <section class="tab" id="tab-time"></section>
   <section class="tab" id="tab-keys"></section>
@@ -149,11 +159,59 @@ const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const el = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; };
 
+// ---- sortable tables (click a header; numbers sort numerically, "-" last; data-sub rows follow their parent row) ----
+function sortValue(text) {
+  const t = text.trim();
+  if (!t || t === "-") return null;
+  const m = t.replace(/,/g, "").match(/-?\d+(\.\d+)?(e[-+]?\d+)?/i);
+  return m ? parseFloat(m[0]) : t.toLowerCase();
+}
+function makeSortable(table) {
+  const ths = [...table.querySelectorAll("thead th")];
+  ths.forEach((th, ci) => {
+    if (!th.textContent.trim()) return;
+    th.classList.add("sortable");
+    th.onclick = () => {
+      const dir = th.dataset.dir === "asc" ? "desc" : "asc";
+      ths.forEach(x => { delete x.dataset.dir; x.classList.remove("asc", "desc"); });
+      th.dataset.dir = dir;
+      th.classList.add(dir);
+      const tbody = table.querySelector("tbody");
+      const groups = [];
+      for (const tr of [...tbody.children]) {
+        if (tr.dataset.sub && groups.length) groups[groups.length - 1].push(tr); else groups.push([tr]);
+      }
+      const valueOf = g => { const cell = g[0].children[ci]; return sortValue(cell ? cell.textContent : ""); };
+      groups.sort((a, b) => {
+        const va = valueOf(a), vb = valueOf(b);
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        const c = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb));
+        return dir === "asc" ? c : -c;
+      });
+      groups.forEach(g => g.forEach(tr => tbody.append(tr)));
+    };
+  });
+  return table;
+}
+
 // ---- comparison state (global compare bar: segments / time axes) ----
 const AXES = P.comparisons || [];
 const PALETTE = ["#5b8ff9", "#5ad8a6", "#f6bd16", "#e8684a", "#6dc8ec", "#9270ca", "#ff9d4d", "#269a99", "#ff99c3", "#bdd2fd"];
 const cmpState = {axis: -1, values: new Set()};
 const groupColor = gi => PALETTE[gi % PALETTE.length];
+/** Null share over all profiled fields of a group ({path: {count, nulls}}), or null without observations. */
+function groupNullRate(fields) {
+  let nulls = 0, total = 0;
+  for (const gf of Object.values(fields || {})) { nulls += gf.nulls || 0; total += (gf.count || 0) + (gf.nulls || 0); }
+  return total > 0 ? nulls / total : null;
+}
+const OVERALL_NULL_RATE = (() => {
+  let nulls = 0, total = 0;
+  P.fields.forEach(f => { nulls += f.nullCount || 0; total += (f.count || 0) + (f.nullCount || 0); });
+  return total > 0 ? nulls / total : null;
+})();
 function selectedGroups() {
   if (cmpState.axis < 0 || !cmpState.values.size) return null;
   const axis = AXES[cmpState.axis];
@@ -178,14 +236,19 @@ const observer = ("IntersectionObserver" in window) ? new IntersectionObserver(e
   }
 }, {rootMargin: "200px"}) : null;
 
+// charts follow the page theme: ECharts' built-in dark theme gives readable axis/legend/tooltip text,
+// the transparent background lets the card colour through; series colours are always set explicitly
+const DARK = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+const BASE_OPTION = {animation: false, backgroundColor: "transparent"};
+function initChart(container) { return echarts.init(container, DARK ? "dark" : null, {renderer: "canvas"}); }
 function lazyChart(container, optionFn) {
   if (!HAS_ECHARTS) {
     container.innerHTML = '<div class="chart-fallback">chart unavailable (CDN unreachable)</div>';
     return;
   }
   const build = () => {
-    const chart = echarts.init(container, null, {renderer: "canvas"});
-    chart.setOption(Object.assign({animation: false}, optionFn()));
+    const chart = initChart(container);
+    chart.setOption(Object.assign({}, BASE_OPTION, optionFn()));
     container._chart = chart;
   };
   if (observer) { chartQueue.set(container, build); observer.observe(container); }
@@ -243,6 +306,30 @@ function boolOption(b) {
 }
 // ---- overlay chart options (selected comparison groups over shared edges/labels) ----
 function share(count, total) { return total > 0 ? 100 * count / total : 0; }
+const fmtDelta = d => d == null ? "-" : (d >= 0 ? "+" : "") + (100 * d).toFixed(1) + " pt";
+// the whole dataset as the fixed grey reference behind every overlay, so a group's deviation is visible at a glance
+const REF_COLOR = "#9ca3af";
+function refSeriesLine(data) {
+  return {name: "all", type: "line", step: "middle", showSymbol: false, silent: true, z: 1,
+    lineStyle: {color: REF_COLOR, width: 1, type: "dashed"}, itemStyle: {color: REF_COLOR}, data};
+}
+function refSeriesBar(data) {
+  return {name: "all", type: "bar", silent: true, z: 1, itemStyle: {color: "#c6cdd8"}, data};
+}
+/** The global histogram re-binned onto the shared overlay edges (bin midpoints), as % of the field's non-null rows. */
+function globalOverlayShares(f) {
+  const edges = f.overlay.edges;
+  const h = f.numeric ? f.numeric.histogram : f.timestamp ? f.timestamp.histogram : null;
+  if (!h || edges.length < 2) return null;
+  const bins = new Array(edges.length - 1).fill(0);
+  for (let i = 0; i < h.counts.length; i++) {
+    const mid = (h.edges[i] + (h.edges[i + 1] != null ? h.edges[i + 1] : h.edges[i])) / 2;
+    let b = 0;
+    while (b + 2 < edges.length && mid >= edges[b + 1]) b++;
+    bins[b] += h.counts[i];
+  }
+  return bins.map(c => +share(c, f.count).toFixed(3));
+}
 function overlayHistOption(f, sel) {
   const edges = f.overlay.edges;
   const isTime = !!f.timestamp;
@@ -252,6 +339,8 @@ function overlayHistOption(f, sel) {
     labels.push(isTime ? new Date(mid).toISOString().slice(0, 10) : fmtNum(edges[i]) + " – " + fmtNum(edges[i + 1]));
   }
   const series = [];
+  const ref = globalOverlayShares(f);
+  if (ref) series.push(refSeriesLine(ref));
   for (const [gi, g] of sel.groups) {
     const gf = g.fields[f.path];
     if (!gf || !gf.hist) continue;
@@ -271,6 +360,11 @@ function overlayHistOption(f, sel) {
 function overlayTopKOption(f, sel) {
   const labels = f.overlay.labels;
   const series = [];
+  // the overlay labels are the first entries of the field's own top-K, in the same order
+  const topK = f.string && f.string.topK;
+  if (topK && topK.length >= labels.length) {
+    series.push(refSeriesBar(labels.map((_, i) => +share(topK[i].count, f.count).toFixed(3))));
+  }
   for (const [gi, g] of sel.groups) {
     const gf = g.fields[f.path];
     if (!gf || !gf.topK) continue;
@@ -290,6 +384,8 @@ function overlayTopKOption(f, sel) {
 }
 function overlayBoolOption(f, sel) {
   const series = [];
+  const all = (f.bool.trueCount || 0) + (f.bool.falseCount || 0);
+  series.push(refSeriesBar([+share(f.bool.trueCount || 0, all).toFixed(2), +share(f.bool.falseCount || 0, all).toFixed(2)]));
   for (const [gi, g] of sel.groups) {
     const gf = g.fields[f.path];
     if (!gf) continue;
@@ -314,7 +410,8 @@ function overlayOptionFor(f, sel) {
     const has = sel.groups.some(([, g]) => g.fields[f.path] && g.fields[f.path].topK);
     if (has) return () => overlayTopKOption(f, sel);
   }
-  if (f.bool) return () => overlayBoolOption(f, sel);
+  // a bool field absent from every group (the target field on its own axis) keeps its normal chart
+  if (f.bool && sel.groups.some(([, g]) => g.fields[f.path])) return () => overlayBoolOption(f, sel);
   return null;
 }
 
@@ -344,6 +441,7 @@ function timeHistOption(h) {
 })();
 
 const TABS = [["overview", "Overview"], ["fields", "Fields"], ["relations", "Relations"]];
+if (P.target) TABS.push(["target", "Target"]);
 if (AXES.some(a => a.kind === "segments")) TABS.push(["segments", "Segments"]);
 if (AXES.some(a => a.kind === "time")) TABS.push(["time", "Time"]);
 if (P.keys) TABS.push(["keys", "Keys"]);
@@ -380,20 +478,32 @@ function toggleGroup(axisIndex, value) {
   if (!cmpState.values.size) cmpState.axis = -1;
   syncCompare();
 }
+function selectGroups(axisIndex, values) {
+  cmpState.axis = axisIndex;
+  cmpState.values.clear();
+  values.forEach(v => cmpState.values.add(String(v)));
+  if (!cmpState.values.size) cmpState.axis = -1;
+  syncCompare();
+}
+function clearCompare() { selectGroups(-1, []); }
 function syncCompare() {
   document.querySelectorAll("#compareBar .chip").forEach(chip => {
     const on = cmpState.axis === +chip.dataset.axis && cmpState.values.has(chip.dataset.value);
     chip.classList.toggle("on", on);
   });
+  const clear = document.getElementById("cmpClear");
+  if (clear) clear.hidden = cmpState.axis < 0;
   setHash({cmp: cmpState.axis < 0 ? "" : cmpState.axis + ":" + [...cmpState.values].join("|")});
   renderFieldList();
 }
+const QUICK_SELECT = 5;
 (function renderCompareBar() {
   if (!AXES.length) return;
   const bar = document.getElementById("compareBar");
   AXES.forEach((axis, ai) => {
     const row = el('<div class="axisrow"><span class="axislabel">' + esc(axis.field)
-      + (axis.granularity ? " (" + esc(axis.granularity) + ")" : "") + ":</span></div>");
+      + (axis.granularity ? " (" + esc(axis.granularity) + ")" : "")
+      + (axis.kind === "target" ? " = " + esc(axis.positive) + " (target)" : "") + ":</span></div>");
     axis.groups.forEach((g, gi) => {
       const isBase = axis.baseline != null && g.value === axis.baseline;
       const chip = el('<button class="chip"><span class="dot" style="background:' + groupColor(gi) + '"></span>'
@@ -404,11 +514,27 @@ function syncCompare() {
       chip.onclick = () => toggleGroup(ai, g.value);
       row.append(chip);
     });
+    // one-click selections: the largest groups (segments are ordered by rows), the most recent time buckets
+    if (axis.groups.length > 2) {
+      const values = axis.groups.map(g => g.value);
+      const quick = axis.kind === "time"
+        ? [["latest " + Math.min(QUICK_SELECT, values.length), values.slice(-QUICK_SELECT)]]
+        : [["top " + Math.min(QUICK_SELECT, values.length), values.slice(0, QUICK_SELECT)]];
+      if (values.length > QUICK_SELECT) quick.push(["all", values]);
+      for (const [label, selected] of quick) {
+        const b = el('<button class="quick">' + esc(label) + "</button>");
+        b.onclick = () => selectGroups(ai, selected);
+        row.append(b);
+      }
+    }
     if (axis.truncatedGroups > 0) {
       row.append(el('<span class="axislabel">+' + axis.truncatedGroups + " more (not kept)</span>"));
     }
     bar.append(row);
   });
+  const clear = el('<div class="axisrow" id="cmpClear" hidden><button class="quick">clear selection</button></div>');
+  clear.querySelector("button").onclick = clearCompare;
+  bar.append(clear);
 })();
 
 // ---- overview ----
@@ -452,6 +578,8 @@ function statStrip(f) {
   if (f.errorCount > 0) parts.push('<span class="badge warn">errors ' + fmtInt(f.errorCount) + "</span>");
   if (f.drift) parts.push('<span class="badge' + (f.drift.psi > 0.2 ? " warn" : "") + '" title="PSI vs baseline">PSI '
     + f.drift.psi.toFixed(3) + " vs " + esc(f.drift.vs) + "</span>");
+  if (f.target && f.target.iv != null) parts.push('<span class="badge' + (f.target.iv > 0.5 ? " warn" : "")
+    + '" title="information value vs target (' + esc(P.target.field) + ')">IV ' + f.target.iv.toFixed(3) + "</span>");
   return parts.map(p => "<span>" + p + "</span>").join("");
 }
 function mainChart(f, container, tall) {
@@ -466,7 +594,18 @@ function mainChart(f, container, tall) {
   else if (f.string && f.string.topK && f.string.topK.length) lazyChart(container, () => topKOption(f.string.topK, f.count, P.topKShow));
   else if (f.bool) lazyChart(container, () => boolOption(f.bool));
   else if (f.timestamp && f.timestamp.histogram) lazyChart(container, () => timeHistOption(f.timestamp.histogram));
+  else if (f.string && f.count > 0) container.innerHTML = highCardinalityNote(f);
   else container.innerHTML = '<div class="chart-fallback">no data</div>';
+}
+/** A string field with no frequent values (ids, free text): what the card can still say about it. */
+function highCardinalityNote(f) {
+  const parts = ["<b>no frequent values</b> — nearly every value is different"];
+  if (f.distinct) parts.push("distinct ≈ " + fmtInt(f.distinct.estimate) + " of " + fmtInt(f.count) + " non-null rows");
+  if (f.string.length) parts.push("length p50 " + fmtNum(f.string.length.p50) + " / p95 " + fmtNum(f.string.length.p95)
+    + " / max " + fmtNum(f.string.length.max) + (f.string.emptyCount ? " · empty " + fmtInt(f.string.emptyCount) : ""));
+  const samples = HIDE ? null : sampleValuesFor(f.path);
+  if (samples && samples.length) parts.push("e.g. " + samples.slice(0, 3).map(v => esc(String(v))).join(" · "));
+  return '<div class="chart-fallback" style="text-align:left;padding:12px 4px">' + parts.join("<br>") + "</div>";
 }
 function buildCard(f) {
   const badges = ['<span class="badge">' + esc(f.sourceType) + "</span>"];
@@ -485,8 +624,11 @@ function fieldMatches(f) {
 }
 function sortedFields() {
   const fields = P.fields.filter(fieldMatches);
-  if (fieldState.sort === "null") fields.sort((a, b) => b.nullRate - a.nullRate);
-  else if (fieldState.sort === "notable") fields.sort((a, b) => (b.notable || []).length - (a.notable || []).length);
+  const desc = key => fields.sort((a, b) => key(b) - key(a));
+  if (fieldState.sort === "null") desc(f => f.nullRate);
+  else if (fieldState.sort === "notable") desc(f => (f.notable || []).length);
+  else if (fieldState.sort === "iv") desc(f => f.target && f.target.iv != null ? f.target.iv : -1);
+  else if (fieldState.sort === "drift") desc(f => f.drift ? f.drift.psi : -1);
   return fields;
 }
 function renderFieldList() {
@@ -503,7 +645,7 @@ function renderFieldList() {
       tr.onclick = () => openDetail(f.path);
       tbody.append(tr);
     }
-    holder.append(table);
+    holder.append(makeSortable(table));
   } else {
     const grid = el('<div class="cards"></div>');
     fields.forEach(f => grid.append(buildCard(f)));
@@ -514,7 +656,10 @@ function renderFieldList() {
   const s = document.getElementById("tab-fields");
   const toolbar = el('<div class="toolbar"><input type="search" placeholder="search fields…">'
     + '<select><option value="schema">schema order</option><option value="null">null rate</option>'
-    + '<option value="notable">notable first</option></select><div class="chipbar"></div></div>');
+    + '<option value="notable">notable first</option>'
+    + (P.target ? '<option value="iv">association with ' + esc(P.target.field) + " (IV)</option>" : "")
+    + (P.fields.some(f => f.drift) ? '<option value="drift">drift vs baseline (PSI)</option>' : "")
+    + '</select><div class="chipbar"></div></div>');
   const chipbar = toolbar.querySelector(".chipbar");
   const types = [...new Set(P.fields.map(f => f.type))];
   for (const t of types) {
@@ -536,7 +681,12 @@ function renderFieldList() {
 const overlay = document.getElementById("overlay");
 overlay.onclick = e => { if (e.target === overlay) closeDetail(); };
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(); });
-function closeDetail() { overlay.classList.remove("open"); document.getElementById("detail").innerHTML = ""; }
+function closeDetail() {
+  if (!overlay.classList.contains("open")) return;
+  overlay.classList.remove("open");
+  document.getElementById("detail").innerHTML = "";
+  setHash({f: ""});
+}
 function sampleValuesFor(path) {
   if (!P.sample) return null;
   const i = P.sample.fields.indexOf(path);
@@ -558,14 +708,21 @@ function openDetail(path) {
   d.append(el('<div class="strip">' + statStrip(f) + "</div>"));
 
   const chart = el('<div class="chart tall"></div>');
-  const state = {view: "pdf", log: false};
+  // with comparison groups selected the detail opens on the same overlay as the card, switchable back
+  const sel = selectedGroups();
+  const overlayFn = sel ? overlayOptionFor(f, sel) : null;
+  const state = {view: overlayFn ? "overlay" : "pdf", log: false};
   if (f.numeric && f.numeric.histogram) {
-    const controls = el('<div class="controls"><button data-v="pdf" class="on">histogram</button>'
+    const controls = el('<div class="controls">'
+      + (overlayFn ? '<button data-v="overlay" class="on">overlay (' + esc(sel.axis.field) + ")</button>" : "")
+      + '<button data-v="pdf"' + (overlayFn ? "" : ' class="on"') + ">histogram</button>"
       + '<button data-v="cdf">CDF</button><button data-l="1">log scale</button></div>');
+    const build = () => state.view === "cdf" ? cdfOption(f.numeric.cdf)
+      : state.view === "overlay" ? overlayFn()
+      : histOption(f.numeric.histogram, state.log);
     const redraw = () => {
       if (chart._chart) { chart._chart.dispose(); chart._chart = null; }
-      const build = state.view === "cdf" ? () => cdfOption(f.numeric.cdf) : () => histOption(f.numeric.histogram, state.log);
-      if (HAS_ECHARTS) { const c = echarts.init(chart); c.setOption(Object.assign({animation: false}, build())); chart._chart = c; }
+      if (HAS_ECHARTS) { const c = initChart(chart); c.setOption(Object.assign({}, BASE_OPTION, build())); chart._chart = c; }
     };
     controls.querySelectorAll("button[data-v]").forEach(b => b.onclick = () => {
       state.view = b.dataset.v;
@@ -577,7 +734,7 @@ function openDetail(path) {
     };
     d.append(controls);
     d.append(chart);
-    lazyChart(chart, () => histOption(f.numeric.histogram, false));
+    lazyChart(chart, build);
   } else {
     d.append(chart);
     mainChart(f, chart, true);
@@ -616,6 +773,7 @@ function openDetail(path) {
     d.append(el('<h2 class="sec">Sample values</h2><p class="samples">' + samples.map(v => esc(JSON.stringify(v))).join(" · ") + "</p>"));
   }
   overlay.classList.add("open");
+  setHash({f: path});
 }
 
 // ---- relations ----
@@ -630,8 +788,9 @@ function openDetail(path) {
       s.append(card);
       continue;
     }
-    card.append(el('<div class="strip"><span>PSI ' + pair.psi.toFixed(4) + "</span><span>KS " + pair.ks.toFixed(4)
-      + "</span><span>n " + fmtInt(pair.countA) + " / " + fmtInt(pair.countB) + "</span></div>"));
+    card.append(el('<div class="strip"><span title="population stability index between the two distributions (0 = identical; > 0.2 = significant difference)">PSI ' + pair.psi.toFixed(4)
+      + '</span><span title="largest gap between the two cumulative distributions, 0 … 1">KS ' + pair.ks.toFixed(4)
+      + '</span><span title="non-null rows of each field">n ' + fmtInt(pair.countA) + " / " + fmtInt(pair.countB) + "</span></div>"));
     const hist = el('<div class="chart"></div>');
     card.append(hist);
     lazyChart(hist, () => {
@@ -691,7 +850,7 @@ function openDetail(path) {
       if (v != null) pairs.push([Math.abs(v), i, j, v]);
     }
     pairs.sort((a, b) => b[0] - a[0]);
-    const table = el('<table class="data"><thead><tr><th>field A</th><th>field B</th><th>corr</th><th>n</th></tr></thead><tbody></tbody></table>');
+    const table = el('<table class="data"><thead><tr><th>field A</th><th>field B</th><th title="Pearson correlation over rows where both fields are non-null: -1 … 1">corr</th><th title="rows with both fields non-null">n</th></tr></thead><tbody></tbody></table>');
     const tbody = table.querySelector("tbody");
     for (const [, i, j, v] of pairs.slice(0, 100)) {
       const tr = el('<tr class="clickable"><td>' + esc(c.fields[i]) + "</td><td>" + esc(c.fields[j]) + "</td><td>"
@@ -699,7 +858,7 @@ function openDetail(path) {
       tr.onclick = () => showPair(i, j);
       tbody.append(tr);
     }
-    s.append(table);
+    s.append(makeSortable(table));
   } else {
     const heat = el('<div class="chart tall" style="height:' + Math.max(320, 24 * c.fields.length + 80) + 'px"></div>');
     s.append(heat);
@@ -729,6 +888,13 @@ function openDetail(path) {
     }
   }
   s.append(pairPanel);
+  // open the strongest pair right away instead of an empty panel
+  let best = null;
+  for (let i = 0; i < c.fields.length; i++) for (let j = i + 1; j < c.fields.length; j++) {
+    const v = c.matrix[i][j];
+    if (v != null && (best == null || Math.abs(v) > Math.abs(c.matrix[best[0]][best[1]]))) best = [i, j];
+  }
+  if (best) showPair(best[0], best[1]);
 
   function showPair(i, j) {
     const panel = document.getElementById("pairPanel");
@@ -760,6 +926,7 @@ function openDetail(path) {
 // ---- segments / time tabs ----
 (function renderAxisTabs() {
   AXES.forEach((axis, ai) => {
+    if (axis.kind === "target") return;   // the Target tab has its own renderer
     const s = document.getElementById("tab-" + axis.kind);
     if (!s) return;
     if (!s.childElementCount) {
@@ -795,18 +962,142 @@ function openDetail(path) {
       };
     });
 
-    const table = el('<table class="data"><thead><tr><th></th><th>group</th><th>rows</th><th>share</th><th>nulls (axis field)</th></tr></thead><tbody></tbody></table>');
+    const withTarget = !!P.target && axis.groups.some(g => g.targetRate != null);
+    const table = el('<table class="data"><thead><tr><th></th><th>group</th><th>rows</th><th>share</th>'
+      + '<th title="null values over all profiled fields of the group\'s rows">null rate</th><th title="group null rate minus the dataset null rate">vs overall</th>'
+      + (withTarget ? "<th>" + esc(P.target.field) + " rate</th><th>vs overall</th>" : "") + "</tr></thead><tbody></tbody></table>");
     const tbody = table.querySelector("tbody");
     axis.groups.forEach((g, gi) => {
-      const axisField = g.fields[axis.field] || {};
+      const nullRate = groupNullRate(g.fields);
       const tr = el('<tr class="clickable"><td><span class="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'
         + groupColor(gi) + '"></span></td><td>' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>"
-        + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td><td>" + fmtInt(axisField.nulls) + "</td></tr>");
+        + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td><td>" + (nullRate == null ? "-" : fmtPct(nullRate)) + "</td><td>"
+        + fmtDelta(nullRate == null || OVERALL_NULL_RATE == null ? null : nullRate - OVERALL_NULL_RATE) + "</td>"
+        + (withTarget ? "<td>" + (g.targetRate != null ? fmtPct(g.targetRate) : "-") + "</td><td>"
+          + fmtDelta(g.targetRate != null && P.target.rate != null ? g.targetRate - P.target.rate : null) + "</td>" : "") + "</tr>");
       tr.onclick = () => toggleGroup(ai, g.value);
       tbody.append(tr);
     });
-    s.append(table);
+    s.append(makeSortable(table));
   });
+})();
+
+// ---- target ----
+function targetBinLabels(f) {
+  if (f.labels) return f.labels.map(String);
+  const isTime = f.type === "timestamp";
+  const labels = [];
+  for (let i = 0; i + 1 < f.edges.length; i++) {
+    labels.push(isTime ? new Date((f.edges[i] + f.edges[i + 1]) / 2).toISOString().slice(0, 10)
+      : fmtNum(f.edges[i]) + " – " + fmtNum(f.edges[i + 1]));
+  }
+  return labels.length ? labels : [fmtNum(f.edges[0])];
+}
+function targetRateOption(f, baseRate) {
+  const labels = targetBinLabels(f);
+  const total = f.positive.map((p, i) => p + f.negative[i]);
+  const all = total.reduce((a, b) => a + b, 0);
+  // a rate over a handful of rows is noise (and the sketch counts are estimates): leave those bins blank
+  const minRows = Math.max(5, Math.ceil(all / 1000));
+  const rates = total.map((t, i) => t >= minRows ? +(100 * f.positive[i] / t).toFixed(2) : null);
+  const shares = total.map(t => +share(t, all).toFixed(3));
+  const categorical = !!f.labels;
+  return {
+    grid: {left: 45, right: 50, top: 24, bottom: categorical ? 48 : 20},
+    legend: {top: 0, textStyle: {fontSize: 10}},
+    tooltip: {trigger: "axis", confine: true, formatter: ps => esc(labels[ps[0].dataIndex])
+      + "<br>rows: " + fmtInt(total[ps[0].dataIndex]) + " (" + shares[ps[0].dataIndex] + "%)"
+      + "<br>positive rate: " + (rates[ps[0].dataIndex] == null ? "-" : rates[ps[0].dataIndex] + "%")},
+    xAxis: Object.assign({type: "category", data: categorical
+      ? labels.map(n => n.length > 12 ? n.slice(0, 11) + "…" : n) : labels.map((_, i) => i)}, AXIS,
+      categorical ? {axisLabel: {fontSize: 9, rotate: 30}} : {axisLabel: {show: false}}),
+    yAxis: [
+      Object.assign({type: "value", name: "rows %", nameTextStyle: {fontSize: 9}, axisLabel: {fontSize: 10, formatter: "{value}%"}}, AXIS),
+      Object.assign({type: "value", name: "positive %", nameTextStyle: {fontSize: 9}, min: 0, max: 100,
+        axisLabel: {fontSize: 10, formatter: "{value}%"}, splitLine: {show: false}}, AXIS)
+    ],
+    series: [
+      {name: "rows", type: "bar", yAxisIndex: 0, data: shares, barCategoryGap: "20%", itemStyle: {color: "#c6cdd8"}},
+      {name: "positive rate", type: "line", yAxisIndex: 1, data: rates, step: categorical ? false : "middle",
+        showSymbol: categorical, symbolSize: 6, connectNulls: false,
+        lineStyle: {color: PALETTE[3], width: 2}, itemStyle: {color: PALETTE[3]},
+        markLine: baseRate == null ? undefined : {silent: true, symbol: "none", label: {formatter: "base " + (100 * baseRate).toFixed(1) + "%", fontSize: 9},
+          lineStyle: {color: PALETTE[3], type: "dashed", width: 1}, data: [{yAxis: +(100 * baseRate).toFixed(2)}]}}
+    ]
+  };
+}
+(function renderTarget() {
+  const t = P.target;
+  if (!t) return;
+  const s = document.getElementById("tab-target");
+  const stat = (v, l) => el('<div class="stat"><div class="v">' + v + '</div><div class="l">' + l + "</div></div>");
+  const grid = el('<div class="statgrid"></div>');
+  grid.append(stat(esc(t.field) + " = " + esc(t.positive), "target (positive class)"));
+  grid.append(stat(t.rate == null ? "-" : fmtPct(t.rate), "positive rate"));
+  grid.append(stat(fmtInt(t.positiveRows), "positive rows"));
+  grid.append(stat(fmtInt(t.negativeRows), "negative rows"));
+  if (t.nullRows > 0) grid.append(stat(fmtInt(t.nullRows), "rows with null target (excluded)"));
+  s.append(grid);
+  s.append(el('<p class="samples">Select the target chips in the compare bar to overlay positive vs negative distributions on every field card. '
+    + "IV (information value) ranks how differently the two classes are distributed over a field: "
+    + "&lt; 0.02 none · 0.02–0.1 weak · 0.1–0.3 medium · 0.3–0.5 strong · &gt; 0.5 suspiciously strong (check for leakage). "
+    + "Estimates come from the per-class sketches and carry the same error bounds as the field statistics.</p>"));
+
+  const ranked = (t.fields || []).slice().sort((a, b) => (b.iv != null ? b.iv : -1) - (a.iv != null ? a.iv : -1));
+  s.append(el('<h2 class="sec">Fields ranked by association with ' + esc(t.field) + "</h2>"));
+  const table = el('<table class="data"><thead><tr><th>field</th><th>type</th><th>IV</th><th title="KS for binned values, total variation distance for categories">KS / TVD</th><th>point-biserial r</th>'
+    + "<th>positive rate when null</th><th>n</th></tr></thead><tbody></tbody></table>");
+  const tbody = table.querySelector("tbody");
+  const panel = el('<div class="pair-panel" id="targetPanel"><p class="samples">click a field to see its positive rate per bin / category.</p></div>');
+  for (const f of ranked) {
+    const ivCell = f.iv == null ? "-" : (f.leak ? '<span class="badge warn" title="possible leakage">' + f.iv.toFixed(3) + "</span>" : f.iv.toFixed(3));
+    const nullCell = f.nulls ? fmtPct(f.nulls.rate) + ' <span class="n" style="color:var(--muted)">(' + fmtInt(f.nulls.rows) + " nulls)</span>" : "-";
+    const tr = el('<tr class="' + (f.positive ? "clickable" : "") + '"><td>' + esc(f.path) + "</td><td>" + esc(f.type) + "</td><td>" + ivCell
+      + "</td><td>" + (f.ks != null ? f.ks.toFixed(3) : f.tvd != null ? f.tvd.toFixed(3) : "-") + "</td><td>" + (f.pointBiserial != null ? f.pointBiserial.toFixed(3) : "-")
+      + "</td><td>" + nullCell + "</td><td>" + fmtInt(f.count) + "</td></tr>");
+    if (f.positive) tr.onclick = () => showTargetField(f);
+    tbody.append(tr);
+  }
+  s.append(makeSortable(table));
+  s.append(panel);
+  function showTargetField(f) {
+    panel.innerHTML = "";
+    panel.append(el('<h2 class="sec">' + esc(f.path) + " : positive rate of " + esc(t.field) + " per " + (f.labels ? "category" : "bin") + "</h2>"));
+    const parts = [];
+    if (f.meanPositive != null) parts.push("mean when positive " + fmtNum(f.meanPositive) + " / when negative " + fmtNum(f.meanNegative));
+    if (f.nulls) parts.push("positive rate among " + fmtInt(f.nulls.rows) + " null rows " + fmtPct(f.nulls.rate));
+    if (parts.length) panel.append(el('<p class="samples">' + parts.map(esc).join(" · ") + "</p>"));
+    const chart = el('<div class="chart tall"></div>');
+    panel.append(chart);
+    lazyChart(chart, () => targetRateOption(f, t.rate));
+    panel.append(el('<p class="samples">bars: share of rows per ' + (f.labels ? "category (global top values + other)" : "bin")
+      + " · line: positive rate within it (blank where a bin holds fewer than " + fmtInt(Math.max(5, Math.ceil((f.count || 0) / 1000)))
+      + " rows) · dashed: overall positive rate.</p>"));
+    const link = el('<p class="samples"><a href="javascript:void(0)">open field detail</a></p>');
+    link.querySelector("a").onclick = () => openDetail(f.path);
+    panel.append(link);
+  }
+  if (ranked.length && ranked[0].positive) showTargetField(ranked[0]);
+
+  // target rate per comparison group (segments / time / inputs)
+  const withRates = AXES.filter(a => a.kind !== "target" && a.groups.some(g => g.targetRate != null));
+  if (withRates.length) {
+    s.append(el('<h2 class="sec">Positive rate by group</h2>'));
+    for (const axis of withRates) {
+      const ai = AXES.indexOf(axis);
+      const gt = el('<table class="data"><thead><tr><th>' + esc(axis.field) + (axis.granularity ? " (" + esc(axis.granularity) + ")" : "")
+        + "</th><th>rows</th><th>positive</th><th>positive rate</th><th>vs overall</th></tr></thead><tbody></tbody></table>");
+      const gb = gt.querySelector("tbody");
+      axis.groups.forEach(g => {
+        const delta = g.targetRate != null && t.rate != null ? g.targetRate - t.rate : null;
+        const tr = el('<tr class="clickable"><td>' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>" + fmtInt(g.targetPositive)
+          + "</td><td>" + (g.targetRate != null ? fmtPct(g.targetRate) : "-") + "</td><td>" + fmtDelta(delta) + "</td></tr>");
+        tr.onclick = () => toggleGroup(ai, g.value);
+        gb.append(tr);
+      });
+      s.append(makeSortable(gt));
+    }
+  }
 })();
 
 // ---- keys ----
@@ -814,24 +1105,57 @@ function openDetail(path) {
   if (!P.keys) return;
   const s = document.getElementById("tab-keys");
   s.append(el('<h2 class="sec">Declared keys</h2>'));
-  const table = el('<table class="data"><thead><tr><th>field</th><th>distinct (Theta)</th><th>95% bounds</th><th>keyness (distinct / rows)</th></tr></thead><tbody></tbody></table>');
+  const table = el('<table class="data"><thead><tr><th>field</th><th title="Theta sketch estimate of the number of distinct values">distinct (Theta)</th><th>95% bounds</th>'
+    + '<th title="distinct / rows: 100% means every row has its own value (a unique key), lower means repeated values">keyness (distinct / rows)</th></tr></thead><tbody></tbody></table>');
   const tbody = table.querySelector("tbody");
   for (const k of P.keys.fields) {
     tbody.append(el("<tr><td>" + esc(k.path) + "</td><td>" + fmtInt(k.distinct) + "</td><td>["
       + fmtInt(k.distinctLower) + ", " + fmtInt(k.distinctUpper) + "]</td><td>" + fmtPct(k.keyness) + "</td></tr>"));
   }
-  s.append(table);
+  s.append(makeSortable(table));
+  s.append(el('<p class="samples">keyness ≈ 100%: every row carries a distinct value (candidate unique key) · clearly below 100%: values repeat (a foreign key or a grouping attribute). Distinct counts are Theta-sketch estimates; the bounds are 95% confidence.</p>'));
   if (P.keys.venn) renderVenn(s, P.keys.venn);
   if (P.keys.fields.length > 1) {
     s.append(el('<h2 class="sec">Containment (row = A, col = B: |A∩B| / |A|)</h2>'));
+    s.append(el('<p class="samples">share of A\'s distinct values that also occur in B: 100% means every A value exists in B (A ⊆ B, e.g. a foreign key fully covered by its reference), near 0% means the two key sets are disjoint.</p>'));
     const m = el('<table class="data"><thead><tr><th></th>' + P.keys.fields.map(k => "<th>" + esc(k.path) + "</th>").join("")
       + "</tr></thead><tbody></tbody></table>");
     const tbody2 = m.querySelector("tbody");
+    // matrix = table of contents, cell click = pair detail (same grammar as the correlation heatmap)
     P.keys.fields.forEach((k, i) => {
-      tbody2.append(el("<tr><th>" + esc(k.path) + "</th>" + P.keys.containment[i].map(v =>
-        "<td>" + (v == null ? "-" : fmtPct(v)) + "</td>").join("") + "</tr>"));
+      const tr = el("<tr><th>" + esc(k.path) + "</th></tr>");
+      P.keys.containment[i].forEach((v, j) => {
+        const td = el("<td>" + (v == null ? "-" : fmtPct(v)) + "</td>");
+        if (i !== j && v != null) { td.classList.add("clickable"); td.onclick = () => showKeyPair(i, j); }
+        tr.append(td);
+      });
+      tbody2.append(tr);
     });
     s.append(m);
+    const panel = el('<div class="pair-panel" id="keyPairPanel"></div>');
+    s.append(panel);
+    const first = P.keys.fields.findIndex((k, i) => P.keys.containment[i].some((v, j) => i !== j && v != null));
+    if (first >= 0) showKeyPair(first, P.keys.containment[first].findIndex((v, j) => first !== j && v != null));
+
+    function showKeyPair(i, j) {
+      panel.innerHTML = "";
+      const a = P.keys.fields[i], b = P.keys.fields[j];
+      const inter = a.distinct != null && P.keys.containment[i][j] != null ? P.keys.containment[i][j] * a.distinct : null;
+      panel.append(el('<h2 class="sec">' + esc(a.path) + " × " + esc(b.path) + "</h2>"));
+      const parts = ["|" + esc(a.path) + "| ≈ " + fmtInt(a.distinct), "|" + esc(b.path) + "| ≈ " + fmtInt(b.distinct)];
+      if (inter != null) {
+        parts.push("|∩| ≈ " + fmtInt(inter));
+        parts.push(esc(a.path) + " ⊆ " + esc(b.path) + ": " + fmtPct(P.keys.containment[i][j]));
+        parts.push(esc(b.path) + " ⊆ " + esc(a.path) + ": " + fmtPct(P.keys.containment[j][i]));
+        const union = a.distinct + b.distinct - inter;
+        parts.push("Jaccard " + (union > 0 ? fmtPct(inter / union) : "-"));
+      }
+      panel.append(el('<p class="samples">' + parts.join(" · ") + "</p>"));
+      if (inter != null && a.distinct > 0 && b.distinct > 0) {
+        renderVenn(panel, {labels: [a.path, b.path], sizes: [a.distinct, b.distinct], pairs: [{a: 0, b: 1, size: inter}]},
+          "Overlap of " + a.path + " and " + b.path);
+      }
+    }
   }
 })();
 
@@ -865,7 +1189,9 @@ function openDetail(path) {
     drifts.sort((a, b) => b.psi - a.psi);
     if (drifts.length) {
       s.append(el('<h2 class="sec">Field drift vs baseline (PSI)</h2>'));
-      const table = el('<table class="data"><thead><tr><th>field</th><th>vs</th><th>PSI</th><th>KS</th></tr></thead><tbody></tbody></table>');
+      const table = el('<table class="data"><thead><tr><th>field</th><th>vs</th>'
+        + '<th title="population stability index between the input and the baseline distribution (0 = identical)">PSI</th>'
+        + '<th title="largest gap between the two cumulative distributions, 0 … 1 (binned values only)">KS</th></tr></thead><tbody></tbody></table>');
       const tbody2 = table.querySelector("tbody");
       for (const d of drifts) {
         const tr = el('<tr class="clickable"><td>' + esc(d.path) + "</td><td>" + esc(d.vs) + "</td><td>"
@@ -874,7 +1200,7 @@ function openDetail(path) {
         tr.onclick = () => openDetail(d.path);
         tbody2.append(tr);
       }
-      s.append(table);
+      s.append(makeSortable(table));
       s.append(el('<p class="samples">PSI &lt; 0.1: stable · 0.1–0.2: moderate shift · &gt; 0.2: significant shift. Select input chips in the compare bar to see the distributions overlaid.</p>'));
     }
   }
@@ -887,9 +1213,31 @@ function openDetail(path) {
     (cw.warnings || []).forEach(w => s.append(el('<div class="banner">' + esc(w) + "</div>")));
 
     const rows = (cw.fields || []).slice().sort((a, b) => (b.psi || 0) - (a.psi || 0));
-    const table = el('<table class="data"><thead><tr><th>field</th><th>status</th><th>PSI</th><th>KS</th><th>p50</th><th>null rate</th><th>distinct</th></tr></thead><tbody></tbody></table>');
+    const table = el('<table class="data"><thead><tr><th>field</th><th title="common: present in both reports · added / removed / type_changed: schema differences">status</th>'
+      + '<th title="population stability index between the past and the current distribution (0 = identical)">PSI</th>'
+      + '<th title="largest gap between the past and current cumulative distributions, 0 … 1">KS</th>'
+      + '<th title="median, past → current">p50</th><th title="past → current">null rate</th><th title="estimated distinct count, past → current">distinct</th></tr></thead><tbody></tbody></table>');
     const tbody = table.querySelector("tbody");
     const panel = el('<div class="pair-panel" id="cwPanel"></div>');
+    const showCdf = f => {
+      panel.innerHTML = "";
+      panel.append(el('<h2 class="sec">' + esc(f.path) + " : CDF old vs new</h2>"));
+      const chart = el('<div class="chart tall"></div>');
+      panel.append(chart);
+      lazyChart(chart, () => ({
+        grid: {left: 45, right: 12, top: 24, bottom: 20},
+        legend: {top: 0, textStyle: {fontSize: 10}},
+        tooltip: {trigger: "axis", confine: true},
+        xAxis: Object.assign({type: "value", min: f.cdf.edges[0], max: f.cdf.edges[f.cdf.edges.length - 1]}, AXIS),
+        yAxis: Object.assign({type: "value", min: 0, max: 1}, AXIS),
+        series: [
+          {name: "old", type: "line", showSymbol: false, lineStyle: {color: REF_COLOR},
+            data: f.cdf.oldRanks.map((r, i) => [f.cdf.edges[i], r])},
+          {name: "new", type: "line", showSymbol: false, lineStyle: {color: PALETTE[0]},
+            data: f.cdf.newRanks.map((r, i) => [f.cdf.edges[i], r])}
+        ]
+      }));
+    };
     for (const f of rows) {
       const statusBadge = f.status === "common" ? "" :
         ' <span class="badge warn">' + esc(f.status) + (f.typeOld ? " (was " + esc(f.typeOld) + ")" : "") + "</span>";
@@ -900,36 +1248,22 @@ function openDetail(path) {
         + "</td><td>" + (f.nullRateOld != null ? fmtPct(f.nullRateOld) + " → " + fmtPct(f.nullRateNew) : "-")
         + "</td><td>" + (f.distinctOld != null || f.distinctNew != null
           ? fmtInt(f.distinctOld) + " → " + fmtInt(f.distinctNew) : "-") + "</td></tr>");
-      if (f.cdf) tr.onclick = () => {
-        panel.innerHTML = "";
-        panel.append(el('<h2 class="sec">' + esc(f.path) + " : CDF old vs new</h2>"));
-        const chart = el('<div class="chart tall"></div>');
-        panel.append(chart);
-        lazyChart(chart, () => ({
-          grid: {left: 45, right: 12, top: 24, bottom: 20},
-          legend: {top: 0, textStyle: {fontSize: 10}},
-          tooltip: {trigger: "axis", confine: true},
-          xAxis: Object.assign({type: "value", min: f.cdf.edges[0], max: f.cdf.edges[f.cdf.edges.length - 1]}, AXIS),
-          yAxis: Object.assign({type: "value", min: 0, max: 1}, AXIS),
-          series: [
-            {name: "old", type: "line", showSymbol: false, lineStyle: {color: "#9ca3af"},
-              data: f.cdf.oldRanks.map((r, i) => [f.cdf.edges[i], r])},
-            {name: "new", type: "line", showSymbol: false, lineStyle: {color: PALETTE[0]},
-              data: f.cdf.newRanks.map((r, i) => [f.cdf.edges[i], r])}
-          ]
-        }));
-      };
+      if (f.cdf) tr.onclick = () => showCdf(f);
       tbody.append(tr);
       if (f.keyOverlap) {
         const ko = f.keyOverlap;
-        tbody.append(el('<tr><td colspan="7" class="samples">key overlap (Theta): |old| ' + fmtInt(ko.distinctOld)
+        tbody.append(el('<tr data-sub="1"><td colspan="7" class="samples">key overlap (Theta): |old| ' + fmtInt(ko.distinctOld)
           + " · |new| " + fmtInt(ko.distinctNew)
           + (ko.intersection != null ? " · |old ∩ new| " + fmtInt(ko.intersection)
             + " · retained " + fmtPct(ko.retainedShare) + " · new keys " + fmtPct(ko.newShare) : "") + "</td></tr>"));
       }
     }
-    s.append(table);
+    s.append(makeSortable(table));
+    s.append(el('<p class="samples">PSI &lt; 0.1: stable · 0.1–0.2: moderate shift · &gt; 0.2: significant shift. Click a row with a stored CDF to overlay the past and current distributions.</p>'));
     s.append(panel);
+    // the field that moved most is the one to look at first
+    const first = rows.find(f => f.cdf);
+    if (first) showCdf(first);
   }
 
   if (inputsAxisIndex < 0 && !cw) {
@@ -956,8 +1290,8 @@ function vennDistance(r1, r2, targetArea) {
   }
   return (lo + hi) / 2;
 }
-function renderVenn(s, venn) {
-  s.append(el('<h2 class="sec">Key overlap (proportional venn, Theta estimates)</h2>'));
+function renderVenn(s, venn, title) {
+  s.append(el('<h2 class="sec">' + esc(title || "Key overlap (proportional venn, Theta estimates)") + "</h2>"));
   const n = venn.sizes.length;
   const radii = venn.sizes.map(v => Math.sqrt(Math.max(v, 1) / Math.PI));
   const inter = {};
@@ -1069,6 +1403,7 @@ function renderVenn(s, venn) {
   }
   const tab = TABS.some(([n]) => n === h.tab) ? h.tab : "overview";
   activateTab(tab);
+  if (h.f) openDetail(h.f);
 })();
 </script>
 </body>

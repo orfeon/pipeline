@@ -46,10 +46,11 @@ public class ProfileReportPreviewTest {
                 .build();
 
         final ProfileSpec spec = ProfileSpec.of(
-                schema, null, null, Set.of("user_id", "item_id"), "default", true, true);
+                schema, null, null, Set.of("user_id", "item_id"), "default", true, true)
+                .withTarget("sold_flag", null);
         final ProfileCombineFn fn = new ProfileCombineFn(spec);
 
-        final ProfileSpec groupSpec = ProfileSpec.of(schema, null, null, null, "default", false, false);
+        final ProfileSpec groupSpec = spec.groupSpec();
         final ProfileCombineFn groupFn = new ProfileCombineFn(groupSpec);
         final ProfileAxis segmentsAxis = new ProfileAxis();
         segmentsAxis.kind = ProfileAxis.Kind.segments;
@@ -84,7 +85,11 @@ public class ProfileReportPreviewTest {
             values.put("sold_price", random.nextDouble() < 0.4 ? null : Math.round(listPrice * (0.7 + random.nextDouble() * 0.3)));
             values.put("weight_g", random.nextDouble() < 0.05 ? null : 50 + random.nextDouble() * 2000);
             values.put("like_count", (long) Math.max(0, (int) Math.exp(random.nextGaussian() * 1.5)));
-            values.put("sold_flag", random.nextDouble() < 0.35);
+            // sold more often when cheap, liked and in the popular categories (so the Target tab has something to show)
+            final double soldOdds = 0.2 + 0.3 * Math.max(0, 1 - listPrice / 2000)
+                    + 0.2 * Math.min(1, (long) values.get("like_count") / 10d)
+                    + ("fashion".equals(values.get("category")) ? 0.15 : 0);
+            values.put("sold_flag", random.nextDouble() < soldOdds);
             values.put("description", random.nextDouble() < 0.6 ? "A nice item number " + i : "");
             values.put("created_at", base + (long) (random.nextDouble() * 180) * 86400_000_000L);
             final ProfileRow element = ProfileRow.of(spec, MElement.of(values, 1735689600000L));
