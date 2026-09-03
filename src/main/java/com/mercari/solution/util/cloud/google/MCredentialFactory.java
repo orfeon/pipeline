@@ -18,7 +18,7 @@ import java.util.List;
  * Activated by {@code options.gcp.credentials}: {@code GCPOptions.setOptions} stores the source
  * in {@link CredentialsSourceOptions} (serialized to workers with the pipeline options) and sets
  * this class as {@code GcpOptions.credentialFactoryClass}. Mirrors Beam's GcpCredentialFactory
- * scoping/impersonation behavior. See docs/developer/cloud-auth.md §4.1.
+ * scoping/impersonation behavior. See docs/design/cloud-auth.md §4.1.
  */
 public class MCredentialFactory implements CredentialFactory {
 

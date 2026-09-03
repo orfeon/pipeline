@@ -118,8 +118,8 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &
   population; stages run wave by wave — the independent stages of a wave branch in parallel and are merged
   back by row id, `engine.parallelWaves: false` = linear chain). DSL spec in
-  [docs/developer/feature-dsl.md](docs/developer/feature-dsl.md), engine design and implementation status in
-  [docs/developer/feature-engine.md](docs/developer/feature-engine.md). Keep examples/tests domain-neutral.
+  [docs/design/feature-dsl.md](docs/design/feature-dsl.md), engine design and implementation status in
+  [docs/design/feature-engine.md](docs/design/feature-engine.md). Keep examples/tests domain-neutral.
   Maintain via the **`feature-engine` skill** (`.claude/skills/feature-engine/`).
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
   http action, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
@@ -237,8 +237,12 @@ self-contained (parameters, examples) — the agent reads one file per module.
 
 ### Developer docs — `docs/`
 
-- `docs/developer/` — developer docs: [architecture.md](docs/developer/architecture.md) (internals),
+- `docs/developer/` — contributor guides: [architecture.md](docs/developer/architecture.md) (internals),
   `server/frontend.md`.
+- `docs/design/` — design documents (each opens with a `Status:` line; the code cites them by section
+  number): [schema-redesign.md](docs/design/schema-redesign.md), [cloud-auth.md](docs/design/cloud-auth.md),
+  [feature-dsl.md](docs/design/feature-dsl.md), [feature-engine.md](docs/design/feature-engine.md).
+  New design documents go here, not in `docs/developer/`.
 - `docs/images/` — images referenced by the root README.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).
 

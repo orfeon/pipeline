@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
 
 /**
  * Compiles a sources document + feature parameters into a {@link FeaturePlan}
- * (docs/developer/feature-engine.md §1.2). Pure function: no Beam, no I/O.
+ * (docs/design/feature-engine.md §1.2). Pure function: no Beam, no I/O.
  *
  * <p>Blocks are expanded with a dependency-resolution loop (the same idiom as pipeline assembly):
  * a block is expanded once every name it references resolves to an input field or an already expanded

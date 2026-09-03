@@ -7,9 +7,9 @@ description: Developing and maintaining the feature transform (util/pipeline/fea
 
 The `feature` transform compiles a YAML/JSON feature spec against a *sources contract* into a
 `FeaturePlan` (every output column with its availability time, status, lineage and stage) and
-executes that plan as a chain of Beam stages. The DSL spec is `docs/developer/feature-dsl.md`
+executes that plan as a chain of Beam stages. The DSL spec is `docs/design/feature-dsl.md`
 (canonical: sources contract, scopes, encoding, availability algebra, §-numbers cited from the
-code) and the engine design is `docs/developer/feature-engine.md` (§3.1 scheduling, §9.2
+code) and the engine design is `docs/design/feature-engine.md` (§3.1 scheduling, §9.2
 implementation status and deferred items, §9.3 spill sorter, §9.4 waves, §9.5 DirectRunner
 finding). This skill is the map plus the invariants and gotchas that are only recorded there or in
 past PR reviews. User-facing reference: `src/main/resources/server/docs/module/transform/feature.md`.

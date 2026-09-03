@@ -13,7 +13,7 @@ import java.util.Map;
 
 /**
  * Characterization tests for the PubSub source's assembly-time schema validation and schema
- * registration (docs/developer/schema-redesign.md Phase 0). These exercise only pipeline assembly
+ * registration (docs/design/schema-redesign.md Phase 0). These exercise only pipeline assembly
  * (no emulator, the pipeline is never run): the schema-requirement rules reference the top-level
  * config schema that Phase 3 moves into parameters, so their messages and trigger conditions are
  * pinned here.

@@ -1,5 +1,7 @@
 # Feature Transform DSL (Design Document)
 
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold fits, factorization, discretize, quantile stats). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
 shrinkage, the availability-time algebra that makes leak checking a type check, and the

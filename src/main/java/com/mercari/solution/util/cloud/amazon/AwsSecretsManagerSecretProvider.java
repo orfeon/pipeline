@@ -20,7 +20,7 @@ import java.util.Base64;
  * Credentials: the launcher-configured pipeline options ({@code options.aws.credentials},
  * including {@code gcpFederation}); otherwise the AWS default provider chain. Runtime resolution
  * on GCP workers (no configured options) therefore requires ambient AWS credentials — a
- * documented limitation (docs/developer/cloud-auth.md §8).
+ * documented limitation (docs/design/cloud-auth.md §8).
  */
 public class AwsSecretsManagerSecretProvider implements SecretProvider {
 

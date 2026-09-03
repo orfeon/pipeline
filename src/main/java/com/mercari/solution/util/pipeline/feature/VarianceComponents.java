@@ -22,7 +22,7 @@ import java.util.*;
 
 /**
  * Batch estimation of the per-level pseudo-counts for {@code weights: varianceComponents}
- * (docs/developer/feature-dsl.md §5.5 rule 3): for every lattice level that a stage composes, per-key sufficient
+ * (docs/design/feature-dsl.md §5.5 rule 3): for every lattice level that a stage composes, per-key sufficient
  * statistics of the target are combined into the one-way random-effects moments and
  * {@link Shrinkage#lambdaFromMoments} turns them into λ = σ²/τ². The result is a side input
  * {@code Map<levelNColumn, λ>} read by the composing DoFn.

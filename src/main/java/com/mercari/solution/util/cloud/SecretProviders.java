@@ -9,7 +9,7 @@ import java.util.List;
 
 /**
  * Cloud-neutral secret resolution, dispatched by reference syntax
- * (docs/developer/cloud-auth.md §6.1):
+ * (docs/design/cloud-auth.md §6.1):
  *
  * <ul>
  *   <li>GCP Secret Manager — {@code projects/{p}/secrets/{s}/versions/{v}}</li>

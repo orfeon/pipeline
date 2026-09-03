@@ -1,5 +1,7 @@
 # Feature Transform Engine (Design Document)
 
+Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6 and the prefix-scan of §9.4.4 are design notes, not code.**
+
 How the DSL of [feature-dsl.md](feature-dsl.md) (below: "the spec") is implemented as `module:
 feature` on Apache Beam: what is reused from the framework, what is new, where the spec and the
 execution constraints collide, and the current implementation status. Section numbers are referenced

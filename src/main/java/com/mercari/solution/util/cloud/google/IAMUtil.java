@@ -65,7 +65,7 @@ public class IAMUtil {
     /**
      * Whether the GCE metadata server is reachable (cached after one short probe).
      * Off Google Cloud, metadata lookups are skipped immediately instead of hanging
-     * through retries (docs/developer/cloud-auth.md §4.2).
+     * through retries (docs/design/cloud-auth.md §4.2).
      * Override with the MERCARI_PIPELINE_ON_GCP env var / system property.
      */
     public static boolean isOnGcp() {

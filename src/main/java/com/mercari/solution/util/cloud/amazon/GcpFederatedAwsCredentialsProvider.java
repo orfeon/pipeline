@@ -23,7 +23,7 @@ import java.time.Instant;
 
 /**
  * AWS credentials for pipelines running on GCP, without AWS key material
- * (docs/developer/cloud-auth.md §5.2): mints a GCP service-account ID token (Google is a
+ * (docs/design/cloud-auth.md §5.2): mints a GCP service-account ID token (Google is a
  * standard OIDC issuer for AWS IAM) and exchanges it via STS {@code AssumeRoleWithWebIdentity}.
  *
  * Beam's AwsModule cannot serialize custom providers into {@code AwsOptions}, so this provider

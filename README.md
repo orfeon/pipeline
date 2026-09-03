@@ -18,6 +18,7 @@ The Mercari Pipeline enables you to run various data pipelines without writing p
 * [How to Execute Pipeline](src/main/resources/server/docs/exec/README.md) — run on Dataflow, locally, or on Flink/Spark
 * [Examples](examples/README.md) — ready-to-use configuration files for common use cases
 * [Developer docs](docs/developer/README.md) — internals and how to extend modules
+* [Design documents](docs/design/README.md) — accepted designs and their implementation status
 
 ## Quick Start
 

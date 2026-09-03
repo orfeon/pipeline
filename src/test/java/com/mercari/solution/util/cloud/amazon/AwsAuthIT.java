@@ -23,7 +23,7 @@ import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse
 /**
  * Integration test (run via maven-failsafe:
  * {@code mvn verify -DskipITs=false -Djib.skip=true -Dit.test=AwsAuthIT})
- * for the cross-cloud auth wiring (docs/developer/cloud-auth.md) against LocalStack:
+ * for the cross-cloud auth wiring (docs/design/cloud-auth.md) against LocalStack:
  *
  * <ul>
  *   <li>{@code options.aws} (region/endpoint/credentials) flowing through Beam's s3

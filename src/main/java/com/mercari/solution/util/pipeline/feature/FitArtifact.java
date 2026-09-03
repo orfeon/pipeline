@@ -20,7 +20,7 @@ import java.time.Instant;
 import java.util.*;
 
 /**
- * Persisted fit result of a {@code fit.mode: static} encoding block (docs/developer/feature-dsl.md §7 train/serve 整合):
+ * Persisted fit result of a {@code fit.mode: static} encoding block (docs/design/feature-dsl.md §7 train/serve 整合):
  * the per-key sufficient statistics of every lattice level, stored as one Avro file per block under a
  * content-addressed directory {@code <artifactUri>/<planHash>/}. The plan hash covers the spec and the
  * sources contract, so a change in either invalidates the artifact; a {@code manifest.json} next to the

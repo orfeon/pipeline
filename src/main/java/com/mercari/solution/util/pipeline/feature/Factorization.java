@@ -20,7 +20,7 @@ import java.io.Serializable;
 import java.util.*;
 
 /**
- * Factorization machine over categorical fields (docs/developer/feature-dsl.md §4.4):
+ * Factorization machine over categorical fields (docs/design/feature-dsl.md §4.4):
  *
  * <pre>
  *   ŷ = w0 + Σ_f w_f[x_f] + Σ_{f&lt;g} r_fg · ⟨v_f[x_f], v_g[x_g]⟩

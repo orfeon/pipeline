@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The "intent" side of the DSL (docs/developer/feature-dsl.md §3–§5): the parsed {@code parameters} block of a
+ * The "intent" side of the DSL (docs/design/feature-dsl.md §3–§5): the parsed {@code parameters} block of a
  * {@code feature} transform. Parsing is syntactic only; cross-references and semantics are resolved by
  * {@link FeaturePlanCompiler}.
  */

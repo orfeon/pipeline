@@ -23,7 +23,7 @@ import java.net.URI;
  * Maps the config {@code options.aws} block onto Beam's {@link AwsOptions}, which both the
  * s3 filesystem and aws2 IOs consume.
  *
- * See docs/developer/cloud-auth.md §5.1. Only credentials provider types that Beam's
+ * See docs/design/cloud-auth.md §5.1. Only credentials provider types that Beam's
  * AwsModule can serialize to workers may be emitted here.
  */
 public class AWSOptions implements Serializable {

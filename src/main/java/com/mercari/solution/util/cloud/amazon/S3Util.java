@@ -18,7 +18,7 @@ public class S3Util {
      * Builds the client through the same factory chain as Beam's s3 filesystem
      * ({@code S3Options.s3ClientFactoryClass}), so construction-time access and runtime IO
      * share one credential source — including {@code gcpFederation}
-     * (docs/developer/cloud-auth.md §5.3).
+     * (docs/design/cloud-auth.md §5.3).
      */
     public static S3Client storage(final PipelineOptions pipelineOptions) {
         final S3Options s3Options = pipelineOptions.as(S3Options.class);

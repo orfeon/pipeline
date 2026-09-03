@@ -11,7 +11,7 @@ import java.time.format.DateTimeParseException;
  *
  * <p>Deliberately separate from {@link com.mercari.solution.util.pipeline.outbound.Durations}: that class
  * defines the outbound modules' grammar (ISO-8601 plus short forms like {@code 10m}, no calendar periods),
- * while the feature DSL accepts ISO-8601 only (docs/developer/feature-dsl.md §2.3) but needs calendar periods and the
+ * while the feature DSL accepts ISO-8601 only (docs/design/feature-dsl.md §2.3) but needs calendar periods and the
  * short column-name tokens of {@link #shortName}. Sharing one class would silently widen one grammar
  * with the other's.
  */

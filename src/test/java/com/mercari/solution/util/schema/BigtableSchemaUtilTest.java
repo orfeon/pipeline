@@ -87,7 +87,7 @@ public class BigtableSchemaUtilTest {
 
     @Test
     public void testFormatAndCellTypeCascade() {
-        // Characterization for docs/developer/schema-redesign.md P4: the per-cell decode format
+        // Characterization for docs/design/schema-redesign.md P4: the per-cell decode format
         // cascades top-level default -> family -> qualifier, and cellType cascades per family.
         final List<BigtableSchemaUtil.ColumnFamilyProperties> families = parseFamilies("""
                 [

@@ -1,7 +1,7 @@
 # Cross-Cloud Authentication Setup (GCP ⇔ AWS)
 
 How to run pipelines on one cloud while reading/writing the other cloud's resources, without
-distributing long-lived keys. Design background: [developer/cloud-auth.md](../../../../../../docs/developer/cloud-auth.md).
+distributing long-lived keys. Design background: [design/cloud-auth.md](../../../../../../docs/design/cloud-auth.md).
 
 | Runs on | Accesses | Mechanism | Section |
 |---|---|---|---|
@@ -163,4 +163,4 @@ parameters.
 - Google Workspace modules (`drive`, sheets) may require key material that federation cannot
   replace (domain-wide delegation); treat them as unsupported off GCP.
 - Custom AWS providers reach only the s3 filesystem and Secrets Manager today; a future
-  Kinesis/SQS module would need per-IO wiring (developer/cloud-auth.md §8).
+  Kinesis/SQS module would need per-IO wiring (design/cloud-auth.md §8).

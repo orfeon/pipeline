@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Declarative feature generation (docs/developer/feature-dsl.md): row / context / sequence / population features with
+ * Declarative feature generation (docs/design/feature-dsl.md): row / context / sequence / population features with
  * availability-time leak checking against a sources contract. The spec is compiled by
  * {@link FeaturePlanCompiler} at assembly time (compile errors fail the pipeline) and executed as a
  * chain of stages by {@link FeatureStages}.
