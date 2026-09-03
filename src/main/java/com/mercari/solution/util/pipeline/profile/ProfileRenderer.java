@@ -297,11 +297,14 @@ public class ProfileRenderer {
         }
         payload.add("fields", fields);
 
+        // the target's per-class distributions are computed once, as a comparison axis; the target
+        // block derives its per-bin rates and separation statistics from those entries
+        final JsonObject targetAxis = withTarget ? buildTargetAxis(accumulator, spec, config) : null;
         if(withTarget) {
-            payload.add("target", buildTarget(accumulator, spec, config, fields));
+            payload.add("target", buildTarget(accumulator, spec, config, fields, targetAxis));
         }
         if(withOverlay) {
-            final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit, groupTotals);
+            final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit, groupTotals, targetAxis);
             annotateBaselineDrift(comparisons, fields, config);
             payload.add("comparisons", comparisons);
         }
@@ -746,7 +749,8 @@ public class ProfileRenderer {
             final ProfileSpec spec,
             final Config config,
             final int groupLimit,
-            final java.util.Map<String, Long> groupTotals) {
+            final java.util.Map<String, Long> groupTotals,
+            final JsonObject targetAxis) {
 
         final JsonArray axes = new JsonArray();
         for(final ProfileAxis axis : config.axes) {
@@ -813,10 +817,61 @@ public class ProfileRenderer {
             axisJson.add("groups", groupsJson);
             axes.add(axisJson);
         }
-        if(spec.getTarget() != null && spec.getTarget().fieldStats) {
-            axes.add(buildTargetAxis(accumulator, spec, config));
+        if(targetAxis != null) {
+            axes.add(targetAxis);
         }
         return axes;
+    }
+
+    /**
+     * One field's distribution for a subset of its rows (a comparison group or a target class),
+     * aligned to the shared overlay edges / labels of the whole dataset so the client can overlay
+     * it without rebinning: {@code count}, {@code nulls}, then per type {@code mean} + {@code hist}
+     * (numeric-like), {@code topK} counts over the global labels (string) or
+     * {@code trueCount}/{@code falseCount} (bool). This is the single place that defines the entry.
+     */
+    private static JsonObject buildDistributionEntry(
+            final ProfileSpec.FieldSpec fieldSpec,
+            final ProfileAccumulator.FieldAccumulator globalField,
+            final long count,
+            final long nulls,
+            final Double mean,
+            final KllDoublesSketch kll,
+            final ItemsSketch<String> fi,
+            final Long trueCount,
+            final Config config) {
+
+        final JsonObject o = new JsonObject();
+        o.addProperty("count", count);
+        o.addProperty("nulls", nulls);
+        switch (fieldSpec.profileType) {
+            case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
+                if(count > 0 && mean != null) {
+                    o.addProperty("mean", mean);
+                }
+                final double[] edges = overlayEdges(globalField, config.overlayBins);
+                if(count > 0 && edges != null && edges.length > 2 && kll != null && !kll.isEmpty()) {
+                    o.add("hist", scaledCounts(pmfOverEdges(kll, edges), count));
+                }
+            }
+            case STRING -> {
+                final List<String> labels = overlayLabels(globalField, config.overlayTopK);
+                if(labels != null && fi != null) {
+                    final JsonArray topK = new JsonArray();
+                    for(final String label : labels) {
+                        topK.add(fi.getEstimate(label));
+                    }
+                    o.add("topK", topK);
+                }
+            }
+            case BOOL -> {
+                if(trueCount != null) {
+                    o.addProperty("trueCount", trueCount);
+                    o.addProperty("falseCount", count - trueCount);
+                }
+            }
+        }
+        return o;
     }
 
     // ---- target (binary outcome) ----
@@ -851,40 +906,17 @@ public class ProfileRenderer {
                 if(stats == null) {
                     continue;   // the target field itself
                 }
-                final JsonObject o = new JsonObject();
-                final long count = positiveClass ? stats.positiveCount : stats.negativeCount;
-                o.addProperty("count", count);
-                o.addProperty("nulls", positiveClass ? stats.nullPositive : stats.nullNegative);
-                switch (fieldSpec.profileType) {
-                    case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                        final ProfileAccumulator.Moments moments = positiveClass ? stats.positive : stats.negative;
-                        final KllDoublesSketch kll = positiveClass ? stats.getKllPositive() : stats.getKllNegative();
-                        if(count > 0 && moments.n > 0) {
-                            o.addProperty("mean", moments.mean);
-                        }
-                        final double[] edges = overlayEdges(globalField, config.overlayBins);
-                        if(edges != null && edges.length > 2 && kll != null && !kll.isEmpty()) {
-                            o.add("hist", scaledCounts(pmfOverEdges(kll, edges), count));
-                        }
-                    }
-                    case STRING -> {
-                        final List<String> labels = overlayLabels(globalField, config.overlayTopK);
-                        final ItemsSketch<String> fi = positiveClass ? stats.getFiPositive() : stats.getFiNegative();
-                        if(labels != null && fi != null) {
-                            final JsonArray topK = new JsonArray();
-                            for(final String label : labels) {
-                                topK.add(fi.getEstimate(label));
-                            }
-                            o.add("topK", topK);
-                        }
-                    }
-                    case BOOL -> {
-                        final long trues = positiveClass ? stats.truePositive : stats.trueNegative;
-                        o.addProperty("trueCount", trues);
-                        o.addProperty("falseCount", count - trues);
-                    }
-                }
-                fields.add(fieldSpec.path, o);
+                final ProfileAccumulator.Moments moments = positiveClass ? stats.positive : stats.negative;
+                fields.add(fieldSpec.path, buildDistributionEntry(
+                        fieldSpec,
+                        globalField,
+                        positiveClass ? stats.positiveCount : stats.negativeCount,
+                        positiveClass ? stats.nullPositive : stats.nullNegative,
+                        moments.n > 0 ? moments.mean : null,
+                        positiveClass ? stats.getKllPositive() : stats.getKllNegative(),
+                        positiveClass ? stats.getFiPositive() : stats.getFiNegative(),
+                        positiveClass ? stats.truePositive : stats.trueNegative,
+                        config));
             }
             groupJson.add("fields", fields);
             groups.add(groupJson);
@@ -913,6 +945,18 @@ public class ProfileRenderer {
         return null;
     }
 
+    /** Top-K counts plus an "(other)" bucket holding the rest of {@code count}, so the tail is represented. */
+    private static JsonArray withOtherCount(final JsonArray topK, final long count) {
+        final JsonArray counts = new JsonArray();
+        long sum = 0;
+        for(final JsonElement c : topK) {
+            counts.add(c.getAsLong());
+            sum += c.getAsLong();
+        }
+        counts.add(Math.max(0L, count - sum));
+        return counts;
+    }
+
     private static JsonArray scaledCounts(final double[] shares, final long count) {
         final JsonArray counts = new JsonArray();
         for(final double share : shares) {
@@ -928,14 +972,21 @@ public class ProfileRenderer {
      * distributions), the binned KS separation, the point-biserial correlation for numeric-like
      * fields and the positive rate among the field's null rows. The per-field IV is also
      * annotated on the top-level field objects for the stat strips.
+     *
+     * <p>The per-class counts come from the target axis entries ({@link #buildTargetAxis}), so
+     * the sketches are queried once and the target block and the overlays cannot disagree.
      */
     private static JsonObject buildTarget(
             final ProfileAccumulator accumulator,
             final ProfileSpec spec,
             final Config config,
-            final JsonArray fieldsJson) {
+            final JsonArray fieldsJson,
+            final JsonObject targetAxis) {
 
         final ProfileSpec.TargetSpec target = spec.getTarget();
+        final JsonArray classGroups = targetAxis.getAsJsonArray("groups");
+        final JsonObject positiveFields = classGroups.get(0).getAsJsonObject().getAsJsonObject("fields");
+        final JsonObject negativeFields = classGroups.get(1).getAsJsonObject().getAsJsonObject("fields");
         final JsonObject result = new JsonObject();
         result.addProperty("field", target.path);
         result.addProperty("positive", target.positiveLabel());
@@ -976,80 +1027,64 @@ public class ProfileRenderer {
                 o.add("nulls", nullRate);
             }
 
-            double[] positiveShares = null;
-            double[] negativeShares = null;
-            if(stats.positiveCount > 0 && stats.negativeCount > 0) {
-                switch (fieldSpec.profileType) {
-                    case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                        final double[] edges = overlayEdges(field, config.overlayBins);
-                        final KllDoublesSketch kllPositive = stats.getKllPositive();
-                        final KllDoublesSketch kllNegative = stats.getKllNegative();
-                        if(edges != null && kllPositive != null && !kllPositive.isEmpty()
-                                && kllNegative != null && !kllNegative.isEmpty()) {
-                            positiveShares = pmfOverEdges(kllPositive, edges);
-                            negativeShares = pmfOverEdges(kllNegative, edges);
-                            o.add("edges", toJsonArray(edges));
-                        }
-                        // point-biserial correlation: standardized mean difference between the classes
-                        final ProfileAccumulator.Moments p = stats.positive;
-                        final ProfileAccumulator.Moments q = stats.negative;
-                        final double n = p.n + q.n;
-                        if(p.n > 0 && q.n > 0) {
-                            final double mean = (p.n * p.mean + q.n * q.mean) / n;
-                            final double m2 = p.m2 + q.m2 + p.n * (p.mean - mean) * (p.mean - mean) + q.n * (q.mean - mean) * (q.mean - mean);
-                            final double sd = Math.sqrt(m2 / n);
-                            if(sd > 0 && Double.isFinite(sd)) {
-                                // class shares in double arithmetic (p.n * q.n would overflow long past ~3e9 rows each)
-                                final double r = (p.mean - q.mean) / sd * Math.sqrt((p.n / n) * (q.n / n));
-                                if(Double.isFinite(r)) {
-                                    o.addProperty("pointBiserial", r);
-                                }
-                            }
-                            o.addProperty("meanPositive", p.mean);
-                            o.addProperty("meanNegative", q.mean);
-                        }
-                    }
-                    case STRING -> {
-                        final List<String> labels = overlayLabels(field, config.overlayTopK);
-                        final ItemsSketch<String> fiPositive = stats.getFiPositive();
-                        final ItemsSketch<String> fiNegative = stats.getFiNegative();
-                        if(labels != null && !labels.isEmpty() && fiPositive != null && fiNegative != null) {
-                            final JsonArray labelsJson = new JsonArray();
-                            positiveShares = new double[labels.size() + 1];
-                            negativeShares = new double[labels.size() + 1];
-                            double positiveSum = 0d;
-                            double negativeSum = 0d;
-                            for(int l = 0; l < labels.size(); l++) {
-                                labelsJson.add(config.showValues ? labels.get(l) : "#" + (l + 1));
-                                positiveShares[l] = (double) fiPositive.getEstimate(labels.get(l)) / stats.positiveCount;
-                                negativeShares[l] = (double) fiNegative.getEstimate(labels.get(l)) / stats.negativeCount;
-                                positiveSum += positiveShares[l];
-                                negativeSum += negativeShares[l];
-                            }
-                            labelsJson.add("(other)");
-                            positiveShares[labels.size()] = Math.max(0d, 1d - positiveSum);
-                            negativeShares[labels.size()] = Math.max(0d, 1d - negativeSum);
-                            o.add("labels", labelsJson);
-                        }
-                    }
-                    case BOOL -> {
-                        final JsonArray labelsJson = new JsonArray();
-                        labelsJson.add("true");
-                        labelsJson.add("false");
-                        o.add("labels", labelsJson);
-                        positiveShares = new double[] {
-                                (double) stats.truePositive / stats.positiveCount,
-                                1d - (double) stats.truePositive / stats.positiveCount };
-                        negativeShares = new double[] {
-                                (double) stats.trueNegative / stats.negativeCount,
-                                1d - (double) stats.trueNegative / stats.negativeCount };
+            if(stats.positive.n > 0 && stats.negative.n > 0) {
+                // point-biserial correlation: standardized mean difference between the classes
+                final ProfileAccumulator.Moments p = stats.positive;
+                final ProfileAccumulator.Moments q = stats.negative;
+                final double n = p.n + q.n;
+                final double mean = (p.n * p.mean + q.n * q.mean) / n;
+                final double m2 = p.m2 + q.m2 + p.n * (p.mean - mean) * (p.mean - mean) + q.n * (q.mean - mean) * (q.mean - mean);
+                final double sd = Math.sqrt(m2 / n);
+                if(sd > 0 && Double.isFinite(sd)) {
+                    // class shares in double arithmetic (p.n * q.n would overflow long past ~3e9 rows each)
+                    final double r = (p.mean - q.mean) / sd * Math.sqrt((p.n / n) * (q.n / n));
+                    if(Double.isFinite(r)) {
+                        o.addProperty("pointBiserial", r);
                     }
                 }
+                o.addProperty("meanPositive", p.mean);
+                o.addProperty("meanNegative", q.mean);
             }
-            if(positiveShares != null) {
-                // aligned class counts per bin: the per-bin positive rate is positive / (positive + negative)
-                o.add("positive", scaledCounts(positiveShares, stats.positiveCount));
-                o.add("negative", scaledCounts(negativeShares, stats.negativeCount));
+
+            // aligned class counts per bin / category from the axis entries; the per-bin positive
+            // rate is positive / (positive + negative)
+            JsonArray positiveCounts = null;
+            JsonArray negativeCounts = null;
+            final JsonObject positive = positiveFields.getAsJsonObject(fieldSpec.path);
+            final JsonObject negative = negativeFields.getAsJsonObject(fieldSpec.path);
+            if(stats.positiveCount > 0 && stats.negativeCount > 0 && positive != null && negative != null) {
+                if(positive.has("hist") && negative.has("hist")) {
+                    o.add("edges", toJsonArray(overlayEdges(field, config.overlayBins)));
+                    positiveCounts = positive.getAsJsonArray("hist");
+                    negativeCounts = negative.getAsJsonArray("hist");
+                } else if(positive.has("topK") && negative.has("topK")) {
+                    final List<String> labels = overlayLabels(field, config.overlayTopK);
+                    final JsonArray labelsJson = new JsonArray();
+                    for(int l = 0; l < labels.size(); l++) {
+                        labelsJson.add(config.showValues ? labels.get(l) : "#" + (l + 1));
+                    }
+                    labelsJson.add("(other)");
+                    o.add("labels", labelsJson);
+                    positiveCounts = withOtherCount(positive.getAsJsonArray("topK"), stats.positiveCount);
+                    negativeCounts = withOtherCount(negative.getAsJsonArray("topK"), stats.negativeCount);
+                } else if(positive.has("trueCount") && negative.has("trueCount")) {
+                    final JsonArray labelsJson = new JsonArray();
+                    labelsJson.add("true");
+                    labelsJson.add("false");
+                    o.add("labels", labelsJson);
+                    positiveCounts = new JsonArray();
+                    positiveCounts.add(positive.get("trueCount").getAsLong());
+                    positiveCounts.add(positive.get("falseCount").getAsLong());
+                    negativeCounts = new JsonArray();
+                    negativeCounts.add(negative.get("trueCount").getAsLong());
+                    negativeCounts.add(negative.get("falseCount").getAsLong());
+                }
+            }
+            if(positiveCounts != null) {
+                o.add("positive", positiveCounts);
+                o.add("negative", negativeCounts);
+                final double[] positiveShares = sharesOf(positiveCounts, stats.positiveCount);
+                final double[] negativeShares = sharesOf(negativeCounts, stats.negativeCount);
                 final double iv = psi(positiveShares, negativeShares);
                 o.addProperty("iv", iv);
                 if(o.has("edges")) {
@@ -1103,43 +1138,20 @@ public class ProfileRenderer {
             final ProfileSpec.FieldSpec fieldSpec = spec.getFields().get(i);
             final ProfileAccumulator.FieldAccumulator globalField = global.getField(i);
             final ProfileAccumulator.FieldAccumulator groupField = group.getField(i);
-            final JsonObject o = new JsonObject();
-            o.addProperty("count", groupField.count);
-            o.addProperty("nulls", groupField.nullCount);
-            switch (fieldSpec.profileType) {
-                case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
-                    if(groupField.count > 0) {
-                        o.addProperty("mean", groupField.mean);
-                        final double[] edges = overlayEdges(globalField, config.overlayBins);
-                        final KllDoublesSketch kll = groupField.getKll();
-                        if(edges != null && edges.length > 2 && kll != null && !kll.isEmpty()) {
-                            final double[] pmf = pmfOverEdges(kll, edges);
-                            final JsonArray hist = new JsonArray();
-                            for(final double p : pmf) {
-                                hist.add(Math.round(p * groupField.count));
-                            }
-                            o.add("hist", hist);
-                        }
-                    }
-                }
-                case STRING -> {
-                    final CpcSketch cpc = groupField.cpcResult(spec.getSketchParameters());
-                    if(cpc != null && groupField.count > 0) {
-                        o.addProperty("distinct", cpc.getEstimate());
-                    }
-                    final List<String> labels = overlayLabels(globalField, config.overlayTopK);
-                    final ItemsSketch<String> fi = groupField.getFrequentItems();
-                    if(labels != null && fi != null) {
-                        final JsonArray topK = new JsonArray();
-                        for(final String label : labels) {
-                            topK.add(fi.getEstimate(label));
-                        }
-                        o.add("topK", topK);
-                    }
-                }
-                case BOOL -> {
-                    o.addProperty("trueCount", groupField.trueCount);
-                    o.addProperty("falseCount", groupField.falseCount);
+            final JsonObject o = buildDistributionEntry(
+                    fieldSpec,
+                    globalField,
+                    groupField.count,
+                    groupField.nullCount,
+                    groupField.count > 0 ? groupField.mean : null,
+                    groupField.getKll(),
+                    groupField.getFrequentItems(),
+                    groupField.trueCount,
+                    config);
+            if(ProfileSpec.ProfileType.STRING.equals(fieldSpec.profileType)) {
+                final CpcSketch cpc = groupField.cpcResult(spec.getSketchParameters());
+                if(cpc != null && groupField.count > 0) {
+                    o.addProperty("distinct", cpc.getEstimate());
                 }
             }
             fields.add(fieldSpec.path, o);
