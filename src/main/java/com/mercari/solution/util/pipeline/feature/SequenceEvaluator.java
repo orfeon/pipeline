@@ -45,6 +45,7 @@ public class SequenceEvaluator implements Serializable {
         boolean incremental;
         String field;
         String stat; // aggregate func / encoding stat driving the incremental accumulator
+        Double quantile; // probability of a quantile encoding stat (resolved once here, not per row)
     }
 
     /** Running statistics of one column (per filter value; key "" without a filter). */
@@ -52,6 +53,8 @@ public class SequenceEvaluator implements Serializable {
         double n, sum, sumSq;
         Double max, min;
         Map<String, Long> valueCounts;
+        /** quantile statistics: the visible values as an order-statistic multiset (supports eviction) */
+        OrderStatistics order;
     }
 
     static final class ColumnState {
@@ -356,6 +359,7 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = incrementalStat(c);
+        plan.quantile = c.scope == FeatureSpec.Scope.population ? OperatorCatalog.quantileProbability(c.coordinates.get("stat")) : null;
         plan.incremental = !forceScan
                 && plan.stat != null
                 && plan.maxEvents == null

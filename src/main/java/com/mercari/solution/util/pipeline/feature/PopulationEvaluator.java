@@ -26,12 +26,14 @@ public class PopulationEvaluator extends SequenceEvaluator {
         super(columns, forceScan);
     }
 
-    /** Stats that need information outside the key's own history and are not available yet. */
+    /**
+     * Stats the expanding (per-key replay) engine can serve: every catalog stat except {@code share} (a row
+     * composition of two hidden counts) plus the hidden {@code sum} of the lattice levels.
+     */
     public static boolean isSupported(final String stat) {
-        return switch (stat) {
-            case "count", "sum", "mean", "rate", "std", "distribution" -> true;
-            default -> false;
-        };
+        if ("sum".equals(stat)) return true;
+        final OperatorCatalog.Stat s = OperatorCatalog.stat(stat);
+        return s != null && !"share".equals(stat);
     }
 
     @Override
@@ -61,16 +63,26 @@ public class PopulationEvaluator extends SequenceEvaluator {
             acc.n += sign;
             return;
         }
-        Double v = FeatureValues.toDouble(p.values().get(plan.field));
+        final Double v = numericTarget(plan, p.values());
         if (v == null) return;
-        if (plan.offset != null) {
-            final Double b = FeatureValues.toDouble(p.values().get(plan.offset));
-            if (b == null) return;
-            v -= b;
-        }
         acc.n += sign;
+        if (plan.quantile != null) {
+            if (acc.order == null) acc.order = new OrderStatistics();
+            if (sign > 0) acc.order.add(v);
+            else acc.order.remove(v);
+            return;
+        }
         acc.sum += sign * v;
         acc.sumSq += sign * v * v;
+    }
+
+    /** The numeric target of a past row (minus its baseline offset), or null when missing — NaN counts as missing. */
+    private static Double numericTarget(final ColumnPlan plan, final Map<String, Object> values) {
+        final Double v = FeatureValues.toDouble(values.get(plan.field));
+        if (v == null || v.isNaN()) return null;
+        if (plan.offset == null) return v;
+        final Double b = FeatureValues.toDouble(values.get(plan.offset));
+        return b == null || b.isNaN() ? null : v - b;
     }
 
     @Override
@@ -93,7 +105,10 @@ public class PopulationEvaluator extends SequenceEvaluator {
                 }
                 yield dist;
             }
-            default -> throw new IllegalStateException("unsupported encoding stat: " + plan.stat);
+            default -> {
+                if (plan.quantile == null) throw new IllegalStateException("unsupported encoding stat: " + plan.stat);
+                yield acc == null || acc.order == null ? null : acc.order.quantile(plan.quantile);
+            }
         };
     }
 
@@ -120,15 +135,21 @@ public class PopulationEvaluator extends SequenceEvaluator {
             for (final Map.Entry<String, Long> e : counts.entrySet()) dist.put(e.getKey(), e.getValue() / total);
             return dist;
         }
+        if (plan.quantile != null) {
+            final double[] values = new double[window.size()];
+            int n = 0;
+            for (final Past p : window) {
+                final Double v = numericTarget(plan, p.values());
+                if (v != null) values[n++] = v;
+            }
+            if (n == 0) return null;
+            java.util.Arrays.sort(values, 0, n);
+            return OrderStatistics.quantile(plan.quantile, values, n);
+        }
         double n = 0, sum = 0, sumSq = 0;
         for (final Past p : window) {
-            Double v = FeatureValues.toDouble(p.values().get(plan.field));
+            final Double v = numericTarget(plan, p.values());
             if (v == null) continue;
-            if (plan.offset != null) {
-                final Double b = FeatureValues.toDouble(p.values().get(plan.offset));
-                if (b == null) continue;
-                v -= b;
-            }
             n++;
             sum += v;
             sumSq += v * v;

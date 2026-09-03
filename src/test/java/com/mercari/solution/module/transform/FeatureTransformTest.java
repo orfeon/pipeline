@@ -492,6 +492,85 @@ public class FeatureTransformTest {
     }
 
     @Test
+    public void testDiscretize() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        // start_price over the 6 rows: 50, 60, 80, 100, 120, 200 -> tercile edges 73.3 / 106.7 (type-7 quantiles)
+        final String blocks = """
+                    - name: price_bin
+                      scope: population
+                      type: discretize
+                      input: start_price
+                      bins: 3
+                      fit: {artifact: "%s"}
+                    - name: by_bin
+                      scope: population
+                      type: encoding
+                      keySets:
+                        - keys: [price_bin]
+                      targets:
+                        - {stats: [count]}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals(Schema.FieldType.INT64.getType(), output.getSchema().getField("f_price_bin").getFieldType().getType());
+        Assertions.assertNotNull(output.getSchema().getField("f_by_bin__price_bin__count"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            final Map<String, Long> bins = Map.of("A/s1", 2L, "A/s2", 1L, "B/s1", 3L, "C/s1", 2L, "C/s2", 1L, "D/s1", 3L);
+            for (final Map.Entry<String, Long> e : bins.entrySet()) {
+                Assertions.assertEquals(e.getValue(), ((Number) byKey.get(e.getKey()).getPrimitiveValue("f_price_bin")).longValue(), e.getKey());
+            }
+            // the bins key an expanding encoding: strictly-past rows of the same bin
+            final Map<String, Long> counts = Map.of("A/s1", 0L, "A/s2", 0L, "B/s1", 0L, "C/s1", 1L, "C/s2", 1L, "D/s1", 1L);
+            for (final Map.Entry<String, Long> e : counts.entrySet()) {
+                Assertions.assertEquals(e.getValue(), ((Number) byKey.get(e.getKey()).getPrimitiveValue("f_by_bin__price_bin__count")).longValue(), e.getKey());
+            }
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs);
+        final java.io.File artifact = new java.io.File(dirs[0], "price_bin.bins.json");
+        Assertions.assertTrue(artifact.exists());
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject();
+        Assertions.assertEquals(3, json.get("bins").getAsInt());
+        Assertions.assertEquals(50.0, json.get("min").getAsDouble(), 1e-9);
+        Assertions.assertEquals(200.0, json.get("max").getAsDouble(), 1e-9);
+        Assertions.assertEquals(2, json.getAsJsonArray("edges").size());
+        Assertions.assertEquals(60 + 20 * 2 / 3d, json.getAsJsonArray("edges").get(0).getAsDouble(), 1e-9);
+        Assertions.assertEquals(100 + 20 / 3d, json.getAsJsonArray("edges").get(1).getAsDouble(), 1e-9);
+    }
+
+    @Test
+    public void testQuantileStat() throws java.io.IOException {
+        // expanding median / first quartile of the seller's past start prices
+        final String config = FEATURE_CONFIG.replace("            - {expr: \"sold >= 1\", stats: [mean]}\n",
+                "            - {expr: \"sold >= 1\", stats: [mean]}\n            - {field: start_price, stats: [quantile, q25]}\n");
+        Assertions.assertNotEquals(FEATURE_CONFIG, config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertNotNull(output.getSchema().getField("f_enc__seller_id__start_price__quantile"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // s1: 100 (A) -> 200 (B) -> 80 (C) -> 120 (D); s2: 50 (A) -> 60 (C)
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_enc__seller_id__start_price__quantile"));
+            Assertions.assertEquals(100.0, byKey.get("B/s1").getAsDouble("f_enc__seller_id__start_price__quantile"), 1e-9);
+            Assertions.assertEquals(150.0, byKey.get("C/s1").getAsDouble("f_enc__seller_id__start_price__quantile"), 1e-9);
+            Assertions.assertEquals(100.0, byKey.get("D/s1").getAsDouble("f_enc__seller_id__start_price__quantile"), 1e-9);
+            Assertions.assertEquals(90.0, byKey.get("D/s1").getAsDouble("f_enc__seller_id__start_price__q25"), 1e-9);
+            Assertions.assertNull(byKey.get("A/s2").getPrimitiveValue("f_enc__seller_id__start_price__quantile"));
+            Assertions.assertEquals(50.0, byKey.get("C/s2").getAsDouble("f_enc__seller_id__start_price__quantile"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testAvroInputWithoutTimestampAttributeAndKeyedFirstStage() throws java.io.IOException {
         // Avro-typed input, no timestampAttribute (all elements share the default timestamp), and a spec whose
         // first block is keyed: rows must still be converted to the element form and ordered by time.field

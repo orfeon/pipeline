@@ -27,11 +27,12 @@ Supports:
   (count / mean / min / max / sum / std / first / last). Windows combine `maxEvents`, `maxAge` and a
   `filter` that can reference the current row through `$self.<field>`.
 - **population** scope — expanding-fit encoding: conditional statistics of a target per key set
-  (count / share / mean / rate / std / distribution), optionally windowed and offset by a baseline, with
+  (count / share / mean / rate / std / distribution / quantile), optionally windowed and offset by a baseline, with
   **shrinkage** along a generalization lattice (key → parent keys → global, `additive` main effects for
   crosses): fixed or variance-components pseudo-counts, leave-node-out, identity / logit / log scale,
   composed values, per-level deviations and effective sample size. **factorization** machines (fm / fwfm,
-  ALS) over categorical fields: pair interaction scores, embeddings, linear predictor.
+  ALS) over categorical fields: pair interaction scores, embeddings, linear predictor. **discretize**: bin
+  edges fitted on the input (quantile method), a fitted categorical column to key an encoding on.
 - **Leakage checking** — every column carries a derived availability time and lineage (source, kind,
   evidence). Columns available after `predictAt` are rejected unless they are only consumed as
   intermediates; history windows over late-arriving fields are shifted automatically.
@@ -151,9 +152,18 @@ features:
       - {stats: [count]}
       - {field: sold, stats: [mean]}
       - {expr: "final_price / start_price", stats: [mean, std]}
+      - {field: final_price, stats: [quantile, q25, quantile90]}   # median, 25th and 90th percentile of the past values
     naming: "{block}__{keys}__{window}__{target}__{stat}"
     maxFeatures: 100
 ```
+
+Encoding stats: `count` (rows), `share` (leaf count / global count), `mean` / `rate` (shrinkable), `std`,
+`distribution` (map of value shares), and `quantile` — the median — or `quantile<NN>` / `q<NN>` for the NN-th
+percentile (0..100), linearly interpolated between the past values (R type 7 / numpy default). `std`,
+`distribution` and the quantiles are read from the key's own past values (no shrinkage: a quantile of an
+interpolated distribution is not the interpolated quantile), so they are available in the expanding fit
+only — `fit.mode: static` / `fold` keep (n, Σy, Σy²) per key and reject them. A NaN target (or baseline)
+value counts as missing for every numeric encoding stat, like null.
 
 ### Static fits and artifacts (fit.mode static)
 
@@ -223,6 +233,37 @@ ridge update per parameter, deterministic for a seed). The whole training set is
 for the fit, so it must fit in memory. Unknown field values yield null outputs. The artifact
 (`<planHash>/<block>.fm.avro` + manifest with the fwfm `pairWeights` ranking) is written and reused like
 the static encoding artifacts.
+
+### Discretize (population, type: discretize)
+
+```yaml
+  - name: price_bin
+    scope: population
+    type: discretize
+    input: start_price                 # numeric field or feature
+    method: quantile                   # quantile (tree / optimal, the supervised methods, are not implemented yet)
+    bins: 8                            # and / or minSamplesPerBin: N — B = min(bins (default 10), n / N)
+    fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
+  - name: by_price
+    scope: population
+    type: encoding
+    keySets: [{keys: [price_bin]}]     # the fitted bins key an encoding (the fit stage runs first)
+    targets: [{field: sold, stats: [mean]}]
+```
+
+Unlike the row `type: bin` (hand-written `edges`), the edges are learned from the whole input in a static
+fit and applied by lookup: the interior edges are the `i / B` quantiles of the non-null, non-NaN values
+(type 7; `B = min(bins, n / minSamplesPerBin)` with `bins` defaulting to 10; ties and edges at the extremes
+are dropped, so discrete data can yield fewer bins than requested). The INT64 output is `-1` for a missing
+value (null / NaN), `0` below the fitted minimum, `1..B` for the fitted bins (`edge <= v < next`) and
+`B + 1` above the fitted maximum — the out-of-range and missing bins are categories of their own, so a
+serving value the fit never saw shows up as a drift signal instead of hiding in an edge bin. (The row `bin`
+numbers its bins `0..` from the count of edges below the value and has no dedicated bins; the two are not
+interchangeable.) An input without a single value still fits (n = 0): every non-missing value maps to
+bin 1 and the artifact is written. The values are gathered on one worker for the fit (8 bytes per row).
+The artifact `<planHash>/<block>.bins.json` (edges, min, max, n) is written and reused like the other static
+artifacts; `fit.cadence / window / warmStart` are accepted but ignored. For a cross key, keep the bins
+coarse (4–8): the cardinality multiplies.
 
 ### Shrinkage and key lattices (population)
 
@@ -425,9 +466,10 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
 - Batch only for sequence / population features (per-key time-ordered replay). Row / context features also
   run in streaming within the configured window, as a linear chain (the parallel-wave merge is a batch
   GroupByKey).
-- Key set `structure: sequence`, nested encoding targets, the `quantile` stat (and
-  `distribution` in static mode), and population types other than `encoding` / `factorization` are parsed
-  but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`, and non-static fits. In `shrinkage`,
+- Key set `structure: sequence`, nested encoding targets, the `quantile` / `distribution` stats in
+  `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
+  `factorization` / `discretize` are parsed but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
+  and non-static fits. Discretize: `method: tree` / `optimal` (supervised) and non-static fits. In `shrinkage`,
   `estimator: joint`, `weights: heldOut` and an `offset` on a logit / log scale are rejected;
   `parentStatistic: type` falls back to token with a warning. `weights: varianceComponents` estimates the
   per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding); a level whose

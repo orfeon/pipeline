@@ -102,27 +102,54 @@ public final class OperatorCatalog {
         };
     }
 
-    /** Encoding statistics: whether a target is required and the output type. */
-    public record Stat(String name, boolean requiresTarget, Schema.FieldType output) {}
+    /**
+     * Encoding statistics: whether a target is required, the output type, and whether the statistic is
+     * derived from the sufficient statistics (n, Σy, Σy²) — the ones a static / fold fit keeps per key.
+     * {@code distribution} and the quantiles need the key's value distribution (expanding only).
+     */
+    public record Stat(String name, boolean requiresTarget, Schema.FieldType output, boolean sufficient) {}
+
+    /** The stat tokens a target may request (plus the {@code quantile<NN>} / {@code q<NN>} family). */
+    public static final List<String> STATS = List.of("count", "share", "mean", "rate", "std", "distribution", "quantile");
+
+    public static final String AVAILABLE_STATS = String.join(" | ", STATS) + " (median) | quantile<NN> / q<NN>";
 
     public static Stat stat(final String name) {
+        if (name == null) return null;
         return switch (name) {
-            case "count" -> new Stat(name, false, I64);
-            case "share" -> new Stat(name, false, F64);
-            case "mean", "rate", "std", "quantile" -> new Stat(name, true, F64);
-            case "distribution" -> new Stat(name, true, Schema.FieldType.map(F64));
-            default -> null;
+            case "count" -> new Stat(name, false, I64, true);
+            case "share" -> new Stat(name, false, F64, true);
+            case "mean", "rate", "std" -> new Stat(name, true, F64, true);
+            case "distribution" -> new Stat(name, true, Schema.FieldType.map(F64), false);
+            default -> quantileProbability(name) == null ? null : new Stat(name, true, F64, false);
         };
+    }
+
+    private static final java.util.regex.Pattern QUANTILE = java.util.regex.Pattern.compile("^(?:quantile|q)(\\d{1,3})$");
+
+    /**
+     * The probability of a quantile stat token — {@code quantile} (the median), {@code quantile<NN>} or
+     * {@code q<NN>} with NN a percentage 0..100 (e.g. {@code q90}) — or null for any other stat.
+     */
+    public static Double quantileProbability(final String stat) {
+        if (stat == null) return null;
+        if ("quantile".equals(stat)) return 0.5;
+        final java.util.regex.Matcher m = QUANTILE.matcher(stat);
+        if (!m.matches()) return null;
+        final int percent = Integer.parseInt(m.group(1));
+        return percent > 100 ? null : percent / 100d;
     }
 
     public static List<String> datetimeDerivations() {
         return List.of("year", "month", "day", "dayOfWeek", "dayOfYear", "weekOfYear", "hour", "minute");
     }
 
-    /** Populations types implemented by the v0 engine; the rest parse but fail compilation. */
+    /** Population types implemented by the engine; the other registered ones parse but fail compilation. */
+    public static final List<String> IMPLEMENTED_POPULATION_TYPES = List.of("encoding", "factorization", "discretize");
+
     public static boolean isImplemented(final Scope scope, final String name) {
         if (scope != Scope.population) return get(scope, name) != null;
-        return "encoding".equals(name) || "factorization".equals(name);
+        return IMPLEMENTED_POPULATION_TYPES.contains(name);
     }
 
     public static boolean isNumeric(final Schema.FieldType type) {

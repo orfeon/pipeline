@@ -61,6 +61,7 @@ public class SequenceIncrementalTest {
                   - {stats: [count]}
                   - {field: sold, stats: [mean, std]}
                   - {field: condition_grade, stats: [distribution, count]}
+                  - {field: start_price, stats: [quantile, q25, quantile90]}
             """;
 
     @Test
