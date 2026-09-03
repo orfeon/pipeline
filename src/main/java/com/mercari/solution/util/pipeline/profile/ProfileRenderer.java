@@ -68,6 +68,38 @@ public class ProfileRenderer {
         public List<ProfileAxis> axes = List.of();
         public List<String[]> comparePairs = List.of();   // declared numeric field pairs
         public String compareWithSource;                  // uri of the past report (loaded at runtime)
+        public boolean comparisonDistributions = true;    // false: groups / classes keep totals only (size degradation)
+
+        /** Whether the payload carries per-group / per-class comparison data at all. */
+        boolean hasComparisons(final ProfileSpec spec) {
+            return !axes.isEmpty() || (spec.getTarget() != null && spec.getTarget().fieldStats);
+        }
+
+        /** A copy with a coarser comparison resolution, for the size-degradation steps. */
+        Config withComparisonResolution(final int bins, final int topK, final boolean distributions) {
+            final Config copy = new Config();
+            copy.title = title;
+            copy.showValues = showValues;
+            copy.jobName = jobName;
+            copy.moduleName = moduleName;
+            copy.inputNames = inputNames;
+            copy.expandedParametersJson = expandedParametersJson;
+            copy.embedLimitBytes = embedLimitBytes;
+            copy.histogramBins = histogramBins;
+            copy.timestampBins = timestampBins;
+            copy.overlayBins = bins;
+            copy.overlayTopK = topK;
+            copy.timeGroupLimit = timeGroupLimit;
+            copy.topKShow = topKShow;
+            copy.sampleRowsInPayload = sampleRowsInPayload;
+            copy.embedSketches = embedSketches;
+            copy.sketchesOutput = sketchesOutput;
+            copy.axes = axes;
+            copy.comparePairs = comparePairs;
+            copy.compareWithSource = compareWithSource;
+            copy.comparisonDistributions = distributions;
+            return copy;
+        }
     }
 
     /** The embedded blocks of a past report loaded for {@code compareWith}. */
@@ -144,29 +176,48 @@ public class ProfileRenderer {
         int sampleRows = config.sampleRowsInPayload;
         int groupLimit = Integer.MAX_VALUE;
         boolean embedSketches = config.embedSketches;
+        Config step = config;
 
-        String payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
+        String payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
         String sketches = embedSketches ? buildSketches(accumulator, config).toString() : null;
 
-        // degradation order: sketches → sample rows → histogram resolution → top segments only
+        // degradation order (§6.2): sketches → sample rows → histogram resolution → top groups only
+        // → coarser comparison distributions → comparison totals only; every step is recorded
+        final boolean withComparisons = config.hasComparisons(accumulator.getSpec());
         if(sketches != null && tooLarge(payload, sketches, config.embedLimitBytes)) {
             sketches = null;
             result.degradations.add("sketch binaries not embedded (size limit exceeded)");
         }
         if(tooLarge(payload, sketches, config.embedLimitBytes) && sampleRows > 100) {
             sampleRows = 100;
-            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
+            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
             result.degradations.add("sample rows in payload reduced to 100 (size limit exceeded)");
         }
         if(tooLarge(payload, sketches, config.embedLimitBytes) && bins > 64) {
             bins = 64;
-            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
+            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
             result.degradations.add("histogram resolution reduced to 64 bins (size limit exceeded)");
         }
-        if(tooLarge(payload, sketches, config.embedLimitBytes) && !config.axes.isEmpty()) {
+        if(tooLarge(payload, sketches, config.embedLimitBytes) && withComparisons && !config.axes.isEmpty()) {
             groupLimit = 5;
-            payload = buildPayload(accumulator, subProfiles, past, config, bins, sampleRows, groupLimit, groupTotals).toString();
+            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
             result.degradations.add("comparison groups limited to the top 5 per axis (size limit exceeded)");
+        }
+        if(tooLarge(payload, sketches, config.embedLimitBytes) && withComparisons
+                && (config.overlayBins > 16 || config.overlayTopK > 5)) {
+            step = config.withComparisonResolution(Math.min(16, config.overlayBins), Math.min(5, config.overlayTopK), true);
+            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
+            result.degradations.add("comparison resolution reduced to " + step.overlayBins + " bins / top " + step.overlayTopK
+                    + " labels per group (size limit exceeded)");
+        }
+        if(tooLarge(payload, sketches, config.embedLimitBytes) && withComparisons) {
+            step = step.withComparisonResolution(step.overlayBins, step.overlayTopK, false);
+            payload = buildPayload(accumulator, subProfiles, past, step, bins, sampleRows, groupLimit, groupTotals).toString();
+            result.degradations.add("comparison distributions dropped, group totals and target statistics kept (size limit exceeded)");
+        }
+        if(tooLarge(payload, sketches, config.embedLimitBytes)) {
+            result.degradations.add("embedded payload still exceeds the size limit by "
+                    + (payload.length() - config.embedLimitBytes) + " bytes after every reduction");
         }
 
         final String manifest = buildManifest(accumulator, config, result.degradations).toString();
@@ -283,11 +334,11 @@ public class ProfileRenderer {
         payload.addProperty("topKShow", config.topKShow);
 
         final boolean withTarget = spec.getTarget() != null && spec.getTarget().fieldStats;
-        final boolean withOverlay = !config.axes.isEmpty() || withTarget;
+        final boolean withOverlay = config.hasComparisons(spec);
         final JsonArray fields = new JsonArray();
         for(int i = 0; i < accumulator.getFieldCount(); i++) {
             final JsonObject field = buildField(spec.getFields().get(i), accumulator.getField(i), accumulator, params, config, bins);
-            if(withOverlay) {
+            if(withOverlay && config.comparisonDistributions) {
                 final JsonObject overlay = buildOverlayMeta(spec.getFields().get(i), accumulator.getField(i), config);
                 if(overlay != null) {
                     field.add("overlay", overlay);
@@ -306,6 +357,10 @@ public class ProfileRenderer {
         if(withOverlay) {
             final JsonArray comparisons = buildComparisons(accumulator, subProfiles, spec, config, groupLimit, groupTotals, targetAxis);
             annotateBaselineDrift(comparisons, fields, config);
+            if(!config.comparisonDistributions) {
+                // size degradation: the drift metrics above were computed from the full entries, now shed the arrays
+                stripDistributions(comparisons);
+            }
             payload.add("comparisons", comparisons);
         }
         if(!config.comparePairs.isEmpty()) {
@@ -945,6 +1000,19 @@ public class ProfileRenderer {
         return null;
     }
 
+    /** Removes the per-bin / per-label arrays from every group field entry, keeping counts, means and rates. */
+    private static void stripDistributions(final JsonArray comparisons) {
+        for(final JsonElement axis : comparisons) {
+            for(final JsonElement group : axis.getAsJsonObject().getAsJsonArray("groups")) {
+                for(final String path : group.getAsJsonObject().getAsJsonObject("fields").keySet()) {
+                    final JsonObject entry = group.getAsJsonObject().getAsJsonObject("fields").getAsJsonObject(path);
+                    entry.remove("hist");
+                    entry.remove("topK");
+                }
+            }
+        }
+    }
+
     /** Top-K counts plus an "(other)" bucket holding the rest of {@code count}, so the tail is represented. */
     private static JsonArray withOtherCount(final JsonArray topK, final long count) {
         final JsonArray counts = new JsonArray();
@@ -1101,6 +1169,12 @@ public class ProfileRenderer {
                     final JsonObject annotation = new JsonObject();
                     annotation.addProperty("iv", iv);
                     fieldJson.add("target", annotation);
+                }
+                if(!config.comparisonDistributions) {
+                    // size degradation: keep the statistics, shed the per-bin arrays behind the chart
+                    for(final String key : List.of("positive", "negative", "edges", "labels")) {
+                        o.remove(key);
+                    }
                 }
             }
             fields.add(o);

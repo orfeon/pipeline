@@ -1098,6 +1098,81 @@ public class ProfileSinkTest {
         Assertions.assertFalse(unmatchedTarget.getAsJsonArray("fields").get(0).getAsJsonObject().has("iv"));
     }
 
+    @Test
+    public void testSizeDegradationLadderCoversComparisons() throws Exception {
+        final Schema schema = Schema.builder()
+                .withField("x", Schema.FieldType.FLOAT64)
+                .withField("label", Schema.FieldType.INT64)
+                .withField("s", Schema.FieldType.STRING)
+                .withField("b", Schema.FieldType.BOOLEAN)
+                .build();
+        final ProfileSpec spec = ProfileSpec.of(schema, null, null, null, "default", true, true)
+                .withTarget("label", "1");
+        final ProfileCombineFn fn = new ProfileCombineFn(spec);
+        final ProfileCombineFn groupFn = new ProfileCombineFn(spec.groupSpec());
+        final com.mercari.solution.util.pipeline.profile.ProfileAxis axis = new com.mercari.solution.util.pipeline.profile.ProfileAxis();
+        axis.kind = com.mercari.solution.util.pipeline.profile.ProfileAxis.Kind.segments;
+        axis.field = "s";
+        axis.fieldIndex = 2;
+        axis.sourceType = "string";
+        ProfileAccumulator acc = fn.createAccumulator();
+        final Map<String, ProfileAccumulator> subProfiles = new HashMap<>();
+        for(int i = 0; i < 300; i++) {
+            final ProfileRow row = ProfileRow.of(spec, targetElement(i));
+            acc = fn.addInput(acc, row);
+            final String key = axis.groupKey(axis.groupValue(row.values[2]));
+            subProfiles.put(key, groupFn.addInput(subProfiles.computeIfAbsent(key, k -> groupFn.createAccumulator()), row));
+        }
+        final ProfileRenderer.Config config = new ProfileRenderer.Config();
+        config.title = "ladder";
+        config.axes = List.of(axis);
+        config.embedLimitBytes = 1;   // nothing fits: every step must fire, in order, and the shortfall is recorded
+
+        final ProfileRenderer.Result result = ProfileRenderer.render(acc, subProfiles, config);
+        final List<String> steps = result.degradations;
+        Assertions.assertEquals(7, steps.size(), String.join("\n", steps));
+        Assertions.assertTrue(steps.get(0).startsWith("sketch binaries not embedded"), steps.get(0));
+        Assertions.assertTrue(steps.get(1).startsWith("sample rows in payload reduced to 100"), steps.get(1));
+        Assertions.assertTrue(steps.get(2).startsWith("histogram resolution reduced to 64 bins"), steps.get(2));
+        Assertions.assertTrue(steps.get(3).startsWith("comparison groups limited to the top 5"), steps.get(3));
+        Assertions.assertTrue(steps.get(4).startsWith("comparison resolution reduced to 16 bins / top 5 labels"), steps.get(4));
+        Assertions.assertTrue(steps.get(5).startsWith("comparison distributions dropped"), steps.get(5));
+        Assertions.assertTrue(steps.get(6).contains("still exceeds the size limit by"), steps.get(6));
+        Assertions.assertNull(result.sketchesJson);
+
+        // the degraded payload keeps totals and statistics but no per-bin arrays
+        final JsonObject payload = JsonParser.parseString(result.payloadJson).getAsJsonObject();
+        for(final JsonElement field : payload.getAsJsonArray("fields")) {
+            Assertions.assertFalse(field.getAsJsonObject().has("overlay"), field.toString());
+        }
+        final JsonArray comparisons = payload.getAsJsonArray("comparisons");
+        Assertions.assertEquals(2, comparisons.size());   // segments axis + target axis
+        for(final JsonElement axisJson : comparisons) {
+            for(final JsonElement group : axisJson.getAsJsonObject().getAsJsonArray("groups")) {
+                final JsonObject fields = group.getAsJsonObject().getAsJsonObject("fields");
+                for(final String path : fields.keySet()) {
+                    Assertions.assertTrue(fields.getAsJsonObject(path).has("count"));
+                    Assertions.assertFalse(fields.getAsJsonObject(path).has("hist"), path);
+                    Assertions.assertFalse(fields.getAsJsonObject(path).has("topK"), path);
+                }
+            }
+        }
+        final JsonObject target = payload.getAsJsonObject("target");
+        for(final JsonElement f : target.getAsJsonArray("fields")) {
+            final JsonObject o = f.getAsJsonObject();
+            Assertions.assertTrue(o.has("iv"), o.toString());
+            Assertions.assertFalse(o.has("positive"), o.toString());
+        }
+        Assertions.assertEquals(7, JsonParser.parseString(result.manifestJson).getAsJsonObject().getAsJsonArray("degradations").size());
+
+        // the same data under the default limit degrades nothing and keeps the full arrays
+        config.embedLimitBytes = 25_000_000L;
+        final ProfileRenderer.Result full = ProfileRenderer.render(acc, subProfiles, config);
+        Assertions.assertTrue(full.degradations.isEmpty(), String.join("\n", full.degradations));
+        final JsonObject fullTarget = JsonParser.parseString(full.payloadJson).getAsJsonObject().getAsJsonObject("target");
+        Assertions.assertEquals(64, fullTarget.getAsJsonArray("fields").get(0).getAsJsonObject().getAsJsonArray("positive").size());
+    }
+
     private static MElement targetElement(final int i) {
         final boolean positive = i % 3 == 0;
         final Map<String, Object> values = new HashMap<>();
