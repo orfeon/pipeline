@@ -117,8 +117,10 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   contract, availability-time algebra, DAG expansion, leak checks, `describe()` = validate --expand) and
   `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &
   population; stages run wave by wave — the independent stages of a wave branch in parallel and are merged
-  back by row id, `engine.parallelWaves: false` = linear chain). Spec in repo-root `work-feature.md`, engine design in `work-feature-engine-beam.md`
-  (uncommitted working docs). Keep examples/tests domain-neutral.
+  back by row id, `engine.parallelWaves: false` = linear chain). DSL spec in
+  [docs/developer/feature-dsl.md](docs/developer/feature-dsl.md), engine design and implementation status in
+  [docs/developer/feature-engine.md](docs/developer/feature-engine.md). Keep examples/tests domain-neutral.
+  Maintain via the **`feature-engine` skill** (`.claude/skills/feature-engine/`).
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
   http action, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
@@ -147,6 +149,12 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   adding/changing external lookup sources, the key-prefix join contract, correlated LATERAL internals,
   UDF/UDAF registration, Calcite-internal value conventions, and the emulator IT patterns. Consult it before
   touching `util/pipeline/Query2.java` or `util/pipeline/lookup/`.
+- **`feature-engine`** (`.claude/skills/feature-engine/`) — the `feature` transform's compile layer and
+  Beam engine: adding row/context/sequence ops, encoding stats and population types (recipes with PR #100
+  as the worked example), the stage scheduler / waves / fan-out merge / static-fit invariants, diagnostic
+  codes, test harnesses (parallel-vs-linear equality, incremental-vs-scan equivalence) and the Dataflow /
+  prism measurement loop. Consult it before touching `util/pipeline/feature/` or
+  `module/transform/FeatureTransform.java`.
 
 ## Adding a New Module
 

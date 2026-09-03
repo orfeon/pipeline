@@ -13,6 +13,13 @@ Guides for working on the Mercari Pipeline codebase itself (extending modules, u
 * [Cross-Cloud Authentication (Design Document)](cloud-auth.md) — accepted design for running pipelines on
   GCP or AWS with transparent access to the other cloud's resources: bidirectional workload identity
   federation, `SecretProvider`, unified file loading, and the phased plan.
+* [Feature Transform DSL (Design Document)](feature-dsl.md) — the declarative feature-engineering DSL
+  of the `feature` transform: sources contract (`availableAt` / `ingestionLag` / `snapshotOf`), the four
+  scopes, the unified encoding with structured keys and shrinkage, the availability algebra behind the
+  leak check, naming / lineage / `validate --expand`, and the implementation phases.
+* [Feature Transform Engine (Design Document)](feature-engine.md) — how that DSL runs on Beam: the pure
+  compile layer, stage scheduling, per-scope evaluators, static fits and artifacts, the spill sorter, the
+  parallel wave DAG, runner findings, and the implementation status / deferred items.
 
 ## Quick reference
 

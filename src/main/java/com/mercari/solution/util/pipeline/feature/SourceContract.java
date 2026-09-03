@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The "facts" side of the DSL (work-feature.md §2): one declared source table with its fields,
+ * The "facts" side of the DSL (docs/developer/feature-dsl.md §2): one declared source table with its fields,
  * event time, availability (world) and ingestion lag (system), mutability and snapshot archive.
  */
 public class SourceContract implements Serializable {

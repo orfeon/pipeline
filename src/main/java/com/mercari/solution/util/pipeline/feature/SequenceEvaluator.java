@@ -10,7 +10,7 @@ import java.util.regex.Pattern;
 
 /**
  * Evaluates sequence-scope columns for one row from that entity's strictly-past history
- * (rows ordered by event time, ascending). Implements the window semantics of work-feature.md §4.3 and
+ * (rows ordered by event time, ascending). Implements the window semantics of docs/developer/feature-dsl.md §4.3 and
  * the near-edge shift of §6.2: a past row contributes only if {@code t' ≤ t − windowShift}.
  *
  * <p>Two evaluation paths share the same semantics:

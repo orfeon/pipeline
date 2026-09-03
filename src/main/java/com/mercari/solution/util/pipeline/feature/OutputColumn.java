@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * One expanded output column with its lineage metadata (work-feature.md §7 命名と系譜).
+ * One expanded output column with its lineage metadata (docs/developer/feature-dsl.md §7 命名と系譜).
  * The canonical name (no prefix, no {@code _} lint) is what other blocks reference; the output name is
  * what appears in the schema.
  */

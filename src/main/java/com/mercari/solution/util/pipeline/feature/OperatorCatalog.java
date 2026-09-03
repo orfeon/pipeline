@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Single source of truth for the operators the DSL accepts (work-feature.md §8 contract point (1)):
+ * Single source of truth for the operators the DSL accepts (docs/developer/feature-dsl.md §8 contract point (1)):
  * name, scope, input signature, output type and whether a fit is involved. The compiler validates
  * against it; the generative DSL builds its search space from it.
  */
