@@ -206,17 +206,20 @@ const AXES = P.comparisons || [];
 const PALETTE = ["#5b8ff9", "#5ad8a6", "#f6bd16", "#e8684a", "#6dc8ec", "#9270ca", "#ff9d4d", "#269a99", "#ff99c3", "#bdd2fd"];
 const cmpState = {axis: -1, values: new Set()};
 const groupColor = gi => PALETTE[gi % PALETTE.length];
-/** Null share over all profiled fields of a group ({path: {count, nulls}}), or null without observations. */
-function groupNullRate(fields) {
+/**
+ * Null / observation totals over the profiled fields of a group ({path: {count, nulls}}), leaving out
+ * the axis field itself: it is 0% null in every group it defines (100% in the "(null)" group) by construction.
+ */
+function nullTotals(fields, excludeField) {
   let nulls = 0, total = 0;
-  for (const gf of Object.values(fields || {})) { nulls += gf.nulls || 0; total += (gf.count || 0) + (gf.nulls || 0); }
-  return total > 0 ? nulls / total : null;
+  for (const [path, gf] of Object.entries(fields || {})) {
+    if (path === excludeField) continue;
+    nulls += gf.nulls || 0;
+    total += (gf.count || 0) + (gf.nulls || 0);
+  }
+  return {nulls, total};
 }
-const OVERALL_NULL_RATE = (() => {
-  let nulls = 0, total = 0;
-  P.fields.forEach(f => { nulls += f.nullCount || 0; total += (f.count || 0) + (f.nullCount || 0); });
-  return total > 0 ? nulls / total : null;
-})();
+const rateOf = t => t.total > 0 ? t.nulls / t.total : null;
 function selectedGroups() {
   if (cmpState.axis < 0 || !cmpState.values.size) return null;
   const axis = AXES[cmpState.axis];
@@ -980,22 +983,29 @@ function openDetail(path) {
     });
 
     const withTarget = !!P.target && axis.groups.some(g => g.targetRate != null);
+    // the reference is the kept groups combined (rows without a group on this axis, e.g. a null time, are not in it)
+    const combined = {nulls: 0, total: 0};
+    axis.groups.forEach(g => { const t = nullTotals(g.fields, axis.field); combined.nulls += t.nulls; combined.total += t.total; });
+    const combinedRate = rateOf(combined);
     const table = el('<table class="data"><thead><tr><th></th><th>group</th><th>rows</th><th>share</th>'
-      + '<th title="null values over all profiled fields of the group\'s rows">null rate</th><th title="group null rate minus the dataset null rate">vs overall</th>'
+      + '<th title="null values over the profiled fields of the group\'s rows, excluding the axis field">null rate</th>'
+      + '<th title="group null rate minus the null rate of all kept groups combined">vs all groups</th>'
       + (withTarget ? "<th>" + esc(P.target.field) + " rate</th><th>vs overall</th>" : "") + "</tr></thead><tbody></tbody></table>");
     const tbody = table.querySelector("tbody");
     axis.groups.forEach((g, gi) => {
-      const nullRate = groupNullRate(g.fields);
+      const nullRate = rateOf(nullTotals(g.fields, axis.field));
       const tr = el('<tr class="clickable"><td><span class="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'
         + groupColor(gi) + '"></span></td><td data-sort="' + esc(String(g.value)) + '">' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>"
         + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td><td>" + (nullRate == null ? "-" : fmtPct(nullRate)) + "</td><td>"
-        + fmtDelta(nullRate == null || OVERALL_NULL_RATE == null ? null : nullRate - OVERALL_NULL_RATE) + "</td>"
+        + fmtDelta(nullRate == null || combinedRate == null ? null : nullRate - combinedRate) + "</td>"
         + (withTarget ? "<td>" + (g.targetRate != null ? fmtPct(g.targetRate) : "-") + "</td><td>"
           + fmtDelta(g.targetRate != null && P.target.rate != null ? g.targetRate - P.target.rate : null) + "</td>" : "") + "</tr>");
       tr.onclick = () => toggleGroup(ai, g.value);
       tbody.append(tr);
     });
     s.append(makeSortable(table));
+    s.append(el('<p class="samples">null rate: nulls over the profiled fields of the group (the axis field itself is left out) · vs all groups: difference to the '
+      + (axis.truncatedGroups > 0 ? "kept " : "") + "groups combined" + (combinedRate == null ? "" : " (" + fmtPct(combinedRate) + ")") + ".</p>"));
   });
 })();
 
