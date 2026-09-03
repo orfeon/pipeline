@@ -1000,6 +1000,72 @@ public class ProfileRenderer {
         return null;
     }
 
+    /** Smallest share of the rows an IV bin may hold: sparser ordered bins are merged into their neighbour. */
+    private static final double IV_MIN_BIN_SHARE = 0.05;
+
+    /**
+     * Information value (PSI between the class distributions) over the class counts. Ordered
+     * bins are merged left to right until each holds at least {@link #IV_MIN_BIN_SHARE} of the
+     * rows, and the shares are Laplace-smoothed (+0.5 per bin): the per-bin sketch counts carry
+     * rank error and vary between runs, which the raw PSI turns into large log terms in
+     * near-empty tail bins. Categories (top-K + other) are frequent by construction and stay as
+     * they are.
+     */
+    public static double informationValue(final long[] positive, final long[] negative, final boolean ordered) {
+        long total = 0;
+        for(int i = 0; i < positive.length; i++) {
+            total += positive[i] + negative[i];
+        }
+        final List<long[]> bins = new ArrayList<>();
+        if(ordered) {
+            final double minRows = Math.max(1d, total * IV_MIN_BIN_SHARE);
+            long[] current = new long[2];
+            for(int i = 0; i < positive.length; i++) {
+                current[0] += positive[i];
+                current[1] += negative[i];
+                if(current[0] + current[1] >= minRows) {
+                    bins.add(current);
+                    current = new long[2];
+                }
+            }
+            if(current[0] + current[1] > 0) {
+                if(bins.isEmpty()) {
+                    bins.add(current);
+                } else {
+                    final long[] last = bins.getLast();
+                    last[0] += current[0];
+                    last[1] += current[1];
+                }
+            }
+        } else {
+            for(int i = 0; i < positive.length; i++) {
+                bins.add(new long[] { positive[i], negative[i] });
+            }
+        }
+        long positiveTotal = 0;
+        long negativeTotal = 0;
+        for(final long[] bin : bins) {
+            positiveTotal += bin[0];
+            negativeTotal += bin[1];
+        }
+        final double k = bins.size();
+        double iv = 0d;
+        for(final long[] bin : bins) {
+            final double a = (bin[0] + 0.5) / (positiveTotal + 0.5 * k);
+            final double b = (bin[1] + 0.5) / (negativeTotal + 0.5 * k);
+            iv += (a - b) * Math.log(a / b);
+        }
+        return iv;
+    }
+
+    private static long[] toLongArray(final JsonArray array) {
+        final long[] values = new long[array.size()];
+        for(int i = 0; i < array.size(); i++) {
+            values[i] = array.get(i).getAsLong();
+        }
+        return values;
+    }
+
     /** Removes the per-bin / per-label arrays from every group field entry, keeping counts, means and rates. */
     private static void stripDistributions(final JsonArray comparisons) {
         for(final JsonElement axis : comparisons) {
@@ -1125,7 +1191,8 @@ public class ProfileRenderer {
                     o.add("edges", toJsonArray(overlayEdges(field, config.overlayBins)));
                     positiveCounts = positive.getAsJsonArray("hist");
                     negativeCounts = negative.getAsJsonArray("hist");
-                } else if(positive.has("topK") && negative.has("topK")) {
+                } else if(positive.has("topK") && negative.has("topK") && !positive.getAsJsonArray("topK").isEmpty()) {
+                    // (a field without frequent values has nothing to relate: no categories, no statistics)
                     final List<String> labels = overlayLabels(field, config.overlayTopK);
                     final JsonArray labelsJson = new JsonArray();
                     for(int l = 0; l < labels.size(); l++) {
@@ -1153,7 +1220,7 @@ public class ProfileRenderer {
                 o.add("negative", negativeCounts);
                 final double[] positiveShares = sharesOf(positiveCounts, stats.positiveCount);
                 final double[] negativeShares = sharesOf(negativeCounts, stats.negativeCount);
-                final double iv = psi(positiveShares, negativeShares);
+                final double iv = informationValue(toLongArray(positiveCounts), toLongArray(negativeCounts), o.has("edges"));
                 o.addProperty("iv", iv);
                 if(o.has("edges")) {
                     o.addProperty("ks", binnedKs(positiveShares, negativeShares));

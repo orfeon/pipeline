@@ -1069,7 +1069,8 @@ function targetRateOption(f, baseRate) {
   s.append(el('<p class="samples">Select the target chips in the compare bar to overlay positive vs negative distributions on every field card. '
     + "IV (information value) ranks how differently the two classes are distributed over a field: "
     + "&lt; 0.02 none · 0.02–0.1 weak · 0.1–0.3 medium · 0.3–0.5 strong · &gt; 0.5 suspiciously strong (check for leakage). "
-    + "Estimates come from the per-class sketches and carry the same error bounds as the field statistics.</p>"));
+    + "For numeric fields IV is computed over bins holding at least 5% of the rows (sparse tail bins merged) with smoothing, so it is stable against sketch error; "
+    + "the chart below still shows the fine bins. Estimates come from the per-class sketches and carry the same error bounds as the field statistics.</p>"));
 
   const ranked = (t.fields || []).slice().sort((a, b) => (b.iv != null ? b.iv : -1) - (a.iv != null ? a.iv : -1));
   s.append(el('<h2 class="sec">Fields ranked by association with ' + esc(t.field) + "</h2>"));

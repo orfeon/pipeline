@@ -1173,6 +1173,26 @@ public class ProfileSinkTest {
         Assertions.assertEquals(64, fullTarget.getAsJsonArray("fields").get(0).getAsJsonObject().getAsJsonArray("positive").size());
     }
 
+    @Test
+    public void testInformationValueIgnoresSparseTailNoise() {
+        // 20 bins, 10,000 rows: identical classes except a few tail rows that sketch error moves around
+        final long[] positive = new long[20];
+        final long[] negative = new long[20];
+        java.util.Arrays.fill(positive, 0, 5, 1000L);
+        java.util.Arrays.fill(negative, 0, 5, 1000L);
+        positive[17] = 3;
+        negative[19] = 3;
+        final long[] shifted = negative.clone();
+        shifted[19] = 0;
+        shifted[16] = 3;
+        Assertions.assertTrue(ProfileRenderer.informationValue(positive, negative, true) < 0.001);
+        Assertions.assertTrue(ProfileRenderer.informationValue(positive, shifted, true) < 0.001);
+        // categories are not merged: a class missing from a frequent category is a real signal
+        Assertions.assertTrue(ProfileRenderer.informationValue(new long[] { 100, 0 }, new long[] { 0, 100 }, false) > 1);
+        // perfectly separating ordered bins keep a leak-level value
+        Assertions.assertTrue(ProfileRenderer.informationValue(new long[] { 500, 500, 0, 0 }, new long[] { 0, 0, 500, 500 }, true) > 1);
+    }
+
     private static MElement targetElement(final int i) {
         final boolean positive = i % 3 == 0;
         final Map<String, Object> values = new HashMap<>();
