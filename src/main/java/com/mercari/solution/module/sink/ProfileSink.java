@@ -2,6 +2,7 @@ package com.mercari.solution.module.sink;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollectionTuple;
@@ -74,6 +75,7 @@ public class ProfileSink extends Sink {
         private FieldsFilter fields;
         private String values;           // show | hide
         private List<String> keys;
+        private JsonElement target;      // field name or {field:, positive:} — the binary outcome to relate every field to
         private JsonElement segments;    // array of field names or [{field:, topK:}]
         private JsonElement time;        // field name or {field:, granularity:}
         private String mode;             // union (default) | compare — how multiple inputs are treated
@@ -140,6 +142,19 @@ public class ProfileSink extends Sink {
             }
             if(time != null && !time.isJsonPrimitive() && !time.isJsonObject()) {
                 errorMessages.add("parameters.time must be a field name or a {field, granularity} object");
+            }
+            if(target != null) {
+                if(target.isJsonObject()) {
+                    final JsonObject o = target.getAsJsonObject();
+                    if(!o.has("field") || !o.get("field").isJsonPrimitive()) {
+                        errorMessages.add("parameters.target object form requires `field`");
+                    }
+                    if(o.has("positive") && !o.get("positive").isJsonPrimitive()) {
+                        errorMessages.add("parameters.target.positive must be a scalar value");
+                    }
+                } else if(!target.isJsonPrimitive() || !target.getAsJsonPrimitive().isString()) {
+                    errorMessages.add("parameters.target must be a field name or a {field, positive} object");
+                }
             }
             if(mode != null && !Set.of("union", "compare").contains(mode)) {
                 errorMessages.add("parameters.mode must be `union` or `compare`");
@@ -212,6 +227,31 @@ public class ProfileSink extends Sink {
                 sb.append("/").append(part);
             }
             return sb.toString();
+        }
+
+        /** Declares the target on the spec from the shorthand (field name) or {field, positive} form. */
+        private void applyTarget(final ProfileSpec spec) {
+            if(target == null) {
+                return;
+            }
+            final String field;
+            Object positive = null;
+            if(target.isJsonPrimitive()) {
+                field = target.getAsString();
+            } else {
+                final JsonObject o = target.getAsJsonObject();
+                field = o.get("field").getAsString();
+                if(o.has("positive")) {
+                    // keep the literal text (`1` stays "1", not 1.0): the spec coerces it by the field's type
+                    final JsonPrimitive p = o.getAsJsonPrimitive("positive");
+                    positive = p.isBoolean() ? (Object) p.getAsBoolean() : p.getAsString();
+                }
+            }
+            try {
+                spec.withTarget(field, positive);
+            } catch (final IllegalArgumentException e) {
+                throw new IllegalModuleException("parameters.target: " + e.getMessage());
+            }
         }
 
         /** Expands segments/time shorthand into comparison axes, validated against the resolved spec. */
@@ -336,6 +376,7 @@ public class ProfileSink extends Sink {
         if(spec.getFields().isEmpty()) {
             throw new IllegalModuleException("profile sink has no profilable fields for input schema: " + inputSchema);
         }
+        parameters.applyTarget(spec);
         final List<ProfileAxis> axes = parameters.parseAxes(spec);
 
         // compare mode: the union inputs become a comparison axis with a fixed baseline
@@ -473,6 +514,10 @@ public class ProfileSink extends Sink {
         expanded.addProperty("fanout", parameters.fanout);
         if(parameters.keys != null && !parameters.keys.isEmpty()) {
             expanded.addProperty("keys", String.join(",", parameters.keys));
+        }
+        if(spec.getTarget() != null) {
+            expanded.addProperty("target", spec.getTarget().path);
+            expanded.addProperty("target.positive", spec.getTarget().positiveLabel());
         }
         if(parameters.segments != null) {
             expanded.addProperty("segments", parameters.segments.toString());
@@ -729,6 +774,12 @@ public class ProfileSink extends Sink {
             write(reportOutput, html, "text/html");
             LOG.info("profile sink wrote report to: {} ({} bytes, rows: {}, error rows: {})",
                     reportOutput, html.length, accumulator.getRowCount(), accumulator.getErrorCount());
+            if(accumulator.getSpec().getTarget() != null) {
+                final String warning = ProfileRenderer.targetWarning(accumulator, accumulator.getSpec().getTarget());
+                if(warning != null) {
+                    LOG.warn("profile sink `{}` target: {}", config.moduleName, warning);
+                }
+            }
             if(sketchesOutput != null) {
                 final String sketchesJson = ProfileRenderer.buildSketches(accumulator, config).toString();
                 write(sketchesOutput, sketchesJson.getBytes(StandardCharsets.UTF_8), "application/json");

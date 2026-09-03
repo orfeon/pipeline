@@ -41,6 +41,11 @@ public class ProfileAccumulator implements Serializable {
     private long rowCount;
     private long errorCount;
 
+    // binary target class totals (rows whose target is null/error are excluded from the analysis)
+    private long targetPositiveRows;
+    private long targetNegativeRows;
+    private long targetNullRows;
+
     private FieldAccumulator[] fields;
 
     // correlation co-moments over numeric field pairs (flattened upper triangle)
@@ -63,8 +68,10 @@ public class ProfileAccumulator implements Serializable {
         acc.spec = spec;
         final List<ProfileSpec.FieldSpec> fieldSpecs = spec.getFields();
         acc.fields = new FieldAccumulator[fieldSpecs.size()];
+        final ProfileSpec.TargetSpec target = spec.getTarget();
         for(int i = 0; i < fieldSpecs.size(); i++) {
-            acc.fields[i] = FieldAccumulator.of(fieldSpecs.get(i), spec.getSketchParameters());
+            final boolean withTarget = target != null && target.fieldStats && target.fieldIndex != i;
+            acc.fields[i] = FieldAccumulator.of(fieldSpecs.get(i), spec.getSketchParameters(), withTarget);
         }
         acc.numericCount = spec.getNumericFieldIndices().size();
         final int pairs = acc.numericCount * (acc.numericCount - 1) / 2;
@@ -94,6 +101,24 @@ public class ProfileAccumulator implements Serializable {
         return errorCount;
     }
 
+    public long getTargetPositiveRows() {
+        return targetPositiveRows;
+    }
+
+    public long getTargetNegativeRows() {
+        return targetNegativeRows;
+    }
+
+    public long getTargetNullRows() {
+        return targetNullRows;
+    }
+
+    /** Positive share among the rows with a non-null target, or null when there are none. */
+    public Double getTargetRate() {
+        final long total = targetPositiveRows + targetNegativeRows;
+        return total == 0 ? null : (double) targetPositiveRows / total;
+    }
+
     public FieldAccumulator getField(final int index) {
         return fields[index];
     }
@@ -114,11 +139,26 @@ public class ProfileAccumulator implements Serializable {
     public void add(final Object[] values, final String sampleJson) {
         rowCount += 1;
         final List<ProfileSpec.FieldSpec> fieldSpecs = spec.getFields();
+
+        // the row's target class, decided before the field loop so every field can split on it
+        Boolean targetClass = null;
+        final ProfileSpec.TargetSpec target = spec.getTarget();
+        if(target != null) {
+            targetClass = target.fieldIndex < values.length ? target.classOf(values[target.fieldIndex]) : null;
+            if(targetClass == null) {
+                targetNullRows += 1;
+            } else if(targetClass) {
+                targetPositiveRows += 1;
+            } else {
+                targetNegativeRows += 1;
+            }
+        }
+
         final Double[] numericValues = pairN != null ? new Double[numericCount] : null;
         int numericIndex = 0;
         for(int i = 0; i < fields.length; i++) {
             final ProfileSpec.FieldSpec fieldSpec = fieldSpecs.get(i);
-            final Double numericValue = fields[i].add(fieldSpec, values[i]);
+            final Double numericValue = fields[i].add(fieldSpec, values[i], targetClass);
             if(ProfileSpec.ProfileType.NUMERIC.equals(fieldSpec.profileType)) {
                 if(numericValues != null) {
                     numericValues[numericIndex] = numericValue;
@@ -162,6 +202,9 @@ public class ProfileAccumulator implements Serializable {
     public ProfileAccumulator merge(final ProfileAccumulator other) {
         rowCount += other.rowCount;
         errorCount += other.errorCount;
+        targetPositiveRows += other.targetPositiveRows;
+        targetNegativeRows += other.targetNegativeRows;
+        targetNullRows += other.targetNullRows;
         for(int i = 0; i < fields.length; i++) {
             fields[i].merge(other.fields[i], spec.getSketchParameters());
         }
@@ -345,13 +388,26 @@ public class ProfileAccumulator implements Serializable {
         private transient UpdateSketch thetaLive;
         private transient CompactSketch thetaMerged;
 
+        private TargetStats target;     // per-class split of this field (null without a declared target)
+
         private FieldAccumulator() {
         }
 
         static FieldAccumulator of(final ProfileSpec.FieldSpec fieldSpec, final ProfileSpec.SketchParameters params) {
+            return of(fieldSpec, params, false);
+        }
+
+        static FieldAccumulator of(
+                final ProfileSpec.FieldSpec fieldSpec,
+                final ProfileSpec.SketchParameters params,
+                final boolean withTarget) {
+
             final FieldAccumulator acc = new FieldAccumulator();
             acc.cpcLgK = params.cpcLgK;
             acc.thetaLgK = params.thetaLgK;
+            if(withTarget) {
+                acc.target = TargetStats.of(fieldSpec, params);
+            }
             switch (fieldSpec.profileType) {
                 case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> acc.kll = KllDoublesSketch.newHeapInstance(params.kllK);
                 case STRING -> {
@@ -372,8 +428,20 @@ public class ProfileAccumulator implements Serializable {
 
         /** Adds one raw value; returns the numeric interpretation for correlation (NUMERIC only). */
         Double add(final ProfileSpec.FieldSpec fieldSpec, final Object value) {
+            return add(fieldSpec, value, null);
+        }
+
+        /**
+         * Adds one raw value, also to the class split when {@code targetClass} (the row's target
+         * class) is known; returns the numeric interpretation for correlation (NUMERIC only).
+         */
+        Double add(final ProfileSpec.FieldSpec fieldSpec, final Object value, final Boolean targetClass) {
+            final TargetStats split = targetClass == null ? null : target;
             if(value == null) {
                 nullCount += 1;
+                if(split != null) {
+                    split.addNull(targetClass);
+                }
                 return null;
             }
             if(value == ProfileRow.Marker.ERROR) {
@@ -404,6 +472,9 @@ public class ProfileAccumulator implements Serializable {
                         kll.update(v);
                         cpcLive.update(v);
                         updateTheta(canonicalNumeric(v));
+                        if(split != null) {
+                            split.addNumeric(v, targetClass);
+                        }
                         return v;
                     }
                     case STRING -> {
@@ -420,6 +491,9 @@ public class ProfileAccumulator implements Serializable {
                         cpcLive.update(s);
                         frequentItems.update(s);
                         updateTheta(s);
+                        if(split != null) {
+                            split.addString(s, targetClass);
+                        }
                         return null;
                     }
                     case BOOL -> {
@@ -434,6 +508,9 @@ public class ProfileAccumulator implements Serializable {
                         } else {
                             falseCount += 1;
                         }
+                        if(split != null) {
+                            split.addBool(b, targetClass);
+                        }
                         return null;
                     }
                     case TIMESTAMP -> {
@@ -446,6 +523,9 @@ public class ProfileAccumulator implements Serializable {
                         updateMoments(ms);
                         kll.update(ms);
                         updateTheta(canonicalNumeric(ms));
+                        if(split != null) {
+                            split.addNumeric(ms, targetClass);
+                        }
                         return null;
                     }
                     case ARRAY_LENGTH -> {
@@ -457,6 +537,9 @@ public class ProfileAccumulator implements Serializable {
                         count += 1;
                         updateMoments(length);
                         kll.update(length);
+                        if(split != null) {
+                            split.addNumeric(length, targetClass);
+                        }
                         return null;
                     }
                 }
@@ -559,10 +642,21 @@ public class ProfileAccumulator implements Serializable {
                         ? UpdateSketch.builder().setNominalEntries(1 << params.thetaLgK).build()
                         : null;
             }
+
+            if(target != null && other.target != null) {
+                target.merge(other.target);
+            } else if(target == null) {
+                target = other.target;
+            }
         }
 
         public KllDoublesSketch getKll() {
             return kll;
+        }
+
+        /** The per-class split of this field, or null when no target is declared (or this is the target). */
+        public TargetStats getTarget() {
+            return target;
         }
 
         public ItemsSketch<String> getFrequentItems() {
@@ -635,6 +729,206 @@ public class ProfileAccumulator implements Serializable {
             if(thetaBytes != null) {
                 thetaMerged = CompactSketch.heapify(Memory.wrap(thetaBytes));
                 thetaLive = UpdateSketch.builder().setNominalEntries(1 << thetaLgK).build();
+            }
+        }
+    }
+
+    /** Streaming mean/variance of one class (Welford, mergeable). */
+    public static class Moments implements Serializable {
+
+        public long n;
+        public double mean;
+        public double m2;
+
+        void add(final double v) {
+            n += 1;
+            final double delta = v - mean;
+            mean += delta / n;
+            m2 += delta * (v - mean);
+        }
+
+        void merge(final Moments other) {
+            if(other.n == 0) {
+                return;
+            }
+            if(n == 0) {
+                n = other.n;
+                mean = other.mean;
+                m2 = other.m2;
+                return;
+            }
+            final double total = n + other.n;
+            final double delta = other.mean - mean;
+            m2 += other.m2 + delta * delta * n * other.n / total;
+            mean += delta * other.n / total;
+            n = (long) total;
+        }
+    }
+
+    /**
+     * One field's observations split by the target class: the same sketch kind as the field's
+     * main one (KLL for numeric-like, Frequent Items for strings) per class, plus class counts.
+     * Positive-vs-negative distributions over shared edges/labels give the per-bin target rate and
+     * the information value (PSI between the two class distributions).
+     */
+    public static class TargetStats implements Serializable {
+
+        private static final ArrayOfStringsSerDe SERDE = new ArrayOfStringsSerDe();
+
+        public long positiveCount;      // non-null observations on positive rows
+        public long negativeCount;
+        public long nullPositive;       // null observations on positive rows
+        public long nullNegative;
+        public long truePositive;       // BOOL: true observations on positive rows
+        public long trueNegative;
+
+        public Moments positive = new Moments();   // numeric-like values per class
+        public Moments negative = new Moments();
+
+        private transient KllDoublesSketch kllPositive;
+        private transient KllDoublesSketch kllNegative;
+        private transient ItemsSketch<String> fiPositive;
+        private transient ItemsSketch<String> fiNegative;
+
+        private TargetStats() {
+        }
+
+        static TargetStats of(final ProfileSpec.FieldSpec fieldSpec, final ProfileSpec.SketchParameters params) {
+            final TargetStats stats = new TargetStats();
+            switch (fieldSpec.profileType) {
+                case NUMERIC, TIMESTAMP, ARRAY_LENGTH -> {
+                    stats.kllPositive = KllDoublesSketch.newHeapInstance(params.kllK);
+                    stats.kllNegative = KllDoublesSketch.newHeapInstance(params.kllK);
+                }
+                case STRING -> {
+                    stats.fiPositive = new ItemsSketch<>(params.fiMaxMapSize);
+                    stats.fiNegative = new ItemsSketch<>(params.fiMaxMapSize);
+                }
+                case BOOL -> { }
+            }
+            return stats;
+        }
+
+        void addNull(final boolean positiveClass) {
+            if(positiveClass) {
+                nullPositive += 1;
+            } else {
+                nullNegative += 1;
+            }
+        }
+
+        void addNumeric(final double v, final boolean positiveClass) {
+            if(positiveClass) {
+                positiveCount += 1;
+                positive.add(v);
+                kllPositive.update(v);
+            } else {
+                negativeCount += 1;
+                negative.add(v);
+                kllNegative.update(v);
+            }
+        }
+
+        void addString(final String s, final boolean positiveClass) {
+            if(positiveClass) {
+                positiveCount += 1;
+                fiPositive.update(s);
+            } else {
+                negativeCount += 1;
+                fiNegative.update(s);
+            }
+        }
+
+        void addBool(final boolean b, final boolean positiveClass) {
+            if(positiveClass) {
+                positiveCount += 1;
+                if(b) {
+                    truePositive += 1;
+                }
+            } else {
+                negativeCount += 1;
+                if(b) {
+                    trueNegative += 1;
+                }
+            }
+        }
+
+        void merge(final TargetStats other) {
+            positiveCount += other.positiveCount;
+            negativeCount += other.negativeCount;
+            nullPositive += other.nullPositive;
+            nullNegative += other.nullNegative;
+            truePositive += other.truePositive;
+            trueNegative += other.trueNegative;
+            positive.merge(other.positive);
+            negative.merge(other.negative);
+            kllPositive = mergeKll(kllPositive, other.kllPositive);
+            kllNegative = mergeKll(kllNegative, other.kllNegative);
+            fiPositive = mergeFi(fiPositive, other.fiPositive);
+            fiNegative = mergeFi(fiNegative, other.fiNegative);
+        }
+
+        private static KllDoublesSketch mergeKll(final KllDoublesSketch a, final KllDoublesSketch b) {
+            if(a == null) {
+                return b;
+            }
+            if(b != null) {
+                a.merge(b);
+            }
+            return a;
+        }
+
+        private static ItemsSketch<String> mergeFi(final ItemsSketch<String> a, final ItemsSketch<String> b) {
+            if(a == null) {
+                return b;
+            }
+            if(b != null) {
+                a.merge(b);
+            }
+            return a;
+        }
+
+        public KllDoublesSketch getKllPositive() {
+            return kllPositive;
+        }
+
+        public KllDoublesSketch getKllNegative() {
+            return kllNegative;
+        }
+
+        public ItemsSketch<String> getFiPositive() {
+            return fiPositive;
+        }
+
+        public ItemsSketch<String> getFiNegative() {
+            return fiNegative;
+        }
+
+        private void writeObject(final ObjectOutputStream out) throws IOException {
+            out.defaultWriteObject();
+            writeBytes(out, kllPositive == null ? null : kllPositive.toByteArray());
+            writeBytes(out, kllNegative == null ? null : kllNegative.toByteArray());
+            writeBytes(out, fiPositive == null ? null : fiPositive.toByteArray(SERDE));
+            writeBytes(out, fiNegative == null ? null : fiNegative.toByteArray(SERDE));
+        }
+
+        private void readObject(final ObjectInputStream in) throws IOException, ClassNotFoundException {
+            in.defaultReadObject();
+            final byte[] kllPositiveBytes = readBytes(in);
+            if(kllPositiveBytes != null) {
+                kllPositive = KllDoublesSketch.heapify(Memory.wrap(kllPositiveBytes));
+            }
+            final byte[] kllNegativeBytes = readBytes(in);
+            if(kllNegativeBytes != null) {
+                kllNegative = KllDoublesSketch.heapify(Memory.wrap(kllNegativeBytes));
+            }
+            final byte[] fiPositiveBytes = readBytes(in);
+            if(fiPositiveBytes != null) {
+                fiPositive = ItemsSketch.getInstance(Memory.wrap(fiPositiveBytes), SERDE);
+            }
+            final byte[] fiNegativeBytes = readBytes(in);
+            if(fiNegativeBytes != null) {
+                fiNegative = ItemsSketch.getInstance(Memory.wrap(fiNegativeBytes), SERDE);
             }
         }
     }

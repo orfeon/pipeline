@@ -6,6 +6,9 @@
 # distinct counts, top-K values, correlations, row samples). Each declared parameter adds
 # a report section:
 #   keys     → key diagnostics (distinct with bounds, keyness, containment between keys)
+#   target   → every field related to a binary outcome (fields ranked by information value,
+#              positive rate per bin/category, positive-vs-negative overlays). `tipped` is derived
+#              in the query; payment_type will show up as a leak (cash tips are not recorded).
 #   segments → per-group sub-profiles + a compare bar that overlays group distributions
 #   time     → time-evolution view (per-bucket sub-profiles)
 #   compare  → declared numeric pairs with overlaid distributions, Q-Q plot and PSI/KS
@@ -18,6 +21,7 @@ sources:
           vendor_id, pickup_datetime, dropoff_datetime, passenger_count, trip_distance,
           rate_code, store_and_fwd_flag, payment_type,
           fare_amount, extra, mta_tax, tip_amount, tolls_amount, total_amount,
+          tip_amount > 0 AS tipped,
           pickup_location_id, dropoff_location_id
         FROM `bigquery-public-data.new_york_taxi_trips.tlc_yellow_trips_2022`
         TABLESAMPLE SYSTEM (1 PERCENT)
@@ -30,6 +34,7 @@ sinks:
     parameters:
       output: gs://mybucket/reports/taxi/trips-2022.html
       keys: [pickup_location_id, dropoff_location_id]
+      target: tipped
       segments:
         - { field: payment_type, topK: 10 }
       time:

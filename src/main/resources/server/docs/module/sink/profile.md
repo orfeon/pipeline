@@ -66,6 +66,7 @@ same sensitivity as the source data**, or set `values: hide`.
 | fields | optional | Object | Field filter: `{include: [...]}` or `{exclude: [...]}` with dot paths for nested fields. |
 | values | optional | Enum | `show` (default) or `hide`. With `hide`, raw values are removed from the report (top-K labels, sample rows, value-bearing sketch binaries); ranks, frequencies, distributions and statistics remain. |
 | keys | optional | Array<String\> | Fields to treat as identifiers. Adds Theta set sketches per key: distinct counts with bounds, keyness (distinct/rows) and a pairwise containment matrix, shown in a dedicated Keys tab. |
+| target | optional | String or Object | The binary outcome to relate every other field to. Shorthand `sold_flag` for a bool field (positive = `true`), or longhand `{field: is_sold, positive: 1}` / `{field: status, positive: sold}` for numeric and string fields (`positive` is required there; any other non-null value is negative, null target rows are excluded). Adds a Target tab — fields ranked by information value (IV; for numeric fields over bins holding at least 5% of the rows, smoothed, so sketch error does not inflate it), KS / total-variation separation, point-biserial correlation, positive rate among null rows, and a positive-rate-per-bin / per-category chart for each field — plus positive/negative chips in the compare bar that overlay the two classes on every field card, and the positive rate per group in the Segments / Time / Compare tables. When no row (or every row) matches `positive`, the report shows a warning banner and the sink logs it, since the per-field statistics need both classes. Continuous (regression) targets are not supported. |
 | segments | optional | Array<String or Object\> | Fields to compare the dataset by. Shorthand `[category]` or longhand `[{field: category, topK: 30}]` (`topK`: max groups kept, default 20, largest first). Adds per-segment sub-profiles, a Segments tab and chips in the global compare bar — selecting chips overlays per-group distributions on every field card. Only the kept groups are profiled: group sizes are counted first and the sub-profiles are computed for the top `topK` alone, so a high-cardinality field (user ids, free text) costs one small count shuffle rather than one sketch set per distinct value; the report shows how many groups were left out. |
 | time | optional | String or Object | Timestamp field for time evolution. Shorthand `created_at` or longhand `{field: created_at, granularity: day}` (`granularity`: `hour`/`day`/`week`/`month`/`year`, default `month`; UTC buckets, most recent 60 kept — like `segments`, only those 60 are profiled). Adds per-bucket sub-profiles, a Time tab and compare-bar chips like `segments`. |
 | mode | optional | Enum | `union` (default) merges multiple inputs into one profile. `compare` (requires 2+ inputs) additionally treats each input as a comparison group: per-input sub-profiles, compare-bar chips, and PSI/KS drift metrics against the baseline shown per field and in the Compare tab. |
@@ -101,7 +102,7 @@ Data values are embedded in the report as JSON with `<` escaped, so a value cont
 `</script>` cannot break out of the embedded blocks; non-finite numbers (NaN/Infinity) are
 reported in the field counters and stored as null in sample rows.
 
-The report's "Next steps" tab shows analyses the module could have run but did not (key/segment/time
+The report's "Next steps" tab shows analyses the module could have run but did not (key/segment/time/target
 candidates inferred from the data) as copy-pasteable parameter snippets — automatic inference is
 deliberately limited to cheap and harmless statistics, while semantic declarations are left to you.
 
@@ -181,7 +182,28 @@ sinks:
         granularity: month
 ```
 
-### Example 5: Hiding raw values
+### Example 5: Relating every field to a binary outcome
+
+Declaring the target adds per-class sketches for every other field: the Target tab ranks fields
+by how differently the positive and negative rows are distributed over them (information value,
+`> 0.5` is flagged as a possible leak), shows the positive rate per bin or category, and the
+compare bar overlays the two classes on every field card. With `segments`, each group's positive
+rate is shown as well.
+
+```yaml
+sinks:
+  - name: itemsProfile
+    module: profile
+    inputs:
+      - items
+    parameters:
+      output: gs://mybucket/reports/items.html
+      target: sold_flag                 # bool field; for INT64 flags: {field: is_sold, positive: 1}
+      segments:
+        - category
+```
+
+### Example 6: Hiding raw values
 
 For reports that will be shared beyond people with source-data access.
 
@@ -196,7 +218,7 @@ sinks:
       values: hide
 ```
 
-### Example 6: Comparing two datasets and the previous year's report
+### Example 7: Comparing two datasets and the previous year's report
 
 The two inputs become comparison groups with drift metrics against the baseline, and the previous
 run's artifact is compared field-by-field without re-scanning last year's data.
@@ -229,7 +251,7 @@ sinks:
       compareWith: gs://mybucket/reports/items-2025.html
 ```
 
-### Example 7: Keeping sketch binaries for later comparison or BigQuery
+### Example 8: Keeping sketch binaries for later comparison or BigQuery
 
 The sketches JSON contains base64 compact sketches per field, mergeable with sketches from other
 runs. The CPC (distinct), Theta (key sets) and frequent-items sketches are readable by BigQuery

@@ -110,11 +110,60 @@ public class ProfileSpec implements Serializable {
         }
     }
 
+    /**
+     * The declared binary target: a profiled field whose value equals {@link #positive} marks a
+     * positive row, any other non-null value a negative row; null/error target rows are excluded
+     * from the target analysis. {@link #fieldStats} enables the per-field class sketches (the
+     * global profile); group sub-profiles only count the class totals.
+     */
+    public static class TargetSpec implements Serializable {
+        public String path;
+        public int fieldIndex;
+        public ProfileType profileType;
+        public Object positive;          // Boolean / Double / String, matching the profile type
+        public boolean fieldStats = true;
+
+        /** Display form of the positive value ({@code 1} rather than {@code 1.0} for numbers). */
+        public String positiveLabel() {
+            if(positive instanceof Double d && d == Math.rint(d) && Math.abs(d) < 1e15) {
+                return String.valueOf(d.longValue());
+            }
+            return String.valueOf(positive);
+        }
+
+        /**
+         * Class of a coerced {@link ProfileRow} value: true/false, or null for null/error/unmatched
+         * types and non-finite numbers (which the field statistics exclude as well).
+         */
+        public Boolean classOf(final Object value) {
+            if(value == null || value == ProfileRow.Marker.ERROR) {
+                return null;
+            }
+            return switch (profileType) {
+                case BOOL -> value instanceof Boolean b ? b.equals(positive) : null;
+                case NUMERIC -> value instanceof Double d && Double.isFinite(d) ? d.equals(positive) : null;
+                case STRING -> value instanceof String s ? s.equals(positive) : null;
+                default -> null;
+            };
+        }
+
+        TargetSpec copy() {
+            final TargetSpec copy = new TargetSpec();
+            copy.path = path;
+            copy.fieldIndex = fieldIndex;
+            copy.profileType = profileType;
+            copy.positive = positive;
+            copy.fieldStats = fieldStats;
+            return copy;
+        }
+    }
+
     private final List<FieldSpec> fields;
     private final List<SkippedField> skipped;
     private final SketchParameters sketchParameters;
     private final boolean sampleEnabled;
     private final boolean correlationEnabled;
+    private TargetSpec target;
 
     private ProfileSpec(
             final List<FieldSpec> fields,
@@ -148,6 +197,77 @@ public class ProfileSpec implements Serializable {
 
     public boolean isCorrelationEnabled() {
         return correlationEnabled;
+    }
+
+    /** The declared binary target, or null. */
+    public TargetSpec getTarget() {
+        return target;
+    }
+
+    /**
+     * Declares the binary target field. {@code positive} is the value that marks a positive row:
+     * optional for bool fields (default {@code true}), required for numeric ({@code 1}) and string
+     * ({@code "sold"}) fields; timestamp and array fields cannot be targets.
+     *
+     * @throws IllegalArgumentException with a user-facing message when the declaration is invalid
+     */
+    public ProfileSpec withTarget(final String path, final Object positive) {
+        int index = -1;
+        for(int i = 0; i < fields.size(); i++) {
+            if(fields.get(i).path.equals(path)) {
+                index = i;
+            }
+        }
+        if(index < 0) {
+            throw new IllegalArgumentException("target field not found in the profiled fields: " + path);
+        }
+        final FieldSpec fieldSpec = fields.get(index);
+        final TargetSpec targetSpec = new TargetSpec();
+        targetSpec.path = path;
+        targetSpec.fieldIndex = index;
+        targetSpec.profileType = fieldSpec.profileType;
+        switch (fieldSpec.profileType) {
+            case BOOL -> {
+                // true/false, or a number the same way row values coerce (non-zero = true)
+                if(positive == null) {
+                    targetSpec.positive = Boolean.TRUE;
+                } else if(positive instanceof Boolean b) {
+                    targetSpec.positive = b;
+                } else if(positive instanceof String s && Set.of("true", "false").contains(s.toLowerCase())) {
+                    targetSpec.positive = Boolean.parseBoolean(s);
+                } else if(toDouble(positive) != null) {
+                    targetSpec.positive = toDouble(positive) != 0d;
+                } else {
+                    throw new IllegalArgumentException("target.positive for the bool field " + path + " must be true or false: " + positive);
+                }
+            }
+            case NUMERIC -> {
+                if(positive == null) {
+                    throw new IllegalArgumentException(
+                            "target.positive is required for the numeric field " + path
+                                    + " (e.g. {field: " + path + ", positive: 1}); continuous targets are not supported");
+                }
+                final Double d = positive instanceof Boolean ? null : toDouble(positive);
+                if(d == null) {
+                    throw new IllegalArgumentException("target.positive for the numeric field " + path + " must be a number: " + positive);
+                }
+                targetSpec.positive = d;
+            }
+            case STRING -> {
+                // the literal text as written (`positive: 1` matches the string "1")
+                if(positive == null) {
+                    throw new IllegalArgumentException(
+                            "target.positive is required for the string field " + path + " (e.g. {field: " + path + ", positive: sold})");
+                }
+                targetSpec.positive = positive instanceof Double d && d == Math.rint(d) && Math.abs(d) < 1e15
+                        ? String.valueOf(d.longValue())
+                        : String.valueOf(positive);
+            }
+            default -> throw new IllegalArgumentException(
+                    "target field must be a bool, numeric or string field: " + path + " is " + fieldSpec.profileType.name().toLowerCase());
+        }
+        this.target = targetSpec;
+        return this;
     }
 
     /** Indices (into {@link #getFields()}) of NUMERIC fields, in order. Used by the correlation accumulator. */
@@ -194,8 +314,9 @@ public class ProfileSpec implements Serializable {
 
     /**
      * The spec for per-group sub-profiles: the same fields in the same order (so a
-     * {@link ProfileRow} extracted with this spec feeds both), without key sketches, row sample
-     * and correlations.
+     * {@link ProfileRow} extracted with this spec feeds both), without key sketches, row sample,
+     * correlations and per-field target sketches (the target class totals are still counted, for
+     * the per-group target rate).
      */
     public ProfileSpec groupSpec() {
         final List<FieldSpec> groupFields = new ArrayList<>();
@@ -204,7 +325,12 @@ public class ProfileSpec implements Serializable {
             copy.isKey = false;
             groupFields.add(copy);
         }
-        return new ProfileSpec(groupFields, skipped, sketchParameters, false, false);
+        final ProfileSpec group = new ProfileSpec(groupFields, skipped, sketchParameters, false, false);
+        if(target != null) {
+            group.target = target.copy();
+            group.target.fieldStats = false;
+        }
+        return group;
     }
 
     private static void collect(
