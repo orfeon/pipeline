@@ -155,6 +155,11 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   codes, test harnesses (parallel-vs-linear equality, incremental-vs-scan equivalence) and the Dataflow /
   prism measurement loop. Consult it before touching `util/pipeline/feature/` or
   `module/transform/FeatureTransform.java`.
+- **`feature-spec`** (`.claude/skills/feature-spec/`) — the *user-side* counterpart: authoring, validating and
+  running a `module: feature` config (sources contract, scope choice, encoding design, reading the
+  validate --expand / dry-run report, every diagnostic code with its fix, sizing / runner choice / launch and
+  monitoring over MCP). Self-contained and meant to be copied into consumer projects; keep it free of
+  references to this repository's source code.
 
 ## Adding a New Module
 
