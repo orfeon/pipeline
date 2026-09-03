@@ -1,6 +1,6 @@
 ---
 name: feature-spec
-description: Authoring, validating and running Mercari Pipeline `module: feature` configs (the declarative feature-engineering transform with availability-time leak checking) from a consumer project — writing the sources contract (availableAt / settlementLag / ingestionLag / observedAtField / kind / mutability / snapshotOf / validFor), choosing scopes (row / context / sequence / population), designing encodings (keySets × windows × targets × stats, hierarchy / cross lattices, shrinkage, fit.mode expanding | static | fold, artifacts), reading the validate --expand / dry-run plan report (stages, waves, shuffles, audit SQL, column status staticSafe / windowShift / violation), fixing diagnostic codes (availability.violation, reference.unresolved, sources.fields.observedAtField, encoding.stat.static, sequence.window.unbounded, encoding.globalKey, lineage.undeclared, input.reserved ...), sizing and launching the job (hot keys, spill, numWorkers + autoscalingAlgorithm NONE, Dataflow vs prism vs direct) over MCP (validate-feature, run-pipeline dryRun, launch-pipeline, get-job-progress, get-job-logs) or the CLI (--dryRun). Use whenever a feature config is written, reviewed, fails validation, leaks, is slow, or runs out of disk / memory.
+description: Authoring, validating and running Mercari Pipeline `module: feature` configs from a consumer project — the sources contract, scope choice (row / context / sequence / population), encoding design (keySets, lattices, shrinkage, fit.mode expanding | static | fold), reading the validate --expand / dry-run plan report, fixing diagnostics (availability.*, sources.*, lineage.*, reference.*, encoding.*, sequence.*, fit.*, engine and fan-out merge errors), and sizing / launching / monitoring over MCP (validate-feature, run-pipeline dryRun, launch-pipeline, get-job-progress, get-job-logs) or the CLI (--dryRun). Use whenever a feature config is written, reviewed, fails validation, leaks, is slow, or runs out of disk / memory.
 ---
 
 # Feature transform: authoring and operating a spec
@@ -132,6 +132,10 @@ parameters:
   an input field's name (`column.shadowsInput`); names contain no `.` and do not start with `_`.
 - `output.passThrough: keys` makes the output table safe for `SELECT *` (input fields are not
   availability-checked, so a full pass-through can carry post-event columns into a model).
+- **Template arguments** (`sources`, `features` files and the config itself): only the exact form
+  `${args.<name>}` is substituted — a bare `${name}` stays literal. The config's own `args:` block
+  supplies the defaults; the `args` of `run-pipeline` / `launch-pipeline` (or `--args` on the CLI)
+  override them per run. Use one for the output table so runs never overwrite each other.
 
 ### Step 3 — choose the scope of each feature
 
@@ -183,6 +187,12 @@ sequence ops never see the current row.
   not time-expanding; the validator says so as info). `fixed` + `priorWeight` is the fully expanding
   alternative.
 - `fit.mode: fold` with keys derived from past outcomes requires `fit.groupBy: <entity>`.
+- **A static fit whose output keys another block deepens the DAG.** A `discretize` (or any static
+  block) must finish before the keyed stage that reads its column, so "fit wave → encoding keyed on the
+  bins → the context stage that reads the encoding" adds waves: on a reference plan two discretize
+  blocks feeding encodings took the job from 3 to 5 waves and from 9 to 14 minutes. Check `waves=` in
+  the plan before and after; if the extra depth is not worth it, key the encoding on a hand-written
+  row `bin` (no fit, no extra wave) or accept the cost consciously.
 
 ### Step 5 — validate, read the report, fix, repeat
 
@@ -251,8 +261,15 @@ not alter values).
   the group keys. `output.childName` must not collide with an input field.
 - `engine.rowId` must be **unique** per input row; duplicates fail fast (`Fan-out merge: engine.rowId is
   not unique`) — this catches duplicated input rows, which is usually the real problem.
-- Very large generated configs must be JSON (the YAML parser caps documents at about 3 MB).
+- **`quantile` / `distribution` stats have no serving path through artifacts**: they are
+  expanding-only (a static / fold artifact keeps only n / Σy / Σy² per key), so a model that uses them
+  must be served from the backfill path — the same history-based run as sequence features — not from a
+  `fit.mode: static` config. Decide that before adopting them.
+- Very large generated configs must be JSON: the YAML loader keeps SnakeYAML's default code-point
+  limit of about 3 MB per document.
 - Artifact / spill paths: `gs://...` or relative local paths (a Windows drive letter is read as a URI
   scheme).
 - The `direct` image is **not** a runner for coarse-key encodings (a global level can take an hour per
-  stage where Dataflow takes seconds); use Dataflow, or the `prism` image for subsets.
+  stage where Dataflow takes seconds); use Dataflow, or the `prism` image for subsets. A prism run
+  that dies of memory leaves no OOM message anywhere — only `UNAVAILABLE: Network closed` /
+  `connection refused` from the JVM (see the runner table in sizing.md).

@@ -102,7 +102,9 @@ sources:
 
 Column names: `<name>_<field>_<op>` (`<name>_<op>` for `groupSize`, `<name>_<field>_<op>_<value>` per
 value, `as:` replaces the field segment). Under `output.groupBy`, `countByValue` / `ratioByValue` /
-`entropy` / `groupSize` without `excludeSelf` land on the parent record.
+`entropy` / `groupSize` without `excludeSelf` land on the parent record; the same ops **with
+`excludeSelf: true`** (and every per-row op such as `rank` / `zscore`) vary per row and stay in the child
+array — the way to get "the composition of the others" as a per-row feature.
 
 ## `scope: sequence`
 

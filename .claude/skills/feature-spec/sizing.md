@@ -83,8 +83,9 @@ options:
   wave 1 with large `columns=` or coarse keys), typically 6–12 for a plan with ~20 stages.
 - Machine type: high-memory. Heap per worker is shared by the concurrent keyed replays (one per core)
   and their spill budgets.
-- Disk: 100 GB was ample for ≈ 1 M rows × 180 columns with the spill sorter; the older estimate of
-  500 GB is obsolete.
+- Disk: a full run of ≈ 1 M rows × 180 columns completed on the default 30 GB with the spill
+  sorter (chunks are deleted per key); 100 GB is the comfortable setting for parallel waves, where
+  several branches spill at once. The older 500 GB estimate predates the sorter and is obsolete.
 - The same values can be passed as launch parameters of `launch-pipeline` (`numWorkers`,
   `maxNumWorkers`, `workerMachineType`, `diskSizeGb`, `workerZone`, `serviceAccount`,
   `templateLocation`, `jobName`, `project`, `region`); `autoscalingAlgorithm` goes in the config's
@@ -95,7 +96,7 @@ options:
 | runner / image | use for | do not use for |
 |---|---|---|
 | **Dataflow** (`dataflow` image, Flex Template) | full backfills, any measurement | — |
-| **prism** (`prism` image, Cloud Run Jobs or local) | subsets, reproduction of a Dataflow result (outputs identical), local iteration | full-size inputs: it is an in-memory runner without spill, and container memory grows roughly linearly with the input (≈ 30 GB per 3 years of a ~1 M-row-per-decade dataset) |
+| **prism** (`prism` image, Cloud Run Jobs or local) | subsets, reproduction of a Dataflow result (outputs identical), local iteration | full-size inputs: it is an in-memory runner without spill, and container memory grows roughly linearly with the input — measured 11 GB for 44 k rows and 28 GB for 130 k rows of a ~180-column plan (≈ 0.2 GB per thousand rows), so size the container from the input row count. **OOM signature**: the prism sub-process is killed silently — no prism log, no OOM message from Cloud Run — and the JVM only reports `UNAVAILABLE: Network closed for unknown reason` / `connection refused` on every gRPC channel at once. That pattern means "out of memory": shrink the input or move to Dataflow |
 | **direct** (`direct` image) | tiny smoke tests, row / context-only specs | anything with a coarse or global key: the DirectRunner copies a key's buffered rows for every bundle that touches it, so a global level takes hours where Dataflow takes seconds |
 
 Completion markers in the logs: Dataflow job state `JOB_STATE_DONE`; prism / direct print `Pipeline
@@ -107,8 +108,17 @@ harmless gRPC warning.
 1. **`run-pipeline`** `{config, dryRun: true, args}` → check `status`, `spec` (every step's schema) and
    `featurePlans[].ok` / `describe` / `engineErrors`.
 2. **`launch-pipeline`** `{config, runner: dataflow | prism | direct | spark, environment?, parameters:
-   {project, region, jobName, numWorkers, maxNumWorkers, workerMachineType, diskSizeGb, ...}, args}` →
-   `job` (id / name). Use a distinct output table per run (a template arg) so runs can be compared.
+   {project, region, jobName, numWorkers, maxNumWorkers, workerMachineType, diskSizeGb, workerZone,
+   serviceAccount, templateLocation, ...}, args}` → `job` (id / name). All of the Dataflow worker
+   parameters listed here, `diskSizeGb` included, are forwarded to the Flex Template launch; the same
+   values may instead sit in the config's `options.dataflow` block (`autoscalingAlgorithm` only there).
+   `project` / `region` (and the template location / Cloud Run job name) are resolved in this order:
+   launch `parameters` → the config's `options` (runner block, then `options.gcp`) → the server's
+   `MERCARI_PIPELINE_LAUNCH_<RUNNER>_<KEY>` / `MERCARI_PIPELINE_LAUNCH_<KEY>` environment → the
+   server's own project / metadata; a value found nowhere rejects the launch before anything is
+   submitted. **`args`**: only `${args.<name>}` placeholders are substituted (a bare `${name}` stays
+   literal); the config's `args:` block gives the defaults and the launch `args` override them. Use a
+   distinct output table per run (a template arg) so runs can be compared.
 3. **`get-job`** `{job, runner?, project?, region?}` for the state; **`get-job-progress`** `{job}` for
    workers / autoscaling events and the per-stage timeline (Dataflow fuses each stage's GroupByKey read
    with the next DoFn, so a fused stage reads `Stage{n};Stage{n+1}_<kind>`; the branches of a wave
@@ -136,3 +146,4 @@ The Pipeline Builder agent exposes the same steps as `validateFeature`, `run` (d
 | OOM on the workers | large context groups, factorization example set, or too many unbounded columns | high-memory machines, `maxAge`, split static fits into their own step |
 | many stages, each short | the linear chain's barrier per keyed stage (`engine.parallelWaves: false`, or streaming) | keep `parallelWaves: true` in batch; fuse blocks on the same key into the same stage by sharing `entity` / keySet keys |
 | a stage of wave 2+ that only carries row columns | a row column consumed only by the output pulled into a late stage | move it into the block that consumes it |
+| `waves=` grew after adding a `discretize` / static block whose column keys an encoding | the fit stage must finish before the keyed stage that reads it, and that stage before the context stage reading the encoding: each such chain adds waves (observed 3 → 5 waves, 9 → 14 min with two discretize blocks) | key the encoding on a hand-written row `bin` instead, or accept the depth; check `waves=` in the dry run before launching |
