@@ -1079,6 +1079,23 @@ public class ProfileSinkTest {
         Assertions.assertEquals(301L, b.getAsJsonArray("positive").get(0).getAsLong());
         Assertions.assertEquals(0L, b.getAsJsonArray("negative").get(0).getAsLong());
         Assertions.assertTrue(result.html.contains("\"kind\":\"target\""));
+        Assertions.assertFalse(target.has("warning"));
+
+        // a positive value no row matches is reported instead of rendering an empty analysis
+        final ProfileSpec unmatched = ProfileSpec.of(schema, null, null, null, "default", false, false)
+                .withTarget("label", "5");
+        final ProfileCombineFn unmatchedFn = new ProfileCombineFn(unmatched);
+        ProfileAccumulator acc = unmatchedFn.createAccumulator();
+        for(int i = 0; i < 30; i++) {
+            acc = unmatchedFn.addInput(acc, ProfileRow.of(unmatched, targetElement(i)));
+        }
+        final JsonObject unmatchedTarget = JsonParser.parseString(ProfileRenderer.render(acc, config).payloadJson)
+                .getAsJsonObject().getAsJsonObject("target");
+        Assertions.assertEquals(0L, unmatchedTarget.get("positiveRows").getAsLong());
+        Assertions.assertTrue(unmatchedTarget.get("warning").getAsString().contains("no row matched the positive value `5`"),
+                "warning: " + unmatchedTarget.get("warning"));
+        Assertions.assertTrue(unmatchedTarget.getAsJsonArray("fields").get(0).getAsJsonObject().has("count"));
+        Assertions.assertFalse(unmatchedTarget.getAsJsonArray("fields").get(0).getAsJsonObject().has("iv"));
     }
 
     private static MElement targetElement(final int i) {
@@ -1108,6 +1125,16 @@ public class ProfileSinkTest {
         Assertions.assertNull(spec.get().withTarget("status", "sold").getTarget().classOf(null));
         Assertions.assertNull(spec.get().withTarget("status", "sold").getTarget().classOf(ProfileRow.Marker.ERROR));
         Assertions.assertEquals(1.0, spec.get().withTarget("label", 1L).getTarget().positive);
+        // the sink passes number literals as text: each field type reads them its own way
+        Assertions.assertEquals(1.0, spec.get().withTarget("label", "1").getTarget().positive);
+        Assertions.assertEquals("1", spec.get().withTarget("status", "1").getTarget().positive);
+        Assertions.assertEquals("1", spec.get().withTarget("status", 1.0).getTarget().positive);
+        Assertions.assertEquals(Boolean.TRUE, spec.get().withTarget("flag", "1").getTarget().positive);
+        Assertions.assertEquals(Boolean.FALSE, spec.get().withTarget("flag", "0").getTarget().positive);
+        // non-finite numeric target values are neither class (the field statistics exclude them too)
+        Assertions.assertNull(spec.get().withTarget("label", "1").getTarget().classOf(Double.NaN));
+        Assertions.assertNull(spec.get().withTarget("label", "1").getTarget().classOf(Double.POSITIVE_INFINITY));
+        Assertions.assertEquals(Boolean.TRUE, spec.get().withTarget("label", "1").getTarget().classOf(1.0));
 
         assertMessage(() -> spec.get().withTarget("label", null), "target.positive is required for the numeric field label");
         assertMessage(() -> spec.get().withTarget("label", "sold"), "must be a number");

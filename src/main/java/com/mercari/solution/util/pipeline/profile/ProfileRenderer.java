@@ -893,6 +893,26 @@ public class ProfileRenderer {
         return axisJson;
     }
 
+    /**
+     * A one-class target is almost always a wrong {@code positive} value (case, quoting, type):
+     * the per-field statistics need both classes, so say so instead of rendering an empty analysis.
+     */
+    public static String targetWarning(final ProfileAccumulator accumulator, final ProfileSpec.TargetSpec target) {
+        if(accumulator.getRowCount() == 0 || accumulator.getTargetPositiveRows() + accumulator.getTargetNegativeRows() == 0) {
+            return accumulator.getRowCount() == 0 ? null
+                    : "every row has a null or unreadable " + target.path + " value: no target analysis was possible";
+        }
+        if(accumulator.getTargetPositiveRows() == 0) {
+            return "no row matched the positive value `" + target.positiveLabel() + "` of " + target.path
+                    + " — check parameters.target.positive (case, quoting); every row was classed negative and the per-field statistics are skipped";
+        }
+        if(accumulator.getTargetNegativeRows() == 0) {
+            return "every row matched the positive value `" + target.positiveLabel() + "` of " + target.path
+                    + " — there is no negative class to compare against and the per-field statistics are skipped";
+        }
+        return null;
+    }
+
     private static JsonArray scaledCounts(final double[] shares, final long count) {
         final JsonArray counts = new JsonArray();
         for(final double share : shares) {
@@ -925,6 +945,10 @@ public class ProfileRenderer {
         final Double rate = accumulator.getTargetRate();
         if(rate != null) {
             result.addProperty("rate", rate);
+        }
+        final String warning = targetWarning(accumulator, target);
+        if(warning != null) {
+            result.addProperty("warning", warning);
         }
 
         final java.util.Map<String, JsonObject> fieldMap = new java.util.HashMap<>();
@@ -975,7 +999,8 @@ public class ProfileRenderer {
                             final double m2 = p.m2 + q.m2 + p.n * (p.mean - mean) * (p.mean - mean) + q.n * (q.mean - mean) * (q.mean - mean);
                             final double sd = Math.sqrt(m2 / n);
                             if(sd > 0 && Double.isFinite(sd)) {
-                                final double r = (p.mean - q.mean) / sd * Math.sqrt(p.n * q.n / (n * n));
+                                // class shares in double arithmetic (p.n * q.n would overflow long past ~3e9 rows each)
+                                final double r = (p.mean - q.mean) / sd * Math.sqrt((p.n / n) * (q.n / n));
                                 if(Double.isFinite(r)) {
                                     o.addProperty("pointBiserial", r);
                                 }

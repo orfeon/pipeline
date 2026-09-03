@@ -131,14 +131,17 @@ public class ProfileSpec implements Serializable {
             return String.valueOf(positive);
         }
 
-        /** Class of a coerced {@link ProfileRow} value: true/false, or null for null/error/unmatched types. */
+        /**
+         * Class of a coerced {@link ProfileRow} value: true/false, or null for null/error/unmatched
+         * types and non-finite numbers (which the field statistics exclude as well).
+         */
         public Boolean classOf(final Object value) {
             if(value == null || value == ProfileRow.Marker.ERROR) {
                 return null;
             }
             return switch (profileType) {
                 case BOOL -> value instanceof Boolean b ? b.equals(positive) : null;
-                case NUMERIC -> value instanceof Double d ? d.equals(positive) : null;
+                case NUMERIC -> value instanceof Double d && Double.isFinite(d) ? d.equals(positive) : null;
                 case STRING -> value instanceof String s ? s.equals(positive) : null;
                 default -> null;
             };
@@ -225,12 +228,15 @@ public class ProfileSpec implements Serializable {
         targetSpec.profileType = fieldSpec.profileType;
         switch (fieldSpec.profileType) {
             case BOOL -> {
+                // true/false, or a number the same way row values coerce (non-zero = true)
                 if(positive == null) {
                     targetSpec.positive = Boolean.TRUE;
                 } else if(positive instanceof Boolean b) {
                     targetSpec.positive = b;
                 } else if(positive instanceof String s && Set.of("true", "false").contains(s.toLowerCase())) {
                     targetSpec.positive = Boolean.parseBoolean(s);
+                } else if(toDouble(positive) != null) {
+                    targetSpec.positive = toDouble(positive) != 0d;
                 } else {
                     throw new IllegalArgumentException("target.positive for the bool field " + path + " must be true or false: " + positive);
                 }
@@ -248,11 +254,14 @@ public class ProfileSpec implements Serializable {
                 targetSpec.positive = d;
             }
             case STRING -> {
+                // the literal text as written (`positive: 1` matches the string "1")
                 if(positive == null) {
                     throw new IllegalArgumentException(
                             "target.positive is required for the string field " + path + " (e.g. {field: " + path + ", positive: sold})");
                 }
-                targetSpec.positive = String.valueOf(positive);
+                targetSpec.positive = positive instanceof Double d && d == Math.rint(d) && Math.abs(d) < 1e15
+                        ? String.valueOf(d.longValue())
+                        : String.valueOf(positive);
             }
             default -> throw new IllegalArgumentException(
                     "target field must be a bool, numeric or string field: " + path + " is " + fieldSpec.profileType.name().toLowerCase());

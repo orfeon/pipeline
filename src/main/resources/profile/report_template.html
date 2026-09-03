@@ -160,8 +160,13 @@ const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(
 const el = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; };
 
 // ---- sortable tables (click a header; numbers sort numerically, "-" last; data-sub rows follow their parent row) ----
-function sortValue(text) {
-  const t = text.trim();
+const NUMBER_RE = /^-?\d+(\.\d+)?(e[-+]?\d+)?$/i;
+/** Sort key of a cell: an explicit data-sort (number or text), else the first number in the text, else the text. */
+function sortValue(cell) {
+  if (!cell) return null;
+  const raw = cell.dataset.sort;
+  if (raw != null) return raw === "" ? null : NUMBER_RE.test(raw) ? parseFloat(raw) : raw.toLowerCase();
+  const t = cell.textContent.trim();
   if (!t || t === "-") return null;
   const m = t.replace(/,/g, "").match(/-?\d+(\.\d+)?(e[-+]?\d+)?/i);
   return m ? parseFloat(m[0]) : t.toLowerCase();
@@ -181,7 +186,7 @@ function makeSortable(table) {
       for (const tr of [...tbody.children]) {
         if (tr.dataset.sub && groups.length) groups[groups.length - 1].push(tr); else groups.push([tr]);
       }
-      const valueOf = g => { const cell = g[0].children[ci]; return sortValue(cell ? cell.textContent : ""); };
+      const valueOf = g => sortValue(g[0].children[ci]);
       groups.sort((a, b) => {
         const va = valueOf(a), vb = valueOf(b);
         if (va == null && vb == null) return 0;
@@ -257,6 +262,15 @@ function lazyChart(container, optionFn) {
 window.addEventListener("resize", () => {
   document.querySelectorAll(".chart").forEach(c => c._chart && c._chart.resize());
 });
+/** Releases the charts under root before its content is replaced (ECharts keeps instances in a global registry). */
+function disposeCharts(root) {
+  root.querySelectorAll(".chart").forEach(c => {
+    if (c._chart) { c._chart.dispose(); c._chart = null; }
+    chartQueue.delete(c);
+    if (observer) observer.unobserve(c);
+  });
+  root.innerHTML = "";
+}
 
 const AXIS = {axisLabel: {fontSize: 10}, axisLine: {show: false}, axisTick: {show: false}};
 function histOption(h, log) {
@@ -438,6 +452,9 @@ function timeHistOption(h) {
   document.getElementById("valuesBanner").append(el(HIDE
     ? '<div class="banner">raw values are hidden (values: hide)</div>'
     : '<div class="banner">this report contains raw data values — treat it with the same sensitivity as the source data</div>'));
+  if (P.target && P.target.warning) {
+    document.getElementById("valuesBanner").append(el('<div class="banner">target: ' + esc(P.target.warning) + "</div>"));
+  }
 })();
 
 const TABS = [["overview", "Overview"], ["fields", "Fields"], ["relations", "Relations"]];
@@ -633,7 +650,7 @@ function sortedFields() {
 }
 function renderFieldList() {
   const holder = document.getElementById("fieldList");
-  holder.innerHTML = "";
+  disposeCharts(holder);
   const fields = sortedFields();
   if (P.fields.length > 200) {
     const table = el('<table class="data"><thead><tr><th>field</th><th>type</th><th>null</th><th>distinct</th><th>mean</th><th>notable</th></tr></thead><tbody></tbody></table>');
@@ -684,7 +701,7 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeDetail(
 function closeDetail() {
   if (!overlay.classList.contains("open")) return;
   overlay.classList.remove("open");
-  document.getElementById("detail").innerHTML = "";
+  disposeCharts(document.getElementById("detail"));
   setHash({f: ""});
 }
 function sampleValuesFor(path) {
@@ -701,7 +718,7 @@ function openDetail(path) {
   const f = P.fields.find(x => x.path === path);
   if (!f) return;
   const d = document.getElementById("detail");
-  d.innerHTML = "";
+  disposeCharts(d);
   d.append(el('<button class="close" title="close">×</button>'));
   d.querySelector(".close").onclick = closeDetail;
   d.append(el("<h2>" + esc(f.path) + ' <span class="badge">' + esc(f.sourceType) + "</span></h2>"));
@@ -898,7 +915,7 @@ function openDetail(path) {
 
   function showPair(i, j) {
     const panel = document.getElementById("pairPanel");
-    panel.innerHTML = "";
+    disposeCharts(panel);
     const a = c.fields[i], b = c.fields[j];
     const v = c.matrix[i][j];
     panel.append(el("<h2 class='sec'>" + esc(a) + " × " + esc(b) + "</h2>"));
@@ -970,7 +987,7 @@ function openDetail(path) {
     axis.groups.forEach((g, gi) => {
       const nullRate = groupNullRate(g.fields);
       const tr = el('<tr class="clickable"><td><span class="dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'
-        + groupColor(gi) + '"></span></td><td>' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>"
+        + groupColor(gi) + '"></span></td><td data-sort="' + esc(String(g.value)) + '">' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>"
         + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td><td>" + (nullRate == null ? "-" : fmtPct(nullRate)) + "</td><td>"
         + fmtDelta(nullRate == null || OVERALL_NULL_RATE == null ? null : nullRate - OVERALL_NULL_RATE) + "</td>"
         + (withTarget ? "<td>" + (g.targetRate != null ? fmtPct(g.targetRate) : "-") + "</td><td>"
@@ -1038,6 +1055,7 @@ function targetRateOption(f, baseRate) {
   grid.append(stat(fmtInt(t.negativeRows), "negative rows"));
   if (t.nullRows > 0) grid.append(stat(fmtInt(t.nullRows), "rows with null target (excluded)"));
   s.append(grid);
+  if (t.warning) s.append(el('<div class="banner">' + esc(t.warning) + "</div>"));
   s.append(el('<p class="samples">Select the target chips in the compare bar to overlay positive vs negative distributions on every field card. '
     + "IV (information value) ranks how differently the two classes are distributed over a field: "
     + "&lt; 0.02 none · 0.02–0.1 weak · 0.1–0.3 medium · 0.3–0.5 strong · &gt; 0.5 suspiciously strong (check for leakage). "
@@ -1061,7 +1079,7 @@ function targetRateOption(f, baseRate) {
   s.append(makeSortable(table));
   s.append(panel);
   function showTargetField(f) {
-    panel.innerHTML = "";
+    disposeCharts(panel);
     panel.append(el('<h2 class="sec">' + esc(f.path) + " : positive rate of " + esc(t.field) + " per " + (f.labels ? "category" : "bin") + "</h2>"));
     const parts = [];
     if (f.meanPositive != null) parts.push("mean when positive " + fmtNum(f.meanPositive) + " / when negative " + fmtNum(f.meanNegative));
@@ -1090,7 +1108,7 @@ function targetRateOption(f, baseRate) {
       const gb = gt.querySelector("tbody");
       axis.groups.forEach(g => {
         const delta = g.targetRate != null && t.rate != null ? g.targetRate - t.rate : null;
-        const tr = el('<tr class="clickable"><td>' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>" + fmtInt(g.targetPositive)
+        const tr = el('<tr class="clickable"><td data-sort="' + esc(String(g.value)) + '">' + esc(String(g.value)) + "</td><td>" + fmtInt(g.rows) + "</td><td>" + fmtInt(g.targetPositive)
           + "</td><td>" + (g.targetRate != null ? fmtPct(g.targetRate) : "-") + "</td><td>" + fmtDelta(delta) + "</td></tr>");
         tr.onclick = () => toggleGroup(ai, g.value);
         gb.append(tr);
@@ -1138,7 +1156,7 @@ function targetRateOption(f, baseRate) {
     if (first >= 0) showKeyPair(first, P.keys.containment[first].findIndex((v, j) => first !== j && v != null));
 
     function showKeyPair(i, j) {
-      panel.innerHTML = "";
+      disposeCharts(panel);
       const a = P.keys.fields[i], b = P.keys.fields[j];
       const inter = a.distinct != null && P.keys.containment[i][j] != null ? P.keys.containment[i][j] * a.distinct : null;
       panel.append(el('<h2 class="sec">' + esc(a.path) + " × " + esc(b.path) + "</h2>"));
@@ -1167,16 +1185,20 @@ function targetRateOption(f, baseRate) {
   if (inputsAxisIndex >= 0) {
     const axis = AXES[inputsAxisIndex];
     s.append(el('<h2 class="sec">Inputs comparison' + (axis.baseline ? " (baseline: " + esc(axis.baseline) + ")" : "") + "</h2>"));
-    const inputsTable = el('<table class="data"><thead><tr><th></th><th>input</th><th>rows</th><th>share</th></tr></thead><tbody></tbody></table>');
+    const withTarget = !!P.target && axis.groups.some(g => g.targetRate != null);
+    const inputsTable = el('<table class="data"><thead><tr><th></th><th>input</th><th>rows</th><th>share</th>'
+      + (withTarget ? "<th>" + esc(P.target.field) + " rate</th><th>vs overall</th>" : "") + "</tr></thead><tbody></tbody></table>");
     const tbody = inputsTable.querySelector("tbody");
     axis.groups.forEach((g, gi) => {
       const tr = el('<tr class="clickable"><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'
-        + groupColor(gi) + '"></span></td><td>' + esc(String(g.value)) + (g.value === axis.baseline ? ' <span class="badge">base</span>' : "")
-        + "</td><td>" + fmtInt(g.rows) + "</td><td>" + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td></tr>");
+        + groupColor(gi) + '"></span></td><td data-sort="' + esc(String(g.value)) + '">' + esc(String(g.value)) + (g.value === axis.baseline ? ' <span class="badge">base</span>' : "")
+        + "</td><td>" + fmtInt(g.rows) + "</td><td>" + fmtPct(P.rows > 0 ? g.rows / P.rows : 0) + "</td>"
+        + (withTarget ? "<td>" + (g.targetRate != null ? fmtPct(g.targetRate) : "-") + "</td><td>"
+          + fmtDelta(g.targetRate != null && P.target.rate != null ? g.targetRate - P.target.rate : null) + "</td>" : "") + "</tr>");
       tr.onclick = () => toggleGroup(inputsAxisIndex, g.value);
       tbody.append(tr);
     });
-    s.append(inputsTable);
+    s.append(makeSortable(inputsTable));
 
     // per-field drift vs baseline, worst first
     const drifts = [];
@@ -1220,7 +1242,7 @@ function targetRateOption(f, baseRate) {
     const tbody = table.querySelector("tbody");
     const panel = el('<div class="pair-panel" id="cwPanel"></div>');
     const showCdf = f => {
-      panel.innerHTML = "";
+      disposeCharts(panel);
       panel.append(el('<h2 class="sec">' + esc(f.path) + " : CDF old vs new</h2>"));
       const chart = el('<div class="chart tall"></div>');
       panel.append(chart);
@@ -1244,9 +1266,9 @@ function targetRateOption(f, baseRate) {
       const tr = el("<tr" + (f.cdf ? ' class="clickable"' : "") + "><td>" + esc(f.path) + statusBadge + "</td><td>" + esc(f.type || "") + "</td><td>"
         + (f.psi != null ? (f.psi > 0.2 ? '<span class="badge warn">' + f.psi.toFixed(4) + "</span>" : f.psi.toFixed(4)) : "-")
         + "</td><td>" + (f.ks != null ? f.ks.toFixed(4) : "-")
-        + "</td><td>" + (f.p50Old != null ? fmtNum(f.p50Old) + " → " + fmtNum(f.p50New) : "-")
-        + "</td><td>" + (f.nullRateOld != null ? fmtPct(f.nullRateOld) + " → " + fmtPct(f.nullRateNew) : "-")
-        + "</td><td>" + (f.distinctOld != null || f.distinctNew != null
+        + '</td><td data-sort="' + (f.p50New != null ? f.p50New : "") + '">' + (f.p50Old != null ? fmtNum(f.p50Old) + " → " + fmtNum(f.p50New) : "-")
+        + '</td><td data-sort="' + (f.nullRateNew != null ? f.nullRateNew : "") + '">' + (f.nullRateOld != null ? fmtPct(f.nullRateOld) + " → " + fmtPct(f.nullRateNew) : "-")
+        + '</td><td data-sort="' + (f.distinctNew != null ? f.distinctNew : "") + '">' + (f.distinctOld != null || f.distinctNew != null
           ? fmtInt(f.distinctOld) + " → " + fmtInt(f.distinctNew) : "-") + "</td></tr>");
       if (f.cdf) tr.onclick = () => showCdf(f);
       tbody.append(tr);

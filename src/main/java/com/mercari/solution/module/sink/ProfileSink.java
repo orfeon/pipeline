@@ -242,10 +242,9 @@ public class ProfileSink extends Sink {
                 final JsonObject o = target.getAsJsonObject();
                 field = o.get("field").getAsString();
                 if(o.has("positive")) {
+                    // keep the literal text (`1` stays "1", not 1.0): the spec coerces it by the field's type
                     final JsonPrimitive p = o.getAsJsonPrimitive("positive");
-                    positive = p.isBoolean() ? (Object) p.getAsBoolean()
-                            : p.isNumber() ? (Object) p.getAsDouble()
-                            : p.getAsString();
+                    positive = p.isBoolean() ? (Object) p.getAsBoolean() : p.getAsString();
                 }
             }
             try {
@@ -775,6 +774,12 @@ public class ProfileSink extends Sink {
             write(reportOutput, html, "text/html");
             LOG.info("profile sink wrote report to: {} ({} bytes, rows: {}, error rows: {})",
                     reportOutput, html.length, accumulator.getRowCount(), accumulator.getErrorCount());
+            if(accumulator.getSpec().getTarget() != null) {
+                final String warning = ProfileRenderer.targetWarning(accumulator, accumulator.getSpec().getTarget());
+                if(warning != null) {
+                    LOG.warn("profile sink `{}` target: {}", config.moduleName, warning);
+                }
+            }
             if(sketchesOutput != null) {
                 final String sketchesJson = ProfileRenderer.buildSketches(accumulator, config).toString();
                 write(sketchesOutput, sketchesJson.getBytes(StandardCharsets.UTF_8), "application/json");
