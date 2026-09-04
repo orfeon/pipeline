@@ -39,7 +39,61 @@ public final class FeaturePlanService {
             copy.add("features", features);
         }
         resolveInclude(copy, templateArgs);
+        resolveTemperatureFrom(copy, templateArgs);
         return new Documents(sources, copy);
+    }
+
+    /**
+     * {@code ops[].temperatureFrom: <uri>} of a softmax op (a calibration document) is read here and replaced by
+     * {@code {source, hash, value}}: a bare number, or a JSON object with {@code temperature} / {@code T}. The
+     * resolved value is outside the plan hash (no fit depends on it) and inside the output hash / manifest.
+     */
+    static void resolveTemperatureFrom(final JsonObject parameters, final Map<String, String> templateArgs) {
+        if (!parameters.has("features") || !parameters.get("features").isJsonArray()) return;
+        for (final JsonElement f : parameters.getAsJsonArray("features")) {
+            if (!f.isJsonObject() || !f.getAsJsonObject().has("ops") || !f.getAsJsonObject().get("ops").isJsonArray()) continue;
+            for (final JsonElement e : f.getAsJsonObject().getAsJsonArray("ops")) {
+                if (!e.isJsonObject()) continue;
+                final JsonObject op = e.getAsJsonObject();
+                if (!op.has("temperatureFrom") || !op.get("temperatureFrom").isJsonPrimitive()) continue;
+                final String reference = op.get("temperatureFrom").getAsString();
+                final String raw;
+                try {
+                    raw = Config.readContent(reference);
+                } catch (final IOException ex) {
+                    throw new IllegalArgumentException("failed to read temperatureFrom: " + reference, ex);
+                }
+                final String text = (templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs)).trim();
+                final Double value = parseTemperature(text, reference);
+                final JsonObject resolved = new JsonObject();
+                resolved.addProperty("source", reference);
+                resolved.addProperty("hash", FeaturePlanCompiler.sha256(text));
+                resolved.addProperty("value", value);
+                op.add("temperatureFrom", resolved);
+            }
+        }
+    }
+
+    static Double parseTemperature(final String text, final String reference) {
+        try {
+            return Double.parseDouble(text);
+        } catch (final NumberFormatException ignored) {
+            // a document
+        }
+        final JsonElement parsed;
+        try {
+            parsed = com.google.gson.JsonParser.parseString(text);
+        } catch (final RuntimeException e) {
+            throw new IllegalArgumentException("temperatureFrom " + reference + " is neither a number nor JSON: " + e.getMessage(), e);
+        }
+        if (parsed.isJsonPrimitive() && parsed.getAsJsonPrimitive().isNumber()) return parsed.getAsDouble();
+        if (parsed.isJsonObject()) {
+            for (final String key : List.of("temperature", "T", "t")) {
+                final JsonElement v = parsed.getAsJsonObject().get(key);
+                if (v != null && v.isJsonPrimitive() && v.getAsJsonPrimitive().isNumber()) return v.getAsDouble();
+            }
+        }
+        throw new IllegalArgumentException("temperatureFrom " + reference + " must be a number or an object with a numeric 'temperature' (or 'T')");
     }
 
     /**

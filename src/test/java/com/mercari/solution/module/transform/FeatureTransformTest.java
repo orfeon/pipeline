@@ -918,4 +918,70 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    // ------------------------------------------------------------------------------------------
+    // softmax / baseline emit / placebo ops
+    // ------------------------------------------------------------------------------------------
+
+    private static final String PROB_BLOCKS = """
+        - name: score
+          scope: row
+          expr: "0"
+        - name: prob
+          scope: context
+          context: session
+          ops:
+            - {type: softmax, field: score, offset: market, temperature: 1, as: pWin}
+        - name: placeboNoise
+          scope: row
+          type: noise
+          distribution: normal
+          seed: 20260717
+        - name: placebo
+          scope: context
+          context: session
+          ops:
+            - {type: shuffle, fields: [start_price], seed: 20260717}
+""";
+
+    private static final String PROB_CONFIG = FEATURE_CONFIG
+            .replace("- {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
+                    "- {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}")
+            .replace("      output:\n", PROB_BLOCKS + "      output:\n");
+
+    @Test
+    public void testSoftmaxEmitAndPlacebos() throws java.io.IOException {
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + PROB_CONFIG));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertNotNull(schema.getField("f_marketProb"));
+        Assertions.assertEquals("market", schema.getField("f_prob_pWin_softmax").getOptions().get("feature.derivedFrom"));
+        Assertions.assertEquals(Schema.Type.float64, schema.getField("f_placebo_start_price_shuffle").getFieldType().getType());
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // f = 0, T = 1: the softmax probability equals the emitted market baseline (share of 1 / bid within the session)
+            for (final MElement row : byKey.values()) {
+                Assertions.assertEquals(row.getAsDouble("f_marketProb"), row.getAsDouble("f_prob_pWin_softmax"), 1e-12);
+                Assertions.assertTrue(Math.abs(row.getAsDouble("f_placeboNoise")) < 6);
+            }
+            final double marketA1 = (1 / 120.0) / (1 / 120.0 + 1 / 55.0);
+            Assertions.assertEquals(marketA1, byKey.get("A/s1").getAsDouble("f_prob_pWin_softmax"), 1e-9);
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_prob_pWin_softmax"), 1e-9);
+            // shuffle keeps the multiset of start_price per session; noise differs per row
+            Assertions.assertEquals(Set.of(100.0, 50.0), Set.of(byKey.get("A/s1").getAsDouble("f_placebo_start_price_shuffle"), byKey.get("A/s2").getAsDouble("f_placebo_start_price_shuffle")));
+            Assertions.assertEquals(200.0, byKey.get("B/s1").getAsDouble("f_placebo_start_price_shuffle"), 0d);
+            // the draw is a function of (time.field, orderTieBreak): A/s1 and A/s2 share both here and get the same draw, B differs
+            Assertions.assertEquals(byKey.get("A/s1").getAsDouble("f_placeboNoise"), byKey.get("A/s2").getAsDouble("f_placeboNoise"), 0d);
+            Assertions.assertNotEquals(byKey.get("A/s1").getAsDouble("f_placeboNoise"), byKey.get("B/s1").getAsDouble("f_placeboNoise"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testPlacebosAreDeterministicAcrossEngineModes() throws java.io.IOException {
+        // noise / shuffle are pure functions of the row identity / group: the parallel waves and the linear chain agree
+        assertParallelMatchesLinear(PROB_CONFIG, 6, List.of(), List.of());
+    }
+
 }

@@ -25,7 +25,7 @@ and review a spec quickly.
 | `predictAt` | yes | `event_time - PT10M`, `event_time`, `event_time + PT1H` |
 | `entities` | for sequence | `{name, keys: [...], minInterval: <ISO-8601>}` |
 | `contexts` | for context | `{name, keys: [...]}` |
-| `baselines` | optional | `{name, expr, context}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline` and encoding / factorization `offset` |
+| `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
 | `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold`, `groupBy: <entity>`, `folds` (default 5), `artifact: {uri, refit, id}` or the URI string. `minHistory` accepted, ignored |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
@@ -85,6 +85,7 @@ sources:
 | `indicator` | `input`, `values: [v1, v2]` | `<name>_<value>` int64 0/1 |
 | `equals` | `inputs: [a, b]` | `<name>` int64 0/1, null if either is null |
 | `residual` | `input`, `baseline: <baselines[].name>`, `on: identity \| logit \| log` | `<name>` float64 |
+| `noise` | `distribution: normal \| uniform`, `seed` (required) | `<name>` float64 placebo: a pure function of `seed` and the row identity (`time.field` + `orderTieBreak`); pre-event |
 
 ## `scope: context`
 
@@ -102,6 +103,8 @@ sources:
 | `rank` | numeric | int64 (1 = largest) |
 | `zscore`, `gapToBest`, `shareOfTotal` (`share`), `percentile`, `median_diff` | numeric | float64 |
 | `groupSize` | none | int64 |
+| `softmax` | numeric `field` (score); `offset: <baselines[].name or column>` in probability space (`offsetScale: log` takes exp first), `temperature` (> 0, default 1) or `temperatureFrom: <uri>` (number or JSON `{temperature}` / `{T}`; outside the plan hash, in the manifest `externals`), `scoreNull: zero \| null` | float64: `w·exp(f/T)` normalised over the group; null offset → null row out of the denominator, offset 0 → 0; inherits the offset's `validFor`; `nullPolicy: indicator` adds `_isnull` and `_scoreNull` |
+| `shuffle` | any field, `seed` (required) | the field's type: values permuted within the group (seed + group key, rows ordered by identity then input values); availability of the field |
 | `countByValue` | categorical | `map<string,int64>`; with `values: [...]` one int64 per value |
 | `ratioByValue` | categorical | `map<string,float64>`; with `values: [...]` one float64 per value |
 | `entropy` | categorical | float64 |

@@ -128,6 +128,13 @@ public final class FeatureValues {
      * then surface through the fan-out merge's uniqueness rejection). The token cannot collide with a
      * value: {@link #appendKeyComponent} always starts a component with its length.
      */
+    /** A generator seeded by a 64-bit hash of (seed, key): a pure function of its arguments (same across re-runs, workers and branches). */
+    static java.util.SplittableRandom seededRandom(final long seed, final String key) {
+        final long h = com.google.common.hash.Hashing.murmur3_128((int) (seed ^ (seed >>> 32)))
+                .hashString(seed + "\u0000" + key, java.nio.charset.StandardCharsets.UTF_8).asLong();
+        return new java.util.SplittableRandom(h);
+    }
+
     static String keyWithNullTokens(final Map<String, Object> row, final List<String> keys) {
         final StringBuilder sb = new StringBuilder();
         for (final String k : keys) {

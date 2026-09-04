@@ -51,6 +51,14 @@ public class ContextEvaluator implements Serializable {
 
     /** Evaluates one context column for every row of the group (rows are mutated in place). */
     public void evaluateColumn(final OutputColumn c, final List<Map<String, Object>> rows) {
+        if ("softmax".equals(c.operator)) {
+            softmax(c, rows);
+            return;
+        }
+        if ("shuffle".equals(c.operator)) {
+            shuffle(c, rows);
+            return;
+        }
         final String op = "baseline".equals(c.operator) ? baselineOps.get(c.canonicalName) : c.operator;
         final boolean excludeSelf = "true".equals(c.coordinates.get("excludeSelf"));
         if (op == null) {
@@ -108,6 +116,99 @@ public class ContextEvaluator implements Serializable {
             }
             default -> numeric(op, values, self, excludeSelf);
         };
+    }
+
+    /**
+     * Group softmax in probability space: p_i = w_i · exp(f_i / T) / Σ_j w_j · exp(f_j / T), w = the offset value
+     * (1 without an offset; {@code offsetScale: log} takes exp first). A null offset makes the row null and drops it
+     * from the denominator; an offset of 0 gives p = 0; a null score falls back to 0 ({@code scoreNull: zero}) or
+     * makes the row null ({@code scoreNull: null}). Scores are shifted by the group maximum for stability.
+     */
+    static void softmax(final OutputColumn c, final List<Map<String, Object>> rows) {
+        final String field = c.coordinates.get("field");
+        final String offset = c.coordinates.get("offset");
+        final double temperature = Double.parseDouble(c.coordinates.getOrDefault("temperature", "1"));
+        final boolean logScale = "log".equals(c.coordinates.get("offsetScale"));
+        final boolean scoreNullIsNull = "null".equals(c.coordinates.get("scoreNull"));
+        final int n = rows.size();
+        final double[] weights = new double[n];
+        final double[] scores = new double[n];
+        final boolean[] active = new boolean[n];
+        double max = Double.NEGATIVE_INFINITY;
+        for (int i = 0; i < n; i++) {
+            final Map<String, Object> row = rows.get(i);
+            Double w = offset == null ? Double.valueOf(1d) : FeatureValues.toDouble(row.get(offset));
+            if (w != null && logScale && offset != null) w = Math.exp(w); // no offset: w = 1 whatever the scale
+            if (w == null || Double.isNaN(w) || Double.isInfinite(w) || w < 0) continue;
+            Double f = FeatureValues.toDouble(row.get(field));
+            if (f == null || Double.isNaN(f)) {
+                if (scoreNullIsNull) continue;
+                f = 0d;
+            }
+            weights[i] = w;
+            scores[i] = f / temperature;
+            active[i] = true;
+            if (w > 0) max = Math.max(max, scores[i]);
+        }
+        double denominator = 0d;
+        for (int i = 0; i < n; i++) if (active[i] && weights[i] > 0) denominator += weights[i] * Math.exp(scores[i] - max);
+        for (int i = 0; i < n; i++) {
+            final Map<String, Object> row = rows.get(i);
+            if (!active[i] || denominator <= 0 || Double.isNaN(denominator)) {
+                row.put(c.canonicalName, null);
+            } else {
+                row.put(c.canonicalName, weights[i] == 0 ? 0d : weights[i] * Math.exp(scores[i] - max) / denominator);
+            }
+        }
+    }
+
+    /**
+     * Placebo permutation: the field's values are reassigned across the group by a permutation drawn from
+     * hash(seed, group key), applied to the rows ordered by (time.field, orderTieBreak) — so the multiset of values
+     * per group is preserved and the result is a pure function of the group.
+     */
+    static void shuffle(final OutputColumn c, final List<Map<String, Object>> rows) {
+        final String field = c.coordinates.get("field");
+        final long seed = Long.parseLong(c.coordinates.get("seed"));
+        final List<String> order = new ArrayList<>(List.of(c.coordinates.get("order").split(",")));
+        final String tieBreak = c.coordinates.getOrDefault("tieBreak", "");
+        if (!tieBreak.isEmpty()) order.addAll(List.of(tieBreak.split(",")));
+        final List<String> contextKeys = c.coordinates.get("contextKeys").isEmpty() ? List.of() : List.of(c.coordinates.get("contextKeys").split(","));
+        final int n = rows.size();
+        final Integer[] sorted = new Integer[n];
+        for (int i = 0; i < n; i++) sorted[i] = i;
+        Arrays.sort(sorted, (a, b) -> compareIdentity(rows.get(a), rows.get(b), order));
+        final String groupKey = n == 0 ? "" : FeatureValues.keyWithNullTokens(rows.get(0), contextKeys);
+        final java.util.SplittableRandom random = FeatureValues.seededRandom(seed, groupKey);
+        final int[] permutation = new int[n];
+        for (int i = 0; i < n; i++) permutation[i] = i;
+        for (int i = n - 1; i > 0; i--) {
+            final int j = random.nextInt(i + 1);
+            final int t = permutation[i];
+            permutation[i] = permutation[j];
+            permutation[j] = t;
+        }
+        final List<Object> values = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) values.add(rows.get(sorted[i]).get(field));
+        for (int i = 0; i < n; i++) rows.get(sorted[i]).put(c.canonicalName, values.get(permutation[i]));
+    }
+
+    private static int compareIdentity(final Map<String, Object> a, final Map<String, Object> b, final List<String> order) {
+        for (int i = 0; i < order.size(); i++) {
+            final Object va = a.get(order.get(i));
+            final Object vb = b.get(order.get(i));
+            final int cmp;
+            if (i == 0) {
+                // time.field: compare as instants
+                final Long ma = FeatureValues.toEpochMillis(va);
+                final Long mb = FeatureValues.toEpochMillis(vb);
+                cmp = ma == null ? (mb == null ? 0 : -1) : mb == null ? 1 : Long.compare(ma, mb);
+            } else {
+                cmp = va == null ? (vb == null ? 0 : -1) : vb == null ? 1 : va.toString().compareTo(vb.toString());
+            }
+            if (cmp != 0) return cmp;
+        }
+        return 0;
     }
 
     /** Map key of a categorical value: integral numbers without a fractional part ("1", not "1.0"), so `values: [1]` matches int and double fields alike. */

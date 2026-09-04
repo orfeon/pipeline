@@ -103,7 +103,7 @@ not expand because another block failed).
 
 | code | level | meaning / fix |
 |---|---|---|
-| `row.type` | error | `expr` or `type: datetime \| bin \| cross \| indicator \| equals \| residual` |
+| `row.type` | error | `expr` or `type: datetime \| bin \| cross \| indicator \| equals \| residual \| noise` |
 | `row.input` | error | the type needs exactly one `input` |
 | `row.expr.type` | error | an operand is not numeric / bool — expressions are evaluated as doubles; use `cross` / `indicator` / `equals` for strings |
 | `row.self` | error | `$self` is only valid inside `window.filter` |
@@ -112,6 +112,9 @@ not expand because another block failed).
 | `row.cross.inputs` / `row.equals.inputs` | error | `cross` ≥ 2 inputs; `equals` exactly 2 |
 | `row.indicator.values` | error | `indicator` needs `values` |
 | `row.residual.baseline` / `row.residual.on` | error | `baseline` must name a baseline; `on` is identity / logit / log |
+| `row.noise.seed` / `row.noise.distribution` | error | `noise` needs an integer `seed`; `distribution` is normal / uniform |
+| `row.noise.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp get the same draw; declare a tie-break |
+| `baselines.emit.duplicate` | error | `emit` name collides with a column or input field |
 
 ## Context
 
@@ -120,6 +123,12 @@ not expand because another block failed).
 | `context.unknown` | error | `context` must name a declared context |
 | `context.ops` / `context.fields` | error | `ops` required; a field-taking op needs `fields` or block `inputs` |
 | `context.op` / `context.op.type` | error | unknown op, or wrong input type (numeric op on a categorical field) |
+| `context.softmax.offset` | error | `offset` must be a `baselines[].name` or a numeric column |
+| `context.softmax.temperature` / `.offsetScale` / `.scoreNull` | error | temperature must be a number > 0; offsetScale probability / log; scoreNull zero / null |
+| `context.softmax.temperatureFrom.unresolved` | error | `temperatureFrom` must be a URI (resolved before compile); a document that is neither a number nor JSON with `temperature` / `T` fails at resolve |
+| `context.softmax.excludeSelf` | warning | `excludeSelf` has no effect on softmax |
+| `context.shuffle.seed` | error | `shuffle` needs an integer `seed` |
+| `context.shuffle.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp are ordered by their input values only |
 
 ## Sequence
 

@@ -1429,4 +1429,210 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(manifest.getAsJsonObject("plan").has("stages"));
     }
 
+    // ------------------------------------------------------------------------------------------
+    // softmax / baseline emit / placebo ops (noise, shuffle)
+    // ------------------------------------------------------------------------------------------
+
+    private static final String PROB_BLOCK = """
+      - name: prob
+        scope: context
+        context: session
+        ops:
+          - {type: softmax, field: price_per_unit, offset: market, temperature: 1.3, as: pWin}
+    """;
+
+    private static String withBlocks(final String blocks) {
+        return SPEC.replace("output:\n", blocks + "output:\n");
+    }
+
+    @Test
+    public void testSoftmaxExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withBlocks(PROB_BLOCK).replace("baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
+                "baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn p = column(plan, "prob_pWin_softmax");
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), p.getFieldType().getType());
+        Assertions.assertEquals("price_per_unit", p.getCoordinates().get("field"));
+        Assertions.assertEquals("__baseline_market", p.getCoordinates().get("offset"));
+        Assertions.assertEquals("1.3", p.getCoordinates().get("temperature"));
+        Assertions.assertEquals("probability", p.getCoordinates().get("offsetScale"));
+        Assertions.assertEquals("zero", p.getCoordinates().get("scoreNull"));
+        // the probability inherits the perishability of the market offset (current_bid_t10 validFor PT15M through the baseline)
+        Assertions.assertEquals(Duration.ofMinutes(15), p.getValidFor());
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, p.getStatus());
+        Assertions.assertTrue(p.getDerivedFrom().contains("market"), p::describe);
+        // baselines[].emit: the baseline value as an output column, in the same context stage
+        final OutputColumn emitted = column(plan, "marketProb");
+        Assertions.assertFalse(emitted.isIntermediate());
+        Assertions.assertEquals("copy", emitted.getOperator());
+        Assertions.assertEquals("f_marketProb", emitted.getOutputName());
+        Assertions.assertEquals(Duration.ofMinutes(15), emitted.getValidFor());
+        Assertions.assertTrue(column(plan, "__baseline_market").isIntermediate());
+    }
+
+    @Test
+    public void testSoftmaxDiagnosticsAndIndicators() {
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: nope"))), "context.softmax.offset"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market", "offset: category"))), "context.softmax.offset"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperature: 0"))), "context.softmax.temperature"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "offsetScale: exp"))), "context.softmax.offsetScale"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "scoreNull: drop"))), "context.softmax.scoreNull"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperatureFrom: gs://b/calibration.json"))), "context.softmax.temperatureFrom.unresolved"));
+        // nullPolicy indicator: the null-row flag and the score-fallback flag
+        final FeaturePlan indicator = compile(SOURCES, withBlocks(PROB_BLOCK).replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  nullPolicy: indicator\n"));
+        Assertions.assertNotNull(indicator.getColumn("prob_pWin_softmax_isnull"), indicator::describe);
+        final OutputColumn fallback = column(indicator, "prob_pWin_softmax_scoreNull");
+        Assertions.assertEquals("price_per_unit", fallback.getCoordinates().get("indicatorOf"));
+        // without an offset: plain group softmax, no validFor
+        final FeaturePlan plain = compile(SOURCES, withBlocks(PROB_BLOCK.replace("offset: market, ", "")));
+        Assertions.assertNull(column(plain, "prob_pWin_softmax").getCoordinates().get("offset"));
+        Assertions.assertNull(column(plain, "prob_pWin_softmax").getValidFor());
+    }
+
+    @Test
+    public void testTemperatureFromIsOutsideThePlanHash() {
+        final JsonObject sourcesJson = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final JsonObject base = Config.convertConfigJson(withBlocks(PROB_BLOCK), Config.Format.yaml);
+        final JsonObject fromUri = Config.convertConfigJson(withBlocks(PROB_BLOCK.replace("temperature: 1.3",
+                "temperatureFrom: \"data:" + java.util.Base64.getEncoder().encodeToString("{\"temperature\": 1.3, \"a\": 0.1}".getBytes()) + "\"")), Config.Format.yaml);
+        FeaturePlanService.resolveTemperatureFrom(fromUri, null);
+        final JsonObject resolved = fromUri.getAsJsonArray("features").asList().stream().map(e -> e.getAsJsonObject())
+                .filter(f -> "prob".equals(f.get("name").getAsString())).findFirst().orElseThrow()
+                .getAsJsonArray("ops").get(0).getAsJsonObject().getAsJsonObject("temperatureFrom");
+        Assertions.assertEquals(1.3, resolved.get("value").getAsDouble(), 1e-9);
+        Assertions.assertTrue(resolved.get("source").getAsString().startsWith("data:"));
+        final FeaturePlan a = FeaturePlanCompiler.compile(sourcesJson, base, null);
+        final FeaturePlan b = FeaturePlanCompiler.compile(sourcesJson, fromUri, null);
+        Assertions.assertFalse(b.getDiagnostics().hasErrors(), b::describe);
+        Assertions.assertEquals("1.3", column(b, "prob_pWin_softmax").getCoordinates().get("temperature"));
+        // the literal and the document give different plan hashes only because the literal is in the parameters;
+        // the document itself is stripped: two documents with different values share the plan hash
+        final JsonObject other = fromUri.deepCopy();
+        other.getAsJsonArray("features").asList().stream().map(e -> e.getAsJsonObject())
+                .filter(f -> "prob".equals(f.get("name").getAsString())).findFirst().orElseThrow()
+                .getAsJsonArray("ops").get(0).getAsJsonObject().getAsJsonObject("temperatureFrom").addProperty("value", 2.0);
+        final FeaturePlan c = FeaturePlanCompiler.compile(sourcesJson, other, null);
+        Assertions.assertEquals(b.getHash(), c.getHash());
+        Assertions.assertNotEquals(b.getOutputHash(), c.getOutputHash());
+        Assertions.assertEquals(1, b.getSpec().resolvedExternals.size());
+        Assertions.assertEquals(1, b.toManifest(List.of(), java.util.Map.of()).getAsJsonArray("externals").size());
+        Assertions.assertNotEquals(a.getHash(), b.getHash());
+        Assertions.assertEquals(2.0, FeaturePlanService.parseTemperature("2.0", "x"), 1e-9);
+        Assertions.assertEquals(1.5, FeaturePlanService.parseTemperature("{\"T\": 1.5}", "x"), 1e-9);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> FeaturePlanService.parseTemperature("{\"x\": 1}", "x"));
+    }
+
+    @Test
+    public void testSoftmaxEvaluation() {
+        final FeaturePlan plan = compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperature: 2")));
+        final OutputColumn p = column(plan, "prob_pWin_softmax");
+        final List<java.util.Map<String, Object>> rows = new java.util.ArrayList<>();
+        rows.add(row("price_per_unit", 2.0, "__baseline_market", 0.5));   // w=0.5, f=1
+        rows.add(row("price_per_unit", 0.0, "__baseline_market", 0.3));   // w=0.3, f=0
+        rows.add(row("price_per_unit", null, "__baseline_market", 0.2));  // score null -> f=0 (scoreNull zero)
+        rows.add(row("price_per_unit", 5.0, "__baseline_market", 0.0));   // offset 0 -> p=0, stays in the denominator as 0
+        rows.add(row("price_per_unit", 5.0, "__baseline_market", null));  // offset null -> row null, out of the denominator
+        ContextEvaluator.softmax(p, rows);
+        final double e1 = 0.5 * Math.exp(1.0), e2 = 0.3, e3 = 0.2, z = e1 + e2 + e3;
+        Assertions.assertEquals(e1 / z, (Double) rows.get(0).get("prob_pWin_softmax"), 1e-12);
+        Assertions.assertEquals(e2 / z, (Double) rows.get(1).get("prob_pWin_softmax"), 1e-12);
+        Assertions.assertEquals(e3 / z, (Double) rows.get(2).get("prob_pWin_softmax"), 1e-12);
+        Assertions.assertEquals(0.0, (Double) rows.get(3).get("prob_pWin_softmax"), 1e-12);
+        Assertions.assertNull(rows.get(4).get("prob_pWin_softmax"));
+        // f = 0, T = 1: the probabilities are the offsets renormalised
+        final FeaturePlan unit = compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperature: 1")));
+        final OutputColumn u = column(unit, "prob_pWin_softmax");
+        final List<java.util.Map<String, Object>> flat = new java.util.ArrayList<>();
+        flat.add(row("price_per_unit", 0.0, "__baseline_market", 0.6));
+        flat.add(row("price_per_unit", 0.0, "__baseline_market", 0.4));
+        ContextEvaluator.softmax(u, flat);
+        Assertions.assertEquals(0.6, (Double) flat.get(0).get("prob_pWin_softmax"), 1e-12);
+        // scoreNull: null and offsetScale: log
+        final FeaturePlan logScale = compile(SOURCES, withBlocks(PROB_BLOCK.replace("temperature: 1.3", "temperature: 1, offsetScale: log, scoreNull: \"null\"")));
+        final OutputColumn l = column(logScale, "prob_pWin_softmax");
+        final List<java.util.Map<String, Object>> logRows = new java.util.ArrayList<>();
+        logRows.add(row("price_per_unit", 0.0, "__baseline_market", Math.log(0.75)));
+        logRows.add(row("price_per_unit", 0.0, "__baseline_market", Math.log(0.25)));
+        logRows.add(row("price_per_unit", null, "__baseline_market", Math.log(0.5)));
+        ContextEvaluator.softmax(l, logRows);
+        Assertions.assertEquals(0.75, (Double) logRows.get(0).get("prob_pWin_softmax"), 1e-12);
+        Assertions.assertNull(logRows.get(2).get("prob_pWin_softmax"));
+    }
+
+    private static java.util.Map<String, Object> row(final Object... kv) {
+        final java.util.Map<String, Object> row = new java.util.HashMap<>();
+        for (int i = 0; i < kv.length; i += 2) row.put((String) kv[i], kv[i + 1]);
+        return row;
+    }
+
+    @Test
+    public void testPlaceboOps() {
+        final String blocks = """
+              - {name: placeboNoise, scope: row, type: noise, distribution: uniform, seed: 20260717}
+              - name: placeboShuffle
+                scope: context
+                context: session
+                ops:
+                  - {type: shuffle, fields: [condition_grade, start_price], seed: 7}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withBlocks(blocks));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn noise = column(plan, "placeboNoise");
+        Assertions.assertEquals("session_time,session_id", noise.getCoordinates().get("identity"));
+        Assertions.assertEquals("20260717", noise.getCoordinates().get("seed"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, noise.getStatus());
+        Assertions.assertTrue(noise.getAvailableAt().isPreEvent(), noise::describe);
+        final OutputColumn grade = column(plan, "placeboShuffle_condition_grade_shuffle");
+        Assertions.assertEquals(Schema.Type.string, grade.getFieldType().getType());
+        Assertions.assertEquals("session_time,session_id", grade.getCoordinates().get("order"));
+        Assertions.assertEquals("session_id", grade.getCoordinates().get("contextKeys"));
+        Assertions.assertEquals(Schema.Type.float64, column(plan, "placeboShuffle_start_price_shuffle").getFieldType().getType());
+        // a shuffled outcome keeps the outcome's availability: emitting it is a violation, exactly like the original
+        final FeaturePlan outcome = compile(SOURCES, withBlocks(blocks.replace("fields: [condition_grade, start_price]", "fields: [sold]")));
+        Assertions.assertTrue(hasCode(outcome, "availability.violation"), outcome::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(blocks.replace(", seed: 20260717", ""))), "row.noise.seed"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(blocks.replace(", seed: 7", ""))), "context.shuffle.seed"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withBlocks(blocks.replace("uniform", "cauchy"))), "row.noise.distribution"));
+        final FeaturePlan noTie = compile(SOURCES, withBlocks(blocks).replace(", orderTieBreak: [session_id]", ""));
+        Assertions.assertTrue(hasCode(noTie, "row.noise.identity"));
+        Assertions.assertTrue(hasCode(noTie, "context.shuffle.identity"));
+
+        // evaluation: deterministic in the row identity / group, multiset preserved
+        final java.util.Map<String, Object> r1 = row("session_time", "2025-01-01T10:00:00Z", "session_id", "A");
+        final java.util.Map<String, Object> r2 = row("session_time", "2025-01-01T10:00:00Z", "session_id", "B");
+        final double v1 = (Double) RowEvaluator.noise(noise, r1);
+        Assertions.assertEquals(v1, (Double) RowEvaluator.noise(noise, new java.util.HashMap<>(r1)), 0d);
+        Assertions.assertNotEquals(v1, (Double) RowEvaluator.noise(noise, r2));
+        Assertions.assertTrue(v1 >= 0 && v1 < 1);
+        final List<java.util.Map<String, Object>> group = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) group.add(row("session_time", "2025-01-01T10:00:00Z", "session_id", "A", "condition_grade", "g" + i));
+        ContextEvaluator.shuffle(grade, group);
+        final java.util.Set<Object> before = new java.util.HashSet<>(), after = new java.util.HashSet<>();
+        final List<Object> permuted = new java.util.ArrayList<>();
+        for (final java.util.Map<String, Object> r : group) {
+            before.add(r.get("condition_grade"));
+            after.add(r.get("placeboShuffle_condition_grade_shuffle"));
+            permuted.add(r.get("placeboShuffle_condition_grade_shuffle"));
+        }
+        Assertions.assertEquals(before, after);
+        final List<java.util.Map<String, Object>> again = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) again.add(row("session_time", "2025-01-01T10:00:00Z", "session_id", "A", "condition_grade", "g" + i));
+        java.util.Collections.reverse(again); // GroupByKey order must not matter
+        ContextEvaluator.shuffle(grade, again);
+        java.util.Collections.reverse(again);
+        for (int i = 0; i < 6; i++) Assertions.assertEquals(permuted.get(i), again.get(i).get("placeboShuffle_condition_grade_shuffle"));
+    }
+
+    @Test
+    public void testBaselineEmitAndRole() {
+        final String spec = SPEC.replace("- {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
+                "- {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}")
+                .replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {baseline: market}\n");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "output.roles.baseline.notEmitted"), plan::describe);
+        Assertions.assertEquals("f_marketProb", plan.getRoleColumns().get("baseline"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("emit: marketProb", "emit: category")), "baselines.emit.duplicate"));
+    }
+
 }

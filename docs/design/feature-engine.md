@@ -440,6 +440,18 @@ the finalize row count into one `View.asList` and written as `manifest.run.json`
 inside the engine (the module sets its coder once more), hence the count side output from the finalize
 DoFns.
 
+**Softmax, baseline emit and placebos.** `softmax` is the first context op with two per-row inputs
+(score + offset): `configureContextOp` resolves the offset (a baseline → its `__baseline_*` column),
+inherits its `validFor`, and puts temperature / scales into the coordinates; `ContextEvaluator.softmax`
+evaluates the group in probability space with a max-shift. `temperatureFrom` is resolved by
+`FeaturePlanService.resolveTemperatureFrom` into `{source, hash, value}`, stripped from the plan hash and
+listed in `FeatureSpec.resolvedExternals` (output hash + manifest `externals`). `baselines[].emit`
+adds a row `copy` column of the baseline. `noise` (row) hashes (seed, `time.field` + `orderTieBreak`)
+with murmur3 into a `SplittableRandom`; `shuffle` (context) draws a Fisher–Yates permutation from
+(seed, group key) and applies it to the rows ordered by identity then the remaining input fields
+(`tieBreak` coordinate), so the result is a pure function of the group in every engine mode — the
+parallel-vs-linear equality test covers both.
+
 **Fits.** Static: per-level sufficient statistics from the whole input (global window), lookup per
 row, `fitStat` for count / mean / rate / std, artifact write / load, `refit`; the hidden columns'
 availability is the fit boundary (`computeAt`), and an info diagnostic states that training rows contain

@@ -62,7 +62,7 @@ time; warnings and hints from the compiler are part of that report.
 | predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
 | entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
-| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`) and encoding `offset:`. |
+| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
@@ -107,6 +107,7 @@ features:
   - {name: grade_is, scope: row, type: indicator, input: condition_grade, values: [good, fair]}   # grade_is_good, grade_is_fair (0/1)
   - {name: kept_grade, scope: row, type: equals, inputs: [condition_grade, recent_all_condition_grade_lag1]}  # 1/0, null if either side is null
   - {name: vs_market, scope: row, type: residual, input: share, baseline: market, on: identity}
+  - {name: placebo_noise, scope: row, type: noise, distribution: normal, seed: 20260717}   # information-free column (see Placebos)
 
   - name: relative                  # context: inputs × ops, or ops with their own fields
     scope: context
@@ -122,6 +123,16 @@ features:
       - {type: countByValue, fields: [condition_grade], values: [good, fair]}  # one INT64 column per value (sink / model friendly)
       - {type: entropy, fields: [condition_grade]}
       - {type: groupSize}
+  - name: prob                      # group softmax: a model score into a probability, on top of a baseline
+    scope: context
+    context: session
+    ops:
+      - {type: softmax, field: model_score, offset: market, temperature: 1.3, as: pWin}
+  - name: placebo                   # the field's values permuted within the group (see Placebos)
+    scope: context
+    context: session
+    ops:
+      - {type: shuffle, fields: [start_price], seed: 20260717}
 
   - name: recent                    # sequence: strictly-past rows of the entity
     scope: sequence
@@ -327,6 +338,48 @@ numeric (Lucene expression syntax), predicates and window filters use the SQL-li
   `groupSize` without `excludeSelf`) are placed on the **parent** record, not in the child array — look for
   them next to the group keys (`placement: parent` in the plan's column list).
 - Hints such as `sequence.aggregate.encoding` are reported once per block.
+
+### Group softmax (context op `softmax`)
+
+Turns a per-row score (a model output from an `onnx` step, say) into a probability that sums to 1 within
+the context, on top of an optional baseline — the serving-side counterpart of a model trained with a
+group softmax and `init_score = log(baseline)`:
+
+```
+p_i = w_i · exp(f_i / T) / Σ_j w_j · exp(f_j / T)      w = offset value (1 without offset), T = temperature
+```
+
+| parameter | meaning |
+|---|---|
+| `field` | the score column (numeric) |
+| `offset` | a `baselines[].name` or a numeric column, read **in probability space** (a `share(...)` baseline is one). `offsetScale: log` takes `exp` first (−∞ / NaN → null) |
+| `temperature` | constant > 0 (default 1); `temperatureFrom: <uri>` reads it from a calibration document at assembly (a bare number, or JSON with `temperature` / `T`). The document is outside the plan hash (no fit depends on it); the resolved value and the document hash are in the manifest (`externals`) and the output hash |
+| `scoreNull` | `zero` (default: a null score falls back to 0, i.e. to the offset's probability; with `nullPolicy: indicator` a `<name>_scoreNull` flag says so) \| `null` (the row's output is null) |
+
+Null handling, matched to a training-side normalisation that drops NaN from the sum: a **null offset**
+makes the row null and removes it from the denominator (the other rows still sum to 1; `nullPolicy:
+indicator` adds `<name>_isnull`); an **offset of 0** gives p = 0 and stays in the denominator as 0. The
+column inherits its availability from the score and the offset, and the offset's `validFor` (a market
+price expires; so does the probability). With f = 0 and T = 1 the output equals the renormalised offset.
+`excludeSelf` has no effect. Row / context only, so the op works in streaming (an `onnx` → `feature`
+→ sink serving chain).
+
+### Placebos (`type: noise`, context op `shuffle`)
+
+Information-free columns that go through the same selection / training path as the candidates, to
+calibrate a selection threshold (a null column still shows a small positive gain) or to measure
+permutation importance without leaving the pipeline:
+
+- **`noise`** (row): `distribution: normal | uniform`, `seed` (required). The draw is a pure function of
+  `seed` and the row identity — `time.field` + `orderTieBreak`, the fold rule — so re-runs, workers and
+  engine modes agree. Rows sharing the identity share the draw (`row.noise.identity` warns when no
+  `orderTieBreak` is declared). Availability: pre-event.
+- **`shuffle`** (context): `fields`, `seed` (required). Within each group the field's values are
+  reassigned by a permutation drawn from `seed` and the group key, applied to the rows ordered by
+  `time.field`, `orderTieBreak`, then the remaining input fields — a pure function of the group's
+  content, whatever order the runner delivers the rows. The multiset per group is preserved, the output
+  keeps the field's type and **availability** (a shuffled outcome is still an outcome: emitting it is
+  the usual violation; as an intermediate consumed by a sequence feature it is fine).
 
 ### Availability check
 

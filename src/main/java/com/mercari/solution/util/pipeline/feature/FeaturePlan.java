@@ -158,6 +158,17 @@ public class FeaturePlan implements Serializable {
         for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
             final String name = e.getValue();
             String resolved = inputFields.containsKey(name) ? name : null;
+            if (resolved == null && "baseline".equals(e.getKey())) {
+                // a baseline name resolves to its emitted copy (baselines[].emit)
+                for (final FeatureSpec.BaselineDef b : spec.baselines) if (b.name().equals(name) && b.emit() != null) resolved = b.emit();
+            }
+            if (resolved != null && !inputFields.containsKey(resolved)) {
+                final String emitted = resolved;
+                resolved = null;
+                for (final OutputColumn c : columns) {
+                    if (!c.intermediate && c.canonicalName.equals(emitted)) { resolved = c.outputName; break; }
+                }
+            }
             if (resolved == null) {
                 for (final OutputColumn c : columns) {
                     if (!c.intermediate && (c.canonicalName.equals(name) || c.outputName.equals(name))) { resolved = c.outputName; break; }
@@ -663,6 +674,22 @@ public class FeaturePlan implements Serializable {
         final JsonObject artifactJson = new JsonObject();
         if (artifacts != null) artifacts.forEach(artifactJson::addProperty);
         manifest.add("artifacts", artifactJson);
+        // values read from external documents at assembly (temperatureFrom): which calibration produced this table
+        final JsonArray externals = new JsonArray();
+        for (final String external : spec.resolvedExternals) {
+            final JsonObject o = new JsonObject();
+            final int eq = external.indexOf('=');
+            o.addProperty("location", external.substring(0, eq));
+            // source:hash:value — the source is a URI (may contain ':'); hash and value never do, so split from the end
+            final String rest = external.substring(eq + 1);
+            final int valueSep = rest.lastIndexOf(':');
+            final int hashSep = valueSep < 0 ? -1 : rest.lastIndexOf(':', valueSep - 1);
+            o.addProperty("source", hashSep < 0 ? rest : rest.substring(0, hashSep));
+            o.addProperty("hash", hashSep < 0 ? null : rest.substring(hashSep + 1, valueSep));
+            o.addProperty("value", valueSep < 0 ? null : rest.substring(valueSep + 1));
+            externals.add(o);
+        }
+        manifest.add("externals", externals);
         manifest.add("plan", toJson());
         return manifest;
     }

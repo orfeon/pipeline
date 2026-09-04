@@ -138,6 +138,11 @@ parameters:
   emitted column with lineage and availability, `planHash` / `outputHash`; a batch run adds
   `manifest.run.json` with the row count and the observedAt audit), and `output.include: <uri or list>`
   to project the columns a screening step passed (replaces `exclude`; outside the plan hash).
+- Serving a group-softmax model: `onnx` → `feature` with a context `softmax` op (`field` = the model
+  score, `offset` = the market baseline, `temperature` or `temperatureFrom: <calibration uri>`) → sink.
+  `baselines[].emit` outputs the baseline itself so training and serving read the same probability.
+- Placebos for threshold calibration / permutation importance: `type: noise` (row, `seed`) and the
+  context op `shuffle` (`fields`, `seed`) — deterministic per row identity / group, no information.
 - Make pre-event claims auditable: pass the `observedAtField` column through from upstream. The engine
   then counts rows observed after the declared availability / after predictAt (metrics
   `feature/observedAt_<field>_*`, run manifest deciles of `predictAt − observedAt`);
