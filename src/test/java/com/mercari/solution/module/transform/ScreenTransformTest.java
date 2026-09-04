@@ -332,6 +332,29 @@ public class ScreenTransformTest {
     }
 
     @Test
+    public void testRejectsTriggeredInput() {
+        // a triggered global window fires the Combines once per pane: the singleton views of the conditioning chain
+        // and the single summary both assume one pane
+        final String config = sessionsConfig(2, 2, 1) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    strategy:
+                      window: {type: global}
+                      trigger: {type: repeatedly, foreverTrigger: {type: afterPane, elementCountAtLeast: 1}}
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      candidates: {include: ["f_*"]}
+                      conditioning: {fields: [f_known]}
+                """;
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(config)));
+        Assertions.assertTrue(String.join(" ", e.errorMessages).contains("default trigger"), e.getMessage());
+    }
+
+    @Test
     public void testAssemblyRejectsUnresolvableSpec() {
         final String config = sessionsConfig(2, 2, 1) + """
                 transforms:

@@ -313,6 +313,7 @@ public final class ScreenSpec implements Serializable {
                 if (s.conditioningTol <= 0) errors.add("conditioning.tol must be > 0");
             } else if (conditioning.isJsonArray()) {
                 s.conditioningPatterns = strings(p, "conditioning", errors);
+                if (s.conditioningPatterns.isEmpty()) errors.add("conditioning must list at least one field (names or globs of the conditioning columns)");
             } else {
                 errors.add("conditioning must be an object {fields, l2, maxIter, tol} or a list of field names");
             }
@@ -521,7 +522,7 @@ public final class ScreenSpec implements Serializable {
         conditioningFields = new ArrayList<>();
         if (!conditioningPatterns.isEmpty() && inputSchema != null) {
             final Set<String> roleOnly = new HashSet<>();
-            for (final String r : new String[]{group, labelField, timeField, weightField, periodsField}) if (r != null) roleOnly.add(r);
+            for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) roleOnly.add(r);
             if (labelExpr != null) roleOnly.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
             for (final String pattern : conditioningPatterns) {
                 final Pattern glob = ScreenMath.glob(pattern);

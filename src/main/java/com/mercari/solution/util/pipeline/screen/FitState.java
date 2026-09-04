@@ -70,12 +70,21 @@ public final class FitState implements Serializable {
         final double[] g = Arrays.copyOfRange(eval, 2, 2 + k);
         final double[][] G = new double[k][k];
         for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) G[i][j] = eval[2 + k + i * k + j];
-        final double objective = ll / n - 0.5 * l2 * dot(proposal, proposal);
+        final double objective = ll / n - 0.5 * l2 * MatrixOps.dot(proposal, proposal);
         if (iteration == 0) ll0 = ll;
         nUnits = n;
         objectiveHistory.add(objective);
         iteration++;
-        if (!hasBest || objective >= bestObjective - 1e-12) {
+        boolean finite = Double.isFinite(objective);
+        for (int i = 2; finite && i < eval.length; i++) finite = Double.isFinite(eval[i]);
+        if (!finite && !hasBest) {
+            // the evaluation at the starting point is not finite: nothing to fit on; the remaining passes are skipped
+            // and the report sees no best point (the summary's conditioningConverged is false). A non-finite matrix
+            // must never reach solveGram (its SVD fallback does not terminate on NaN).
+            converged = true;
+            return this;
+        }
+        if (finite && (!hasBest || objective >= bestObjective - 1e-12)) {
             final double improvement = hasBest ? objective - bestObjective : Double.POSITIVE_INFINITY;
             hasBest = true;
             bestTheta = proposal.clone();
@@ -122,11 +131,5 @@ public final class FitState implements Serializable {
         final double[] out = new double[theta.length];
         for (int i = 0; i < out.length; i++) out[i] = theta[i] + alpha * direction[i];
         return out;
-    }
-
-    static double dot(final double[] a, final double[] b) {
-        double s = 0;
-        for (int i = 0; i < a.length; i++) s += a[i] * b[i];
-        return s;
     }
 }

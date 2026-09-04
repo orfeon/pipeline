@@ -71,7 +71,7 @@ current model misses): candidates = the model's own features gives a drift / sta
   `it = 1..maxIter` `ConditioningFit<it>` (a ParDo over the units with the moments and the previous state as
   side inputs, bundle-local sum, `Combine.globally` with defaults so a skipped pass yields an empty vector) →
   `ConditioningFit<it>_Advance` (the controller on a copy of the previous state) → view; finally
-  `ConditioningPartial` (bundle-local `[s, b, a]` per key → `Combine.perKey` → gather → list view) and the
+  `ConditioningPartial` (bundle-local `[s, b, a]` per key → `Combine.perKey` → map view) and the
   fit view join `Finalize` as side inputs. `engineConstraints` rejects conditioning outside the global window
   (the Combines carry defaults).
 
@@ -113,7 +113,7 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
   DoFn (empty vector out) — the pass still exists in the graph but reads nothing. The orthogonalisation and
   the partial test collapse into one pass because both are bilinear in x: `[s, b, a]` at p̂ plus the fit's
   (g, G) give γ, S⊥, H⊥ and r²_F in closed form, so the proposal's two extra passes are one. Penalty and
-  tolerance are on the *average* log-likelihood (per unit), so `l2` and `tol` are size-free; F is
+  tolerance are on the *average* log-likelihood (per weighted unit, the unit count carrying the same weight as the sums), so `l2` and `tol` are size-free and weight-scale-free; F is
   standardised so `l2` is scale-free; the binomial family always carries an intercept in F̃ (a calibration
   shift beyond the baseline, the prior rate without one), which also centres the partial statistics.
 - Field names follow the proposal (`est_gain`, `n_groups`, `period_z`, `leakSuspect` …) with additions that

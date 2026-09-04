@@ -96,7 +96,7 @@ the step size and costs one more pass; converged iterations are skipped) and one
 `maxIter + 2` passes over the data at most, each a global Combine. The summary reports `conditioningIterations`,
 `conditioningRejectedSteps`, `conditioningConverged` and `conditioningGain` (the in-sample average
 log-likelihood improvement of F over the baseline — a sanity check that the conditioning set is informative).
-Conditioning needs the global window (no `strategy` window).
+Conditioning needs the global window (no `strategy` window) and, like every screen run, the default trigger.
 
 ## Input contract
 

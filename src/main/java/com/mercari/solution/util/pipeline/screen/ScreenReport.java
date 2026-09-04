@@ -74,9 +74,10 @@ public final class ScreenReport {
     }
 
     /**
-     * Partial test from the sums {@code [s, b, a]} at the fitted p̂ and the fit's (g, G): γ = (G + l2·N·I)⁻¹ a,
-     * S⊥ = s − γ'g, H⊥ = b − 2γ'a + γ'Gγ, r²_F = 1 − H⊥ / b. A column fully explained by F (H⊥ ≈ 0) is
-     * degenerate with r²_F = 1.
+     * Partial test from the sums {@code [s, b, a]} at the fitted p̂ and the fit's (g, G): γ = (G + l2·N·I)⁻¹ a
+     * with N the fit's (weighted) unit mass, i.e. the same ridge as the fit's Newton system, S⊥ = s − γ'g,
+     * H⊥ = b − 2γ'a + γ'Gγ, r²_F = 1 − H⊥ / b. A column fully explained by F (H⊥ ≈ 0) is degenerate with
+     * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator).
      */
     public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs) {
         final int k = fit.k;
@@ -84,11 +85,11 @@ public final class ScreenReport {
         final double b = vec[1];
         if (!(b > 0) || !fit.hasBest) return new Partial(Stats.degenerate(nObs), Double.NaN);
         final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
-        final double[] gamma = MatrixOps.solveGram(fit.bestG, a, l2 * nUnits);
-        final double sPerp = s - FitState.dot(gamma, fit.bestGrad);
+        final double[] gamma = MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);
+        final double sPerp = s - MatrixOps.dot(gamma, fit.bestGrad);
         double gGg = 0;
         for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) gGg += gamma[i] * fit.bestG[i][j] * gamma[j];
-        final double hPerp = b - 2 * FitState.dot(gamma, a) + gGg;
+        final double hPerp = b - 2 * MatrixOps.dot(gamma, a) + gGg;
         final double r2 = Math.min(1d, Math.max(0d, 1d - hPerp / b));
         if (hPerp <= 1e-10 * b) return new Partial(Stats.degenerate(nObs), 1d);
         return new Partial(fromScore(sPerp, hPerp, nObs, nUnits), r2);
@@ -110,6 +111,10 @@ public final class ScreenReport {
         final List<String> names = spec.columnNames();
         final int nTransforms = spec.transforms.size();
         final boolean conditioned = spec.hasConditioning() && fit != null && fit.hasBest && partials != null;
+        final List<String> notes = new ArrayList<>(spec.notes);
+        if (spec.hasConditioning() && !conditioned) {
+            notes.add("conditioning: the fit accepted no point (no scorable unit); partial statistics are null and passed / threshold / qValue follow the marginal test");
+        }
 
         // statistics per key
         final List<Map<String, Object>> records = new ArrayList<>();
@@ -266,10 +271,10 @@ public final class ScreenReport {
         summary.put("conditioningK", fit == null ? null : (long) fit.k);
         summary.put("conditioningIterations", fit == null ? null : (long) fit.iteration);
         summary.put("conditioningRejectedSteps", fit == null ? null : (long) fit.rejected);
-        summary.put("conditioningConverged", fit == null ? null : fit.converged);
+        summary.put("conditioningConverged", fit == null ? null : fit.hasBest && fit.converged);
         summary.put("conditioningGain", fit == null || Double.isNaN(fit.gainPerUnit()) ? null : fit.gainPerUnit());
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
-        summary.put("notes", new ArrayList<>(spec.notes));
+        summary.put("notes", notes);
         return new Result(records, summary);
     }
 

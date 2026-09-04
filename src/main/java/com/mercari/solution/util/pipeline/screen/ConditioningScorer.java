@@ -1,5 +1,7 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.mercari.solution.util.domain.math.MatrixOps;
+
 import java.io.Serializable;
 import java.util.Map;
 
@@ -84,7 +86,7 @@ public final class ConditioningScorer implements Serializable {
         final double[] eta = new double[n];
         final boolean prior = !spec.hasBaseline();
         for (int i = 0; i < n; i++) {
-            double e = FitState.dot(f[i], theta);
+            double e = MatrixOps.dot(f[i], theta);
             if (spec.isGroupedMultinomial()) {
                 e += unit.p[i] > 0 ? Math.log(unit.p[i]) : Double.NEGATIVE_INFINITY;
             } else if (!prior) {
@@ -113,7 +115,8 @@ public final class ConditioningScorer implements Serializable {
 
     /**
      * One Newton pass evaluation of the unit at θ: {@code [units, ll, g(k), G(k*k)]} (weighted). Units are 1 per
-     * group (grouped family) or the row count (binomial).
+     * group (grouped family) or the row count (binomial), each weighted like ll / g / G so that the average
+     * objective of {@link FitState} is invariant to a rescaling of the weight column.
      */
     public double[] evaluate(final GroupScorer.Unit unit, final double[] theta, final double[] moments) {
         final double[][] f = design(unit, moments);
@@ -133,13 +136,16 @@ public final class ConditioningScorer implements Serializable {
                 }
             }
             for (int a = 0; a < k; a++) for (int b = 0; b < k; b++) out[2 + k + a * k + b] -= w * pf[a] * pf[b];
-            out[0] = 1;
+            // the unit count carries the same weight as ll / g / G, so the average objective is weight-invariant
+            out[0] = w;
             out[1] = w * ll;
         } else {
             double ll = 0;
+            double wsum = 0;
             for (int i = 0; i < n; i++) {
                 final double w = unit.w[i];
                 final double y = unit.y[i];
+                wsum += w;
                 ll += w * (y * Math.log(p[i]) + (1 - y) * Math.log(1 - p[i]));
                 final double v = p[i] * (1 - p[i]);
                 for (int a = 0; a < k; a++) {
@@ -147,7 +153,7 @@ public final class ConditioningScorer implements Serializable {
                     for (int b = 0; b < k; b++) out[2 + k + a * k + b] += w * v * f[i][a] * f[i][b];
                 }
             }
-            out[0] = n;
+            out[0] = wsum;
             out[1] = ll;
         }
         return out;

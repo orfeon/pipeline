@@ -21,13 +21,16 @@ import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.slf4j.Logger;
@@ -62,8 +65,12 @@ public final class ScreenStages {
     /** Engine rejections that only the input can tell (called by the module before wiring). */
     public static List<String> engineConstraints(final PCollection<MElement> input, final ScreenSpec spec) {
         final List<String> errors = new ArrayList<>();
-        if (spec.hasConditioning() && !(input.getWindowingStrategy().getWindowFn() instanceof GlobalWindows)) {
+        final WindowingStrategy<?, ?> strategy = input.getWindowingStrategy();
+        if (spec.hasConditioning() && !(strategy.getWindowFn() instanceof GlobalWindows)) {
             errors.add("conditioning needs the global window (the Newton passes combine over the whole input); remove the windowing strategy or the conditioning block");
+        }
+        if (!(strategy.getTrigger() instanceof DefaultTrigger)) {
+            errors.add("screen needs the default trigger (a triggered input fires the Combines once per pane: several partial summaries, and the conditioning singleton views break); remove strategy.trigger");
         }
         return errors;
     }
@@ -101,7 +108,7 @@ public final class ScreenStages {
 
         // conditioning: moments → unrolled Newton passes → partial pass (all global-window Combines)
         PCollectionView<FitState> fitView = null;
-        PCollectionView<List<List<KV<Integer, VectorAccumulator>>>> partialView = null;
+        PCollectionView<Map<Integer, VectorAccumulator>> partialView = null;
         final List<PCollectionView<?>> finalizeSideInputs = new ArrayList<>();
         if (spec.hasConditioning()) {
             final ConditioningScorer scorer = new ConditioningScorer(spec);
@@ -130,8 +137,7 @@ public final class ScreenStages {
                     .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView)).withSideInputs(momentsView, fitView))
                     .setCoder(KvCoder.of(VarIntCoder.of(), VectorAccumulator.CODER))
                     .apply("ConditioningPartial_Combine", Combine.perKey(new VectorAccumulator.Fn()))
-                    .apply("ConditioningPartial_Gather", Combine.globally(new GatherFn<KV<Integer, VectorAccumulator>>(KvCoder.of(VarIntCoder.of(), VectorAccumulator.CODER))).withoutDefaults())
-                    .apply("ConditioningPartial_View", View.asList());
+                    .apply("ConditioningPartial_View", View.asMap());
             finalizeSideInputs.add(fitView);
             finalizeSideInputs.add(partialView);
         }
@@ -209,9 +215,9 @@ public final class ScreenStages {
                 final Double label = label(values);
                 final String group = spec.group == null ? null : text(values.get(spec.group));
                 final Double weight = spec.weightField == null ? 1d : ScreenMath.toDouble(values.get(spec.weightField));
-                final boolean invalid = label == null || Double.isNaN(label)
+                final boolean invalid = label == null || !Double.isFinite(label)
                         || (spec.group != null && group == null)
-                        || weight == null || Double.isNaN(weight) || weight < 0;
+                        || weight == null || !Double.isFinite(weight) || weight < 0;
                 if (invalid) {
                     book[ScoreAccumulator.ROWS_INVALID] = 1;
                     c.output(bookTag, KV.of(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator().add(null, book)));
@@ -419,29 +425,11 @@ public final class ScreenStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final FitState previous = c.sideInput(stateView);
-            final FitState next = SerializableCoderCopy.copy(previous).advance(c.element().getValues(), spec.conditioningL2, spec.conditioningTol);
+            // side-input values must not be mutated: the controller advances a copy
+            final FitState next = SerializableUtils.clone(previous).advance(c.element().getValues(), spec.conditioningL2, spec.conditioningTol);
             LOG.info("screen conditioning iteration {}: objective {} converged={} rejected={}", next.iteration,
                     next.objectiveHistory.isEmpty() ? null : next.objectiveHistory.get(next.objectiveHistory.size() - 1), next.converged, next.rejected);
             c.output(next);
-        }
-    }
-
-    /** Side-input values must not be mutated: the controller advances a copy. */
-    static final class SerializableCoderCopy {
-        private SerializableCoderCopy() {}
-
-        static FitState copy(final FitState state) {
-            try {
-                final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
-                try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
-                    out.writeObject(state);
-                }
-                try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
-                    return (FitState) in.readObject();
-                }
-            } catch (final java.io.IOException | ClassNotFoundException e) {
-                throw new IllegalStateException("failed to copy the fit state", e);
-            }
         }
     }
 
@@ -540,10 +528,10 @@ public final class ScreenStages {
         private final TupleTag<MElement> recordTag;
         private final TupleTag<MElement> summaryTag;
         private final PCollectionView<FitState> fitView;
-        private final PCollectionView<List<List<KV<Integer, VectorAccumulator>>>> partialView;
+        private final PCollectionView<Map<Integer, VectorAccumulator>> partialView;
 
         FinalizeDoFn(final ScreenSpec spec, final TupleTag<MElement> recordTag, final TupleTag<MElement> summaryTag,
-                     final PCollectionView<FitState> fitView, final PCollectionView<List<List<KV<Integer, VectorAccumulator>>>> partialView) {
+                     final PCollectionView<FitState> fitView, final PCollectionView<Map<Integer, VectorAccumulator>> partialView) {
             this.spec = spec;
             this.recordTag = recordTag;
             this.summaryTag = summaryTag;
@@ -562,13 +550,9 @@ public final class ScreenStages {
             if (fitView != null) {
                 fit = c.sideInput(fitView);
                 partials = new HashMap<>();
-                for (final List<KV<Integer, VectorAccumulator>> gathered : c.sideInput(partialView)) {
-                    for (final KV<Integer, VectorAccumulator> kv : gathered) {
-                        partials.merge(kv.getKey(), kv.getValue().getValues().clone(), (a, b) -> {
-                            for (int i = 0; i < a.length; i++) a[i] += b[i];
-                            return a;
-                        });
-                    }
+                // Combine.perKey in the global window: exactly one vector per key
+                for (final Map.Entry<Integer, VectorAccumulator> e : c.sideInput(partialView).entrySet()) {
+                    partials.put(e.getKey(), e.getValue().getValues());
                 }
             }
             final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit);

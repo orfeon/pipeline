@@ -253,5 +253,9 @@ public class GroupScorerTest {
         Assertions.assertEquals("date", s.periodsFieldType);
         // a manifest that is not JSON (e.g. a local path that does not exist) is reported as a config error
         Assertions.assertThrows(IllegalArgumentException.class, () -> ScreenSpec.Lineage.fromManifest("manifests/missing.json"));
+        // the list form of conditioning must not silently disable the partial test
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], conditioning: []}"));
+        // the baseline is the model offset: it is a role field for conditioning like it is for candidates
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, baseline: b, candidates: [x], conditioning: {fields: [b]}}"));
     }
 }

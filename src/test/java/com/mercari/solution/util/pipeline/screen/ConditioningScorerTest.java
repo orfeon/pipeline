@@ -161,6 +161,41 @@ public class ConditioningScorerTest {
     }
 
     @Test
+    public void testFitIsInvariantToWeightScale() {
+        // rescaling the weight column must leave the fitted point, the pass count and the partial ridge unchanged
+        final ScreenSpec s = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, conditioning: {fields: [f], l2: 0.1, maxIter: 20}}");
+        final GroupScorer groups = new GroupScorer(s);
+        final ConditioningScorer scorer = new ConditioningScorer(s);
+        final FitState[] fits = new FitState[2];
+        for (int run = 0; run < 2; run++) {
+            final double w = run == 0 ? 1d : 1000d;
+            final GroupScorer.Unit unit = groups.prepare(List.of(
+                    new ScreenRow("a", "a:0", 1, null, 1, Double.NaN, w, new double[]{3, 1}),
+                    new ScreenRow("a", "a:1", 1, null, 0, Double.NaN, w, new double[]{1, 0}),
+                    new ScreenRow("a", "a:2", 1, null, 0, Double.NaN, w, new double[]{2, -1})), "a");
+            FitState state = FitState.initial(1);
+            int passes = 0;
+            while (!state.converged && passes < 20) {
+                state.advance(scorer.evaluate(unit, state.proposal, UNIT_MOMENTS), 0.1, 1e-10);
+                passes++;
+            }
+            fits[run] = state;
+        }
+        Assertions.assertEquals(fits[0].iteration, fits[1].iteration);
+        Assertions.assertEquals(fits[0].bestTheta[0], fits[1].bestTheta[0], 1e-9);
+        Assertions.assertEquals(fits[0].gainPerUnit(), fits[1].gainPerUnit(), 1e-9);
+        Assertions.assertEquals(1000d, fits[1].nUnits, 1e-9);
+    }
+
+    @Test
+    public void testNonFiniteStartIsNotAcceptedAsBest() {
+        final FitState state = FitState.initial(1).advance(new double[]{1, Double.NaN, Double.NaN, Double.NaN}, 0d, 1e-8);
+        Assertions.assertFalse(state.hasBest);
+        Assertions.assertTrue(state.converged);
+        Assertions.assertEquals(1, state.iteration);
+    }
+
+    @Test
     public void testBinomialEvaluationCarriesAnIntercept() {
         // prior mode, two independent rows y = [1, 0], F = [1, -1] standardised: p̂(0) = 0.5
         // ll = 2 log 0.5 ; g = [(1-.5)*1 + (0-.5)*(-1), (1-.5) + (0-.5)] = [1, 0] ; G = 0.25 * [[2, 0], [0, 2]]
