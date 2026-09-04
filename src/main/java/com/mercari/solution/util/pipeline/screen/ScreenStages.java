@@ -1,9 +1,12 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.mercari.solution.module.Logging;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.IterableCoder;
@@ -68,6 +71,9 @@ public final class ScreenStages {
         final WindowingStrategy<?, ?> strategy = input.getWindowingStrategy();
         if (spec.hasConditioning() && !(strategy.getWindowFn() instanceof GlobalWindows)) {
             errors.add("conditioning needs the global window (the Newton passes combine over the whole input); remove the windowing strategy or the conditioning block");
+        }
+        if (spec.selectionUri != null && !(strategy.getWindowFn() instanceof GlobalWindows)) {
+            errors.add("output.selection needs the global window (one pass list per run; a windowed run would overwrite it per window)");
         }
         if (!(strategy.getTrigger() instanceof DefaultTrigger)) {
             errors.add("screen needs the default trigger (a triggered input fires the Combines once per pane: several partial summaries, and the conditioning singleton views break); remove strategy.trigger");
@@ -524,6 +530,7 @@ public final class ScreenStages {
     }
 
     static class FinalizeDoFn extends DoFn<List<KV<Integer, ScoreAccumulator>>, MElement> {
+        private static final Gson SELECTION_GSON = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
         private final ScreenSpec spec;
         private final TupleTag<MElement> recordTag;
         private final TupleTag<MElement> summaryTag;
@@ -560,6 +567,16 @@ public final class ScreenStages {
                 c.output(recordTag, MElement.of(record, c.timestamp()));
             }
             c.output(summaryTag, MElement.of(result.summary(), c.timestamp()));
+            if (spec.selectionUri != null) {
+                // the pass list is a primary deliverable: a write failure fails the step (no silent partial run)
+                ResourceUtil.writeString(spec.selectionUri, SELECTION_GSON.toJson(ScreenReport.selection(spec, result)));
+                final int nColumns = ((List<?>) result.summary().get("passedColumns")).size();
+                if (nColumns == 0) {
+                    LOG.warn("screen selection written to {} with no column: a feature run reading it as output.include keeps no feature column", spec.selectionUri);
+                } else {
+                    LOG.info("screen selection written to {}: {} columns", spec.selectionUri, nColumns);
+                }
+            }
             LOG.info("screen finalized: {} records, summary {}", result.records().size(), result.summary());
         }
     }

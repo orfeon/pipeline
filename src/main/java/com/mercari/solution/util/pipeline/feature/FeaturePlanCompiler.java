@@ -2520,8 +2520,11 @@ public final class FeaturePlanCompiler {
         return copy;
     }
 
-    /** JSON with object keys sorted recursively, so formatting / key order do not change the hash. */
-    static String canonical(final JsonElement element) {
+    /**
+     * JSON with object keys sorted recursively, so formatting / key order do not change the hash. Its text is a
+     * hash input (plan / output / include hashes, the screen transform's screenHash): keep it stable.
+     */
+    public static String canonical(final JsonElement element) {
         if (element == null || element.isJsonNull()) return "null";
         if (element.isJsonPrimitive()) return element.toString();
         if (element.isJsonArray()) {
