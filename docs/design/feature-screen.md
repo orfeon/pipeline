@@ -1,9 +1,9 @@
-# Screen transform — baseline-conditioned feature screening
+# Screen Transform (Design Document)
 
-Status: PR 1 implemented (marginal score test, placebo calibration, periods, time window, leak flags;
+Status: **Implemented** — PR 1 implemented (marginal score test, placebo calibration, periods, time window, leak flags;
 families `groupedMultinomial` / `binomial`); PR 2 implemented (conditioning = partial test against an existing
-feature set, §2 `ConditioningScorer` / `FitState` and §3). PR 3 (gaussian, poisson, independent-row rank) / PR 4
-(`output.selection`) are design positions only. User-facing reference:
+feature set, §2 `ConditioningScorer` / `FitState` and §3). PR 4 implemented (`output.selection`, the pass list the feature transform's `output.include` reads). PR 3
+(gaussian, poisson, independent-row rank) is a design position only. User-facing reference:
 `src/main/resources/server/docs/module/transform/screen.md`.
 
 ## 1. Position
@@ -116,6 +116,12 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
   tolerance are on the *average* log-likelihood (per weighted unit, the unit count carrying the same weight as the sums), so `l2` and `tol` are size-free and weight-scale-free; F is
   standardised so `l2` is scale-free; the binomial family always carries an intercept in F̃ (a calibration
   shift beyond the baseline, the prior rate without one), which also centres the partial statistics.
+- **The pass list is one JSON document with `columns` first.** `ScreenReport.selection` writes what
+  `FeaturePlanService.parseIncludeList` reads (`{columns: [...]}`), plus the provenance a consumer needs to
+  trust it: the effective test (`partial` / `marginal`), thresholds, the upstream manifest's `planHash` /
+  `outputHash` (from `candidates.manifest`), `screenHash` (SHA-256 of the canonical parameters) and the passing
+  records' statistics. Written from the finalize step (global window only) through `ResourceUtil.writeBytes`;
+  a write failure fails the step. `ScreenSelectionIncludeTest` pins the round trip.
 - Field names follow the proposal (`est_gain`, `n_groups`, `period_z`, `leakSuspect` …) with additions that
   cost nothing now and keep later extensions schema-compatible: `df` (block tests), `pValue` / `qValue`,
   `degenerate`, `family`, and the summary's `passedColumns` (the selection list of PR 4).
@@ -138,8 +144,6 @@ the same finding for keyed feature stages).
 
 - **PR 3 — gaussian / poisson** (`σ²` from `Σ(y − μ)²` in the same accumulator: one pass) and the
   independent-row `rank` / `absdev` via a KLL pass.
-- **PR 4 — `output.selection`** (writes `{"columns": [...], "threshold": ..., "planHash": ...}` for the feature
-  transform's `output.include`; `passedColumns` in the summary already carries the list).
 - Block tests (`df > 1`) for categorical / vector candidates (one-hot blocks, embeddings): `S` vector, `H`
   matrix, χ²(k); the record schema already has `df`.
 - Windowed / streaming marginal screen (sliding-window drift monitoring): the marginal path is one Combine

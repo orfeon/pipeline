@@ -80,6 +80,14 @@ public final class ScreenSpec implements Serializable {
     public int conditioningMaxIter = 10;
     public double conditioningTol = 1e-8;
 
+    /** output.selection: URI / path of the pass-list file (null = not written) */
+    public String selectionUri;
+    /** SHA-256 of the canonical parameters (the identity of this screen configuration) */
+    public String parametersHash;
+    /** plan / output hash of the upstream feature manifest (candidates.manifest), when given */
+    public String manifestPlanHash;
+    public String manifestOutputHash;
+
     /** resolved candidate column names (input schema order) */
     public List<String> candidates = new ArrayList<>();
     /** resolved conditioning column names (input schema order) */
@@ -318,9 +326,17 @@ public final class ScreenSpec implements Serializable {
                 errors.add("conditioning must be an object {fields, l2, maxIter, tol} or a list of field names");
             }
         }
-        if (p.has("output") && p.get("output").isJsonObject() && p.getAsJsonObject("output").has("selection")) {
-            errors.add("output.selection is not implemented in this version (the summary output carries passedColumns)");
+        final JsonElement output = p.get("output");
+        if (output != null && !output.isJsonNull()) {
+            if (output.isJsonObject()) {
+                final JsonObject o = output.getAsJsonObject();
+                s.selectionUri = string(o, "selection");
+                if (o.has("selection") && (s.selectionUri == null || s.selectionUri.isBlank())) errors.add("output.selection must be a URI or path of the pass-list file to write");
+            } else {
+                errors.add("output must be an object {selection: <uri>}");
+            }
         }
+        s.parametersHash = sha256(canonical(p));
 
         // rules that depend on group are checked in resolve (group may still come from the manifest roles)
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
@@ -345,6 +361,9 @@ public final class ScreenSpec implements Serializable {
         /** role name → column (feature manifest {@code roles}) */
         public final Map<String, String> roles = new LinkedHashMap<>();
         public String timeField;
+        /** feature manifest identities (null when the lineage came from the schema) */
+        public String planHash;
+        public String outputHash;
 
         public record Entry(String scope, String block, Set<String> derivedFrom, String evidence) implements Serializable {}
 
@@ -372,6 +391,8 @@ public final class ScreenSpec implements Serializable {
                 throw new IllegalArgumentException("candidates.manifest is not a JSON object (a local path that does not exist is read as literal content): " + e.getMessage());
             }
             l.timeField = string(m, "timeField");
+            l.planHash = string(m, "planHash");
+            l.outputHash = string(m, "outputHash");
             if (m.has("roles") && m.get("roles").isJsonObject()) {
                 for (final Map.Entry<String, JsonElement> e : m.getAsJsonObject("roles").entrySet()) {
                     if (!e.getValue().isJsonObject()) continue;
@@ -410,6 +431,8 @@ public final class ScreenSpec implements Serializable {
             other.columns.forEach(columns::putIfAbsent);
             other.roles.forEach(roles::putIfAbsent);
             if (timeField == null) timeField = other.timeField;
+            if (planHash == null) planHash = other.planHash;
+            if (outputHash == null) outputHash = other.outputHash;
             return this;
         }
     }
@@ -445,6 +468,8 @@ public final class ScreenSpec implements Serializable {
             timeField = l.timeField;
             notes.add("time.field defaulted to manifest timeField: " + timeField);
         }
+        manifestPlanHash = l.planHash;
+        manifestOutputHash = l.outputHash;
         if (periodsBucket != null && periodsField == null) periodsField = timeField;
         if (timeField == null && (timeToMillis != null || timeFromMillis != null)) {
             errors.add("time.from / time.to require time.field (or a manifest timeField): the element timestamp of a bounded source is not an event time");
@@ -559,6 +584,45 @@ public final class ScreenSpec implements Serializable {
             case int32, int64, float32, float64, bool -> true;
             default -> false;
         };
+    }
+
+    // ---- identity ------------------------------------------------------------------------------------------
+
+    /** Canonical (key-sorted, compact) JSON text of an element. */
+    public static String canonical(final JsonElement e) {
+        if (e == null || e.isJsonNull()) return "null";
+        if (e.isJsonPrimitive()) return e.toString();
+        if (e.isJsonArray()) {
+            final StringBuilder sb = new StringBuilder("[");
+            boolean first = true;
+            for (final JsonElement i : e.getAsJsonArray()) {
+                if (!first) sb.append(',');
+                sb.append(canonical(i));
+                first = false;
+            }
+            return sb.append(']').toString();
+        }
+        final java.util.TreeMap<String, JsonElement> sorted = new java.util.TreeMap<>();
+        for (final Map.Entry<String, JsonElement> entry : e.getAsJsonObject().entrySet()) sorted.put(entry.getKey(), entry.getValue());
+        final StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (final Map.Entry<String, JsonElement> entry : sorted.entrySet()) {
+            if (!first) sb.append(',');
+            sb.append(new com.google.gson.JsonPrimitive(entry.getKey())).append(':').append(canonical(entry.getValue()));
+            first = false;
+        }
+        return sb.append('}').toString();
+    }
+
+    public static String sha256(final String text) {
+        try {
+            final java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            final StringBuilder sb = new StringBuilder();
+            for (final byte b : digest.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (final java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     // ---- json helpers --------------------------------------------------------------------------------------

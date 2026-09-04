@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group) and binomial. Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group) and binomial. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -150,7 +150,7 @@ comes back through a sink / source. Using a selector without any lineage availab
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect`. Default: no flag. |
 | conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit. Needs the global window. |
-| output.selection | — | — | Planned: writing the pass list to a URI. The summary's `passedColumns` already carries the list. |
+| output | optional | Object | `selection`: URI / path of the pass-list file written at the end of the run (see [Closing the loop](#closing-the-loop-outputselection)). Needs the global window. |
 
 ## Outputs
 
@@ -294,6 +294,68 @@ transforms:
       placebo: {noise: 100, shuffle: {field: cand_start_price, n: 100}}
 ```
 
+### Example 5: closing the loop with the feature transform
+
+The screen writes its pass list; the next feature run projects its output to those columns. The two
+configs share the version argument, so the manifest the screen read (`candidates.manifest`) and the include the
+feature reads (`output.include`) are tied to one plan.
+
+```yaml
+# screen run
+transforms:
+  - name: screen
+    module: screen
+    inputs: [features]
+    parameters:
+      candidates:
+        manifest: gs://bucket/feature/${args.version}/manifest.json
+        exclude: ["derivedFrom:final_price", "scope:row"]
+      placebo: {noise: 100, shuffle: {field: start_price, n: 100}}
+      output:
+        selection: gs://bucket/screen/${args.version}/passed.json
+
+# next feature run
+transforms:
+  - name: features
+    module: feature
+    inputs: [rows]
+    parameters:
+      sources: ...
+      features: ...
+      output:
+        include: gs://bucket/screen/${args.version}/passed.json
+        manifest: gs://bucket/feature/${args.nextVersion}/manifest.json
+```
+
+## Closing the loop (output.selection)
+
+`output.selection` writes one JSON document at the end of the run:
+
+```json
+{
+  "version": 1,
+  "columns": ["f_extra", "f_recent_bids"],
+  "test": "partial",
+  "family": "groupedMultinomial", "method": "scoreTest",
+  "threshold": 0.000063, "thresholdTheoretical": 0.000067, "quantile": 0.99,
+  "nCandidates": 27, "nPassed": 2, "nUnits": 49839,
+  "timeFrom": null, "timeTo": "2025-06-30T23:59:59Z",
+  "screenHash": "…", "planHash": "…", "outputHash": "…", "manifest": "gs://…/manifest.json",
+  "conditioningFields": ["model_a", "model_b"],
+  "createdAt": "2026-09-05T10:00:00Z",
+  "passed": [{"candidate": "f_extra", "transform": "rank", "est_gain": 0.00077, "z": 8.95, "partial_gain": 0.00051, "partial_z": 7.1, "r2_F": 0.035, "leakSuspect": false}]
+}
+```
+
+- `columns` is what the feature transform's `output.include` reads (`{columns: [...]}` is one of its accepted
+  shapes); the other members record how the list was produced.
+- `test` says which statistic the cut-off used (`partial` with a converged conditioning fit, else `marginal`).
+- `planHash` / `outputHash` are the upstream feature manifest's identities when `candidates.manifest` was given
+  (null otherwise); `screenHash` is the SHA-256 of this step's canonical parameters. Together they make the pass
+  list traceable to the plan that produced the candidates and the configuration that screened them.
+- The file is written once per run from the finalize step (global window only); a failed write fails the step.
+  Keeping a ledger of runs is a matter of versioned paths (`${args.version}`) or an `action/storage` copy.
+
 ## Reading the output
 
 - Rank candidates by `est_gain` (or `z`); `passed` is the placebo-calibrated cut-off, `qValue` the
@@ -303,8 +365,8 @@ transforms:
 - `periods_agree` far below `n_periods` means an unstable effect: look at `period_z` for a decay over time.
 - `leakSuspect` candidates deserve a look at their lineage before they are used: an outsized z is the typical
   signature of a column computed after the outcome.
-- Feed `passedColumns` into the feature transform's `output.include` (a JSON file with `{"columns": [...]}`) to
-  close the loop between screening and the next feature run.
+- `output.selection` writes the pass list in the format the feature transform's `output.include` reads, so
+  the next feature run emits only the screened columns (see below); `passedColumns` in the summary is the same list.
 
 ## Limits
 
@@ -322,4 +384,4 @@ transforms:
   quantile sketch (planned).
 - Conditioning needs the global window and costs `maxIter + 2` passes; keep the conditioning set to a few
   hundred columns (the Newton Gram matrix is k × k).
-- Planned: `gaussian` / `poisson` families, `output.selection`.
+- Planned: `gaussian` / `poisson` families.

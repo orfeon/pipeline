@@ -69,6 +69,9 @@ public final class ScreenStages {
         if (spec.hasConditioning() && !(strategy.getWindowFn() instanceof GlobalWindows)) {
             errors.add("conditioning needs the global window (the Newton passes combine over the whole input); remove the windowing strategy or the conditioning block");
         }
+        if (spec.selectionUri != null && !(strategy.getWindowFn() instanceof GlobalWindows)) {
+            errors.add("output.selection needs the global window (one pass list per run; a windowed run would overwrite it per window)");
+        }
         if (!(strategy.getTrigger() instanceof DefaultTrigger)) {
             errors.add("screen needs the default trigger (a triggered input fires the Combines once per pane: several partial summaries, and the conditioning singleton views break); remove strategy.trigger");
         }
@@ -560,6 +563,12 @@ public final class ScreenStages {
                 c.output(recordTag, MElement.of(record, c.timestamp()));
             }
             c.output(summaryTag, MElement.of(result.summary(), c.timestamp()));
+            if (spec.selectionUri != null) {
+                // the pass list is a primary deliverable: a write failure fails the step (no silent partial run)
+                final String json = new com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(ScreenReport.selection(spec, result));
+                com.mercari.solution.util.domain.file.ResourceUtil.writeBytes(spec.selectionUri, json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                LOG.info("screen selection written to {}: {} columns", spec.selectionUri, ((List<?>) result.summary().get("passedColumns")).size());
+            }
             LOG.info("screen finalized: {} records, summary {}", result.records().size(), result.summary());
         }
     }

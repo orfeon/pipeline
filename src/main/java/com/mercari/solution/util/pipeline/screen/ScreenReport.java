@@ -278,6 +278,59 @@ public final class ScreenReport {
         return new Result(records, summary);
     }
 
+    /**
+     * The pass list written to {@code output.selection}: {@code columns} is what the feature transform's
+     * {@code output.include} reads; the rest records how the list was produced (thresholds, the effective test,
+     * the upstream manifest identities, this configuration's hash) and the passing records' statistics.
+     */
+    public static com.google.gson.JsonObject selection(final ScreenSpec spec, final Result result) {
+        final Map<String, Object> summary = result.summary();
+        final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        o.addProperty("version", 1);
+        final com.google.gson.JsonArray columns = new com.google.gson.JsonArray();
+        for (final Object name : (List<?>) summary.get("passedColumns")) columns.add((String) name);
+        o.add("columns", columns);
+        o.addProperty("test", spec.hasConditioning() && Boolean.TRUE.equals(summary.get("conditioningConverged")) ? "partial" : "marginal");
+        o.addProperty("family", spec.family);
+        o.addProperty("method", METHOD);
+        o.addProperty("threshold", (Double) summary.get("threshold"));
+        o.addProperty("thresholdTheoretical", (Double) summary.get("thresholdTheoretical"));
+        o.addProperty("quantile", spec.quantile);
+        o.addProperty("nCandidates", (Long) summary.get("nCandidates"));
+        o.addProperty("nPassed", (Long) summary.get("nPassed"));
+        o.addProperty("nUnits", (Long) summary.get("nUnits"));
+        o.addProperty("timeFrom", spec.timeFrom);
+        o.addProperty("timeTo", spec.timeTo);
+        o.addProperty("screenHash", spec.parametersHash);
+        o.addProperty("planHash", spec.manifestPlanHash);
+        o.addProperty("outputHash", spec.manifestOutputHash);
+        o.addProperty("manifest", spec.candidateManifest);
+        if (spec.hasConditioning()) {
+            final com.google.gson.JsonArray fields = new com.google.gson.JsonArray();
+            spec.conditioningFields.forEach(fields::add);
+            o.add("conditioningFields", fields);
+        }
+        o.addProperty("createdAt", java.time.Instant.now().toString());
+        final com.google.gson.JsonArray details = new com.google.gson.JsonArray();
+        for (final Map<String, Object> r : result.records()) {
+            if (!Boolean.TRUE.equals(r.get("passed"))) continue;
+            final com.google.gson.JsonObject d = new com.google.gson.JsonObject();
+            d.addProperty("candidate", (String) r.get("candidate"));
+            d.addProperty("transform", (String) r.get("transform"));
+            d.addProperty("est_gain", (Double) r.get("est_gain"));
+            d.addProperty("z", (Double) r.get("z"));
+            if (r.get("partial_gain") != null) {
+                d.addProperty("partial_gain", (Double) r.get("partial_gain"));
+                d.addProperty("partial_z", (Double) r.get("partial_z"));
+                d.addProperty("r2_F", (Double) r.get("r2_F"));
+            }
+            d.addProperty("leakSuspect", (Boolean) r.get("leakSuspect"));
+            details.add(d);
+        }
+        o.add("passed", details);
+        return o;
+    }
+
     public static Schema recordSchema() {
         final Schema period = Schema.builder()
                 .withField("period", Schema.FieldType.STRING)
