@@ -1,10 +1,10 @@
 # Screen Transform (Design Document)
 
-Status: **Implemented** — PR 1 implemented (marginal score test, placebo calibration, periods, time window, leak flags;
-families `groupedMultinomial` / `binomial`); PR 2 implemented (conditioning = partial test against an existing
-feature set, §2 `ConditioningScorer` / `FitState` and §3). PR 4 implemented (`output.selection`, the pass list the feature transform's `output.include` reads). PR 3
-(gaussian, poisson, independent-row rank) is a design position only. User-facing reference:
-`src/main/resources/server/docs/module/transform/screen.md`.
+Status: **Implemented — marginal score test with placebo calibration, periods, time window and leak flags;
+conditioning (the partial test against an existing feature set, §2 `ConditioningScorer` / `FitState`, §3);
+families `groupedMultinomial` / `binomial` / `gaussian` / `poisson`; `output.selection` (the pass list the feature
+transform's `output.include` reads). The independent-row `rank` / `absdev` via a quantile sketch remains a design
+position (§4).** User-facing reference: `src/main/resources/server/docs/module/transform/screen.md`.
 
 ## 1. Position
 
@@ -120,9 +120,22 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
   `FeaturePlanService.parseIncludeList` reads (`{columns: [...]}`), plus the provenance a consumer needs to
   trust it: the effective test (`partial` / `marginal`), thresholds, the upstream manifest's `planHash` /
   `outputHash` (from `candidates.manifest`), `screenHash` (SHA-256 of the canonical parameters without the
-  file locations, sharing `FeaturePlanCompiler.canonical` with the feature plan hash) and the passing
+  file locations, sharing `FeaturePlanCompiler.canonical` / `sha256` — the same 16-hex width — with the feature
+  plan hash) and the passing
   records' statistics; NaN statistics are written as null. Written from the finalize step (global window only)
   through `ResourceUtil.writeString`; a write failure fails the step. `ScreenSelectionIncludeTest` pins the round trip.
+- **Row families share one moment-sum path.** `binomial`, `gaussian` and `poisson` differ only in the Fisher
+  weight at the baseline mean (μ(1 − μ), 1, μ — `ScreenSpec.fisherWeight`, the one definition the marginal
+  moments, the conditioning fit and the report's prior mode share — the report applies it at ȳ in prior mode, and
+  the label variance for gaussian); gaussian carries one extra slot (`C6 = Σ w r²`) for the residual
+  variance, so its statistic is scale-free without a second pass. The conditioning fit uses the matching link
+  (logit / identity / log) and likelihood; without a baseline the intercept starts at the link of the weighted label
+  mean (`ConditioningScorer.initialTheta`, from two extra slots of the moments pass) so the first pass sits at the
+  prior-mean model — at θ = 0 the poisson mean is 1 and the first step on the intercept is log ȳ in one jump,
+  which overshoots for count labels with a large mean and wastes the pass budget on step halvings. The gaussian
+  fit is least squares at σ² = 1 (one Newton step); the partial test and `conditioningGain` divide by the residual
+  variance at the fit (`SIGMA_KEY` sums from the partial pass), and an exact fit (σ² = 0) falls back to the
+  marginal test with a note.
 - Field names follow the proposal (`est_gain`, `n_groups`, `period_z`, `leakSuspect` …) with additions that
   cost nothing now and keep later extensions schema-compatible: `df` (block tests), `pValue` / `qValue`,
   `degenerate`, `family`, and the summary's `passedColumns` (the selection list of PR 4).
@@ -143,8 +156,8 @@ the same finding for keyed feature stages).
 
 ## 4. Deferred (design position)
 
-- **PR 3 — gaussian / poisson** (`σ²` from `Σ(y − μ)²` in the same accumulator: one pass) and the
-  independent-row `rank` / `absdev` via a KLL pass.
+- **Independent-row `rank` / `absdev`** need a window-wide quantile sketch (one KLL pass, `KllDoublesSketch` as
+  in the profile sink) before the score pass; the grouped transforms stay exact.
 - Block tests (`df > 1`) for categorical / vector candidates (one-hot blocks, embeddings): `S` vector, `H`
   matrix, χ²(k); the record schema already has `df`.
 - Windowed / streaming marginal screen (sliding-window drift monitoring): the marginal path is one Combine

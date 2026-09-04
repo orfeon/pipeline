@@ -126,7 +126,9 @@ public final class ScreenStages {
                     .apply("ConditioningMoments_Combine", Combine.globally(new VectorAccumulator.Fn()))
                     .apply("ConditioningMoments_View", View.asSingleton());
             PCollectionView<FitState> state = input.getPipeline()
-                    .apply("ConditioningInit", Create.of(FitState.initial(scorer.k)).withCoder(SerializableCoder.of(FitState.class)))
+                    .apply("ConditioningInit", Create.of(scorer.k))
+                    .apply("ConditioningInit_State", ParDo.of(new InitDoFn(spec, momentsView)).withSideInputs(momentsView))
+                    .setCoder(SerializableCoder.of(FitState.class))
                     .apply("ConditioningInit_View", View.asSingleton());
             for (int it = 1; it <= spec.conditioningMaxIter; it++) {
                 final PCollection<VectorAccumulator> evaluation = units
@@ -223,6 +225,7 @@ public final class ScreenStages {
                 final Double weight = spec.weightField == null ? 1d : ScreenMath.toDouble(values.get(spec.weightField));
                 final boolean invalid = label == null || !Double.isFinite(label)
                         || (spec.group != null && group == null)
+                        || (spec.isPoisson() && label < 0)
                         || weight == null || !Double.isFinite(weight) || weight < 0;
                 if (invalid) {
                     book[ScoreAccumulator.ROWS_INVALID] = 1;
@@ -369,6 +372,23 @@ public final class ScreenStages {
         public void finishBundle(final FinishBundleContext c) {
             if (!partial.isEmpty()) c.output(partial, GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
             partial = new VectorAccumulator();
+        }
+    }
+
+    /** The state before the first pass: θ = 0 with the intercept at the prior mean (from the moments). */
+    static class InitDoFn extends DoFn<Integer, FitState> {
+        private final ScreenSpec spec;
+        private final PCollectionView<VectorAccumulator> momentsView;
+
+        InitDoFn(final ScreenSpec spec, final PCollectionView<VectorAccumulator> momentsView) {
+            this.spec = spec;
+            this.momentsView = momentsView;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final ConditioningScorer scorer = new ConditioningScorer(spec);
+            c.output(FitState.initial(c.element(), scorer.initialTheta(c.sideInput(momentsView).getValues())));
         }
     }
 

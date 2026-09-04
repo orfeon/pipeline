@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group) and binomial. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group), binomial, gaussian and poisson. output.selection writes the pass list the feature transform's output.include reads (closed loop). Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -31,6 +31,8 @@ nothing to a tree model (false positive). See [Limits](#limits).
 |---|---|---|---|
 | `groupedMultinomial` | Σ x̃ (ỹ − p) | Σ_g [ Σ p x̃² − (Σ p x̃)² ] | conditional logit within a group (the candidates of a search query, the listings of an auction session, the bids of a lot); `p` is the baseline share within the group (sums to 1); `ỹ` is the label normalised to sum 1 within the group |
 | `binomial` | Σ x̃ (y − p) | Σ p (1 − p) x̃² | independent rows; `p` is the baseline probability. Without a baseline the prior rate is used and the intercept is profiled out |
+| `gaussian` | Σ x̃ (y − μ) / σ² | Σ x̃² / σ² | independent rows, identity link; `μ` is the baseline value (`form: value`), σ² the residual variance around it (the label variance without a baseline). The statistic is invariant to the scale of the label |
+| `poisson` | Σ x̃ (y − μ) | Σ μ x̃² | independent rows, log link; `μ` is the baseline rate (`form: rate`, or `logRate` on the log scale). Without a baseline the prior rate is used |
 
 - `x̃` is the candidate centred by the p-weighted mean over the observed rows (within the group for
   `groupedMultinomial`, over the window for `binomial`); a missing value after centring is 0 (no information).
@@ -78,8 +80,9 @@ statistics); independent rows support `raw` only in this version.
 ### Conditioning (partial test)
 
 `conditioning.fields` names an existing feature set F. The transform fits the conditioning model
-η = offset + F̃·θ (the conditional logit within the group for `groupedMultinomial`; the logistic model with an
-intercept for `binomial`; F̃ = F standardised, missing → mean) by Newton's method with an L2 penalty on the
+η = offset + F̃·θ (the conditional logit within the group for `groupedMultinomial`; for the row families a GLM with an
+intercept — logistic for `binomial`, least squares for `gaussian` (one Newton step; the residual variance at the fit
+scales the partial test), log-linear for `poisson`; F̃ = F standardised, missing → mean) by Newton's method with an L2 penalty on the
 *average* log-likelihood, then orthogonalises every candidate against F in the Fisher metric W of the fitted
 model and reads the score test of what is left:
 
@@ -95,7 +98,11 @@ Cost: one pass for the column moments, one pass per Newton iteration (at most `m
 the step size and costs one more pass; converged iterations are skipped) and one pass for the partial sums —
 `maxIter + 2` passes over the data at most, each a global Combine. The summary reports `conditioningIterations`,
 `conditioningRejectedSteps`, `conditioningConverged` and `conditioningGain` (the in-sample average
-log-likelihood improvement of F over the baseline — a sanity check that the conditioning set is informative).
+log-likelihood improvement of F over the baseline — or, without one, over the prior-mean intercept the fit starts
+from — on the per-unit scale of `est_gain`; for `gaussian` it is divided by the residual variance at the fit, so it
+is invariant to the label scale — a sanity check that the conditioning set is informative). A `gaussian` fit whose
+residual variance is 0 (an exact fit) cannot scale the partial statistics: they are null, `passed` follows the
+marginal test and `notes` says so.
 Conditioning needs the global window (no `strategy` window) and, like every screen run, the default trigger.
 
 ## Input contract
@@ -104,7 +111,7 @@ Conditioning needs the global window (no `strategy` window) and, like every scre
 |---|---|
 | `group` (optional) | mutually exclusive samples of one unit (a query's candidates, a session's listings, a lot's bids). Required for `groupedMultinomial`. Omitted: every row is independent. |
 | `label` | the label field, or an expression over numeric fields (`{expr: "rank == 1 ? 1 : 0"}`). Several positives in a group are normalised (`normalizeTies: true`). |
-| `baseline` (optional) | the reference prediction: `form: prob` (a probability; normalised within the group for `groupedMultinomial`), `logProb`, `inverseShare` (1/x made a share within the group — odds, prices). Omitted: the prior (uniform share / prior rate). |
+| `baseline` (optional) | the reference prediction. `groupedMultinomial` / `binomial`: `form: prob` (a probability; normalised within the group for `groupedMultinomial`), `logProb`, `inverseShare` (1/x made a share within the group — odds, prices). `gaussian`: `form: value` (the predicted value). `poisson`: `form: rate` or `logRate`. Omitted: the prior (uniform share / prior rate / label mean). |
 | `time` (recommended) | the time field (`timestamp` / `date` / ISO string); `to` / `from` fence the window. Omitted: the element timestamp is used (set the source's `timestampAttribute`; bounded sources otherwise carry the minimum timestamp, so `to` / `from` require `field`). |
 | `weight` (optional) | a sample-weight field. |
 | candidates | numeric input fields (`int32` / `int64` / `float32` / `float64` / `bool`) selected by name globs or lineage selectors; role fields are never candidates. |
@@ -137,10 +144,10 @@ comes back through a sink / source. Using a selector without any lineage availab
 
 | parameter | optional | type | description |
 |---|---|---|---|
-| family | optional | String | `groupedMultinomial` (default) or `binomial`. `gaussian` / `poisson` are planned and rejected with a message. |
+| family | optional | String | `groupedMultinomial` (default), `binomial`, `gaussian` or `poisson`. The row families (`binomial` / `gaussian` / `poisson`) accept `group` for the within-group transforms and shuffles; `groupedMultinomial` requires it. A negative label is an invalid row for `poisson`. |
 | group | optional | String | Group key field. Required for `groupedMultinomial`. |
 | label | required | String or Object | Field name, or `{field}` / `{expr, normalizeTies}`. `expr` is a [Lucene expression](https://lucene.apache.org/core/10_5_0/expressions/org/apache/lucene/expressions/js/package-summary.html) over numeric fields; `normalizeTies` (default true) normalises the labels of a group to sum 1. |
-| baseline | optional | String or Object | Field name (form `prob`), or `{field, form}` with form `prob` / `logProb` / `inverseShare`. |
+| baseline | optional | String or Object | Field name (the family's default form), or `{field, form}`: `prob` / `logProb` / `inverseShare` (groupedMultinomial, binomial), `value` (gaussian), `rate` / `logRate` (poisson). |
 | time | optional | String or Object | Field name, or `{field, to, from}` with ISO-8601 instants. Rows after `to` / before `from` are not screened. |
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
 | rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time). Default: every field value. |
@@ -353,8 +360,9 @@ transforms:
 - `test` says which statistic the cut-off used (`partial` when the conditioning fit accepted a point — the same
   rule as the summary's `test` — else `marginal`).
 - `planHash` / `outputHash` are the upstream feature manifest's identities when `candidates.manifest` was given
-  (null otherwise); `screenHash` is the SHA-256 of this step's canonical parameters without the file locations
-  (`output`, `candidates.manifest`), so it is the same across runs that only move the pass list or the manifest.
+  (null otherwise); `screenHash` is the SHA-256 (16 hex characters, the width of the feature transform's hashes) of
+  this step's canonical parameters without the file locations (`output`, `candidates.manifest`), so it is the same
+  across runs that only move the pass list or the manifest.
   Together they make the pass list traceable to the plan that produced the candidates and the configuration that
   screened them.
 - `threshold` / `thresholdTheoretical` are null when no unit was scored (no `NaN` in the file).
@@ -391,4 +399,3 @@ transforms:
   quantile sketch (planned).
 - Conditioning needs the global window and costs `maxIter + 2` passes; keep the conditioning set to a few
   hundred columns (the Newton Gram matrix is k × k).
-- Planned: `gaussian` / `poisson` families.

@@ -34,9 +34,12 @@ public final class ConditioningScorer implements Serializable {
         this.offset = spec.conditioningOffset();
     }
 
-    /** Standardisation sums of one row: {@code [n, Σ, Σ²]} per conditioning column over finite values. */
+    /**
+     * Standardisation sums of one row: {@code [n, Σ, Σ²]} per conditioning column over finite values, then the
+     * weighted label sums {@code [Σ w y, Σ w]} (the starting point of the intercept, see {@link #initialTheta}).
+     */
     public double[] moments(final ScreenRow row) {
-        final double[] m = new double[3 * kF];
+        final double[] m = new double[3 * kF + 2];
         for (int j = 0; j < kF; j++) {
             final double v = row.x[offset + j];
             if (!ScreenMath.isFinite(v)) continue;
@@ -44,7 +47,29 @@ public final class ConditioningScorer implements Serializable {
             m[3 * j + 1] += v;
             m[3 * j + 2] += v * v;
         }
+        m[3 * kF] = row.weight * row.label;
+        m[3 * kF + 1] = row.weight;
         return m;
+    }
+
+    /**
+     * The starting point of the Newton passes: θ = 0, except that without a baseline the intercept starts at the
+     * link of the weighted label mean, so the first pass already sits at the prior-mean model. At θ = 0 the poisson
+     * mean is 1 for every row and the first step on the intercept is ≈ log ȳ in one jump: for count labels with a
+     * large mean the proposal overshoots (exp(η) overflows), the step halvings eat the pass budget and the partial
+     * test runs at a non-MLE point. The binomial start moves from 0.5 to the prior rate, the gaussian from 0 to ȳ.
+     */
+    public double[] initialTheta(final double[] moments) {
+        final double[] theta = new double[k];
+        if (!intercept || spec.hasBaseline() || moments == null || moments.length < 3 * kF + 2) return theta;
+        final double w = moments[3 * kF + 1];
+        if (!(w > 0)) return theta;
+        double mean = moments[3 * kF] / w;
+        if (spec.isBinomial()) mean = Math.min(1 - GroupScorer.EPS, Math.max(GroupScorer.EPS, mean));
+        if (spec.isPoisson() && !(mean > 0)) return theta;
+        final double eta = spec.link(mean);
+        if (Double.isFinite(eta)) theta[kF] = eta;
+        return theta;
     }
 
     /** {@code [mean[], std[]]} from the summed moments; a constant column keeps std 1 (it becomes all zeros). */
@@ -80,7 +105,14 @@ public final class ConditioningScorer implements Serializable {
         return f;
     }
 
-    /** Fitted probabilities at θ: grouped softmax of log p + F̃θ within the unit; binomial σ(logit p + F̃θ). */
+    /** Key of the gaussian residual-variance sums {@code [Σ w r̂², Σ w]} in the partial-pass map (never a column key). */
+    public static final int SIGMA_KEY = -2;
+
+    /**
+     * Fitted means at θ: grouped softmax of log p + F̃θ within the unit; binomial σ(logit p + F̃θ); gaussian
+     * μ + F̃θ (identity link); poisson exp(log μ + F̃θ). Without a baseline the offset is 0 and the intercept
+     * column of F̃ carries the prior.
+     */
     public double[] fitted(final GroupScorer.Unit unit, final double[][] f, final double[] theta) {
         final int n = unit.size();
         final double[] eta = new double[n];
@@ -90,7 +122,9 @@ public final class ConditioningScorer implements Serializable {
             if (spec.isGroupedMultinomial()) {
                 e += unit.p[i] > 0 ? Math.log(unit.p[i]) : Double.NEGATIVE_INFINITY;
             } else if (!prior) {
-                e += Math.log(unit.p[i] / (1 - unit.p[i]));
+                if (spec.isBinomial()) e += Math.log(unit.p[i] / (1 - unit.p[i]));
+                else if (spec.isPoisson()) e += Math.log(unit.p[i]);
+                else e += unit.p[i];
             }
             eta[i] = e;
         }
@@ -104,13 +138,24 @@ public final class ConditioningScorer implements Serializable {
                 sum += p[i];
             }
             for (int i = 0; i < n; i++) p[i] /= sum;
-        } else {
+        } else if (spec.isBinomial()) {
             for (int i = 0; i < n; i++) {
                 final double s = 1d / (1d + Math.exp(-eta[i]));
                 p[i] = Math.min(1 - GroupScorer.EPS, Math.max(GroupScorer.EPS, s));
             }
+        } else if (spec.isPoisson()) {
+            for (int i = 0; i < n; i++) p[i] = Math.exp(Math.min(eta[i], 700d));
+        } else {
+            System.arraycopy(eta, 0, p, 0, n);
         }
         return p;
+    }
+
+    /** Log-likelihood term of one row (gaussian at σ² = 1: the fit is least squares, σ² enters the report). */
+    private double rowLogLikelihood(final double y, final double mu) {
+        if (spec.isBinomial()) return y * Math.log(mu) + (1 - y) * Math.log(1 - mu);
+        if (spec.isPoisson()) return y * Math.log(Math.max(mu, 1e-300)) - mu;
+        return -0.5 * (y - mu) * (y - mu);
     }
 
     /**
@@ -146,8 +191,8 @@ public final class ConditioningScorer implements Serializable {
                 final double w = unit.w[i];
                 final double y = unit.y[i];
                 wsum += w;
-                ll += w * (y * Math.log(p[i]) + (1 - y) * Math.log(1 - p[i]));
-                final double v = p[i] * (1 - p[i]);
+                ll += w * rowLogLikelihood(y, p[i]);
+                final double v = spec.fisherWeight(p[i]);
                 for (int a = 0; a < k; a++) {
                     out[2 + a] += w * (y - p[i]) * f[i][a];
                     for (int b = 0; b < k; b++) out[2 + k + a * k + b] += w * v * f[i][a] * f[i][b];
@@ -179,6 +224,14 @@ public final class ConditioningScorer implements Serializable {
         if (spec.isGroupedMultinomial()) {
             for (int i = 0; i < n; i++) for (int a = 0; a < k; a++) pf[a] += p[i] * f[i][a];
         }
+        if (spec.isGaussian()) {
+            // residual variance at the fitted model: the report divides the partial S / H by it
+            final double[] sig = into.computeIfAbsent(SIGMA_KEY, key -> new double[partialLength()]);
+            for (int i = 0; i < n; i++) {
+                sig[0] += unit.w[i] * (unit.y[i] - p[i]) * (unit.y[i] - p[i]);
+                sig[1] += unit.w[i];
+            }
+        }
         for (int c = 0; c < cols.length; c++) {
             for (int t = 0; t < nTransforms; t++) {
                 final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
@@ -209,7 +262,7 @@ public final class ConditioningScorer implements Serializable {
                     for (int i = 0; i < n; i++) {
                         if (!ScreenMath.isFinite(v[i])) continue;
                         final double w = unit.w[i];
-                        final double vv = p[i] * (1 - p[i]);
+                        final double vv = spec.fisherWeight(p[i]);
                         acc[0] += w * v[i] * (unit.y[i] - p[i]);
                         acc[1] += w * vv * v[i] * v[i];
                         for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];
