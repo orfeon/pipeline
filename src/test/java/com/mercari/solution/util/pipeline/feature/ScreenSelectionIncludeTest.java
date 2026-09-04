@@ -65,5 +65,25 @@ public class ScreenSelectionIncludeTest {
         final ScreenSpec c = ScreenSpec.parse(JsonParser.parseString("{placebo: {seed: 2, noise: 0}, candidates: [x], label: y, family: binomial}").getAsJsonObject());
         Assertions.assertEquals(a.parametersHash, b.parametersHash);
         Assertions.assertNotEquals(a.parametersHash, c.parametersHash);
+        // the file locations are not part of the identity
+        final ScreenSpec d = ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: [x], placebo: {noise: 0, seed: 1}, output: {selection: 'gs://b/v2/passed.json'}}").getAsJsonObject());
+        Assertions.assertEquals(a.parametersHash, d.parametersHash);
+    }
+
+    @Test
+    public void testEmptyInputWritesNullsNotNaN() {
+        final Schema schema = Schema.builder()
+                .withField("y", Schema.FieldType.INT64)
+                .withField("x", Schema.FieldType.FLOAT64)
+                .build();
+        final ScreenSpec spec = ScreenSpec.parse(JsonParser.parseString(
+                "{family: binomial, label: y, candidates: [x], placebo: {noise: 0}, output: {selection: 'target/unused.json'}}").getAsJsonObject()).resolve(schema, null);
+        final ScreenReport.Result result = ScreenReport.build(spec, new HashMap<>());
+        final JsonObject selection = ScreenReport.selection(spec, result);
+        Assertions.assertTrue(selection.get("threshold").isJsonNull());
+        Assertions.assertTrue(selection.get("thresholdTheoretical").isJsonNull());
+        Assertions.assertEquals(0, selection.getAsJsonArray("columns").size());
+        Assertions.assertEquals("marginal", selection.get("test").getAsString());
+        Assertions.assertDoesNotThrow(() -> JsonParser.parseString(selection.toString()));
     }
 }

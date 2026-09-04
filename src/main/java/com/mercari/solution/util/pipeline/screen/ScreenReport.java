@@ -1,8 +1,11 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.MatrixOps;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -242,6 +245,7 @@ public final class ScreenReport {
         summary.put("baseline", spec.baselineField);
         summary.put("baselineForm", spec.hasBaseline() ? spec.baselineForm : null);
         summary.put("weight", spec.weightField);
+        summary.put("test", conditioned ? "partial" : "marginal");
         summary.put("threshold", threshold);
         summary.put("thresholdTheoretical", thresholdTheoretical);
         summary.put("quantile", spec.quantile);
@@ -283,18 +287,19 @@ public final class ScreenReport {
      * {@code output.include} reads; the rest records how the list was produced (thresholds, the effective test,
      * the upstream manifest identities, this configuration's hash) and the passing records' statistics.
      */
-    public static com.google.gson.JsonObject selection(final ScreenSpec spec, final Result result) {
+    public static JsonObject selection(final ScreenSpec spec, final Result result) {
         final Map<String, Object> summary = result.summary();
-        final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        final JsonObject o = new JsonObject();
         o.addProperty("version", 1);
-        final com.google.gson.JsonArray columns = new com.google.gson.JsonArray();
+        final JsonArray columns = new JsonArray();
         for (final Object name : (List<?>) summary.get("passedColumns")) columns.add((String) name);
         o.add("columns", columns);
-        o.addProperty("test", spec.hasConditioning() && Boolean.TRUE.equals(summary.get("conditioningConverged")) ? "partial" : "marginal");
+        o.addProperty("test", (String) summary.get("test"));
         o.addProperty("family", spec.family);
         o.addProperty("method", METHOD);
-        o.addProperty("threshold", (Double) summary.get("threshold"));
-        o.addProperty("thresholdTheoretical", (Double) summary.get("thresholdTheoretical"));
+        // NaN (no scored unit) is not JSON: written as null
+        o.addProperty("threshold", finiteOrNull((Double) summary.get("threshold")));
+        o.addProperty("thresholdTheoretical", finiteOrNull((Double) summary.get("thresholdTheoretical")));
         o.addProperty("quantile", spec.quantile);
         o.addProperty("nCandidates", (Long) summary.get("nCandidates"));
         o.addProperty("nPassed", (Long) summary.get("nPassed"));
@@ -306,15 +311,15 @@ public final class ScreenReport {
         o.addProperty("outputHash", spec.manifestOutputHash);
         o.addProperty("manifest", spec.candidateManifest);
         if (spec.hasConditioning()) {
-            final com.google.gson.JsonArray fields = new com.google.gson.JsonArray();
+            final JsonArray fields = new JsonArray();
             spec.conditioningFields.forEach(fields::add);
             o.add("conditioningFields", fields);
         }
-        o.addProperty("createdAt", java.time.Instant.now().toString());
-        final com.google.gson.JsonArray details = new com.google.gson.JsonArray();
+        o.addProperty("createdAt", Instant.now().toString());
+        final JsonArray details = new JsonArray();
         for (final Map<String, Object> r : result.records()) {
             if (!Boolean.TRUE.equals(r.get("passed"))) continue;
-            final com.google.gson.JsonObject d = new com.google.gson.JsonObject();
+            final JsonObject d = new JsonObject();
             d.addProperty("candidate", (String) r.get("candidate"));
             d.addProperty("transform", (String) r.get("transform"));
             d.addProperty("est_gain", (Double) r.get("est_gain"));
@@ -329,6 +334,10 @@ public final class ScreenReport {
         }
         o.add("passed", details);
         return o;
+    }
+
+    private static Double finiteOrNull(final Double v) {
+        return v == null || Double.isNaN(v) || Double.isInfinite(v) ? null : v;
     }
 
     public static Schema recordSchema() {
@@ -382,6 +391,7 @@ public final class ScreenReport {
                 .withField("baseline", Schema.FieldType.STRING)
                 .withField("baselineForm", Schema.FieldType.STRING)
                 .withField("weight", Schema.FieldType.STRING)
+                .withField("test", Schema.FieldType.STRING)
                 .withField("threshold", Schema.FieldType.FLOAT64)
                 .withField("thresholdTheoretical", Schema.FieldType.FLOAT64)
                 .withField("quantile", Schema.FieldType.FLOAT64)

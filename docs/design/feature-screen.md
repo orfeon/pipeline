@@ -119,9 +119,10 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
 - **The pass list is one JSON document with `columns` first.** `ScreenReport.selection` writes what
   `FeaturePlanService.parseIncludeList` reads (`{columns: [...]}`), plus the provenance a consumer needs to
   trust it: the effective test (`partial` / `marginal`), thresholds, the upstream manifest's `planHash` /
-  `outputHash` (from `candidates.manifest`), `screenHash` (SHA-256 of the canonical parameters) and the passing
-  records' statistics. Written from the finalize step (global window only) through `ResourceUtil.writeBytes`;
-  a write failure fails the step. `ScreenSelectionIncludeTest` pins the round trip.
+  `outputHash` (from `candidates.manifest`), `screenHash` (SHA-256 of the canonical parameters without the
+  file locations, sharing `FeaturePlanCompiler.canonical` with the feature plan hash) and the passing
+  records' statistics; NaN statistics are written as null. Written from the finalize step (global window only)
+  through `ResourceUtil.writeString`; a write failure fails the step. `ScreenSelectionIncludeTest` pins the round trip.
 - Field names follow the proposal (`est_gain`, `n_groups`, `period_z`, `leakSuspect` …) with additions that
   cost nothing now and keep later extensions schema-compatible: `df` (block tests), `pValue` / `qValue`,
   `degenerate`, `family`, and the summary's `passedColumns` (the selection list of PR 4).

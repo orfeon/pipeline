@@ -186,7 +186,8 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
 `nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
-`maxTime` (TIMESTAMP, of the scored rows), `periodsBucket`, `transforms`, `candidates`, `passedColumns` (candidate
+`maxTime` (TIMESTAMP, of the scored rows), `periodsBucket`, `transforms`, `candidates`, `test` (the statistic
+that decided `passed` / `threshold`: `partial` when a conditioning fit accepted a point, else `marginal`), `passedColumns` (candidate
 names with a passing transform, best gain first — the list to feed back into the feature transform's
 `output.include`), `conditioningFields`, `conditioningK`, `conditioningIterations`, `conditioningRejectedSteps`,
 `conditioningConverged`, `conditioningGain`, `conditioningL2` (null without conditioning), `notes` (role defaults
@@ -349,10 +350,16 @@ transforms:
 
 - `columns` is what the feature transform's `output.include` reads (`{columns: [...]}` is one of its accepted
   shapes); the other members record how the list was produced.
-- `test` says which statistic the cut-off used (`partial` with a converged conditioning fit, else `marginal`).
+- `test` says which statistic the cut-off used (`partial` when the conditioning fit accepted a point — the same
+  rule as the summary's `test` — else `marginal`).
 - `planHash` / `outputHash` are the upstream feature manifest's identities when `candidates.manifest` was given
-  (null otherwise); `screenHash` is the SHA-256 of this step's canonical parameters. Together they make the pass
-  list traceable to the plan that produced the candidates and the configuration that screened them.
+  (null otherwise); `screenHash` is the SHA-256 of this step's canonical parameters without the file locations
+  (`output`, `candidates.manifest`), so it is the same across runs that only move the pass list or the manifest.
+  Together they make the pass list traceable to the plan that produced the candidates and the configuration that
+  screened them.
+- `threshold` / `thresholdTheoretical` are null when no unit was scored (no `NaN` in the file).
+- An empty `columns` (nothing passed) is still written and logged as a warning: a feature run reading it as
+  `output.include` keeps no feature column, so check `nPassed` before closing the loop.
 - The file is written once per run from the finalize step (global window only); a failed write fails the step.
   Keeping a ledger of runs is a matter of versioned paths (`${args.version}`) or an `action/storage` copy.
 

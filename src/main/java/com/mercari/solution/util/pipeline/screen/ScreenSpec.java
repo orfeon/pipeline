@@ -6,6 +6,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.domain.text.template.StringFunctions;
+import com.mercari.solution.util.pipeline.feature.FeaturePlanCompiler;
 
 import java.io.Serializable;
 import java.time.Instant;
@@ -82,7 +84,7 @@ public final class ScreenSpec implements Serializable {
 
     /** output.selection: URI / path of the pass-list file (null = not written) */
     public String selectionUri;
-    /** SHA-256 of the canonical parameters (the identity of this screen configuration) */
+    /** SHA-256 of the canonical parameters without the file locations (output, candidates.manifest): the identity of this screen configuration */
     public String parametersHash;
     /** plan / output hash of the upstream feature manifest (candidates.manifest), when given */
     public String manifestPlanHash;
@@ -336,7 +338,7 @@ public final class ScreenSpec implements Serializable {
                 errors.add("output must be an object {selection: <uri>}");
             }
         }
-        s.parametersHash = sha256(canonical(p));
+        s.parametersHash = StringFunctions.sha256Hex(FeaturePlanCompiler.canonical(withoutLocations(p)));
 
         // rules that depend on group are checked in resolve (group may still come from the manifest roles)
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
@@ -588,41 +590,20 @@ public final class ScreenSpec implements Serializable {
 
     // ---- identity ------------------------------------------------------------------------------------------
 
-    /** Canonical (key-sorted, compact) JSON text of an element. */
-    public static String canonical(final JsonElement e) {
-        if (e == null || e.isJsonNull()) return "null";
-        if (e.isJsonPrimitive()) return e.toString();
-        if (e.isJsonArray()) {
-            final StringBuilder sb = new StringBuilder("[");
-            boolean first = true;
-            for (final JsonElement i : e.getAsJsonArray()) {
-                if (!first) sb.append(',');
-                sb.append(canonical(i));
-                first = false;
-            }
-            return sb.append(']').toString();
+    /**
+     * The parameters without what does not change the screen: the pass-list destination ({@code output}) and the
+     * manifest location ({@code candidates.manifest}, whose content identity travels as planHash / outputHash).
+     * Mirrors the feature transform's plan hash, which excludes its artifact and output locations the same way.
+     */
+    static JsonObject withoutLocations(final JsonObject parameters) {
+        final JsonObject copy = parameters.deepCopy();
+        copy.remove("output");
+        if (copy.has("candidates") && copy.get("candidates").isJsonObject()) {
+            final JsonObject candidates = copy.getAsJsonObject("candidates");
+            candidates.remove("manifest");
+            if (candidates.isEmpty()) copy.remove("candidates");
         }
-        final java.util.TreeMap<String, JsonElement> sorted = new java.util.TreeMap<>();
-        for (final Map.Entry<String, JsonElement> entry : e.getAsJsonObject().entrySet()) sorted.put(entry.getKey(), entry.getValue());
-        final StringBuilder sb = new StringBuilder("{");
-        boolean first = true;
-        for (final Map.Entry<String, JsonElement> entry : sorted.entrySet()) {
-            if (!first) sb.append(',');
-            sb.append(new com.google.gson.JsonPrimitive(entry.getKey())).append(':').append(canonical(entry.getValue()));
-            first = false;
-        }
-        return sb.append('}').toString();
-    }
-
-    public static String sha256(final String text) {
-        try {
-            final java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            final StringBuilder sb = new StringBuilder();
-            for (final byte b : digest.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8))) sb.append(String.format("%02x", b));
-            return sb.toString();
-        } catch (final java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return copy;
     }
 
     // ---- json helpers --------------------------------------------------------------------------------------

@@ -1,9 +1,12 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.mercari.solution.module.Logging;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.IterableCoder;
@@ -527,6 +530,7 @@ public final class ScreenStages {
     }
 
     static class FinalizeDoFn extends DoFn<List<KV<Integer, ScoreAccumulator>>, MElement> {
+        private static final Gson SELECTION_GSON = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
         private final ScreenSpec spec;
         private final TupleTag<MElement> recordTag;
         private final TupleTag<MElement> summaryTag;
@@ -565,9 +569,13 @@ public final class ScreenStages {
             c.output(summaryTag, MElement.of(result.summary(), c.timestamp()));
             if (spec.selectionUri != null) {
                 // the pass list is a primary deliverable: a write failure fails the step (no silent partial run)
-                final String json = new com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create().toJson(ScreenReport.selection(spec, result));
-                com.mercari.solution.util.domain.file.ResourceUtil.writeBytes(spec.selectionUri, json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                LOG.info("screen selection written to {}: {} columns", spec.selectionUri, ((List<?>) result.summary().get("passedColumns")).size());
+                ResourceUtil.writeString(spec.selectionUri, SELECTION_GSON.toJson(ScreenReport.selection(spec, result)));
+                final int nColumns = ((List<?>) result.summary().get("passedColumns")).size();
+                if (nColumns == 0) {
+                    LOG.warn("screen selection written to {} with no column: a feature run reading it as output.include keeps no feature column", spec.selectionUri);
+                } else {
+                    LOG.info("screen selection written to {}: {} columns", spec.selectionUri, nColumns);
+                }
             }
             LOG.info("screen finalized: {} records, summary {}", result.records().size(), result.summary());
         }
