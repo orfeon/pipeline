@@ -1,9 +1,7 @@
 package com.mercari.solution.module.source;
 
 import com.google.api.services.bigquery.model.TableReference;
-import org.apache.beam.sdk.io.gcp.bigquery.BigQueryOptions;
-import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import com.mercari.solution.module.IllegalModuleException;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -37,38 +35,16 @@ public class BigQuerySourceTest {
     @Test
     public void testTableQueryProjectsFieldsAndFiltersRows() {
         Assertions.assertEquals(
-                "SELECT `id`, `name`, `address`.`city` FROM `my-project.my_dataset.my_view` WHERE age > 18 AND status = 'active'",
-                BigQuerySource.createTableQuery(VIEW, List.of("id", " name", "address.city"), " age > 18 AND status = 'active' "));
+                "SELECT `id`, `name` FROM `my-project.my_dataset.my_view` WHERE age > 18 AND status = 'active'",
+                BigQuerySource.createTableQuery(VIEW, List.of("id", " name"), " age > 18 AND status = 'active' "));
     }
 
     @Test
-    public void testQueryRunProjectIdBecomesJobProjectWhenUnset() {
-        final PipelineOptions options = PipelineOptionsFactory.create();
-        Assertions.assertNull(options.as(BigQueryOptions.class).getBigQueryProject());
-
-        BigQuerySource.applyQueryRunProject(options, "query-project");
-
-        Assertions.assertEquals("query-project", options.as(BigQueryOptions.class).getBigQueryProject());
-    }
-
-    @Test
-    public void testConfiguredJobProjectIsKept() {
-        final PipelineOptions options = PipelineOptionsFactory.create();
-        options.as(BigQueryOptions.class).setBigQueryProject("configured-project");
-
-        BigQuerySource.applyQueryRunProject(options, "query-project");
-
-        Assertions.assertEquals("configured-project", options.as(BigQueryOptions.class).getBigQueryProject());
-    }
-
-    @Test
-    public void testSameJobProjectIsNoop() {
-        final PipelineOptions options = PipelineOptionsFactory.create();
-        options.as(BigQueryOptions.class).setBigQueryProject("same-project");
-
-        BigQuerySource.applyQueryRunProject(options, "same-project");
-
-        Assertions.assertEquals("same-project", options.as(BigQueryOptions.class).getBigQueryProject());
+    public void testTableQueryRejectsNestedFieldPaths() {
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class,
+                () -> BigQuerySource.createTableQuery(VIEW, List.of("id", "address.city"), null));
+        Assertions.assertTrue(e.getMessage().contains("address.city"), e.getMessage());
+        Assertions.assertTrue(e.getMessage().contains("query"), e.getMessage());
     }
 
 }

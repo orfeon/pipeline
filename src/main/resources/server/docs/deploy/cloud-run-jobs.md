@@ -165,5 +165,6 @@ full list of variables and roles is in [server.md](server.md).
   `blockOnRun`, and exits non-zero on anything but a DONE terminal state, so Cloud Run's
   success/failure status and retry semantics reflect the pipeline outcome.
 * The GCP project (`options.gcp.project`) defaults to the project the job runs in, resolved from
-  the metadata server; setting `GOOGLE_CLOUD_PROJECT` is usually unnecessary. Set it explicitly
-  when BigQuery jobs or the `datastore` sink must run in another project.
+  the metadata server (after `GOOGLE_CLOUD_PROJECT` and the project of the credentials, see
+  [GCP options](../options/gcp.md)); setting `GOOGLE_CLOUD_PROJECT` is usually unnecessary. Set
+  it explicitly when BigQuery jobs or the `datastore` sink must run in another project.

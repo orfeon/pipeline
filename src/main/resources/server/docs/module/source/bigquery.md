@@ -40,7 +40,7 @@ Schema is automatically inferred from the query result or table definition; no `
 | queryTempDataset | optional           | String | Temporary dataset to store query results. Format: `dataset_id` or `project_id.dataset_id`. If not specified, a temporary dataset is created automatically (requires dataset create/delete permissions).                                                                |
 | queryLocation    | optional           | String | Query execution location (e.g. `US`, `asia-northeast1`). If not specified, it is automatically estimated from the datasets referenced in the query (requires `bigquery.datasets.get` permission).                                                                      |
 | queryPriority    | optional           | Enum   | Query execution priority. Values: `INTERACTIVE`, `BATCH`. Default: `INTERACTIVE`.                                                                                                                                                                                      |
-| queryRunProjectId | optional          | String | Project ID to use for running the query. If not specified, the pipeline's project (`options.gcp.project`) is used. When specified, it also becomes the pipeline-wide BigQuery job project (`options.gcp.bigquery.bigqueryProject`) unless that option is set explicitly, since BigQueryIO has no per-source job project. |
+| queryRunProjectId | optional          | String | Project ID used for the schema dry run and as the parent of the Storage Read session. If not specified, the pipeline's project (`options.gcp.project`) is used. The query job itself always runs in the pipeline's BigQuery job project: `options.gcp.bigquery.bigqueryProject`, else `options.gcp.project` (BigQueryIO has no per-source job project). |
 
 ### Table direct read parameters
 
@@ -58,8 +58,8 @@ API or by an extract job, so the module reads it with a query job instead (`SELE
 table WHERE <rowRestriction>`, then the query result is read as for a `query`): the query
 parameters `queryTempDataset`, `queryLocation`, `queryPriority` and `queryRunProjectId` apply,
 `format` is ignored, the caller needs query job permissions in addition to the view's read
-access, and a nested path in `fields` (`a.b`) is output as a top-level column. Materialized views,
-snapshots and native tables are read directly.
+access, and nested paths in `fields` (`a.b`) are rejected (use `query` with the SELECT you need).
+Materialized views, snapshots and native tables are read directly.
 
 For table (and view) reads, the field descriptions of the table are attached to the output schema
 (`description` of each field, visible in the dry-run output schema and carried to sinks that store

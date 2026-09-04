@@ -20,7 +20,6 @@ import org.apache.beam.sdk.extensions.avro.coders.AvroGenericCoder;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
 import org.apache.beam.sdk.io.gcp.bigquery.SchemaAndRecord;
-import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -143,34 +142,14 @@ public class BigQuerySource extends Source {
                 mode = Mode.batch;
             }
             if(queryRunProjectId == null) {
+                // the schema dry run and the Storage Read session parent; the query job itself runs in
+                // options.gcp.bigquery.bigqueryProject, else options.gcp.project (BigQueryIO has no
+                // per-source job project)
                 queryRunProjectId = DataflowOptions.getProject(input.getPipeline().getOptions());
-            } else {
-                applyQueryRunProject(input.getPipeline().getOptions(), queryRunProjectId);
             }
             if(view != null) {
                 view.setDefaults();
             }
-        }
-    }
-
-    /**
-     * BigQueryIO runs the query job in the pipeline-level BigQuery job project
-     * ({@code options.gcp.bigquery.bigqueryProject}, else {@code options.gcp.project}); the read
-     * transform has no per-source setting for it, and {@code queryTempDataset} only places the
-     * result table. So an explicit {@code queryRunProjectId} is applied as the job project when
-     * none is configured. It is pipeline-wide (other BigQuery sources and sinks share it), hence
-     * a configured value is kept, with a warning when it differs.
-     */
-    static void applyQueryRunProject(final PipelineOptions options, final String queryRunProjectId) {
-        final org.apache.beam.sdk.io.gcp.bigquery.BigQueryOptions bigQueryOptions = options
-                .as(org.apache.beam.sdk.io.gcp.bigquery.BigQueryOptions.class);
-        final String configured = bigQueryOptions.getBigQueryProject();
-        if(configured == null || configured.isBlank()) {
-            LOG.info("queryRunProjectId {} is used as the pipeline's BigQuery job project (options.gcp.bigquery.bigqueryProject)", queryRunProjectId);
-            bigQueryOptions.setBigQueryProject(queryRunProjectId);
-        } else if(!configured.equals(queryRunProjectId)) {
-            LOG.warn("queryRunProjectId {} differs from options.gcp.bigquery.bigqueryProject {}: the query job runs in {} (only the dry run for the schema uses queryRunProjectId)",
-                    queryRunProjectId, configured, configured);
         }
     }
 
@@ -293,13 +272,9 @@ public class BigQuerySource extends Source {
 
             // Logical views and external tables can be read neither by the Storage Read API nor by
             // an extract job, so they go through the query path (query job -> temp table -> read).
-            Table table = null;
-            try {
-                table = BigQueryUtil.getTable(tableReference);
-            } catch (final Exception e) {
-                LOG.warn("Failed to get metadata of table: {}, cause: {}", tableReference, e.getMessage());
-            }
-            if(table != null && requiresQueryRead(table.getType())) {
+            // The metadata lookup decides that, so its failure fails the assembly.
+            final Table table = BigQueryUtil.getTable(tableReference);
+            if(requiresQueryRead(table.getType())) {
                 final String query = createTableQuery(tableReference, parameters.fields, parameters.rowRestriction);
                 LOG.info("table {} is a {}, which the Storage Read API cannot read: reading it with a query job instead: {}",
                         tableReference.getTableId(), table.getType(), query);
@@ -329,29 +304,23 @@ public class BigQuerySource extends Source {
 
             read = errorHandler.apply(read);
 
-            // The coder schema has to match the records BigQueryIO emits, which depends on the read
-            // method, not on the runner: DIRECT_READ records carry the Storage Read API session schema
-            // (selected fields, storage type mapping), EXPORT records the table's export schema.
-            final org.apache.avro.Schema avroSchema = switch (method) {
-                case DIRECT_READ -> {
-                    // the session is created under the query project; fall back to the table's own project
-                    final String sessionProject = Optional
-                            .ofNullable(parameters.queryRunProjectId)
-                            .orElse(tableReference.getProjectId());
-                    org.apache.avro.Schema sessionSchema = BigQueryUtil.getTableSchemaFromTableStorage(
-                            tableReference, sessionProject, parameters.fields, parameters.rowRestriction);
-                    // the read session schema carries no descriptions; take them from the table metadata
-                    if(table != null) {
-                        sessionSchema = AvroSchemaUtil.mergeDescriptions(sessionSchema, table);
-                    }
-                    yield sessionSchema;
-                }
-                default -> {
-                    final Table exportTable = table != null ? table : BigQueryUtil.getTable(tableReference);
-                    yield AvroSchemaUtil.withDoc(
-                            AvroSchemaUtil.convertSchema(exportTable.getSchema()), exportTable.getDescription());
-                }
-            };
+            // The coder schema is the Storage Read API session schema on every runner and read method:
+            // it reflects the selected fields and covers every column type (the table-schema conversion
+            // has no BIGNUMERIC / RANGE / INTERVAL). Avro DIRECT_READ records carry exactly this schema.
+            // Known gap: with format ARROW, Beam converts the rows through its Row schema (timestamps as
+            // millis, generated record names), which this coder schema does not describe.
+            if(DataFormat.ARROW.equals(parameters.format)) {
+                LOG.warn("bigquery source {}: format ARROW records are converted through the Beam Row schema, which can differ from the coder schema (timestamp precision, nested record names); prefer AVRO",
+                        tableReference.getTableId());
+            }
+            // the session is created under the query project; fall back to the table's own project
+            final String sessionProject = Optional
+                    .ofNullable(parameters.queryRunProjectId)
+                    .orElse(tableReference.getProjectId());
+            final org.apache.avro.Schema sessionSchema = BigQueryUtil.getTableSchemaFromTableStorage(
+                    tableReference, sessionProject, parameters.fields, parameters.rowRestriction);
+            // the read session schema carries no descriptions; take them from the table metadata
+            final org.apache.avro.Schema avroSchema = AvroSchemaUtil.mergeDescriptions(sessionSchema, table);
             return KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
         } else {
             throw new IllegalModuleException("bigquery module support only query or table");
@@ -401,19 +370,24 @@ public class BigQuerySource extends Source {
 
     /**
      * The query equivalent of a table read: {@code fields} become the select list and
-     * {@code rowRestriction} the WHERE clause. A nested field path (`a.b`) selects that leaf as a
-     * top-level column, unlike the Storage Read API projection which keeps the struct.
+     * {@code rowRestriction} the WHERE clause. Nested field paths are rejected: a SELECT of `a.b`
+     * flattens the leaf into a top-level column (and collides on repeated leaf names, or fails on a
+     * repeated parent), unlike the Storage Read API projection which keeps the struct.
      */
     static String createTableQuery(final TableReference tableReference, final List<String> fields, final String rowRestriction) {
+        final String tableName = tableReference.getProjectId() + "." + tableReference.getDatasetId() + "." + tableReference.getTableId();
+        if(fields != null) {
+            final List<String> nested = fields.stream().map(String::trim).filter(f -> f.contains(".")).toList();
+            if(!nested.isEmpty()) {
+                throw new IllegalModuleException("fields " + nested + " are nested paths, which cannot be projected when reading the view / external table "
+                        + tableName + " (it is read with a query job): use a query parameter with the SELECT you need instead");
+            }
+        }
         final String select = fields == null || fields.isEmpty() ? "*" : fields.stream()
-                .map(field -> Arrays.stream(field.trim().split("\\."))
-                        .map(segment -> "`" + segment + "`")
-                        .collect(Collectors.joining(".")))
+                .map(field -> "`" + field.trim() + "`")
                 .collect(Collectors.joining(", "));
         final StringBuilder query = new StringBuilder("SELECT ").append(select)
-                .append(" FROM `").append(tableReference.getProjectId())
-                .append(".").append(tableReference.getDatasetId())
-                .append(".").append(tableReference.getTableId()).append("`");
+                .append(" FROM `").append(tableName).append("`");
         if(rowRestriction != null && !rowRestriction.isBlank()) {
             query.append(" WHERE ").append(rowRestriction.trim());
         }

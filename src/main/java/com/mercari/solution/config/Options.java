@@ -133,7 +133,6 @@ public class Options implements Serializable {
         }
 
         GCPOptions.setOptions(pipelineOptions, options.gcp);
-        GCPOptions.applyDefaultProject(pipelineOptions);
         AWSOptions.setOptions(pipelineOptions, options.aws);
 
         final MPipeline.Runner runner = OptionUtil.getRunner(pipelineOptions);
@@ -145,6 +144,9 @@ public class Options implements Serializable {
             case flink -> FlinkOptions.setOptions(pipelineOptions, options.flink);
             case spark -> SparkOptions.setOptions(pipelineOptions, options.spark);
         }
+
+        // after the runner options: options.dataflow.project also sets GcpOptions.project
+        GCPOptions.applyDefaultProject(pipelineOptions);
 
         BeamSQLOptions.setOptions(pipelineOptions, options.beamsql);
         ExpansionOptions.setOptions(pipelineOptions, options.expansion);
