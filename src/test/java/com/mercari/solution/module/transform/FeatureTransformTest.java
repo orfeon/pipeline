@@ -984,4 +984,71 @@ public class FeatureTransformTest {
         assertParallelMatchesLinear(PROB_CONFIG, 6, List.of(), List.of());
     }
 
+    // ------------------------------------------------------------------------------------------
+    // fit.mode forward
+    // ------------------------------------------------------------------------------------------
+
+    private static String forwardConfig(final String dir, final String extra) {
+        return FEATURE_CONFIG.replace("      output:\n",
+                "      fit: {mode: forward, blocks: {size: P7D}" + extra + ", artifact: {uri: \"" + dir + "\"}}\n      output:\n");
+    }
+
+    /**
+     * Weekly blocks from the epoch: Jan 1 (A) = block 2869, Jan 3 (B) = 2870, Jan 20 (C) = 2872, Feb 1 (D) = 2874. The
+     * row-count level has no lag; the sold level lags 6 days 30 minutes (settlement + ingestion). Every block boundary
+     * falls between sessions here, so forward reproduces the expanding values of {@link #testFeatureTransform}.
+     */
+    @Test
+    public void testForwardFit() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + forwardConfig(dir, "")));
+        Assertions.assertEquals("true", outputs.get("features").getSchema().getField("f_enc__seller_id__count").getOptions().get("feature.fit"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // A: nothing before its block
+            Assertions.assertEquals(0L, ((Number) byKey.get("A/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            // B (Jan 3): the row count sees A's block; the outcome of A (known Jan 7) does not fit a complete known block yet
+            Assertions.assertEquals(1L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            // C (Jan 20): blocks 2869 + 2870 are complete and their outcomes known -> A, B
+            Assertions.assertEquals(2L, ((Number) byKey.get("C/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(0.5, byKey.get("C/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(1L, ((Number) byKey.get("C/s2").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(0.0, byKey.get("C/s2").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            // D (Feb 1): up to block 2872 -> A, B, C
+            Assertions.assertEquals(3L, ((Number) byKey.get("D/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(2.0 / 3.0, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        // the artifact holds the whole-input totals (a static serving run can load them) and the manifest the λ per block
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(files[0], "enc.avro").exists());
+        final String manifest = java.nio.file.Files.readString(new java.io.File(files[0], "enc.manifest.json").toPath());
+        Assertions.assertTrue(manifest.contains("lambdasByBlock"), manifest);
+    }
+
+    @Test
+    public void testForwardFitMinBlocks() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + forwardConfig(dir, ", minBlocks: 2")));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            // B sees one preceding block with data for s1 (< 2): nothing; C sees two (2869, 2870); D three
+            Assertions.assertEquals(0L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(2L, ((Number) byKey.get("C/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(3L, ((Number) byKey.get("D/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            // s2 has a single preceding block at C and D: below minBlocks
+            Assertions.assertEquals(0L, ((Number) byKey.get("C/s2").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertNull(byKey.get("C/s2").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            return null;
+        });
+        pipeline.run();
+    }
+
 }

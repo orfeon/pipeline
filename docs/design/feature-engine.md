@@ -452,6 +452,16 @@ with murmur3 into a `SplittableRandom`; `shuffle` (context) draws a Fisher–Yat
 (`tieBreak` coordinate), so the result is a pure function of the group in every engine mode — the
 parallel-vs-linear equality test covers both.
 
+**Forward fits.** `fit.mode: forward` (spec §4.4 fit metadata): `ForwardBlocks` (fixed-size blocks from the
+epoch or UTC calendar buckets; `usableBlock(event, predictOffset, lag) = indexOf(event + predictOffset −
+lag) − 1`), `VarianceComponents.forwardSeries` (extract → `Combine.perKey` per (level, key, block) → GBK per
+(level, key) → sorted prefix `ForwardBlocks.Series`) as a `View.asMap`, and `FitApplyDoFn.forwardStats`
+(floor lookup of the row's usable block, `windowBlocks` prefix difference, `minBlocks`). The λ per block
+(`VarianceComponents.lambdasByBlock`: moments over the keys' cumulative statistics up to each block) is
+derived once per DoFn instance from the side input and swapped into the row evaluator per row; the artifact
+holds the totals (`forwardTotals`) and its manifest `lambdasByBlock`. The side-input map is keys × blocks
+entries; fine keys with many blocks are the sizing limit (a CoGroupByKey path is the fallback if it bites).
+
 **Fits.** Static: per-level sufficient statistics from the whole input (global window), lookup per
 row, `fitStat` for count / mean / rate / std, artifact write / load, `refit`; the hidden columns'
 availability is the fit boundary (`computeAt`), and an info diagnostic states that training rows contain

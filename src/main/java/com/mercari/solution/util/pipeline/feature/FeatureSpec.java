@@ -21,15 +21,15 @@ public class FeatureSpec implements Serializable {
 
     public enum Scope { row, context, sequence, population }
     public enum FitMode {
-        expanding, fold, statik;
+        expanding, fold, forward, statik;
 
-        /** static / fold: statistics fitted over the input and applied by lookup (a fit stage, not a keyed stage). */
+        /** static / fold / forward: statistics fitted over the input and applied by lookup (a fit stage, not a keyed stage). */
         public boolean isLookup() { return this != expanding; }
 
         /** The value written to the {@code fit} column coordinate. */
         public String token() { return this == statik ? "static" : name(); }
 
-        public static boolean isLookupToken(final String token) { return "static".equals(token) || "fold".equals(token); }
+        public static boolean isLookupToken(final String token) { return "static".equals(token) || "fold".equals(token) || "forward".equals(token); }
     }
     public enum NullPolicy { keep, fillZero, indicator }
     public enum Combine { product, zip }
@@ -186,6 +186,58 @@ public class FeatureSpec implements Serializable {
         public boolean refit;
         /** Explicit artifact version replacing the plan hash in artifact paths (pin a fitted version). */
         public String artifactId;
+        /** fit.mode forward: the time blocks ({@code blocks.bucket} calendar bucket, else {@code blocks.size}; default P90D). */
+        public String blockBucket;
+        public Duration blockSize;
+        /** fit.mode forward: rows with fewer usable preceding blocks (with data for the key) read null. */
+        public Integer minBlocks;
+
+        /** The forward blocks of this spec (defaults applied). */
+        public ForwardBlocks forwardBlocks() {
+            return blockBucket != null ? ForwardBlocks.ofBucket(blockBucket) : ForwardBlocks.ofSize(blockSize == null ? ForwardBlocks.DEFAULT_SIZE : blockSize);
+        }
+
+        /** Parses {@code blocks: {field, bucket, size}} and {@code minBlocks} of a fit block (top level or per feature). */
+        static void parseForward(final JsonObject fit, final FitSpec spec, final Diagnostics diagnostics, final String loc, final String timeField) {
+            if (fit == null) return;
+            if (fit.has("blocks") && !fit.get("blocks").isJsonNull()) {
+                if (!fit.get("blocks").isJsonObject()) {
+                    diagnostics.error("fit.blocks", loc, "fit.blocks must be an object: {bucket: year | quarter | month | week | day} or {size: <ISO-8601 duration>}");
+                } else {
+                    final JsonObject blocks = fit.getAsJsonObject("blocks");
+                    final String field = Json.string(blocks, "field");
+                    if (field != null && timeField != null && !field.equals(timeField)) {
+                        diagnostics.error("fit.blocks.field", loc, "fit.blocks.field must be time.field (" + timeField + "): " + field);
+                    }
+                    final String bucket = Json.string(blocks, "bucket");
+                    final Duration size = Json.duration(blocks, "size", null, diagnostics, loc);
+                    if (bucket != null && size != null) {
+                        diagnostics.error("fit.blocks", loc, "fit.blocks takes either bucket or size, not both");
+                    } else if (bucket != null) {
+                        if (!ForwardBlocks.BUCKETS.contains(bucket)) {
+                            diagnostics.error("fit.blocks.bucket", loc, "fit.blocks.bucket must be one of " + ForwardBlocks.BUCKETS + ": " + bucket);
+                        } else {
+                            spec.blockBucket = bucket;
+                            spec.blockSize = null;
+                        }
+                    } else if (size != null) {
+                        if (size.isZero() || size.isNegative()) {
+                            diagnostics.error("fit.blocks.size", loc, "fit.blocks.size must be positive: " + size);
+                        } else {
+                            spec.blockSize = size;
+                            spec.blockBucket = null;
+                        }
+                    } else {
+                        diagnostics.error("fit.blocks", loc, "fit.blocks requires bucket or size");
+                    }
+                }
+            }
+            final Integer minBlocks = Json.integer(fit, "minBlocks");
+            if (minBlocks != null) {
+                if (minBlocks < 1) diagnostics.error("fit.minBlocks", loc, "fit.minBlocks must be >= 1: " + minBlocks);
+                else spec.minBlocks = minBlocks;
+            }
+        }
 
         static void parseArtifact(final JsonObject fit, final FitSpec spec) {
             if (fit == null || !fit.has("artifact")) return;
@@ -351,6 +403,7 @@ public class FeatureSpec implements Serializable {
             spec.fit.groupBy = Json.string(fit, "groupBy");
             if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
             FitSpec.parseArtifact(fit, spec.fit);
+            FitSpec.parseForward(fit, spec.fit, diagnostics, "fit", spec.timeField);
         }
 
         if (parameters.has("output") && parameters.get("output").isJsonObject()) {
@@ -449,9 +502,10 @@ public class FeatureSpec implements Serializable {
         return switch (text) {
             case "expanding" -> FitMode.expanding;
             case "fold" -> FitMode.fold;
+            case "forward" -> FitMode.forward;
             case "static" -> FitMode.statik;
             default -> {
-                diagnostics.error("fit.mode", location, "fit.mode must be expanding | fold | static: " + text);
+                diagnostics.error("fit.mode", location, "fit.mode must be expanding | fold | forward | static: " + text);
                 yield FitMode.expanding;
             }
         };

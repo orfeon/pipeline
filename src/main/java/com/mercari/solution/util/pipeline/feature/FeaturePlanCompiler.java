@@ -186,8 +186,8 @@ public final class FeaturePlanCompiler {
             diagnostics.hint("encoding.globalKey", "features." + String.join(",", s.blocks()),
                     "stage #" + s.index() + " evaluates every row under one key (a single worker thread"
                             + (spec.engine.parallelWaves ? " — the critical path once the waves run in parallel" : "")
-                            + "); a global / very coarse encoding can move its statistics to fit.mode static"
-                            + " (streaming-capable with an artifact) or fold (batch only) — the values change:"
+                            + "); a global / very coarse encoding can move its statistics to fit.mode forward"
+                            + " (complete earlier time blocks, leak-free), static (streaming-capable with an artifact) or fold (batch only) — the values change:"
                             + " see the feature docs, Performance and sizing");
         }
     }
@@ -1520,6 +1520,10 @@ public final class FeaturePlanCompiler {
             }
             FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
         }
+        fitSpec.blockBucket = spec.fit.blockBucket;
+        fitSpec.blockSize = spec.fit.blockSize;
+        fitSpec.minBlocks = spec.fit.minBlocks;
+        FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
         if (mode == FitMode.fold && folds < 2) {
@@ -1543,8 +1547,14 @@ public final class FeaturePlanCompiler {
             if (groupBy == null && spec.orderTieBreak.isEmpty()) {
                 diagnostics.warning("fit.fold.identity", loc, "fit.mode fold without fit.groupBy or time.orderTieBreak assigns folds by time.field alone (rows sharing a timestamp share a fold); declare time.orderTieBreak for a row identity");
             }
+        } else if (mode == FitMode.forward) {
+            final ForwardBlocks blocks = fitSpec.forwardBlocks();
+            diagnostics.info("fit.mode.forward", loc, "fit.mode forward reads, per row, the statistics of the complete time blocks (" + blocks.describe()
+                    + ") whose targets are known at predictAt — a stepwise expanding fit computed as a parallel Combine per (key, block); the row's own block is never included"
+                    + (fitSpec.minBlocks == null || fitSpec.minBlocks <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocks + " preceding blocks read null")
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         }
-        if (isStatic && def.keySets.stream().anyMatch(ks -> !ks.windows.isEmpty())) {
+        if (mode != FitMode.forward && isStatic && def.keySets.stream().anyMatch(ks -> !ks.windows.isEmpty())) {
             diagnostics.warning("fit.mode.static.windows", loc, "keySet windows are ignored in fit.mode static (statistics cover the whole input)");
         }
         if (def.emitConfidence) diagnostics.warning("encoding.emitConfidence", loc, "emitConfidence is v1 and ignored");
@@ -1699,7 +1709,7 @@ public final class FeaturePlanCompiler {
             final ResolvedTarget target = resolvedTargets.get(pair[1]);
             if (lattice.levels.get(lattice.levels.size() - 1).isEmpty()) {
                 for (final Window window : windowsOf(lattice.keySet)) {
-                    levelStats(def, List.of(), isStatic ? null : window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec);
+                    levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec);
                 }
             }
         }
@@ -1708,7 +1718,7 @@ public final class FeaturePlanCompiler {
             final KeySet ks = lattice.keySet;
             final ResolvedTarget target = resolvedTargets.get(pair[1]);
             for (final Window declaredWindow : windowsOf(ks)) {
-                final Window window = isStatic ? null : declaredWindow;
+                final Window window = lookupWindow(declaredWindow, mode, def);
                 final Map<String, String> names = new HashMap<>(Map.of(
                         "block", def.name,
                         "keys", String.join("_", ks.keys),
@@ -1817,6 +1827,23 @@ public final class FeaturePlanCompiler {
         }
     }
 
+    /**
+     * The window a lookup fit keeps: none in static / fold (whole-input statistics), the {@code maxAge} part in
+     * forward (rounded to blocks by {@link #forwardCoordinates}; {@code maxEvents} / {@code filter} are dropped
+     * with a warning once per block), the declared window in expanding.
+     */
+    private Window lookupWindow(final Window declared, final FitMode mode, final FeatureDef def) {
+        if (declared == null || !mode.isLookup()) return declared;
+        if (mode != FitMode.forward) return null;
+        if ((declared.maxEvents != null || declared.filter != null) && hintedBlocks.add(def.name + "#forwardWindowIgnored")) {
+            diagnostics.warning("fit.mode.forward.windowIgnored", def.location(), "maxEvents / filter windows are ignored in fit.mode forward (statistics are per block; only maxAge applies, rounded to blocks)");
+        }
+        if (declared.maxAge == null) return null;
+        final Window window = new Window();
+        window.maxAge = declared.maxAge;
+        return window;
+    }
+
     private static List<Window> windowsOf(final KeySet ks) {
         return ks.windows.isEmpty() ? Collections.singletonList(null) : ks.windows;
     }
@@ -1915,6 +1942,7 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("foldKeys", String.join(",", foldKeys));
             c.coordinates.put("folds", String.valueOf(fitSpec.folds));
         }
+        if (mode == FitMode.forward) forwardCoordinates(c, window, targetReference, offsetColumn, def, fitSpec);
         c.coordinates.put("keys", String.join(",", ks.keys));
         if (window != null) {
             c.coordinates.put("window", window.token());
@@ -1947,6 +1975,45 @@ public final class FeaturePlanCompiler {
         } else {
             classifyPast(c, null);
             c.validFor = def.validFor;
+        }
+    }
+
+    /**
+     * fit.mode forward (spec §5.6): the block geometry, the target's availability lag (the block must be complete
+     * AND its targets known at predictAt: lag = the target's effective availability offset after its event,
+     * settlement + ingestion; an attribute-only level has none), the window rounded to whole blocks, and the
+     * time field the engine reads the row's block from.
+     */
+    private void forwardCoordinates(final OutputColumn c, final Window window, final String targetReference, final String offsetColumn,
+                                    final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
+        final String loc = def.location();
+        final ForwardBlocks blocks = fitSpec.forwardBlocks();
+        if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
+        else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocks == null ? 1 : fitSpec.minBlocks));
+        c.coordinates.put("blockField", spec.timeField);
+        final FieldContract time = inputFields.get(spec.timeField);
+        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
+        long lag = 0;
+        for (final String reference : new String[]{targetReference, offsetColumn}) {
+            if (reference == null) continue;
+            final Ref ref = resolve(reference);
+            if (ref == null) continue;
+            final AvailableAt at = ref.availableAt();
+            if (at == null || at.isPreEvent()) continue;
+            if (!at.isStatic()) {
+                diagnostics.error("fit.mode.forward.dynamic", loc, "fit.mode forward needs a static availability for '" + reference + "' (is " + at.describe() + "): the block boundary cannot be decided per row");
+                continue;
+            }
+            lag = Math.max(lag, at.getOffset().toMillis());
+        }
+        c.coordinates.put("forwardLagMillis", Long.toString(lag));
+        if (window != null && window.maxAge != null) {
+            final int k = blocks.windowBlocks(window.maxAge);
+            c.coordinates.put("windowBlocks", Integer.toString(k));
+            if (hintedBlocks.add(def.name + "#forwardWindow")) {
+                diagnostics.info("fit.mode.forward.window", loc, "maxAge " + window.maxAge + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
+            }
         }
     }
 

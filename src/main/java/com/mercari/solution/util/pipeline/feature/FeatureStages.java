@@ -407,7 +407,8 @@ public final class FeatureStages {
                                 .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
-                case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), label, loggings, failFast, outputTag, failureTag);
+                case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), plan.getSpec().predictAt.getOffset().toMillis(),
+                        label, loggings, failFast, outputTag, failureTag);
                 default -> throw new IllegalStateException("unexpected stage kind: " + stage.kind());
             };
             failures.add(outputs.get(failureTag));
@@ -537,6 +538,9 @@ public final class FeatureStages {
         if (streaming && plan.getColumns().stream().anyMatch(c -> "fold".equals(c.getCoordinates().get("fit")))) {
             errors.add("fit.mode fold is supported in batch only (out-of-fold statistics are fitted from the whole input); use static with an artifact for streaming");
         }
+        if (streaming && plan.getColumns().stream().anyMatch(c -> "forward".equals(c.getCoordinates().get("fit")))) {
+            errors.add("fit.mode forward is supported in batch only (per-block statistics are fitted from the whole input); use static with an artifact for streaming");
+        }
         for (final OutputColumn c : plan.getColumns()) {
             if (c.isIntermediate()) continue;
             if (c.getStatus() == OutputColumn.Status.runtimeFilter) {
@@ -556,13 +560,33 @@ public final class FeatureStages {
 
     /** One fitted lattice level of a static block: hidden columns it fills and how its statistics are keyed. */
     record FitLevel(String block, String id, String sumColumn, String sumSqColumn, List<String> keys, String field,
-                    String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds) implements Serializable {
+                    String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds,
+                    Forward forward) implements Serializable {
         VarianceComponents.LevelSpec spec() {
             return new VarianceComponents.LevelSpec(id, keys, field, offsetColumn, foldKeys, folds);
         }
         /** fit.mode fold: out-of-fold statistics, always fitted in-pipeline (an artifact only holds the totals). */
         boolean isFold() {
             return foldKeys != null;
+        }
+        /** fit.mode forward: per-block statistics, always fitted in-pipeline (an artifact only holds the totals). */
+        boolean isForward() {
+            return forward != null;
+        }
+        VarianceComponents.ForwardSpec forwardSpec() {
+            return new VarianceComponents.ForwardSpec(id, keys, field, offsetColumn, forward.blocks(), forward.blockField(), forward.blockFieldType());
+        }
+    }
+
+    /** fit.mode forward geometry of a level (from the column coordinates, see FeaturePlanCompiler.forwardCoordinates). */
+    record Forward(ForwardBlocks blocks, int minBlocks, long lagMillis, int windowBlocks, String blockField, String blockFieldType) implements Serializable {
+        static Forward of(final Map<String, String> coordinates) {
+            if (!"forward".equals(coordinates.get("fit"))) return null;
+            return new Forward(ForwardBlocks.fromCoordinates(coordinates.get("blockBucket"), coordinates.get("blockSizeMillis")),
+                    Integer.parseInt(coordinates.getOrDefault("minBlocks", "1")),
+                    Long.parseLong(coordinates.getOrDefault("forwardLagMillis", "0")),
+                    Integer.parseInt(coordinates.getOrDefault("windowBlocks", "0")),
+                    coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"));
         }
     }
 
@@ -587,7 +611,8 @@ public final class FeatureStages {
                     c.getCoordinates().get("field"), offset,
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
-                    foldKeys != null ? Integer.parseInt(c.getCoordinates().get("folds")) : 0));
+                    foldKeys != null ? Integer.parseInt(c.getCoordinates().get("folds")) : 0,
+                    Forward.of(c.getCoordinates())));
         }
         return new ArrayList<>(levels.values());
     }
@@ -597,31 +622,33 @@ public final class FeatureStages {
      * applied to every row by lookup; composition / statistics are then ordinary row columns.
      */
     private static PCollectionTuple applyFit(final PCollection<MElement> input, final List<OutputColumn> stageColumns,
-                                             final StageEvaluator evaluator, final String planHash, final String label,
+                                             final StageEvaluator evaluator, final String planHash, final long predictOffsetMillis, final String label,
                                              final List<Logging> loggings, final boolean failFast,
                                              final TupleTag<MElement> outputTag, final TupleTag<BadRecord> failureTag) {
         final List<FitLevel> levels = fitLevels(stageColumns);
         final Map<String, String> loadBlocks = new LinkedHashMap<>();
         final List<FitLevel> fitted = new ArrayList<>();
+        final List<FitLevel> forward = new ArrayList<>();
         final Map<String, String> writeBlocks = new LinkedHashMap<>();
+        final Map<String, String> writeForwardBlocks = new LinkedHashMap<>();
         for (final FitLevel level : levels) {
             final String uri = level.artifactUri();
-            // fold levels are always fitted: the per-fold tags cannot come from an artifact (which holds totals)
+            // fold / forward levels are always fitted: their per-fold / per-block parts cannot come from an artifact (which holds totals)
             final boolean exists = uri != null && !level.refit() && FitArtifact.exists(uri, planHash, level.block());
-            if (exists && !level.isFold()) {
+            if (exists && !level.isFold() && !level.isForward()) {
                 loadBlocks.put(level.block(), uri);
                 continue;
             }
-            fitted.add(level);
-            // fold levels are re-fitted every run but respect refit: false for the (totals) artifact
-            if (uri != null && !exists) writeBlocks.put(level.block(), uri);
+            (level.isForward() ? forward : fitted).add(level);
+            // fold / forward levels are re-fitted every run but respect refit: false for the (totals) artifact
+            if (uri != null && !exists) (level.isForward() ? writeForwardBlocks : writeBlocks).put(level.block(), uri);
         }
         for (final Map.Entry<String, String> e : loadBlocks.entrySet()) {
             LOG.info("feature fit: block {} loads artifact {}", e.getKey(), FitArtifact.statsPath(e.getValue(), planHash, e.getKey()));
         }
-        if (!fitted.isEmpty() && com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
+        if ((!fitted.isEmpty() || !forward.isEmpty()) && com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input)) {
             throw new IllegalStateException("fit.mode static in streaming requires an existing artifact for plan " + planHash
-                    + " (fit the statistics with a batch run first)");
+                    + " (fit the statistics with a batch run first; fold / forward are batch only)");
         }
         // a static fit is over the WHOLE input whatever the module's windowing strategy: the statistics
         // are computed in the global window (single pane), which also lets the global-window artifact
@@ -651,8 +678,25 @@ public final class FeatureStages {
                 input.getPipeline()
                         .apply(label + "_Write_" + e.getKey() + "_Trigger", Create.of(e.getKey()))
                         .apply(label + "_Write_" + e.getKey(), ParDo
-                                .of(new WriteArtifactDoFn(e.getValue(), planHash, e.getKey(), blockLevels, statsView))
+                                .of(new WriteArtifactDoFn(e.getValue(), planHash, e.getKey(), blockLevels, statsView, null))
                                 .withSideInputs(statsView));
+            }
+        }
+        // fit.mode forward: cumulative per-block statistics per (level, key) — a parallel Combine, no time-ordered replay
+        PCollectionView<Map<String, ForwardBlocks.Series>> seriesView = null;
+        if (!forward.isEmpty()) {
+            final List<VarianceComponents.ForwardSpec> specs = new ArrayList<>();
+            for (final FitLevel level : forward) specs.add(level.forwardSpec());
+            seriesView = VarianceComponents.forwardSeries(fitInput, specs, label + "_Forward").apply(label + "_ForwardView", View.asMap());
+            sideInputs.add(seriesView);
+            for (final Map.Entry<String, String> e : writeForwardBlocks.entrySet()) {
+                final List<String> blockLevels = new ArrayList<>();
+                for (final FitLevel level : forward) if (level.block().equals(e.getKey())) blockLevels.add(level.id());
+                input.getPipeline()
+                        .apply(label + "_Write_" + e.getKey() + "_Trigger", Create.of(e.getKey()))
+                        .apply(label + "_Write_" + e.getKey(), ParDo
+                                .of(new WriteArtifactDoFn(e.getValue(), planHash, e.getKey(), blockLevels, null, seriesView))
+                                .withSideInputs(seriesView));
             }
         }
         // static-fit blocks (factorization / discretize): fitted on one worker over the whole input, or loaded
@@ -695,7 +739,7 @@ public final class FeatureStages {
         }
 
         return input.apply(label, ParDo
-                .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, loadBlocks, planHash,
+                .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, seriesView, predictOffsetMillis, loadBlocks, planHash,
                         blocks, blockViews, blockLoad, loggings, failFast, failureTag))
                 .withSideInputs(sideInputs)
                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
@@ -1057,24 +1101,46 @@ public final class FeatureStages {
         private final String block;
         private final List<String> levels;
         private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
+        /** fit.mode forward: the totals come from the series, and the manifest records λ per block */
+        private final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView;
 
         WriteArtifactDoFn(final String uri, final String planHash, final String block, final List<String> levels,
-                          final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView) {
+                          final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
+                          final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView) {
             this.uri = uri;
             this.planHash = planHash;
             this.block = block;
             this.levels = levels;
             this.statsView = statsView;
+            this.seriesView = seriesView;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final Map<String, VarianceComponents.KeyStats> all = c.sideInput(statsView);
             final Map<String, VarianceComponents.KeyStats> blockStats = new HashMap<>();
-            for (final Map.Entry<String, VarianceComponents.KeyStats> e : all.entrySet()) {
-                if (levels.contains(FitArtifact.levelOf(e.getKey()))) blockStats.put(e.getKey(), e.getValue());
+            com.google.gson.JsonObject extra = null;
+            if (seriesView != null) {
+                final Map<String, ForwardBlocks.Series> all = c.sideInput(seriesView);
+                final Map<String, ForwardBlocks.Series> mine = new HashMap<>();
+                for (final Map.Entry<String, ForwardBlocks.Series> e : all.entrySet()) {
+                    if (levels.contains(FitArtifact.levelOf(e.getKey()))) mine.put(e.getKey(), e.getValue());
+                }
+                blockStats.putAll(VarianceComponents.forwardTotals(mine));
+                extra = new com.google.gson.JsonObject();
+                final com.google.gson.JsonObject byBlock = new com.google.gson.JsonObject();
+                for (final Map.Entry<String, TreeMap<Long, Double>> e : VarianceComponents.lambdasByBlock(mine).entrySet()) {
+                    final com.google.gson.JsonObject perBlock = new com.google.gson.JsonObject();
+                    for (final Map.Entry<Long, Double> b : e.getValue().entrySet()) perBlock.addProperty(Long.toString(b.getKey()), b.getValue());
+                    byBlock.add(e.getKey(), perBlock);
+                }
+                extra.add("lambdasByBlock", byBlock);
+            } else {
+                final Map<String, VarianceComponents.KeyStats> all = c.sideInput(statsView);
+                for (final Map.Entry<String, VarianceComponents.KeyStats> e : all.entrySet()) {
+                    if (levels.contains(FitArtifact.levelOf(e.getKey()))) blockStats.put(e.getKey(), e.getValue());
+                }
             }
-            FitArtifact.write(uri, planHash, block, blockStats, levels);
+            FitArtifact.write(uri, planHash, block, blockStats, levels, extra);
         }
     }
 
@@ -1085,6 +1151,9 @@ public final class FeatureStages {
 
         private final List<FitLevel> levels;
         private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
+        /** fit.mode forward: cumulative per-block statistics per (level, key) */
+        private final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView;
+        private final long predictOffsetMillis;
         private final Map<String, String> loadBlocks;
         private final String planHash;
         private final List<StaticFitBlock<?>> blocks;
@@ -1093,16 +1162,21 @@ public final class FeatureStages {
         private transient Map<String, VarianceComponents.KeyStats> loaded;
         private transient Map<String, Double> loadedLambdas;
         private transient Map<String, Object> loadedModels;
+        /** fit.mode forward: λ per level per block, derived once from the series side input (immutable in a batch run) */
+        private transient Map<String, TreeMap<Long, Double>> forwardLambdas;
 
         FitApplyDoFn(final StageEvaluator evaluator, final List<FitLevel> levels,
                      final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
                      final PCollectionView<Map<String, Double>> lambdas,
+                     final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView, final long predictOffsetMillis,
                      final Map<String, String> loadBlocks, final String planHash,
                      final List<StaticFitBlock<?>> blocks, final Map<String, PCollectionView<?>> blockViews, final Set<String> blockLoad,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.levels = levels;
             this.statsView = statsView;
+            this.seriesView = seriesView;
+            this.predictOffsetMillis = predictOffsetMillis;
             this.loadBlocks = loadBlocks;
             this.planHash = planHash;
             this.blocks = blocks;
@@ -1148,6 +1222,24 @@ public final class FeatureStages {
             evaluator.setLambdas(merged);
         }
 
+        /** fit.mode forward: the row's statistics = the series up to its usable block (minus the window's older blocks). */
+        private VarianceComponents.KeyStats forwardStats(final FitLevel level, final Map<String, ForwardBlocks.Series> series,
+                                                          final String entry, final long eventMillis, final Map<String, Double> rowLambdas) {
+            final Forward f = level.forward();
+            final ForwardBlocks.Series s = series.get(entry);
+            final long usable = f.blocks().usableBlock(eventMillis, predictOffsetMillis, f.lagMillis());
+            if (rowLambdas != null && forwardLambdas != null && forwardLambdas.containsKey(level.id())) {
+                final Map.Entry<Long, Double> lambda = forwardLambdas.get(level.id()).floorEntry(usable);
+                if (lambda != null) rowLambdas.put(level.id(), lambda.getValue());
+                else rowLambdas.remove(level.id());
+            }
+            if (s == null) return null;
+            final int position = s.floor(usable);
+            if (position < 0 || position + 1 < f.minBlocks()) return null;
+            final int from = f.windowBlocks() > 0 ? s.floor(usable - f.windowBlocks()) : -1;
+            return s.statsBetween(from, position);
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final MElement input = c.element();
@@ -1155,11 +1247,22 @@ public final class FeatureStages {
             try {
                 prepare(c);
                 final Map<String, VarianceComponents.KeyStats> fitted = statsView == null ? Map.of() : c.sideInput(statsView);
+                final Map<String, ForwardBlocks.Series> series = seriesView == null ? Map.of() : c.sideInput(seriesView);
+                if (seriesView != null && forwardLambdas == null && evaluator.row.needsVarianceComponents()) {
+                    forwardLambdas = VarianceComponents.lambdasByBlock(series);
+                }
                 final Map<String, Object> values = input.asPrimitiveMap();
+                Map<String, Double> rowLambdas = null;
                 for (final FitLevel level : levels) {
                     final String key = FeatureValues.key(values, level.keys());
                     VarianceComponents.KeyStats stats = null;
-                    if (key != null) {
+                    if (key != null && level.isForward()) {
+                        final Long eventMillis = FeatureValues.toEpochMillis(values.get(level.forward().blockField()), level.forward().blockFieldType());
+                        if (eventMillis != null) {
+                            if (forwardLambdas != null && rowLambdas == null) rowLambdas = new HashMap<>(evaluator.row.lambdas());
+                            stats = forwardStats(level, series, FitArtifact.entryKey(level.id(), key), eventMillis, rowLambdas);
+                        }
+                    } else if (key != null) {
                         final String entry = FitArtifact.entryKey(level.id(), key);
                         stats = loaded.get(entry);
                         if (stats == null) stats = fitted.get(entry);
@@ -1176,6 +1279,7 @@ public final class FeatureStages {
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);
                     if (level.sumSqColumn() != null) values.put(level.sumSqColumn(), stats == null ? 0d : stats.sumSq);
                 }
+                if (rowLambdas != null) evaluator.setLambdas(rowLambdas); // the λ of the row's usable block, per forward level
                 for (final StaticFitBlock<?> block : blocks) apply(block, model(c, block), values);
                 evaluator.evaluateRowColumns(values);
                 c.output(MElement.of(values, c.timestamp()));

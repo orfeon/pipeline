@@ -64,7 +64,7 @@ time; warnings and hints from the compiler are part of that report.
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
-| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
+| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) and `minBlocks` (default 1) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). `minHistory` is accepted but not implemented yet (warning). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
 | output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`), `roles` (the data contract: `group` / `time` / `entity` / `label` / `baseline` / `weight` → an input field, a context / entity name or a baseline name; role fields always pass through and are recorded in the manifest so consumers never treat them as features), `include` (the output projection: a list of column names, or a URI / path to a JSON array / `{columns: [...]}` / one-name-per-line file such as a screening step's pass list; when declared it replaces `exclude`), `manifest` (URI of the assembly-time manifest, see [Output contract](#output-contract-roles-include-manifest)). |
 | audit      | optional | Object                         | `observedAt` (`count` (default) \| `fail` \| `off`): what the [observedAt audit](#observedat-audit-declaration-vs-data) does with a row whose observation time is after the declared availability — count it (metrics + run manifest), route it to the failure output, or skip the audit. |
@@ -197,6 +197,33 @@ for the current plan hash already exists it is loaded at worker setup instead of
 forces a new fit) — this is the serving path: the same config, run on request data, applies the fitted
 statistics without any history. Streaming runs require an existing artifact. Paths use the Beam
 filesystems (`gs://`, `s3://`, relative local paths).
+
+### Forward block fits (fit.mode forward)
+
+```yaml
+  fit:
+    mode: forward
+    blocks: {size: P90D}                          # or {bucket: year | quarter | month | week | day}; default P90D
+    minBlocks: 1                                  # rows with fewer preceding blocks (with data for the key) read nothing
+    artifact: {uri: "gs://bucket/features"}       # optional: the whole-input totals, for a static serving run
+```
+
+`forward` is the time-series counterpart of `fold`: every row reads the statistics of the **complete time
+blocks whose targets are known at predictAt**, and nothing from its own block — a stepwise `expanding`
+(the statistics move at block boundaries) that is computed as a parallel Combine per (key, block) plus a
+per-key prefix over blocks instead of a time-ordered replay per key. The single-threaded global-level
+stage of an expanding lattice disappears (`encoding.globalKey`), and unlike `fold` no later row leaks
+into the statistics. Per level, a block is usable when its end is at or before `predictAt(row) − lag`,
+`lag` being the target's availability delay after its event (settlement + ingestion; an attribute-only
+level has none), so a fresh outcome never enters a block early. `minBlocks` makes rows with a short
+history read nothing (`count` reads 0, the other statistics null). Windows: `maxAge` is rounded up to
+whole blocks (`fit.mode.forward.window`), `maxEvents` / `filter` are ignored (`fit.mode.forward.windowIgnored`).
+Sufficient statistics only (count / sum / mean / rate / std; `quantile` / `distribution` are expanding
+only, `encoding.stat.static`). With `weights: varianceComponents` the pseudo-count λ is estimated per
+block from the keys' statistics up to that block, and recorded per block in the artifact manifest
+(`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
+empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
+(UTC). The `blocks` / `minBlocks` settings are part of the plan hash. Batch only.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -547,8 +574,9 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   statistic needs) processes every row
   under one key — one worker thread, however many workers the job has — and once the waves run in parallel
   it is what the job waits for (the `encoding.globalKey` hint marks such stages). Where the statistics are
-  encoding sufficient statistics, `fit.mode: static` / `fold` computes them as a parallel Combine instead —
-  but this is a modeling change, not a drop-in: `fold` is out-of-fold over the whole batch (other folds
+  encoding sufficient statistics, `fit.mode: forward` / `static` / `fold` computes them as a parallel Combine
+  instead — but this is a modeling change, not a drop-in: `forward` reads complete earlier blocks only (leak-free,
+  stepwise; the closest to `expanding`), `fold` is out-of-fold over the whole batch (other folds
   include later events), `static` freezes a training period's statistics (and matches how a serving path
   would consume them). The values change, so treat it as a feature-design decision and validate by model
   metrics, not by output diffing.

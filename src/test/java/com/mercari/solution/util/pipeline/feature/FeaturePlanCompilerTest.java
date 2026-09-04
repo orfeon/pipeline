@@ -1635,4 +1635,116 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("emit: marketProb", "emit: category")), "baselines.emit.duplicate"));
     }
 
+    // ------------------------------------------------------------------------------------------
+    // fit.mode forward
+    // ------------------------------------------------------------------------------------------
+
+    private static String withForward(final String fit) {
+        return SPEC.replace("output:\n  prefix: f_\n", fit + "output:\n  prefix: f_\n");
+    }
+
+    @Test
+    public void testForwardFitExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withForward("fit: {mode: forward, blocks: {size: P7D}, minBlocks: 2}\n"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.forward"), plan::describe);
+        // the hidden level columns carry the block geometry and, per level, the target's availability lag
+        final OutputColumn count = column(plan, "enc__seller_id__n");
+        Assertions.assertEquals("forward", count.getCoordinates().get("fit"));
+        Assertions.assertEquals(Long.toString(7L * 86_400_000L), count.getCoordinates().get("blockSizeMillis"));
+        Assertions.assertEquals("2", count.getCoordinates().get("minBlocks"));
+        Assertions.assertEquals("session_time", count.getCoordinates().get("blockField"));
+        Assertions.assertEquals("0", count.getCoordinates().get("forwardLagMillis")); // no target: attribute-only level
+        final OutputColumn mean = column(plan, "enc__seller_id__e2__n");
+        Assertions.assertEquals(Long.toString(6L * 86_400_000L + 30L * 60_000L), mean.getCoordinates().get("forwardLagMillis")); // sold: settlement PT30M + ingestion P6D
+        Assertions.assertTrue(column(plan, "enc__seller_id__e2__mean").isFitted());
+        Assertions.assertEquals("fitStat", column(plan, "enc__seller_id__e2__mean").getOperator());
+        // a fit stage, no time-ordered replay for the block
+        Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() == FeaturePlan.StageKind.fit && s.blocks().contains("enc")), plan::describe);
+        // the hidden level columns live in the fit stage (the target expression is a row column hosted earlier, as for static)
+        Assertions.assertTrue(plan.getStages().stream().filter(s -> s.columnNames().contains("enc__seller_id__n")).allMatch(s -> s.kind() == FeaturePlan.StageKind.fit), plan::describe);
+        // calendar buckets and the default size
+        Assertions.assertEquals("quarter", column(compile(SOURCES, withForward("fit: {mode: forward, blocks: {bucket: quarter}}\n")), "enc__seller_id__n").getCoordinates().get("blockBucket"));
+        Assertions.assertEquals(Long.toString(90L * 86_400_000L), column(compile(SOURCES, withForward("fit: {mode: forward}\n")), "enc__seller_id__n").getCoordinates().get("blockSizeMillis"));
+        // the geometry is semantic: it changes the plan hash
+        Assertions.assertNotEquals(compile(SOURCES, withForward("fit: {mode: forward, blocks: {size: P7D}}\n")).getHash(),
+                compile(SOURCES, withForward("fit: {mode: forward, blocks: {size: P30D}}\n")).getHash());
+        // batch only
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, true).stream().anyMatch(m -> m.contains("forward")));
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).isEmpty());
+    }
+
+    @Test
+    public void testForwardFitDiagnostics() {
+        Assertions.assertTrue(hasCode(compile(SOURCES, withForward("fit: {mode: forward, blocks: {bucket: decade}}\n")), "fit.blocks.bucket"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withForward("fit: {mode: forward, blocks: {bucket: year, size: P7D}}\n")), "fit.blocks"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withForward("fit: {mode: forward, blocks: {field: start_price, size: P7D}}\n")), "fit.blocks.field"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withForward("fit: {mode: forward, minBlocks: 0}\n")), "fit.minBlocks"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withForward("fit: {mode: forward, blocks: {size: PT0S}}\n")), "fit.blocks.size"));
+        // sufficient statistics only, like static / fold
+        final FeaturePlan quantile = compile(SOURCES, withForward("fit: {mode: forward}\n").replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {expr: \"sold >= 1\", stats: [mean, quantile50]}"));
+        Assertions.assertTrue(hasCode(quantile, "encoding.stat.static"), quantile::describe);
+        // windows: maxAge rounded to blocks, maxEvents / filter ignored with a warning; no static-windows warning
+        final FeaturePlan window = compile(SOURCES, withForward("fit: {mode: forward, blocks: {size: P7D}}\n")
+                .replace("      - keys: [seller_id]\n", "      - keys: [seller_id]\n        windows: [{maxAge: P30D}, {maxEvents: 5}]\n"));
+        Assertions.assertTrue(hasCode(window, "fit.mode.forward.window"), window::describe);
+        Assertions.assertTrue(hasCode(window, "fit.mode.forward.windowIgnored"), window::describe);
+        Assertions.assertFalse(hasCode(window, "fit.mode.static.windows"), window::describe);
+        Assertions.assertEquals("5", column(window, "enc__seller_id__30d__n").getCoordinates().get("windowBlocks"));
+        // per-block override
+        final FeaturePlan perBlock = compile(SOURCES, SPEC.replace("  - name: enc\n    scope: population\n    type: encoding\n",
+                "  - name: enc\n    scope: population\n    type: encoding\n    fit: {mode: forward, blocks: {bucket: month}, minBlocks: 3}\n"));
+        Assertions.assertFalse(perBlock.getDiagnostics().hasErrors(), perBlock::describe);
+        Assertions.assertEquals("month", column(perBlock, "enc__seller_id__n").getCoordinates().get("blockBucket"));
+        Assertions.assertEquals("3", column(perBlock, "enc__seller_id__n").getCoordinates().get("minBlocks"));
+    }
+
+    @Test
+    public void testForwardBlocksArithmetic() {
+        final ForwardBlocks weekly = ForwardBlocks.ofSize(Duration.ofDays(7));
+        final long jan1 = java.time.Instant.parse("2025-01-01T10:00:00Z").toEpochMilli();
+        final long jan3 = java.time.Instant.parse("2025-01-03T10:00:00Z").toEpochMilli();
+        final long jan20 = java.time.Instant.parse("2025-01-20T10:00:00Z").toEpochMilli();
+        final long feb1 = java.time.Instant.parse("2025-02-01T10:00:00Z").toEpochMilli();
+        Assertions.assertEquals(2869, weekly.indexOf(jan1));
+        Assertions.assertEquals(2870, weekly.indexOf(jan3));
+        Assertions.assertEquals(2872, weekly.indexOf(jan20));
+        Assertions.assertEquals(2874, weekly.indexOf(feb1));
+        // usable = the last block ending at or before event + predictOffset − lag: Feb 1 with predictAt −8 min and a
+        // 6-day-30-minute target lag reads up to block 2872 (Jan 16–22); Jan 3 with no lag reads block 2869
+        final long predict = -8L * 60_000L, lag = 6L * 86_400_000L + 30L * 60_000L;
+        Assertions.assertEquals(2872, weekly.usableBlock(feb1, predict, lag));
+        Assertions.assertEquals(2869, weekly.usableBlock(jan3, predict, 0));
+        Assertions.assertEquals(2868, weekly.usableBlock(jan3, predict, lag));
+        // calendar buckets
+        Assertions.assertEquals(2025L * 4, ForwardBlocks.ofBucket("quarter").indexOf(jan1));
+        Assertions.assertEquals(2025L * 4, ForwardBlocks.ofBucket("quarter").indexOf(java.time.Instant.parse("2025-03-31T23:59:59Z").toEpochMilli()));
+        Assertions.assertEquals(2025L * 4 + 1, ForwardBlocks.ofBucket("quarter").indexOf(java.time.Instant.parse("2025-04-01T00:00:00Z").toEpochMilli()));
+        Assertions.assertEquals(2025L * 12 + 1, ForwardBlocks.ofBucket("month").indexOf(feb1));
+        Assertions.assertEquals(2025L, ForwardBlocks.ofBucket("year").indexOf(feb1));
+        Assertions.assertEquals(1, ForwardBlocks.ofBucket("year").windowBlocks(Duration.ofDays(200)));
+        Assertions.assertEquals(2, ForwardBlocks.ofBucket("year").windowBlocks(Duration.ofDays(400)));
+        Assertions.assertEquals(5, weekly.windowBlocks(Duration.ofDays(30)));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ForwardBlocks.ofBucket("decade"));
+        // series: floor / prefix differences
+        final ForwardBlocks.Series s = new ForwardBlocks.Series(new long[]{10, 12, 15}, new double[]{1, 3, 6}, new double[]{1, 2, 4}, new double[]{1, 2, 4});
+        Assertions.assertEquals(-1, s.floor(9));
+        Assertions.assertEquals(0, s.floor(10));
+        Assertions.assertEquals(1, s.floor(14));
+        Assertions.assertEquals(2, s.floor(99));
+        Assertions.assertEquals(6.0, s.totals().n, 0d);
+        Assertions.assertEquals(5.0, s.statsBetween(0, 2).n, 0d);
+        Assertions.assertNull(s.statsBetween(-1, -1));
+        Assertions.assertNull(s.statsBetween(2, 2));
+        // λ per block from cumulative series: one level, two keys, moments over the keys' prefix up to each block
+        final java.util.Map<String, ForwardBlocks.Series> series = new java.util.HashMap<>();
+        series.put(FitArtifact.entryKey("lvl__n", "a"), new ForwardBlocks.Series(new long[]{1, 2}, new double[]{4, 8}, new double[]{2, 4}, new double[]{2, 4}));
+        series.put(FitArtifact.entryKey("lvl__n", "b"), new ForwardBlocks.Series(new long[]{2}, new double[]{4}, new double[]{0}, new double[]{0}));
+        final java.util.Map<String, java.util.TreeMap<Long, Double>> lambdas = VarianceComponents.lambdasByBlock(series);
+        Assertions.assertTrue(lambdas.containsKey("lvl__n"));
+        Assertions.assertFalse(lambdas.get("lvl__n").containsKey(1L)); // one key only at block 1: no estimate
+        Assertions.assertTrue(lambdas.get("lvl__n").containsKey(2L));
+        Assertions.assertEquals(12.0, VarianceComponents.forwardTotals(series).get(FitArtifact.entryKey("lvl__n", "a")).n + VarianceComponents.forwardTotals(series).get(FitArtifact.entryKey("lvl__n", "b")).n, 0d);
+    }
+
 }

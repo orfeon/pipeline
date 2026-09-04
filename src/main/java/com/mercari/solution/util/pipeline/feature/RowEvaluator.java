@@ -40,6 +40,11 @@ public class RowEvaluator implements Serializable {
         this.lambdas = lambdas;
     }
 
+    /** The current variance-components pseudo-counts (never null). */
+    public Map<String, Double> lambdas() {
+        return lambdas == null ? Map.of() : lambdas;
+    }
+
     /** Whether any composed column of this evaluator needs variance-components pseudo-counts. */
     public boolean needsVarianceComponents() {
         return columns.stream().anyMatch(c -> "varianceComponents".equals(c.coordinates.get("weights")));
