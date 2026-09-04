@@ -106,7 +106,7 @@ public final class FeaturePlanCompiler {
             final String observedAt = field.getObservedAtField();
             if (observedAt == null || field.getAvailableAt() == null) continue;
             final boolean known = inputSchemaFields != null;
-            final boolean present = known ? schemaTypes.containsKey(observedAt) : inputFields.containsKey(observedAt);
+            final boolean present = !known || schemaTypes.containsKey(observedAt);
             if (known && !present) {
                 diagnostics.warning("sources.observedAt.missingInput", "sources." + field.getSourceName() + "." + field.getName(),
                         "observedAtField '" + observedAt + "' is not in the input relation: the observedAt audit of '" + field.getName()
@@ -116,7 +116,7 @@ public final class FeaturePlanCompiler {
                     : inputFields.containsKey(observedAt) ? inputFields.get(observedAt).getType() : null;
             final String typeName = type == null ? "timestamp" : type.getType().name();
             observedAtAudits.add(new FeaturePlan.ObservedAtAudit(field.getName(), field.getSourceName(), observedAt, typeName,
-                    present || !known, field.getAvailableAt(), spec.predictAt));
+                    present, field.getAvailableAt(), spec.predictAt));
         }
     }
 
