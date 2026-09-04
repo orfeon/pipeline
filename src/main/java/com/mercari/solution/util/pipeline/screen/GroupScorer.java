@@ -13,12 +13,13 @@ import java.util.SplittableRandom;
  * Scores one unit (a group, or a single independent row) against every column x transform: builds the
  * placebo columns, applies the transforms, and adds the score-test contribution of the unit into the
  * accumulator map keyed by {@link ScreenSpec#key}. Pure and deterministic: the rows are sorted by (time,
- * identity) and every random draw is seeded from the spec seed and the unit key.
+ * identity) and every random draw is seeded from the spec seed and the unit key. {@link #prepare} and
+ * {@link #columns} are shared with the conditioning passes ({@link ConditioningScorer}).
  */
 public final class GroupScorer implements Serializable {
 
     private static final String SEP = String.valueOf((char) 0);
-    private static final double EPS = 1e-12;
+    static final double EPS = 1e-12;
 
     private final ScreenSpec spec;
     private final int nCandidates;
@@ -29,69 +30,121 @@ public final class GroupScorer implements Serializable {
         this.spec = spec;
         this.nCandidates = spec.candidates.size();
         this.nColumns = spec.columnCount();
-        this.shuffleRef = spec.hasShuffle() ? nCandidates : -1;
+        this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
     }
 
     /** Skip reasons of a unit, counted in the bookkeeping accumulator. */
     public enum Skip { NONE, NO_POSITIVE_LABEL, INVALID_BASELINE }
 
-    /**
-     * Adds the unit's contributions into {@code into} (created on demand). Returns why the unit was skipped,
-     * {@link Skip#NONE} when it was scored.
-     */
-    public Skip score(final List<ScreenRow> input, final String unitKey, final Map<Integer, ScoreAccumulator> into) {
+    /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
+    public static final class Unit {
+        public final List<ScreenRow> rows;
+        public final String key;
+        public final Skip skip;
+        /** baseline probability per row (grouped: shares summing to 1; binomial: clamped probabilities; zeros in prior mode) */
+        public final double[] p;
+        public final double[] y;
+        public final double[] w;
+        /** unit weight (the row mean) for the grouped family */
+        public final double unitWeight;
+
+        Unit(final List<ScreenRow> rows, final String key, final Skip skip, final double[] p, final double[] y, final double[] w, final double unitWeight) {
+            this.rows = rows;
+            this.key = key;
+            this.skip = skip;
+            this.p = p;
+            this.y = y;
+            this.w = w;
+            this.unitWeight = unitWeight;
+        }
+
+        public int size() {
+            return rows.size();
+        }
+
+        public String period() {
+            return rows.get(0).period;
+        }
+    }
+
+    /** Sorts the rows and derives p / ỹ / w; {@code skip} says why the unit cannot be scored. */
+    public Unit prepare(final List<ScreenRow> input, final String unitKey) {
         final List<ScreenRow> rows = new ArrayList<>(input);
         rows.sort(Comparator.comparingLong(ScreenRow::getTime).thenComparing(ScreenRow::getIdentity));
         final int n = rows.size();
-        final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
-        final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
-
-        // baseline probabilities
         final double[] p = new double[n];
-        final boolean prior = !spec.hasBaseline();
-        if (!prior) {
+        if (spec.hasBaseline()) {
             final Skip skip = probabilities(rows, p);
-            if (skip != Skip.NONE) {
-                bookSlots[ScoreAccumulator.UNITS_SKIPPED] = 1;
-                book.add(null, bookSlots);
-                return skip;
-            }
+            if (skip != Skip.NONE) return new Unit(rows, unitKey, skip, p, null, null, 0);
         } else if (spec.isGroupedMultinomial()) {
             Arrays.fill(p, 1d / n);
         }
-
-        // labels
         final double[] y = new double[n];
         for (int i = 0; i < n; i++) y[i] = rows.get(i).label;
         if (spec.isGroupedMultinomial()) {
             double sum = 0;
             for (final double v : y) sum += v;
-            if (!(sum > 0)) {
-                bookSlots[ScoreAccumulator.UNITS_SKIPPED] = 1;
-                book.add(null, bookSlots);
-                return Skip.NO_POSITIVE_LABEL;
-            }
+            if (!(sum > 0)) return new Unit(rows, unitKey, Skip.NO_POSITIVE_LABEL, p, y, null, 0);
             if (spec.normalizeTies) for (int i = 0; i < n; i++) y[i] /= sum;
         }
-
-        // weights: per row for binomial, the unit mean for the grouped family
         final double[] w = new double[n];
         double wsum = 0;
         for (int i = 0; i < n; i++) {
             w[i] = rows.get(i).weight;
             wsum += w[i];
         }
-        final double unitWeight = wsum / n;
+        return new Unit(rows, unitKey, Skip.NONE, p, y, w, wsum / n);
+    }
 
-        // columns: candidates, noise placebos, shuffle placebos
+    /**
+     * Adds the unit's contributions into {@code into} (created on demand). Returns why the unit was skipped,
+     * {@link Skip#NONE} when it was scored.
+     */
+    public Skip score(final List<ScreenRow> input, final String unitKey, final Map<Integer, ScoreAccumulator> into) {
+        final Unit unit = prepare(input, unitKey);
+        final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
+        final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
+        if (unit.skip != Skip.NONE) {
+            bookSlots[ScoreAccumulator.UNITS_SKIPPED] = 1;
+            book.add(null, bookSlots);
+            return unit.skip;
+        }
+        final int n = unit.size();
+        final boolean prior = !spec.hasBaseline();
+        final double[][] cols = columns(unit);
+        final String unitPeriod = unit.period();
+        final int nTransforms = spec.transforms.size();
+        final double[] contribution = new double[ScoreAccumulator.SLOTS];
+        for (int c = 0; c < nColumns; c++) {
+            for (int t = 0; t < nTransforms; t++) {
+                final double[] v = transform(spec.transforms.get(t), cols[c]);
+                final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
+                if (spec.isGroupedMultinomial()) {
+                    groupedContribution(v, unit.y, unit.p, unit.unitWeight, contribution);
+                    acc.add(unitPeriod, contribution);
+                } else {
+                    binomialContributions(unit.rows, v, unit.y, unit.p, unit.w, prior, acc);
+                }
+            }
+        }
+        bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
+        bookSlots[ScoreAccumulator.ROWS_SCORED] = n;
+        book.add(null, bookSlots);
+        for (final ScreenRow r : unit.rows) book.time(r.time);
+        return Skip.NONE;
+    }
+
+    /** The unit's columns in key order: candidates, noise placebos (deterministic), shuffle placebos. */
+    public double[][] columns(final Unit unit) {
+        final int n = unit.size();
         final double[][] cols = new double[nColumns][n];
         for (int i = 0; i < n; i++) {
-            final double[] x = rows.get(i).x;
+            final double[] x = unit.rows.get(i).x;
             for (int c = 0; c < nCandidates; c++) cols[c][i] = x[c];
         }
         int next = nCandidates;
         if (spec.noise > 0) {
-            final SplittableRandom rng = ScreenMath.seededRandom(spec.seed, unitKey + SEP + "noise");
+            final SplittableRandom rng = ScreenMath.seededRandom(spec.seed, unit.key + SEP + "noise");
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < spec.noise; j++) cols[next + j][i] = rng.nextGaussian();
             }
@@ -99,9 +152,9 @@ public final class GroupScorer implements Serializable {
         }
         if (shuffleRef >= 0) {
             final double[] ref = new double[n];
-            for (int i = 0; i < n; i++) ref[i] = rows.get(i).x[shuffleRef];
+            for (int i = 0; i < n; i++) ref[i] = unit.rows.get(i).x[shuffleRef];
             for (int j = 0; j < spec.shuffleN; j++) {
-                final SplittableRandom rng = ScreenMath.seededRandom(spec.seed, unitKey + SEP + "shuffle" + j);
+                final SplittableRandom rng = ScreenMath.seededRandom(spec.seed, unit.key + SEP + "shuffle" + j);
                 final int[] perm = new int[n];
                 for (int i = 0; i < n; i++) perm[i] = i;
                 for (int i = n - 1; i > 0; i--) {
@@ -113,27 +166,7 @@ public final class GroupScorer implements Serializable {
                 for (int i = 0; i < n; i++) cols[next + j][i] = ref[perm[i]];
             }
         }
-
-        final String unitPeriod = rows.get(0).period;
-        final int nTransforms = spec.transforms.size();
-        final double[] contribution = new double[ScoreAccumulator.SLOTS];
-        for (int c = 0; c < nColumns; c++) {
-            for (int t = 0; t < nTransforms; t++) {
-                final double[] v = transform(spec.transforms.get(t), cols[c]);
-                final ScoreAccumulator acc = into.computeIfAbsent(spec.key(c, t), k -> new ScoreAccumulator());
-                if (spec.isGroupedMultinomial()) {
-                    groupedContribution(v, y, p, unitWeight, contribution);
-                    acc.add(unitPeriod, contribution);
-                } else {
-                    binomialContributions(rows, v, y, p, w, prior, acc);
-                }
-            }
-        }
-        bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
-        bookSlots[ScoreAccumulator.ROWS_SCORED] = n;
-        book.add(null, bookSlots);
-        for (final ScreenRow r : rows) book.time(r.time);
-        return Skip.NONE;
+        return cols;
     }
 
     /** Fills {@code p} from the baselines; NONE when every row is usable. */

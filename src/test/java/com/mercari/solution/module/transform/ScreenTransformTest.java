@@ -5,6 +5,8 @@ import com.mercari.solution.config.Config;
 import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
+import org.apache.beam.runners.direct.DirectOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.junit.jupiter.api.Assertions;
@@ -25,7 +27,19 @@ import java.util.Random;
  */
 public class ScreenTransformTest {
 
-    private final transient TestPipeline pipeline = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+    /**
+     * The DirectRunner's immutability enforcement traverses the whole pipeline graph once per bundle; the
+     * unrolled conditioning passes make the graph large and the GroupByKey output is one bundle per key, so the
+     * check dominates the run time (CPU-bound in ImmutabilityEnforcementFactory). It is disabled here as in the
+     * Spanner / Datastore ITs; the engine never mutates its inputs.
+     */
+    private static TestPipeline createPipeline() {
+        final DirectOptions options = PipelineOptionsFactory.as(DirectOptions.class);
+        options.setEnforceImmutability(false);
+        return TestPipeline.fromOptions(options).enableAbandonedNodeEnforcement(false);
+    }
+
+    private final transient TestPipeline pipeline = createPipeline();
 
     private static String sessionsConfig(final int sessions, final int listings, final long seed) {
         final Random random = new Random(seed);
@@ -235,6 +249,86 @@ public class ScreenTransformTest {
             return null;
         });
         pipeline.run();
+    }
+
+    @Test
+    public void testConditioningReplacesTheBaseline() throws Exception {
+        // no baseline: the prior sees f_known and f_extra; conditioning on f_known removes f_known (r2_F ≈ 1)
+        // while f_extra keeps its partial gain
+        // small on purpose: the DirectRunner's cost grows with (unrolled passes x keyed bundles), see createPipeline
+        final String config = sessionsConfig(80, 8, 42) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      time: {field: session_time}
+                      candidates: {include: ["f_*"]}
+                      transforms: [raw, rank]
+                      placebo: {noise: 30, seed: 3}
+                      conditioning: {fields: [f_known], l2: 1.0e-4, maxIter: 6}
+                """;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            Assertions.assertEquals((3 + 30) * 2, records.size());
+            final MElement known = records.get("f_known:raw");
+            final MElement extra = records.get("f_extra:raw");
+            final MElement noise = records.get("f_noise:raw");
+            // marginally f_known is the strongest column; conditioned on itself it vanishes
+            Assertions.assertTrue(known.getAsDouble("z") > 5, "marginal z of f_known: " + known.getAsDouble("z"));
+            // the L2 ridge leaves a residual of order l2 in the orthogonalisation: r2_F ≈ 1, partial gain ≈ 0
+            Assertions.assertTrue(known.getAsDouble("r2_F") > 0.999, "r2_F of f_known: " + known.getAsDouble("r2_F"));
+            Assertions.assertTrue(known.getAsDouble("partial_gain") < known.getAsDouble("threshold") / 100, "partial gain of f_known: " + known.getAsDouble("partial_gain"));
+            Assertions.assertEquals(Boolean.FALSE, known.getPrimitiveValue("passed"));
+            // f_extra survives the conditioning
+            Assertions.assertTrue(extra.getAsDouble("partial_z") > 5, "partial z of f_extra: " + extra.getAsDouble("partial_z"));
+            Assertions.assertTrue(extra.getAsDouble("r2_F") < 0.2, "r2_F of f_extra: " + extra.getAsDouble("r2_F"));
+            Assertions.assertEquals(Boolean.TRUE, extra.getPrimitiveValue("passed"));
+            Assertions.assertTrue(extra.getAsDouble("partial_gain") > extra.getAsDouble("threshold"));
+            Assertions.assertNotNull(extra.getAsDouble("partial_pValue"));
+            Assertions.assertNotNull(extra.getAsDouble("qValue"));
+            Assertions.assertEquals(Boolean.FALSE, noise.getPrimitiveValue("passed"));
+            // placebo columns carry partial statistics too
+            Assertions.assertNotNull(records.get("__noise_0:rank").getAsDouble("partial_gain"));
+            return null;
+        });
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            final MElement summary = rows.iterator().next();
+            Assertions.assertEquals(List.of("f_known"), summary.getPrimitiveValue("conditioningFields"));
+            Assertions.assertEquals(1L, summary.getAsLong("conditioningK"));
+            Assertions.assertEquals(Boolean.TRUE, summary.getPrimitiveValue("conditioningConverged"));
+            Assertions.assertTrue(summary.getAsLong("conditioningIterations") <= 6);
+            Assertions.assertTrue(summary.getAsDouble("conditioningGain") > 0);
+            final List<?> passed = (List<?>) summary.getPrimitiveValue("passedColumns");
+            Assertions.assertTrue(passed.contains("f_extra"), "passedColumns: " + passed);
+            Assertions.assertFalse(passed.contains("f_known"), "passedColumns: " + passed);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testConditioningRejectsWindowedInput() {
+        final String config = sessionsConfig(2, 2, 1) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    strategy:
+                      window: {type: fixed, unit: day, size: 1, offset: 0}
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      candidates: {include: ["f_*"]}
+                      conditioning: {fields: [f_known]}
+                """;
+        final IllegalModuleException e = Assertions.assertThrows(IllegalModuleException.class, () -> MPipeline.apply(pipeline, Config.load(config)));
+        Assertions.assertTrue(String.join(" ", e.errorMessages).contains("global window"), e.getMessage());
     }
 
     @Test

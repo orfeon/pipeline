@@ -6,21 +6,28 @@ import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
+import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.ListCoder;
+import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.transforms.Combine;
+import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PCollectionTuple;
+import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.slf4j.Logger;
@@ -33,9 +40,12 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Beam wiring of the screen transform: prepare rows → (group) → score units into bundle-local accumulators →
- * Combine per (column, transform) key → gather → one finalize step emitting the scoring records and the summary.
- * Every stage is a bounded Combine; the pass count does not depend on the data.
+ * Beam wiring of the screen transform: prepare rows → units (a GroupByKey, or one row each) → score units into
+ * bundle-local accumulators → Combine per (column, transform) key → gather → one finalize step emitting the
+ * scoring records and the summary. With conditioning: a moments pass, {@code maxIter} unrolled Newton passes
+ * (each one Combine, the controller a tiny ParDo with the previous state as side input), and one partial pass
+ * whose sums join the finalize step as a side input. Every stage is a bounded Combine; the pass count does
+ * not depend on the data.
  */
 public final class ScreenStages {
 
@@ -46,6 +56,15 @@ public final class ScreenStages {
     private static final String SEP = String.valueOf((char) 1);
 
     public record Outputs(PCollection<MElement> records, PCollection<MElement> summary, PCollection<BadRecord> failures) {}
+
+    /** Engine rejections that only the input can tell (called by the module before wiring). */
+    public static List<String> engineConstraints(final PCollection<MElement> input, final ScreenSpec spec) {
+        final List<String> errors = new ArrayList<>();
+        if (spec.hasConditioning() && !(input.getWindowingStrategy().getWindowFn() instanceof GlobalWindows)) {
+            errors.add("conditioning needs the global window (the Newton passes combine over the whole input); remove the windowing strategy or the conditioning block");
+        }
+        return errors;
+    }
 
     public static Outputs apply(final PCollection<MElement> input, final ScreenSpec spec, final List<Logging> loggings, final boolean failFast) {
         final TupleTag<KV<String, ScreenRow>> rowTag = new TupleTag<>() {};
@@ -60,26 +79,67 @@ public final class ScreenStages {
         final PCollection<KV<Integer, ScoreAccumulator>> bookkeeping = prepared.get(bookTag)
                 .setCoder(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER));
 
-        final PCollection<KV<Integer, ScoreAccumulator>> scored;
+        final Coder<KV<String, Iterable<ScreenRow>>> unitCoder = KvCoder.of(StringUtf8Coder.of(), IterableCoder.of(ScreenRow.CODER));
+        final PCollection<KV<String, Iterable<ScreenRow>>> units;
         if (spec.isGrouped()) {
-            scored = rows
-                    .apply("Group", GroupByKey.create())
-                    .apply("ScoreGroups", ParDo.of(new ScoreGroupDoFn(spec)));
+            units = rows.apply("Group", GroupByKey.create());
         } else {
-            scored = rows.apply("ScoreRows", ParDo.of(new ScoreRowDoFn(spec)));
+            units = rows.apply("Units", ParDo.of(new SingletonUnitDoFn())).setCoder(unitCoder);
         }
+
+        final PCollection<KV<Integer, ScoreAccumulator>> scored = units
+                .apply("ScoreUnits", ParDo.of(new ScoreUnitsDoFn(spec)))
+                .setCoder(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER));
         final PCollection<KV<Integer, ScoreAccumulator>> combined = PCollectionList
-                .of(scored.setCoder(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER)))
+                .of(scored)
                 .and(bookkeeping)
                 .apply("FlattenPartials", Flatten.pCollections())
                 .apply("Combine", Combine.perKey(new ScoreAccumulator.Fn()))
                 .setCoder(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER));
 
+        // conditioning: moments → unrolled Newton passes → partial pass (all global-window Combines)
+        PCollectionView<FitState> fitView = null;
+        PCollectionView<List<List<KV<Integer, VectorAccumulator>>>> partialView = null;
+        final List<PCollectionView<?>> finalizeSideInputs = new ArrayList<>();
+        if (spec.hasConditioning()) {
+            final ConditioningScorer scorer = new ConditioningScorer(spec);
+            // singleton views over default-carrying global Combines: every pass yields exactly one element (an
+            // empty vector when nothing was evaluated), so the state chain never has an unready or empty view
+            final PCollectionView<VectorAccumulator> momentsView = rows
+                    .apply("ConditioningMoments", ParDo.of(new MomentsDoFn(spec)))
+                    .setCoder(VectorAccumulator.CODER)
+                    .apply("ConditioningMoments_Combine", Combine.globally(new VectorAccumulator.Fn()))
+                    .apply("ConditioningMoments_View", View.asSingleton());
+            PCollectionView<FitState> state = input.getPipeline()
+                    .apply("ConditioningInit", Create.of(FitState.initial(scorer.k)).withCoder(SerializableCoder.of(FitState.class)))
+                    .apply("ConditioningInit_View", View.asSingleton());
+            for (int it = 1; it <= spec.conditioningMaxIter; it++) {
+                final PCollection<VectorAccumulator> evaluation = units
+                        .apply("ConditioningFit" + it, ParDo.of(new FitPassDoFn(spec, momentsView, state)).withSideInputs(momentsView, state))
+                        .setCoder(VectorAccumulator.CODER)
+                        .apply("ConditioningFit" + it + "_Combine", Combine.globally(new VectorAccumulator.Fn()));
+                state = evaluation
+                        .apply("ConditioningFit" + it + "_Advance", ParDo.of(new AdvanceDoFn(spec, state)).withSideInputs(state))
+                        .setCoder(SerializableCoder.of(FitState.class))
+                        .apply("ConditioningFit" + it + "_View", View.asSingleton());
+            }
+            fitView = state;
+            partialView = units
+                    .apply("ConditioningPartial", ParDo.of(new PartialPassDoFn(spec, momentsView, fitView)).withSideInputs(momentsView, fitView))
+                    .setCoder(KvCoder.of(VarIntCoder.of(), VectorAccumulator.CODER))
+                    .apply("ConditioningPartial_Combine", Combine.perKey(new VectorAccumulator.Fn()))
+                    .apply("ConditioningPartial_Gather", Combine.globally(new GatherFn<KV<Integer, VectorAccumulator>>(KvCoder.of(VarIntCoder.of(), VectorAccumulator.CODER))).withoutDefaults())
+                    .apply("ConditioningPartial_View", View.asList());
+            finalizeSideInputs.add(fitView);
+            finalizeSideInputs.add(partialView);
+        }
+
         final TupleTag<MElement> recordTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final PCollectionTuple finalized = combined
-                .apply("Gather", Combine.globally(new GatherFn()).withoutDefaults())
-                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag))
+                .apply("Gather", Combine.globally(new GatherFn<KV<Integer, ScoreAccumulator>>(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER))).withoutDefaults())
+                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, fitView, partialView))
+                        .withSideInputs(finalizeSideInputs)
                         .withOutputTags(recordTag, TupleTagList.of(summaryTag)));
         return new Outputs(finalized.get(recordTag), finalized.get(summaryTag), prepared.get(failureTag));
     }
@@ -104,8 +164,7 @@ public final class ScreenStages {
             this.rowTag = rowTag;
             this.bookTag = bookTag;
             this.failureTag = failureTag;
-            this.columns = new ArrayList<>(spec.candidates);
-            if (spec.hasShuffle()) this.columns.add(spec.shuffleField);
+            this.columns = spec.rowColumns();
         }
 
         @Setup
@@ -205,16 +264,24 @@ public final class ScreenStages {
         }
     }
 
+    /** Independent rows: every row is its own unit. */
+    static class SingletonUnitDoFn extends DoFn<KV<String, ScreenRow>, KV<String, Iterable<ScreenRow>>> {
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            c.output(KV.of(c.element().getKey(), List.of(c.element().getValue())));
+        }
+    }
+
     /**
      * Scores units into bundle-local accumulator maps (one per window), flushed once per bundle: a partial
      * combine, so the shuffle carries keys x bundles elements instead of units x columns.
      */
-    abstract static class ScoreDoFn<T> extends DoFn<T, KV<Integer, ScoreAccumulator>> {
-        protected final ScreenSpec spec;
-        protected transient GroupScorer scorer;
+    static class ScoreUnitsDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, ScoreAccumulator>> {
+        private final ScreenSpec spec;
+        private transient GroupScorer scorer;
         private transient Map<BoundedWindow, Map<Integer, ScoreAccumulator>> partials;
 
-        ScoreDoFn(final ScreenSpec spec) {
+        ScoreUnitsDoFn(final ScreenSpec spec) {
             this.spec = spec;
         }
 
@@ -228,8 +295,12 @@ public final class ScreenStages {
             partials = new HashMap<>();
         }
 
-        protected Map<Integer, ScoreAccumulator> partial(final BoundedWindow window) {
-            return partials.computeIfAbsent(window, w -> new HashMap<>());
+        @ProcessElement
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
+            final List<ScreenRow> rows = new ArrayList<>();
+            for (final ScreenRow r : c.element().getValue()) rows.add(r);
+            if (rows.isEmpty()) return;
+            scorer.score(rows, c.element().getKey(), partials.computeIfAbsent(window, w -> new HashMap<>()));
         }
 
         @FinishBundle
@@ -243,66 +314,210 @@ public final class ScreenStages {
         }
     }
 
-    static class ScoreGroupDoFn extends ScoreDoFn<KV<String, Iterable<ScreenRow>>> {
-        ScoreGroupDoFn(final ScreenSpec spec) {
-            super(spec);
+    /** Standardisation sums of the conditioning columns, one vector per row (combined globally). */
+    static class MomentsDoFn extends DoFn<KV<String, ScreenRow>, VectorAccumulator> {
+        private final ScreenSpec spec;
+        private transient ConditioningScorer scorer;
+        private transient VectorAccumulator partial;
+
+        MomentsDoFn(final ScreenSpec spec) {
+            this.spec = spec;
+        }
+
+        @Setup
+        public void setup() {
+            scorer = new ConditioningScorer(spec);
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partial = new VectorAccumulator();
         }
 
         @ProcessElement
-        public void processElement(final ProcessContext c, final BoundedWindow window) {
-            final List<ScreenRow> rows = new ArrayList<>();
-            for (final ScreenRow r : c.element().getValue()) rows.add(r);
-            if (rows.isEmpty()) return;
-            scorer.score(rows, c.element().getKey(), partial(window));
+        public void processElement(final ProcessContext c) {
+            partial.add(scorer.moments(c.element().getValue()));
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            if (!partial.isEmpty()) c.output(partial, GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            partial = new VectorAccumulator();
         }
     }
 
-    static class ScoreRowDoFn extends ScoreDoFn<KV<String, ScreenRow>> {
-        ScoreRowDoFn(final ScreenSpec spec) {
-            super(spec);
+    /** One Newton pass: evaluates every scored unit at the state's proposal (nothing once converged). */
+    static class FitPassDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, VectorAccumulator> {
+        private final ScreenSpec spec;
+        private final PCollectionView<VectorAccumulator> momentsView;
+        private final PCollectionView<FitState> stateView;
+        private transient GroupScorer groups;
+        private transient ConditioningScorer scorer;
+        private transient VectorAccumulator partial;
+
+        FitPassDoFn(final ScreenSpec spec, final PCollectionView<VectorAccumulator> momentsView, final PCollectionView<FitState> stateView) {
+            this.spec = spec;
+            this.momentsView = momentsView;
+            this.stateView = stateView;
+        }
+
+        @Setup
+        public void setup() {
+            groups = new GroupScorer(spec);
+            scorer = new ConditioningScorer(spec);
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partial = new VectorAccumulator();
         }
 
         @ProcessElement
-        public void processElement(final ProcessContext c, final BoundedWindow window) {
-            scorer.score(List.of(c.element().getValue()), c.element().getKey(), partial(window));
+        public void processElement(final ProcessContext c) {
+            final FitState state = c.sideInput(stateView);
+            final VectorAccumulator moments = c.sideInput(momentsView);
+            if (state.converged || moments.isEmpty()) return;
+            final List<ScreenRow> rows = new ArrayList<>();
+            for (final ScreenRow r : c.element().getValue()) rows.add(r);
+            if (rows.isEmpty()) return;
+            final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
+            if (unit.skip != GroupScorer.Skip.NONE) return;
+            partial.add(scorer.evaluate(unit, state.proposal, moments.getValues()));
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            if (!partial.isEmpty()) c.output(partial, GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            partial = new VectorAccumulator();
+        }
+    }
+
+    /** The Newton controller: previous state + the pass evaluation → next state. */
+    static class AdvanceDoFn extends DoFn<VectorAccumulator, FitState> {
+        private final ScreenSpec spec;
+        private final PCollectionView<FitState> stateView;
+
+        AdvanceDoFn(final ScreenSpec spec, final PCollectionView<FitState> stateView) {
+            this.spec = spec;
+            this.stateView = stateView;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final FitState previous = c.sideInput(stateView);
+            final FitState next = SerializableCoderCopy.copy(previous).advance(c.element().getValues(), spec.conditioningL2, spec.conditioningTol);
+            LOG.info("screen conditioning iteration {}: objective {} converged={} rejected={}", next.iteration,
+                    next.objectiveHistory.isEmpty() ? null : next.objectiveHistory.get(next.objectiveHistory.size() - 1), next.converged, next.rejected);
+            c.output(next);
+        }
+    }
+
+    /** Side-input values must not be mutated: the controller advances a copy. */
+    static final class SerializableCoderCopy {
+        private SerializableCoderCopy() {}
+
+        static FitState copy(final FitState state) {
+            try {
+                final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
+                    out.writeObject(state);
+                }
+                try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
+                    return (FitState) in.readObject();
+                }
+            } catch (final java.io.IOException | ClassNotFoundException e) {
+                throw new IllegalStateException("failed to copy the fit state", e);
+            }
+        }
+    }
+
+    /** The partial-test sums per (column, transform) at the fitted model, bundle-local like the score pass. */
+    static class PartialPassDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<Integer, VectorAccumulator>> {
+        private final ScreenSpec spec;
+        private final PCollectionView<VectorAccumulator> momentsView;
+        private final PCollectionView<FitState> stateView;
+        private transient GroupScorer groups;
+        private transient ConditioningScorer scorer;
+        private transient Map<Integer, double[]> partial;
+
+        PartialPassDoFn(final ScreenSpec spec, final PCollectionView<VectorAccumulator> momentsView, final PCollectionView<FitState> stateView) {
+            this.spec = spec;
+            this.momentsView = momentsView;
+            this.stateView = stateView;
+        }
+
+        @Setup
+        public void setup() {
+            groups = new GroupScorer(spec);
+            scorer = new ConditioningScorer(spec);
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partial = new HashMap<>();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final FitState state = c.sideInput(stateView);
+            final VectorAccumulator moments = c.sideInput(momentsView);
+            if (!state.hasBest || moments.isEmpty()) return;
+            final List<ScreenRow> rows = new ArrayList<>();
+            for (final ScreenRow r : c.element().getValue()) rows.add(r);
+            if (rows.isEmpty()) return;
+            final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
+            if (unit.skip != GroupScorer.Skip.NONE) return;
+            scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partial);
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            for (final Map.Entry<Integer, double[]> e : partial.entrySet()) {
+                c.output(KV.of(e.getKey(), new VectorAccumulator(e.getValue())), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            }
+            partial = new HashMap<>();
         }
     }
 
     /** Gathers the (few) combined accumulators into one list for the finalize step. */
-    static class GatherFn extends Combine.CombineFn<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>, List<KV<Integer, ScoreAccumulator>>> {
-        private static final Coder<List<KV<Integer, ScoreAccumulator>>> CODER = ListCoder.of(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER));
+    static class GatherFn<T> extends Combine.CombineFn<T, List<T>, List<T>> {
+        private final Coder<List<T>> coder;
+
+        GatherFn(final Coder<T> elementCoder) {
+            this.coder = ListCoder.of(elementCoder);
+        }
 
         @Override
-        public List<KV<Integer, ScoreAccumulator>> createAccumulator() {
+        public List<T> createAccumulator() {
             return new ArrayList<>();
         }
 
         @Override
-        public List<KV<Integer, ScoreAccumulator>> addInput(final List<KV<Integer, ScoreAccumulator>> acc, final KV<Integer, ScoreAccumulator> input) {
+        public List<T> addInput(final List<T> acc, final T input) {
             acc.add(input);
             return acc;
         }
 
         @Override
-        public List<KV<Integer, ScoreAccumulator>> mergeAccumulators(final Iterable<List<KV<Integer, ScoreAccumulator>>> accs) {
-            final List<KV<Integer, ScoreAccumulator>> merged = new ArrayList<>();
-            for (final List<KV<Integer, ScoreAccumulator>> a : accs) merged.addAll(a);
+        public List<T> mergeAccumulators(final Iterable<List<T>> accs) {
+            final List<T> merged = new ArrayList<>();
+            for (final List<T> a : accs) merged.addAll(a);
             return merged;
         }
 
         @Override
-        public List<KV<Integer, ScoreAccumulator>> extractOutput(final List<KV<Integer, ScoreAccumulator>> acc) {
+        public List<T> extractOutput(final List<T> acc) {
             return acc;
         }
 
         @Override
-        public Coder<List<KV<Integer, ScoreAccumulator>>> getAccumulatorCoder(final CoderRegistry registry, final Coder<KV<Integer, ScoreAccumulator>> inputCoder) {
-            return CODER;
+        public Coder<List<T>> getAccumulatorCoder(final CoderRegistry registry, final Coder<T> inputCoder) {
+            return coder;
         }
 
         @Override
-        public Coder<List<KV<Integer, ScoreAccumulator>>> getDefaultOutputCoder(final CoderRegistry registry, final Coder<KV<Integer, ScoreAccumulator>> inputCoder) {
-            return CODER;
+        public Coder<List<T>> getDefaultOutputCoder(final CoderRegistry registry, final Coder<T> inputCoder) {
+            return coder;
         }
     }
 
@@ -310,11 +525,16 @@ public final class ScreenStages {
         private final ScreenSpec spec;
         private final TupleTag<MElement> recordTag;
         private final TupleTag<MElement> summaryTag;
+        private final PCollectionView<FitState> fitView;
+        private final PCollectionView<List<List<KV<Integer, VectorAccumulator>>>> partialView;
 
-        FinalizeDoFn(final ScreenSpec spec, final TupleTag<MElement> recordTag, final TupleTag<MElement> summaryTag) {
+        FinalizeDoFn(final ScreenSpec spec, final TupleTag<MElement> recordTag, final TupleTag<MElement> summaryTag,
+                     final PCollectionView<FitState> fitView, final PCollectionView<List<List<KV<Integer, VectorAccumulator>>>> partialView) {
             this.spec = spec;
             this.recordTag = recordTag;
             this.summaryTag = summaryTag;
+            this.fitView = fitView;
+            this.partialView = partialView;
         }
 
         @ProcessElement
@@ -323,7 +543,21 @@ public final class ScreenStages {
             for (final KV<Integer, ScoreAccumulator> kv : c.element()) {
                 accumulators.merge(kv.getKey(), kv.getValue(), ScoreAccumulator::merge);
             }
-            final ScreenReport.Result result = ScreenReport.build(spec, accumulators);
+            FitState fit = null;
+            Map<Integer, double[]> partials = null;
+            if (fitView != null) {
+                fit = c.sideInput(fitView);
+                partials = new HashMap<>();
+                for (final List<KV<Integer, VectorAccumulator>> gathered : c.sideInput(partialView)) {
+                    for (final KV<Integer, VectorAccumulator> kv : gathered) {
+                        partials.merge(kv.getKey(), kv.getValue().getValues().clone(), (a, b) -> {
+                            for (int i = 0; i < a.length; i++) a[i] += b[i];
+                            return a;
+                        });
+                    }
+                }
+            }
+            final ScreenReport.Result result = ScreenReport.build(spec, accumulators, partials, fit);
             for (final Map<String, Object> record : result.records()) {
                 c.output(recordTag, MElement.of(record, c.timestamp()));
             }

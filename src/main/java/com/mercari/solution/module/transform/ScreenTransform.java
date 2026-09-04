@@ -56,6 +56,10 @@ public class ScreenTransform extends Transform {
         } catch (final IOException e) {
             throw new IllegalModuleException(getName(), "screen", "failed to read candidates.manifest: " + e.getMessage());
         }
+        final java.util.List<String> constraints = ScreenStages.engineConstraints(input, spec);
+        if (!constraints.isEmpty()) {
+            throw new IllegalModuleException(getName(), "screen", constraints);
+        }
         LOG.info(ScreenReport.describe(spec));
 
         final ScreenStages.Outputs outputs = ScreenStages.apply(input, spec, getLoggings(), getFailFast());
