@@ -37,7 +37,8 @@ public class FeatureSpec implements Serializable {
     public record LineageEntry(List<String> fields, String from, String eventTime) implements Serializable {}
     public record EntityDef(String name, List<String> keys, Duration minInterval) implements Serializable {}
     public record ContextDef(String name, List<String> keys) implements Serializable {}
-    public record BaselineDef(String name, String context, String expr) implements Serializable {}
+    /** {@code emit}: output column name of the baseline value (baselines are intermediate unless emitted). */
+    public record BaselineDef(String name, String context, String expr, String emit) implements Serializable {}
 
     public static class Window implements Serializable {
         public Integer maxEvents;
@@ -68,6 +69,19 @@ public class FeatureSpec implements Serializable {
         public String as;
         /** countByValue / ratioByValue: emit one column per listed value instead of a map. */
         public List<String> values = new ArrayList<>();
+        /** softmax: the offset (a baselines[].name or a column) whose value weights each row in probability space. */
+        public String offset;
+        /** softmax: temperature (default 1); a {@code temperatureFrom} URI is resolved into it before compile. */
+        public Double temperature;
+        /** softmax: where {@code temperature} was read from (URI) and the content hash of that document. */
+        public String temperatureSource;
+        public String temperatureHash;
+        /** softmax: {@code probability} (default: the offset is a probability / weight) | {@code log} (exp is applied first). */
+        public String offsetScale;
+        /** softmax: {@code zero} (default: a null score falls back to the offset) | {@code null} (the row's output is null). */
+        public String scoreNull;
+        /** shuffle: the seed of the deterministic permutation. */
+        public Long seed;
     }
 
     public static class KeySet implements Serializable {
@@ -115,6 +129,8 @@ public class FeatureSpec implements Serializable {
         public List<String> values = new ArrayList<>();
         public String baseline;
         public String on;
+        /** noise: {@code normal} (default) | {@code uniform}; the draw's seed is the shared {@code seed} field. */
+        public String distribution;
 
         // context / sequence
         public String context;
@@ -231,6 +247,11 @@ public class FeatureSpec implements Serializable {
     public List<LineageEntry> lineage = new ArrayList<>();
     public EngineSpec engine = new EngineSpec();
     public AuditSpec audit = new AuditSpec();
+    /**
+     * Values resolved from external documents at assembly ({@code temperatureFrom}): {@code location=source:hash:value}.
+     * Outside the plan hash (no fit depends on them), inside the output hash and the manifest.
+     */
+    public List<String> resolvedExternals = new ArrayList<>();
     public String timeField;
     public List<String> orderTieBreak = new ArrayList<>();
     public String predictAtExpression;
@@ -311,7 +332,7 @@ public class FeatureSpec implements Serializable {
                 diagnostics.error("baselines.invalid", "baselines", "each baseline requires 'name' and 'expr'");
                 continue;
             }
-            spec.baselines.add(new BaselineDef(name, Json.string(o, "context"), expr));
+            spec.baselines.add(new BaselineDef(name, Json.string(o, "context"), expr, Json.string(o, "emit")));
         }
 
         for (final JsonObject o : objects(parameters, "features")) {
@@ -412,6 +433,14 @@ public class FeatureSpec implements Serializable {
                 spec.engine.spillCompress = Json.bool(spill, "compress", false);
             }
         }
+        for (final FeatureDef def : spec.features) {
+            for (int i = 0; i < def.ops.size(); i++) {
+                final Op op = def.ops.get(i);
+                if (op.temperatureSource != null) {
+                    spec.resolvedExternals.add(def.location() + ".ops[" + i + "].temperatureFrom=" + op.temperatureSource + ":" + op.temperatureHash + ":" + op.temperature);
+                }
+            }
+        }
         return spec;
     }
 
@@ -460,6 +489,8 @@ public class FeatureSpec implements Serializable {
         def.values = Json.strings(o, "values");
         def.baseline = Json.string(o, "baseline");
         def.on = Json.string(o, "on");
+        def.distribution = Json.string(o, "distribution");
+        def.seed = longOf(o, "seed", diagnostics, loc);
 
         def.context = Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
@@ -616,7 +647,47 @@ public class FeatureSpec implements Serializable {
         op.decayBy = Json.string(o, "decayBy");
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
+        op.offset = Json.string(o, "offset");
+        op.offsetScale = Json.string(o, "offsetScale");
+        op.scoreNull = Json.string(o, "scoreNull");
+        op.seed = longOf(o, "seed", diagnostics, loc);
+        if (o.has("temperature") && !o.get("temperature").isJsonNull()) {
+            final JsonElement t = o.get("temperature");
+            if (t.isJsonPrimitive() && t.getAsJsonPrimitive().isNumber()) {
+                op.temperature = t.getAsDouble();
+            } else {
+                diagnostics.error("context.softmax.temperature", loc, "temperature must be a number: " + t);
+            }
+        }
+        if (o.has("temperatureFrom") && !o.get("temperatureFrom").isJsonNull()) {
+            final JsonElement t = o.get("temperatureFrom");
+            if (t.isJsonObject() && t.getAsJsonObject().has("value")) {
+                // resolved by FeaturePlanService.resolve: {source, hash, value}
+                final JsonObject resolved = t.getAsJsonObject();
+                op.temperature = resolved.get("value").getAsDouble();
+                op.temperatureSource = Json.string(resolved, "source");
+                op.temperatureHash = Json.string(resolved, "hash");
+            } else {
+                diagnostics.error("context.softmax.temperatureFrom.unresolved", loc,
+                        "temperatureFrom must be a URI resolved before compile (got " + t + ")");
+            }
+        }
         return op;
+    }
+
+    private static Long longOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
+        if (!o.has(key) || o.get(key).isJsonNull()) return null;
+        final JsonElement e = o.get(key);
+        if (e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber()) return e.getAsLong();
+        if (e.isJsonPrimitive()) {
+            try {
+                return Long.parseLong(e.getAsString().trim());
+            } catch (final NumberFormatException ignored) {
+                // reported below
+            }
+        }
+        diagnostics.error(key + ".invalid", loc, key + " must be an integer: " + e);
+        return null;
     }
 
     private static List<Double> doubles(final JsonObject o, final String key) {

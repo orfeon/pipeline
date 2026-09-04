@@ -46,6 +46,8 @@ public final class FeaturePlanCompiler {
     private final Map<String, EntityDef> entities = new LinkedHashMap<>();
     private final Map<String, ContextDef> contexts = new LinkedHashMap<>();
     private final Map<String, String> baselineColumns = new LinkedHashMap<>();
+    /** baselines[].emit: baseline name → the emitted copy column. */
+    private final Map<String, String> baselineEmits = new LinkedHashMap<>();
     /** Input fields whose lineage declaration failed: references to them are secondary errors. */
     private final Set<String> lineageMissing = new LinkedHashSet<>();
     /** True when at least one block could not be expanded (availability verdicts are then deferred). */
@@ -144,10 +146,9 @@ public final class FeaturePlanCompiler {
                 }
                 case "baseline" -> {
                     if (baselineColumns.containsKey(name)) {
-                        final OutputColumn b = columnsByCanonical.get(baselineColumns.get(name));
-                        if (b != null && b.intermediate) {
+                        if (!baselineEmits.containsKey(name) || !isEmittedColumn(baselineEmits.get(name))) {
                             diagnostics.warning("output.roles.baseline.notEmitted", loc,
-                                    "baseline '" + name + "' is not an output column (baselines are intermediate): consumers reading the role from the manifest will not find it; derive it as a feature (e.g. shareOfTotal) and name that column, or wait for baselines[].emit");
+                                    "baseline '" + name + "' is not an output column (baselines are intermediate): give it baselines[].emit so consumers reading the role from the manifest find it");
                         }
                     } else if (!input && !isEmittedColumn(name)) {
                         diagnostics.error("output.roles.unresolved", loc, "baseline role '" + name + "' is neither a baseline name, an input field nor an output column");
@@ -569,11 +570,29 @@ public final class FeaturePlanCompiler {
                         "baseline references market field '" + r + "' with evidence: declared; a baseline must be time-consistent (measured or allowDeclared)");
             }
             addSelfInput(c, r);
+            // the baseline is as perishable as its most perishable input (a market price with validFor)
+            final Duration validFor = ref == null ? null : ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
+            if (validFor != null && (c.validFor == null || validFor.compareTo(c.validFor) < 0)) c.validFor = validFor;
         }
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
         c.status = Status.staticSafe;
         register(c);
         baselineColumns.put(baseline.name(), c.canonicalName);
+        if (baseline.emit() != null) {
+            // emit: the baseline value as an output column (a probability from share(...), say), so consumers
+            // and the softmax offset read the same number
+            if (columnsByCanonical.containsKey(baseline.emit()) || inputFields.containsKey(baseline.emit())) {
+                diagnostics.error("baselines.emit.duplicate", loc, "emit name collides with an existing column or input field: " + baseline.emit());
+                return;
+            }
+            final OutputColumn e = newColumn("baselines", Scope.row, "copy", baseline.emit(), Schema.FieldType.FLOAT64, spec.predictAt);
+            e.coordinates.put("baseline", baseline.name());
+            addSelfInput(e, c.canonicalName);
+            e.validFor = c.validFor;
+            e.status = Status.staticSafe;
+            register(e);
+            baselineEmits.put(baseline.name(), e.canonicalName);
+        }
     }
 
     private void expandBlock(final FeatureDef def) {
@@ -707,8 +726,38 @@ public final class FeaturePlanCompiler {
                 addSelfInput(c, def.baseline);
                 finishRow(c, def);
             }
+            case "noise" -> {
+                // placebo column: a deterministic pseudo-random draw per row identity (the fold rule: time.field +
+                // orderTieBreak), so re-runs and parallel branches agree; carries no information by construction
+                final String distribution = def.distribution == null ? "normal" : def.distribution;
+                if (!List.of("normal", "uniform").contains(distribution)) {
+                    diagnostics.error("row.noise.distribution", loc, "distribution must be normal | uniform: " + distribution);
+                    return;
+                }
+                if (def.seed == null) {
+                    diagnostics.error("row.noise.seed", loc, "noise requires 'seed' (the draw must be reproducible)");
+                    return;
+                }
+                if (spec.orderTieBreak.isEmpty()) {
+                    diagnostics.warning("row.noise.identity", loc, "noise without time.orderTieBreak draws from time.field alone: rows sharing a timestamp get the same value; declare time.orderTieBreak for a row identity");
+                }
+                final OutputColumn c = newColumn(def.name, Scope.row, "noise", def.name, Schema.FieldType.FLOAT64, computeAt);
+                c.coordinates.put("distribution", distribution);
+                c.coordinates.put("seed", Long.toString(def.seed));
+                c.coordinates.put("identity", String.join(",", rowIdentity()));
+                for (final String f : rowIdentity()) addSelfInput(c, f);
+                finishRow(c, def);
+            }
             default -> diagnostics.error("row.type", loc, "unsupported row type: " + type);
         }
+    }
+
+    /** The row identity of the fold rule: time.field + orderTieBreak (canonical names). */
+    private List<String> rowIdentity() {
+        final List<String> identity = new ArrayList<>();
+        identity.add(spec.timeField);
+        for (final String f : spec.orderTieBreak) if (!identity.contains(f)) identity.add(f);
+        return identity;
     }
 
     private String singleInput(final FeatureDef def) {
@@ -781,9 +830,81 @@ public final class FeaturePlanCompiler {
                 final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type, operator.outputFor(ref.type()), computeAt);
                 c.coordinates.put("field", canonicalOf(field));
                 addSelfInput(c, field);
+                if (!configureContextOp(c, op, def, context, loc)) continue;
                 finishContext(c, def, context, op);
             }
         }
+    }
+
+    /**
+     * Parameters of the context ops that take more than one field: {@code softmax} (offset / temperature /
+     * scales) and {@code shuffle} (seed / ordering). Returns false when the column must not be created.
+     */
+    private boolean configureContextOp(final OutputColumn c, final Op op, final FeatureDef def, final ContextDef context, final String loc) {
+        switch (op.type) {
+            case "softmax" -> {
+                if (op.offset != null) {
+                    final String offsetColumn = baselineColumns.containsKey(op.offset) ? baselineColumns.get(op.offset) : op.offset;
+                    final Ref ref = resolve(offsetColumn);
+                    if (ref == null) {
+                        diagnostics.error("context.softmax.offset", loc, "softmax offset must reference baselines[].name or a numeric column: " + op.offset);
+                        return false;
+                    }
+                    if (!OperatorCatalog.isNumeric(ref.type())) {
+                        diagnostics.error("context.softmax.offset", loc, "softmax offset '" + op.offset + "' is not numeric");
+                        return false;
+                    }
+                    c.coordinates.put("offset", ref.canonical());
+                    addSelfInput(c, ref.canonical());
+                    // the probability is as perishable as its offset (a market price with validFor)
+                    final Duration validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
+                    if (def.validFor == null && validFor != null) c.validFor = validFor;
+                }
+                if (op.temperature != null && !(op.temperature > 0)) {
+                    diagnostics.error("context.softmax.temperature", loc, "temperature must be > 0: " + op.temperature);
+                    return false;
+                }
+                final String offsetScale = op.offsetScale == null ? "probability" : op.offsetScale;
+                if (!List.of("probability", "log").contains(offsetScale)) {
+                    diagnostics.error("context.softmax.offsetScale", loc, "offsetScale must be probability | log: " + offsetScale);
+                    return false;
+                }
+                final String scoreNull = op.scoreNull == null ? "zero" : op.scoreNull;
+                if (!List.of("zero", "null").contains(scoreNull)) {
+                    diagnostics.error("context.softmax.scoreNull", loc, "scoreNull must be zero | null: " + scoreNull);
+                    return false;
+                }
+                c.coordinates.put("temperature", Double.toString(op.temperature == null ? 1d : op.temperature));
+                if (op.temperatureSource != null) c.coordinates.put("temperatureSource", op.temperatureSource);
+                c.coordinates.put("offsetScale", offsetScale);
+                c.coordinates.put("scoreNull", scoreNull);
+                if (def.excludeSelf) {
+                    diagnostics.warning("context.softmax.excludeSelf", loc, "excludeSelf has no effect on softmax (the row is part of its own normalisation)");
+                }
+            }
+            case "shuffle" -> {
+                if (op.seed == null) {
+                    diagnostics.error("context.shuffle.seed", loc, "shuffle requires 'seed' (the permutation must be reproducible)");
+                    return false;
+                }
+                if (spec.orderTieBreak.isEmpty()) {
+                    diagnostics.warning("context.shuffle.identity", loc, "shuffle without time.orderTieBreak orders rows sharing a timestamp by their input values only; declare time.orderTieBreak for a row identity");
+                }
+                c.coordinates.put("seed", Long.toString(op.seed));
+                c.coordinates.put("order", String.join(",", rowIdentity()));
+                c.coordinates.put("contextKeys", String.join(",", context.keys()));
+                // rows sharing the identity are told apart by their input values, so the permutation is a pure
+                // function of the group whatever order the GroupByKey delivers (and identical in every engine mode)
+                final List<String> tieBreak = new ArrayList<>(new TreeSet<>(inputFields.keySet()));
+                tieBreak.removeAll(rowIdentity());
+                c.coordinates.put("tieBreak", String.join(",", tieBreak));
+                for (final String f : rowIdentity()) addSelfInput(c, f);
+                // the permuted values carry the availability of the source column (addSelfInput above);
+                // nothing else is read
+            }
+            default -> { }
+        }
+        return true;
     }
 
     private void finishContext(final OutputColumn c, final FeatureDef def, final ContextDef context, final Op op) {
@@ -792,7 +913,7 @@ public final class FeaturePlanCompiler {
         if (def.excludeSelf) c.coordinates.put("excludeSelf", "true");
         for (final String key : context.keys()) addSelfInput(c, key);
         if (c.availableAt == null) c.availableAt = AvailableAt.atEventTime();
-        c.validFor = def.validFor;
+        if (def.validFor != null || c.validFor == null) c.validFor = def.validFor; // an op may have inherited one (softmax offset)
         c.status = c.availableAt.isStaticallyAtOrBefore(c.computeAt) ? Status.staticSafe
                 : c.availableAt.isStatic() ? Status.violation : Status.runtimeFilter;
         if (!def.excludeSelf && PARENT_CONTEXT_OPS.contains(op.type) && context.name().equals(spec.output.groupBy)) {
@@ -1901,7 +2022,7 @@ public final class FeaturePlanCompiler {
             c.outputName = (lint ? "_" : "") + (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
             if (spec.output.groupBy == null) c.placement = Placement.child;
             if (!c.intermediate && spec.output.nullPolicy == NullPolicy.indicator
-                    && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population)) {
+                    && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || "softmax".equals(c.operator))) {
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_isnull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_isnull";
                 flag.inputs.add(c.canonicalName);
@@ -1909,6 +2030,18 @@ public final class FeaturePlanCompiler {
                 flag.status = c.status;
                 flag.placement = c.placement;
                 flag.coordinates.put("indicatorOf", c.canonicalName);
+                indicators.add(flag);
+            }
+            if (!c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && "softmax".equals(c.operator)
+                    && "zero".equals(c.coordinates.get("scoreNull"))) {
+                // the score fell back to 0 (the row took its offset's probability): the consumer must be able to tell
+                final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_scoreNull", Schema.FieldType.BOOLEAN, c.computeAt);
+                flag.outputName = c.outputName + "_scoreNull";
+                flag.inputs.add(c.coordinates.get("field"));
+                flag.availableAt = c.availableAt;
+                flag.status = c.status;
+                flag.placement = c.placement;
+                flag.coordinates.put("indicatorOf", c.coordinates.get("field"));
                 indicators.add(flag);
             }
         }
@@ -2273,6 +2406,8 @@ public final class FeaturePlanCompiler {
         spec.output.roles.forEach(roles::addProperty);
         sb.append(canonical(roles));
         sb.append("\u0000").append(spec.output.includeHash == null ? "" : spec.output.includeHash);
+        // values read from external documents at assembly (temperatureFrom): outside the plan hash, part of the output identity
+        for (final String external : spec.resolvedExternals) sb.append("\u0000").append(external);
         return sha256(sb.toString());
     }
 
@@ -2306,6 +2441,12 @@ public final class FeaturePlanCompiler {
             for (final JsonElement f : copy.getAsJsonArray("features")) {
                 if (f.isJsonObject() && f.getAsJsonObject().has("fit") && f.getAsJsonObject().get("fit").isJsonObject()) {
                     f.getAsJsonObject().getAsJsonObject("fit").remove("artifact");
+                }
+                // temperatureFrom: a calibration document read at assembly (no fit depends on it; the resolved value is in the output hash)
+                if (f.isJsonObject() && f.getAsJsonObject().has("ops") && f.getAsJsonObject().get("ops").isJsonArray()) {
+                    for (final JsonElement op : f.getAsJsonObject().getAsJsonArray("ops")) {
+                        if (op.isJsonObject()) op.getAsJsonObject().remove("temperatureFrom");
+                    }
                 }
             }
         }

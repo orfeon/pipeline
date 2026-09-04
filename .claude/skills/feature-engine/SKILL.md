@@ -110,11 +110,16 @@ reads what the compile layer wrote into each column's `coordinates`.
 
 - `RowEvaluator.evaluateColumn` — `switch (c.operator)`: `expr` / `baseline` (Lucene expression
   engine, **doubles only**), `datetime`, `bin`, `cross`, `indicator`, `equals`, `residual`,
-  `isnull`, and the hidden-level readers of a lattice: `share`, `fitStat`, `compose`, `deviation`,
+  `isnull`, `copy` (baselines[].emit), `noise` (murmur3 of seed + row identity → `SplittableRandom`),
+  and the hidden-level readers of a lattice: `share`, `fitStat`, `compose`, `deviation`,
   `effectiveN` (λ from `setLambdas`, the variance-components side input).
 - `ContextEvaluator.evaluateColumn` — one group at a time; `apply(op, values, self, excludeSelf)`;
   group-constant ops are evaluated once per group; `values:` lists become per-value columns
-  (`valueKey` normalises integral numbers).
+  (`valueKey` normalises integral numbers). `softmax` and `shuffle` bypass `apply`: they read two
+  per-row inputs / need the group order (`softmax(c, rows)` in probability space with a max-shift;
+  `shuffle(c, rows)` = Fisher–Yates from (seed, group key) over rows sorted by `order` + `tieBreak`
+  coordinates — the tie-break over all input fields is what makes it engine-mode independent). Op
+  parameters that are not a single field go through `FeaturePlanCompiler.configureContextOp`.
 - `SequenceEvaluator` — the keyed replay logic. `ColumnPlan` from coordinates (shift, `maxAge`,
   `maxEvents`, filter → `EqualityFilter` when `f = $self.f`, `stat`, `quantile`); two paths per
   column: **incremental** (fold / evict pointers over the history + `Accumulator` — n, Σ, Σ², max,
@@ -223,9 +228,11 @@ shape the output schema (lineage in field options).
    `finishStaticFitted` (lookup fits: the artifact is available at `computeAt` by declaration, only
    the row side decides). A violation that is consumed becomes a `_` intermediate; a terminal
    violation is `availability.violation`.
-8. **Plan hash / artifacts.** `withoutArtifact` strips `engine`, `fit.artifact` and the output
-   projection (`output.include` / `includeSource` / `includeHash` / `manifest`); the projection, roles
-   and include content go into `FeaturePlan.getOutputHash` instead (the output-table identity). A new
+8. **Plan hash / artifacts.** `withoutArtifact` strips `engine`, `fit.artifact`, the output
+   projection (`output.include` / `includeSource` / `includeHash` / `manifest`) and `ops[].temperatureFrom`
+   (resolved by `FeaturePlanService.resolveTemperatureFrom` into `{source, hash, value}`); the projection,
+   roles, include content and `FeatureSpec.resolvedExternals` go into `FeaturePlan.getOutputHash`
+   instead (the output-table identity). A new
    *runtime-only* knob goes under `engine` (or is stripped explicitly); a new *semantic* parameter
    must stay in the hash. Artifacts are content-addressed by that hash under `<uri>/<planHash>/`
    and cached per JVM (`ARTIFACT_CACHE` / `MODEL_CACHE`), so a path must never be reused for

@@ -494,7 +494,30 @@ market column into the expression:
   context: marketplace_day
   inputs: [start_price]
   ops: [zscore, median_diff]
+
+- name: prob                     # group softmax on top of a baseline (serving: onnx score → probability)
+  scope: context
+  context: session
+  ops:
+    - {type: softmax, field: model_score, offset: market, temperature: 1.3, as: pWin}
+      # p_i = w_i · exp(f_i / T) / Σ_j w_j · exp(f_j / T); w = offset in probability space (offsetScale: log
+      # takes exp first); null offset → row null, out of the denominator; offset 0 → p = 0; null score → 0
+      # (scoreNull: zero) or row null; temperatureFrom: <uri> reads T from a calibration document
+      # (outside the plan hash, recorded in the manifest / output hash); validFor inherited from the offset
+
+- name: placebo                  # shuffle: the field's values permuted within the group (seed + group key)
+  scope: context
+  context: session
+  ops:
+    - {type: shuffle, fields: [start_price], seed: 20260717}
+      # the multiset per group is preserved; type and availability are the field's own
 ```
+
+Placebo columns (`type: noise` at row scope — a draw from `seed` and the row identity `time.field` +
+`orderTieBreak`, the fold rule; `shuffle` above) carry no information by construction and calibrate a
+selection threshold or measure permutation importance through the same path as the candidates.
+`baselines[].emit` writes a baseline value as an output column (the number the softmax offset reads),
+which the `baseline` role of the output contract (§7) can name.
 
 **Normal form and sugar**: the normal form carries `fields` on each op (`ops: [{type, fields:
 [...]}]`); block-level `inputs` × `ops` is sugar for "give every op `fields: inputs`". Applying the

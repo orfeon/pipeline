@@ -71,6 +71,20 @@ public class RowEvaluator implements Serializable {
         }
     }
 
+    /**
+     * Placebo draw: a 64-bit hash of (seed, row identity) seeds a {@link java.util.SplittableRandom}, so the value
+     * is a pure function of the row (same across re-runs, workers and parallel branches) and carries no information.
+     */
+    static Object noise(final OutputColumn c, final Map<String, Object> row) {
+        final List<String> identity = List.of(c.coordinates.get("identity").split(","));
+        final String key = FeatureValues.keyWithNullTokens(row, identity);
+        final long seed = Long.parseLong(c.coordinates.get("seed"));
+        final long h = com.google.common.hash.Hashing.murmur3_128((int) (seed ^ (seed >>> 32)))
+                .hashString(seed + "\u0000" + key, java.nio.charset.StandardCharsets.UTF_8).asLong();
+        final java.util.SplittableRandom random = new java.util.SplittableRandom(h);
+        return "uniform".equals(c.coordinates.get("distribution")) ? random.nextDouble() : random.nextGaussian();
+    }
+
     public void evaluate(final Map<String, Object> row) {
         for (final OutputColumn c : columns) {
             row.put(c.canonicalName, evaluateColumn(c, row));
@@ -109,6 +123,8 @@ public class RowEvaluator implements Serializable {
             }
             case "residual" -> residual(c, row);
             case "isnull" -> row.get(c.coordinates.get("indicatorOf")) == null;
+            case "copy" -> FeatureValues.toDouble(row.get(inputs.get(0)));
+            case "noise" -> noise(c, row);
             case "share" -> {
                 final List<Shrinkage.Level> levels = lattices.get(c.canonicalName);
                 final Double leaf = FeatureValues.toDouble(row.get(levels.get(0).nColumn()));

@@ -48,6 +48,7 @@ public final class OperatorCatalog {
         register(Scope.row, "residual", InputKind.numeric, F64, false, "difference to a named baseline on identity / logit / log scale");
         register(Scope.row, "indicator", InputKind.categorical, I64, false, "one 0/1 column per listed value of a categorical field");
         register(Scope.row, "equals", InputKind.any, I64, false, "1 when two fields are equal, 0 otherwise (null if either is null)");
+        register(Scope.row, "noise", InputKind.none, F64, false, "placebo: deterministic pseudo-random value from the row identity and a seed (normal | uniform)");
 
         // context
         register(Scope.context, "rank", InputKind.numeric, I64, false, "rank within the group (1 = largest)");
@@ -61,6 +62,8 @@ public final class OperatorCatalog {
         register(Scope.context, "countByValue", InputKind.categorical, Schema.FieldType.map(I64), false, "count per value within the group");
         register(Scope.context, "ratioByValue", InputKind.categorical, Schema.FieldType.map(F64), false, "ratio per value within the group");
         register(Scope.context, "entropy", InputKind.categorical, F64, false, "entropy of the value distribution within the group");
+        register(Scope.context, "softmax", InputKind.numeric, F64, false, "probability within the group: offset * exp(score / temperature), normalised over the group");
+        register(Scope.context, "shuffle", InputKind.any, null, false, "placebo: the field's values permuted within the group (deterministic from seed and group key)");
 
         // sequence (deterministic, strictly-past window)
         register(Scope.sequence, "lag", InputKind.any, null, false, "value k events back");
