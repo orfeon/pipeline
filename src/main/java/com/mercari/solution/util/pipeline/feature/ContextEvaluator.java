@@ -138,7 +138,7 @@ public class ContextEvaluator implements Serializable {
         for (int i = 0; i < n; i++) {
             final Map<String, Object> row = rows.get(i);
             Double w = offset == null ? Double.valueOf(1d) : FeatureValues.toDouble(row.get(offset));
-            if (w != null && logScale) w = Math.exp(w);
+            if (w != null && logScale && offset != null) w = Math.exp(w); // no offset: w = 1 whatever the scale
             if (w == null || Double.isNaN(w) || Double.isInfinite(w) || w < 0) continue;
             Double f = FeatureValues.toDouble(row.get(field));
             if (f == null || Double.isNaN(f)) {
@@ -179,9 +179,7 @@ public class ContextEvaluator implements Serializable {
         for (int i = 0; i < n; i++) sorted[i] = i;
         Arrays.sort(sorted, (a, b) -> compareIdentity(rows.get(a), rows.get(b), order));
         final String groupKey = n == 0 ? "" : FeatureValues.keyWithNullTokens(rows.get(0), contextKeys);
-        final long h = com.google.common.hash.Hashing.murmur3_128((int) (seed ^ (seed >>> 32)))
-                .hashString(seed + "\u0000" + groupKey, java.nio.charset.StandardCharsets.UTF_8).asLong();
-        final java.util.SplittableRandom random = new java.util.SplittableRandom(h);
+        final java.util.SplittableRandom random = FeatureValues.seededRandom(seed, groupKey);
         final int[] permutation = new int[n];
         for (int i = 0; i < n; i++) permutation[i] = i;
         for (int i = n - 1; i > 0; i--) {

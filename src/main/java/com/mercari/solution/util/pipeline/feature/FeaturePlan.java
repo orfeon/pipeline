@@ -680,10 +680,13 @@ public class FeaturePlan implements Serializable {
             final JsonObject o = new JsonObject();
             final int eq = external.indexOf('=');
             o.addProperty("location", external.substring(0, eq));
-            final String[] parts = external.substring(eq + 1).split(":", 3);
-            o.addProperty("source", parts[0]);
-            o.addProperty("hash", parts.length > 1 ? parts[1] : null);
-            o.addProperty("value", parts.length > 2 ? parts[2] : null);
+            // source:hash:value — the source is a URI (may contain ':'); hash and value never do, so split from the end
+            final String rest = external.substring(eq + 1);
+            final int valueSep = rest.lastIndexOf(':');
+            final int hashSep = valueSep < 0 ? -1 : rest.lastIndexOf(':', valueSep - 1);
+            o.addProperty("source", hashSep < 0 ? rest : rest.substring(0, hashSep));
+            o.addProperty("hash", hashSep < 0 ? null : rest.substring(hashSep + 1, valueSep));
+            o.addProperty("value", valueSep < 0 ? null : rest.substring(valueSep + 1));
             externals.add(o);
         }
         manifest.add("externals", externals);

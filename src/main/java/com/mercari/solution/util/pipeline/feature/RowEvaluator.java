@@ -79,9 +79,7 @@ public class RowEvaluator implements Serializable {
         final List<String> identity = List.of(c.coordinates.get("identity").split(","));
         final String key = FeatureValues.keyWithNullTokens(row, identity);
         final long seed = Long.parseLong(c.coordinates.get("seed"));
-        final long h = com.google.common.hash.Hashing.murmur3_128((int) (seed ^ (seed >>> 32)))
-                .hashString(seed + "\u0000" + key, java.nio.charset.StandardCharsets.UTF_8).asLong();
-        final java.util.SplittableRandom random = new java.util.SplittableRandom(h);
+        final java.util.SplittableRandom random = FeatureValues.seededRandom(seed, key);
         return "uniform".equals(c.coordinates.get("distribution")) ? random.nextDouble() : random.nextGaussian();
     }
 
