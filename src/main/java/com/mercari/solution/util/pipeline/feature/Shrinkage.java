@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Shrinkage configuration (work-feature.md §5.5) and the row-local composition of a generalization
+ * Shrinkage configuration (docs/design/feature-dsl.md §5.5) and the row-local composition of a generalization
  * lattice (§5.3.1): every level of the lattice has its own sufficient statistics per row
  * ({@code n}, {@code sum} over the key's past contributions, computed by hidden population stages) and the
  * final value is a top-down backoff from the global level to the leaf:

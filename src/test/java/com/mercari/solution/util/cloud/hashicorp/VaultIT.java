@@ -12,7 +12,7 @@ import org.testcontainers.vault.VaultContainer;
  * Integration test (run via maven-failsafe:
  * {@code mvn verify -DskipITs=false -Djib.skip=true -Dit.test=VaultIT})
  * for {@code vault://} secret resolution with token auth against a dev-mode Vault container
- * (docs/developer/cloud-auth.md §6.4). Settings are passed as system properties, which
+ * (docs/design/cloud-auth.md §6.4). Settings are passed as system properties, which
  * {@code VaultSecretProvider} reads with priority over environment variables.
  */
 @Testcontainers

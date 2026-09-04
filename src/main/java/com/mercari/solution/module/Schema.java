@@ -17,7 +17,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Unified schema representation (see docs/developer/schema-redesign.md).
+ * Unified schema representation (see docs/design/schema-redesign.md).
  *
  * Internally the schema separates three concerns (Phase 1):
  * <ul>

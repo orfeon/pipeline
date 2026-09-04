@@ -6,7 +6,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Expanding-fit encoding (work-feature.md §5, engine §4.4): for one keySet stage, the conditional
+ * Expanding-fit encoding (docs/design/feature-dsl.md §5, engine §4.4): for one keySet stage, the conditional
  * statistics of each target over the key's past contributions. A contribution at t' is visible to the
  * row at t only if {@code t' ≤ t − windowShift}, which is exactly the pending-contribution rule — the
  * target's value is unknown to the system until its effective availability time.

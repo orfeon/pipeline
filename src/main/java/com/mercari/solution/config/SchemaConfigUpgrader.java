@@ -9,7 +9,7 @@ import java.util.List;
 
 /**
  * Rewrites old-format schema declarations in a pipeline config into the new form
- * (docs/developer/schema-redesign.md Phase 5):
+ * (docs/design/schema-redesign.md Phase 5):
  *
  * <ul>
  *   <li>a module top-level {@code schema} moves into {@code parameters.schema}</li>

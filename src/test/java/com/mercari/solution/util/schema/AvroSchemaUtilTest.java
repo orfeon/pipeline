@@ -28,7 +28,7 @@ public class AvroSchemaUtilTest {
 
     @Test
     public void testToBuilderProjection() {
-        // Characterization for docs/developer/schema-redesign.md P3: this is the building block of
+        // Characterization for docs/design/schema-redesign.md P3: this is the building block of
         // the storage source's parquet `fields` projection (StorageSource.createParquetRead).
         final Schema schema = new Schema.Parser().parse("""
                 {

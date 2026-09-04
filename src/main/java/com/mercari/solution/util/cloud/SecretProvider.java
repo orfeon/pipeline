@@ -2,7 +2,7 @@ package com.mercari.solution.util.cloud;
 
 /**
  * A secret backend, selected by the syntax of the secret reference
- * (docs/developer/cloud-auth.md §6.1). Implementations are registered in {@link SecretProviders}.
+ * (docs/design/cloud-auth.md §6.1). Implementations are registered in {@link SecretProviders}.
  */
 public interface SecretProvider {
 

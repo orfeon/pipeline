@@ -23,7 +23,7 @@ public class FeaturePlan implements Serializable {
     public enum StageKind { row, context, sequence, population, fit, groupBy }
 
     /**
-     * One evaluation stage: the columns evaluated under one key in one pass (work-feature-engine-beam.md §3.1).
+     * One evaluation stage: the columns evaluated under one key in one pass (docs/design/feature-engine.md §3.1).
      * Columns are scheduled by key affinity, so a stage may gather blocks from anywhere in the config, and
      * two stages may share a key when a dependency forces the split.
      */
@@ -54,7 +54,7 @@ public class FeaturePlan implements Serializable {
     }
 
     /**
-     * A data audit query derived from the plan (work-feature.md §7): hot-key row counts per keyed stage so
+     * A data audit query derived from the plan (docs/design/feature-dsl.md §7): hot-key row counts per keyed stage so
      * the per-key memory budget (docs "Performance and sizing") can be checked before a run. {@code {input}}
      * stands for the transform's input relation; identifiers are emitted bare (quote them for your dialect if needed).
      */

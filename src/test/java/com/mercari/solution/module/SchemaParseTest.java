@@ -16,7 +16,7 @@ import java.util.Map;
  *
  * These pin the pre-redesign semantics of the schema config block (fields / avro / protobuf /
  * useDestinationSchema and the deprecated aliases) so that the internal restructuring described in
- * docs/developer/schema-redesign.md (Phase 1) can be verified not to change observable behavior.
+ * docs/design/schema-redesign.md (Phase 1) can be verified not to change observable behavior.
  * When a behavior is changed intentionally in a later phase, update the corresponding test and
  * reference the design document section that mandates the change.
  */

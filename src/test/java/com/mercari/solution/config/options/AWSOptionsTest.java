@@ -206,7 +206,7 @@ public class AWSOptionsTest {
     }
 
     // Beam serializes AwsOptions.awsCredentialsProvider to workers with Jackson via AwsModule,
-    // which supports only a fixed set of provider types (docs/developer/cloud-auth.md §5.1).
+    // which supports only a fixed set of provider types (docs/design/cloud-auth.md §5.1).
     // Guard that every provider type we emit survives that serialization.
     @Test
     public void testEmittedProvidersAreBeamSerializable() throws Exception {

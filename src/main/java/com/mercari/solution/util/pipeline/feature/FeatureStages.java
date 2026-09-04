@@ -34,7 +34,7 @@ import java.time.Duration;
 import java.util.*;
 
 /**
- * Beam wiring of a {@link FeaturePlan} (work-feature-engine-beam.md §3, §9.4): one ParDo / GroupByKey per
+ * Beam wiring of a {@link FeaturePlan} (docs/design/feature-engine.md §3, §9.4): one ParDo / GroupByKey per
  * stage, each appending its columns to the element's primitive map. The stages are executed wave by wave
  * ({@link FeaturePlan#getWaves()}): the independent stages of a wave branch from the same input in
  * parallel, each emitting only its own columns keyed by a row id, and the branches are merged back into

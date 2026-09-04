@@ -8,11 +8,10 @@ Guides for working on the Mercari Pipeline codebase itself (extending modules, u
   loop, the unified data model (`MElement` / `DataType` / `Schema`), config loading & templating, module
   discovery, error handling, and the Server.
 * [Server Frontend](server/frontend.md) — Pipeline Server web UI.
-* [Schema Redesign (Design Document)](schema-redesign.md) — accepted design for restructuring the `schema`
-  block (fields / encoding / reference), moving it into `parameters`, and the phased migration plan.
-* [Cross-Cloud Authentication (Design Document)](cloud-auth.md) — accepted design for running pipelines on
-  GCP or AWS with transparent access to the other cloud's resources: bidirectional workload identity
-  federation, `SecretProvider`, unified file loading, and the phased plan.
+
+Design documents (why a subsystem is shaped the way it is, decisions, deferred items — schema
+redesign, cross-cloud authentication, the feature transform DSL and engine) live in
+[`../design/`](../design/README.md).
 
 ## Quick reference
 

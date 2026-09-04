@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for the new-format schema keys (docs/developer/schema-redesign.md Phase 2):
+ * Tests for the new-format schema keys (docs/design/schema-redesign.md Phase 2):
  * {@code encoding} (wire format) and {@code reference} (definition source). The new format
  * normalizes into the same internals as the old format, so the legacy accessors
  * ({@code getAvro()} / {@code getProtobuf()} / {@code getUseDestinationSchema()}) must behave

@@ -13,7 +13,7 @@ import java.util.Arrays;
 import java.util.Map;
 
 /**
- * Fitted discretization of a numeric field (work-feature.md §4.4, {@code type: discretize}): bin edges
+ * Fitted discretization of a numeric field (docs/design/feature-dsl.md §4.4, {@code type: discretize}): bin edges
  * learned from the whole input in a static fit and applied by lookup, so the bins can key an encoding.
  *
  * <p>Bin numbering: {@code -1} = missing (null / NaN), {@code 0} = below the fitted minimum,

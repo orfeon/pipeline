@@ -15,7 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 /**
- * Central provider for GCP credentials (docs/developer/cloud-auth.md §4.1).
+ * Central provider for GCP credentials (docs/design/cloud-auth.md §4.1).
  *
  * Resolution order:
  * <ol>

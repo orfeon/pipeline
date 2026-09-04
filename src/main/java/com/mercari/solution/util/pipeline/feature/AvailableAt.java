@@ -9,7 +9,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Availability time algebra (work-feature.md §2.3, §6.1).
+ * Availability time algebra (docs/design/feature-dsl.md §2.3, §6.1).
  *
  * <p>A value is either <b>static</b> — expressible as {@code event_time + offset} for every row, so it
  * can be compared with {@code predictAt} / {@code computeAt} at compile time — or <b>dynamic</b>, when it

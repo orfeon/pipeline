@@ -15,7 +15,7 @@ import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Unified file loading over Beam {@link FileSystems} (docs/developer/cloud-auth.md §6.2):
+ * Unified file loading over Beam {@link FileSystems} (docs/design/cloud-auth.md §6.2):
  * one code path for {@code gs://}, {@code s3://}, and local paths, with credentials resolved
  * by the registered filesystems ({@code options.gcp.credentials} / {@code options.aws}).
  *

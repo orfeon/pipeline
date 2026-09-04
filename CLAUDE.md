@@ -117,8 +117,10 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   contract, availability-time algebra, DAG expansion, leak checks, `describe()` = validate --expand) and
   `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &
   population; stages run wave by wave — the independent stages of a wave branch in parallel and are merged
-  back by row id, `engine.parallelWaves: false` = linear chain). Spec in repo-root `work-feature.md`, engine design in `work-feature-engine-beam.md`
-  (uncommitted working docs). Keep examples/tests domain-neutral.
+  back by row id, `engine.parallelWaves: false` = linear chain). DSL spec in
+  [docs/design/feature-dsl.md](docs/design/feature-dsl.md), engine design and implementation status in
+  [docs/design/feature-engine.md](docs/design/feature-engine.md). Keep examples/tests domain-neutral.
+  Maintain via the **`feature-engine` skill** (`.claude/skills/feature-engine/`).
 - `pipeline/outbound/` — shared core for modules that call external HTTP/gRPC endpoints (`http` source/sink,
   http action, `tasks` sink, `grpc` sink, rest/grpc lookup, select http): `AuthProvider` (basic/bearer/apiKey/oauth2/
   gcpOidc/gcpOauth with worker-scoped token cache), `HttpTransport` (JDK HttpClient, async), `ResponsePolicy`
@@ -147,6 +149,17 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   adding/changing external lookup sources, the key-prefix join contract, correlated LATERAL internals,
   UDF/UDAF registration, Calcite-internal value conventions, and the emulator IT patterns. Consult it before
   touching `util/pipeline/Query2.java` or `util/pipeline/lookup/`.
+- **`feature-engine`** (`.claude/skills/feature-engine/`) — the `feature` transform's compile layer and
+  Beam engine: adding row/context/sequence ops, encoding stats and population types (recipes with PR #100
+  as the worked example), the stage scheduler / waves / fan-out merge / static-fit invariants, diagnostic
+  codes, test harnesses (parallel-vs-linear equality, incremental-vs-scan equivalence) and the Dataflow /
+  prism measurement loop. Consult it before touching `util/pipeline/feature/` or
+  `module/transform/FeatureTransform.java`.
+- **`feature-spec`** (`.claude/skills/feature-spec/`) — the *user-side* counterpart: authoring, validating and
+  running a `module: feature` config (sources contract, scope choice, encoding design, reading the
+  validate --expand / dry-run report, every diagnostic code with its fix, sizing / runner choice / launch and
+  monitoring over MCP). Self-contained and meant to be copied into consumer projects; keep it free of
+  references to this repository's source code.
 
 ## Adding a New Module
 
@@ -224,8 +237,12 @@ self-contained (parameters, examples) — the agent reads one file per module.
 
 ### Developer docs — `docs/`
 
-- `docs/developer/` — developer docs: [architecture.md](docs/developer/architecture.md) (internals),
+- `docs/developer/` — contributor guides: [architecture.md](docs/developer/architecture.md) (internals),
   `server/frontend.md`.
+- `docs/design/` — design documents (each opens with a `Status:` line; the code cites them by section
+  number): [schema-redesign.md](docs/design/schema-redesign.md), [cloud-auth.md](docs/design/cloud-auth.md),
+  [feature-dsl.md](docs/design/feature-dsl.md), [feature-engine.md](docs/design/feature-engine.md).
+  New design documents go here, not in `docs/developer/`.
 - `docs/images/` — images referenced by the root README.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).
 
