@@ -105,7 +105,7 @@ Conditioning needs the global window (no `strategy` window).
 | `group` (optional) | mutually exclusive samples of one unit (a query's candidates, a session's listings, a lot's bids). Required for `groupedMultinomial`. Omitted: every row is independent. |
 | `label` | the label field, or an expression over numeric fields (`{expr: "rank == 1 ? 1 : 0"}`). Several positives in a group are normalised (`normalizeTies: true`). |
 | `baseline` (optional) | the reference prediction: `form: prob` (a probability; normalised within the group for `groupedMultinomial`), `logProb`, `inverseShare` (1/x made a share within the group — odds, prices). Omitted: the prior (uniform share / prior rate). |
-| `time` (recommended) | the time field (`timestamp` / `date` / ISO string); `to` / `from` fence the window. Omitted: the element timestamp is used. |
+| `time` (recommended) | the time field (`timestamp` / `date` / ISO string); `to` / `from` fence the window. Omitted: the element timestamp is used (set the source's `timestampAttribute`; bounded sources otherwise carry the minimum timestamp, so `to` / `from` require `field`). |
 | `weight` (optional) | a sample-weight field. |
 | candidates | numeric input fields (`int32` / `int64` / `float32` / `float64` / `bool`) selected by name globs or lineage selectors; role fields are never candidates. |
 
@@ -184,7 +184,7 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
-`nUnits`, `nUnitsSkipped` (groups without a positive label or with an invalid baseline), `nCandidates`,
+`nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
 `maxTime` (TIMESTAMP, of the scored rows), `periodsBucket`, `transforms`, `candidates`, `passedColumns` (candidate
 names with a passing transform, best gain first — the list to feed back into the feature transform's

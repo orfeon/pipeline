@@ -105,7 +105,8 @@ public final class GroupScorer implements Serializable {
         final ScoreAccumulator book = into.computeIfAbsent(ScoreAccumulator.BOOKKEEPING_KEY, k -> new ScoreAccumulator());
         final double[] bookSlots = new double[ScoreAccumulator.SLOTS];
         if (unit.skip != Skip.NONE) {
-            bookSlots[ScoreAccumulator.UNITS_SKIPPED] = 1;
+            // same unit as UNITS_SCORED: groups for the grouped family, rows for binomial
+            bookSlots[ScoreAccumulator.UNITS_SKIPPED] = spec.isGroupedMultinomial() ? 1 : unit.size();
             book.add(null, bookSlots);
             return unit.skip;
         }
@@ -130,7 +131,7 @@ public final class GroupScorer implements Serializable {
         bookSlots[ScoreAccumulator.UNITS_SCORED] = spec.isGroupedMultinomial() ? 1 : n;
         bookSlots[ScoreAccumulator.ROWS_SCORED] = n;
         book.add(null, bookSlots);
-        for (final ScreenRow r : unit.rows) book.time(r.time);
+        for (final ScreenRow r : unit.rows) if (r.time != ScreenRow.NO_TIME) book.time(r.time);
         return Skip.NONE;
     }
 

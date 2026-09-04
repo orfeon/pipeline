@@ -227,4 +227,31 @@ public class GroupScorerTest {
         final ScreenSpec byScope = ScreenSpec.parse(JsonParser.parseString("{candidates: {include: ['scope:row']}, placebo: {noise: 0}}").getAsJsonObject()).resolve(SCHEMA, lineage);
         Assertions.assertEquals(List.of("x"), byScope.candidates);
     }
+
+    @Test
+    public void testExplicitTransformsSurviveGroupDefault() {
+        final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}}}";
+        final ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromManifest(manifest);
+        final ScreenSpec raw = ScreenSpec.parse(JsonParser.parseString("{transforms: [raw], candidates: [x], placebo: {noise: 0}}").getAsJsonObject()).resolve(SCHEMA, lineage);
+        Assertions.assertEquals("g", raw.group);
+        Assertions.assertEquals(List.of("raw"), raw.transforms);
+        final ScreenSpec defaulted = ScreenSpec.parse(JsonParser.parseString("{candidates: [x], placebo: {noise: 0}}").getAsJsonObject()).resolve(SCHEMA, lineage);
+        Assertions.assertEquals(List.of("raw", "rank", "absdev"), defaulted.transforms);
+    }
+
+    @Test
+    public void testResolveRejectsUnusableFields() {
+        // a time window needs an event-time field: the element timestamp of a bounded source is TIMESTAMP_MIN_VALUE
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], time: {from: '2024-01-01T00:00:00Z'}}"));
+        // a non-numeric shuffle reference would make every shuffle placebo degenerate
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{label: y, group: g, candidates: [x], placebo: {noise: 0, shuffle: {field: g, n: 2}}}"));
+        // the periods field type is resolved like the time field's
+        final Schema withDate = Schema.builder().withField("g", Schema.FieldType.STRING).withField("y", Schema.FieldType.INT64)
+                .withField("t", Schema.FieldType.TIMESTAMP).withField("d", Schema.FieldType.DATE).withField("x", Schema.FieldType.FLOAT64).build();
+        final ScreenSpec s = ScreenSpec.parse(JsonParser.parseString("{family: binomial, label: y, candidates: [x], time: {field: t}, periods: {field: d, bucket: month}, placebo: {noise: 0}}").getAsJsonObject()).resolve(withDate, null);
+        Assertions.assertEquals("timestamp", s.timeFieldType);
+        Assertions.assertEquals("date", s.periodsFieldType);
+        // a manifest that is not JSON (e.g. a local path that does not exist) is reported as a config error
+        Assertions.assertThrows(IllegalArgumentException.class, () -> ScreenSpec.Lineage.fromManifest("manifests/missing.json"));
+    }
 }

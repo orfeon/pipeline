@@ -23,6 +23,9 @@ public final class ScreenRow implements Serializable {
 
     final String group;
     final String identity;
+    /** Row time when no time field is set and the element carries no usable timestamp (kept out of the summary range). */
+    public static final long NO_TIME = Long.MIN_VALUE;
+
     final long time;
     final String period;
     final double label;

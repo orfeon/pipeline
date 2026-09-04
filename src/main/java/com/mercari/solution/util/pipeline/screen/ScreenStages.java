@@ -33,7 +33,9 @@ import org.apache.beam.sdk.values.TupleTagList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -136,8 +138,11 @@ public final class ScreenStages {
 
         final TupleTag<MElement> recordTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
+        // in the global window the Combine emits its (empty) default on empty input, so the summary is always produced
+        final Combine.Globally<KV<Integer, ScoreAccumulator>, List<KV<Integer, ScoreAccumulator>>> gather =
+                Combine.globally(new GatherFn<KV<Integer, ScoreAccumulator>>(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER)));
         final PCollectionTuple finalized = combined
-                .apply("Gather", Combine.globally(new GatherFn<KV<Integer, ScoreAccumulator>>(KvCoder.of(VarIntCoder.of(), ScoreAccumulator.CODER))).withoutDefaults())
+                .apply("Gather", combined.getWindowingStrategy().getWindowFn() instanceof GlobalWindows ? gather : gather.withoutDefaults())
                 .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, recordTag, summaryTag, fitView, partialView))
                         .withSideInputs(finalizeSideInputs)
                         .withOutputTags(recordTag, TupleTagList.of(summaryTag)));
@@ -191,7 +196,9 @@ public final class ScreenStages {
                     if (millis == null) throw new IllegalArgumentException("time.field '" + spec.timeField + "' is null or not a timestamp");
                     time = millis;
                 } else {
-                    time = c.timestamp().getMillis();
+                    // bounded sources without a timestampAttribute carry TIMESTAMP_MIN_VALUE: keep it out of the summary range
+                    final long ts = c.timestamp().getMillis();
+                    time = ts <= BoundedWindow.TIMESTAMP_MIN_VALUE.getMillis() ? ScreenRow.NO_TIME : ts;
                 }
                 if ((spec.timeToMillis != null && time > spec.timeToMillis) || (spec.timeFromMillis != null && time < spec.timeFromMillis)) {
                     book[ScoreAccumulator.ROWS_TIME_FILTERED] = 1;
@@ -221,7 +228,7 @@ public final class ScreenStages {
                 if (spec.periodsBucket != null) {
                     final Long periodMillis = spec.periodsField.equals(spec.timeField)
                             ? time
-                            : ScreenMath.toEpochMillis(values.get(spec.periodsField), null);
+                            : ScreenMath.toEpochMillis(values.get(spec.periodsField), spec.periodsFieldType);
                     if (periodMillis != null) period = ScreenMath.periodBucket(periodMillis, spec.periodsBucket);
                 }
                 final String identity = identity(values);
@@ -260,6 +267,13 @@ public final class ScreenStages {
             if (value == null) return null;
             if (value instanceof Double d && d == Math.rint(d) && !Double.isInfinite(d)) return String.valueOf(d.longValue());
             if (value instanceof Float f && f == Math.rint(f) && !Float.isInfinite(f)) return String.valueOf(f.longValue());
+            if (value instanceof byte[] b) return Base64.getEncoder().encodeToString(b);
+            if (value instanceof ByteBuffer bb) {
+                final ByteBuffer d = bb.duplicate();
+                final byte[] b = new byte[d.remaining()];
+                d.get(b);
+                return Base64.getEncoder().encodeToString(b);
+            }
             return String.valueOf(value);
         }
     }

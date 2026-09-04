@@ -3,6 +3,7 @@ package com.mercari.solution.util.pipeline.screen;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
 
@@ -62,7 +63,10 @@ public final class ScreenSpec implements Serializable {
     public List<String> candidateExclude = new ArrayList<>();
     public String candidateManifest;
     public List<String> transforms = new ArrayList<>();
+    /** True when the config lists transforms explicitly (a defaulted group must not override them). */
+    public boolean transformsExplicit;
     public String periodsField;
+    public String periodsFieldType;
     public String periodsBucket;
     public int noise = 100;
     public String shuffleField;
@@ -242,6 +246,7 @@ public final class ScreenSpec implements Serializable {
                 errors.add("transforms must be a list (available: " + TRANSFORMS + ")");
             }
         }
+        s.transformsExplicit = !s.transforms.isEmpty();
         if (s.transforms.isEmpty()) {
             s.transforms = s.group != null ? new ArrayList<>(TRANSFORMS) : new ArrayList<>(List.of(TRANSFORM_RAW));
         }
@@ -359,7 +364,12 @@ public final class ScreenSpec implements Serializable {
         /** Reads a feature transform manifest (see {@code FeaturePlan.toManifest}). */
         public static Lineage fromManifest(final String json) {
             final Lineage l = new Lineage();
-            final JsonObject m = JsonParser.parseString(json).getAsJsonObject();
+            final JsonObject m;
+            try {
+                m = JsonParser.parseString(json).getAsJsonObject();
+            } catch (final JsonParseException | IllegalStateException e) {
+                throw new IllegalArgumentException("candidates.manifest is not a JSON object (a local path that does not exist is read as literal content): " + e.getMessage());
+            }
             l.timeField = string(m, "timeField");
             if (m.has("roles") && m.get("roles").isJsonObject()) {
                 for (final Map.Entry<String, JsonElement> e : m.getAsJsonObject("roles").entrySet()) {
@@ -415,7 +425,7 @@ public final class ScreenSpec implements Serializable {
         if (group == null && l.roles.containsKey("group")) {
             group = l.roles.get("group");
             notes.add("group defaulted to manifest role: " + group);
-            if (transforms.equals(List.of(TRANSFORM_RAW))) transforms = new ArrayList<>(TRANSFORMS);
+            if (!transformsExplicit) transforms = new ArrayList<>(TRANSFORMS);
         }
         if (labelField == null && labelExpr == null && l.roles.containsKey("label")) {
             labelField = l.roles.get("label");
@@ -435,6 +445,9 @@ public final class ScreenSpec implements Serializable {
             notes.add("time.field defaulted to manifest timeField: " + timeField);
         }
         if (periodsBucket != null && periodsField == null) periodsField = timeField;
+        if (timeField == null && (timeToMillis != null || timeFromMillis != null)) {
+            errors.add("time.from / time.to require time.field (or a manifest timeField): the element timestamp of a bounded source is not an event time");
+        }
 
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
@@ -455,6 +468,10 @@ public final class ScreenSpec implements Serializable {
         }
         for (final String id : rowId) if (!fields.containsKey(id)) errors.add("rowId '" + id + "' is not an input field");
         if (timeField != null && fields.containsKey(timeField)) timeFieldType = fields.get(timeField).getFieldType().getType().name();
+        if (periodsField != null && fields.containsKey(periodsField)) periodsFieldType = fields.get(periodsField).getFieldType().getType().name();
+        if (shuffleField != null && fields.containsKey(shuffleField) && !isNumeric(fields.get(shuffleField))) {
+            errors.add("placebo.shuffle.field '" + shuffleField + "' must be numeric (" + fields.get(shuffleField).getFieldType().getType() + "); a non-numeric reference makes every shuffle placebo degenerate");
+        }
 
         final Set<String> reserved = new HashSet<>();
         for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) reserved.add(r);
