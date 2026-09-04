@@ -396,7 +396,7 @@ public class ScreenTransformTest {
         Assertions.assertEquals("marginal", json.get("test").getAsString());
         Assertions.assertEquals("2024-12-31T23:59:59Z", json.get("timeTo").getAsString());
         Assertions.assertTrue(json.get("threshold").getAsDouble() > 0);
-        Assertions.assertEquals(64, json.get("screenHash").getAsString().length());
+        Assertions.assertEquals(16, json.get("screenHash").getAsString().length());
         Assertions.assertTrue(json.get("planHash").isJsonNull());
         Assertions.assertEquals("f_extra", json.getAsJsonArray("passed").get(0).getAsJsonObject().get("candidate").getAsString());
     }

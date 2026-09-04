@@ -66,13 +66,8 @@ public final class ScreenReport {
                 h = sxx / sigma2;
             } else {
                 s = c1 - xMean * c2;
-                if (spec.hasBaseline()) {
-                    h = sxx;
-                } else if (spec.isPoisson()) {
-                    h = rMean * sxx;
-                } else {
-                    h = rMean * (1 - rMean) * sxx;
-                }
+                // offset mode: the Fisher weight is already inside c3..c5; prior mode: raw moments, weight at ȳ
+                h = spec.hasBaseline() ? sxx : spec.fisherWeight(rMean) * sxx;
             }
         }
         return fromScore(s, h, nObs, nUnits);
@@ -90,13 +85,9 @@ public final class ScreenReport {
      * Partial test from the sums {@code [s, b, a]} at the fitted p̂ and the fit's (g, G): γ = (G + l2·N·I)⁻¹ a
      * with N the fit's (weighted) unit mass, i.e. the same ridge as the fit's Newton system, S⊥ = s − γ'g,
      * H⊥ = b − 2γ'a + γ'Gγ, r²_F = 1 − H⊥ / b. A column fully explained by F (H⊥ ≈ 0) is degenerate with
-     * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator).
+     * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator);
+     * {@code sigma2} is the gaussian family's residual variance at the fitted model (1 for the other families).
      */
-    public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs) {
-        return partial(vec, fit, nUnits, l2, nObs, 1d);
-    }
-
-    /** @param sigma2 the gaussian family's residual variance at the fitted model (1 for the other families) */
     public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs, final double sigma2) {
         final int k = fit.k;
         final double s = vec[0];
@@ -128,16 +119,20 @@ public final class ScreenReport {
         final double nUnits = b[ScoreAccumulator.UNITS_SCORED];
         final List<String> names = spec.columnNames();
         final int nTransforms = spec.transforms.size();
-        final boolean conditioned = spec.hasConditioning() && fit != null && fit.hasBest && partials != null;
+        final boolean fitted = spec.hasConditioning() && fit != null && fit.hasBest && partials != null;
         // gaussian: the residual variance at the fitted conditioning model ([Σ w r̂², Σ w] under SIGMA_KEY)
         double sigma2 = 1d;
-        if (conditioned && spec.isGaussian()) {
+        if (fitted && spec.isGaussian()) {
             final double[] sig = partials.get(ConditioningScorer.SIGMA_KEY);
             sigma2 = sig != null && sig[1] > 0 ? sig[0] / sig[1] : Double.NaN;
         }
+        // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
+        final boolean conditioned = fitted && sigma2 > 0;
         final List<String> notes = new ArrayList<>(spec.notes);
-        if (spec.hasConditioning() && !conditioned) {
+        if (spec.hasConditioning() && !fitted) {
             notes.add("conditioning: the fit accepted no point (no scorable unit); partial statistics are null and passed / threshold / qValue follow the marginal test");
+        } else if (fitted && !conditioned) {
+            notes.add("conditioning: the gaussian residual variance at the fitted model is " + sigma2 + " (an exact fit or no weighted row); partial statistics are null and passed / threshold / qValue follow the marginal test");
         }
 
         // statistics per key
@@ -297,7 +292,10 @@ public final class ScreenReport {
         summary.put("conditioningIterations", fit == null ? null : (long) fit.iteration);
         summary.put("conditioningRejectedSteps", fit == null ? null : (long) fit.rejected);
         summary.put("conditioningConverged", fit == null ? null : fit.hasBest && fit.converged);
-        summary.put("conditioningGain", fit == null || Double.isNaN(fit.gainPerUnit()) ? null : fit.gainPerUnit());
+        // gaussian: the fit is least squares at σ² = 1, so the gain is divided by the residual variance at the fit
+        // (label-scale free, the units of est_gain / partial_gain)
+        final double gain = fit == null ? Double.NaN : conditioned && spec.isGaussian() ? fit.gainPerUnit() / sigma2 : fit.gainPerUnit();
+        summary.put("conditioningGain", Double.isNaN(gain) ? null : gain);
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
         summary.put("notes", notes);
         return new Result(records, summary);

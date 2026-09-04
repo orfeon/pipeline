@@ -139,6 +139,42 @@ public class FamilyScorerTest {
     }
 
     @Test
+    public void testFitStartsAtThePriorMeanWithoutBaseline() {
+        // poisson counts with mean 1000: the intercept starts at log ȳ (at θ = 0 the mean is 1 and the first Newton
+        // step overshoots by exp(999)); binomial at logit ȳ, gaussian at ȳ; with a baseline the offset carries it
+        final ScreenSpec poisson = spec("{family: poisson, label: y, time: t, candidates: [x], placebo: {noise: 0}, conditioning: {fields: [f]}}");
+        final ConditioningScorer ps = new ConditioningScorer(poisson);
+        final VectorAccumulator moments = new VectorAccumulator();
+        moments.add(ps.moments(row(0, 800, Double.NaN, 1, 1)));
+        moments.add(ps.moments(row(1, 1200, Double.NaN, 1, -1)));
+        final double[] theta = ps.initialTheta(moments.getValues());
+        Assertions.assertEquals(2, theta.length);
+        Assertions.assertEquals(0d, theta[0]);
+        Assertions.assertEquals(Math.log(1000), theta[1], 1e-12);
+        Assertions.assertEquals(2000d, moments.getValues()[3]);   // Σ w y after the [n, Σ, Σ²] of the one column
+        Assertions.assertEquals(2d, moments.getValues()[4]);      // Σ w
+        final FitState state = FitState.initial(2, theta);
+        final VectorAccumulator eval = new VectorAccumulator();
+        eval.add(ps.evaluate(new GroupScorer(poisson).prepare(List.of(row(0, 800, Double.NaN, 1, 1)), "r0"), state.proposal, moments.getValues()));
+        eval.add(ps.evaluate(new GroupScorer(poisson).prepare(List.of(row(1, 1200, Double.NaN, 1, -1)), "r1"), state.proposal, moments.getValues()));
+        state.advance(eval.getValues(), 0d, 1e-10);
+        Assertions.assertTrue(state.hasBest);
+        Assertions.assertEquals(0d, state.bestGrad[1], 1e-9);   // the intercept gradient vanishes at log ȳ
+
+        final ScreenSpec binomial = spec("{family: binomial, label: y, time: t, candidates: [x], placebo: {noise: 0}, conditioning: {fields: [f]}}");
+        final ConditioningScorer bs = new ConditioningScorer(binomial);
+        final VectorAccumulator bm = new VectorAccumulator();
+        bm.add(bs.moments(row(0, 1, Double.NaN, 1, 1)));
+        bm.add(bs.moments(row(1, 0, Double.NaN, 1, -1)));
+        bm.add(bs.moments(row(2, 0, Double.NaN, 1, 0)));
+        bm.add(bs.moments(row(3, 0, Double.NaN, 1, 0)));
+        Assertions.assertEquals(Math.log(0.25 / 0.75), bs.initialTheta(bm.getValues())[1], 1e-12);
+
+        final ScreenSpec offset = spec("{family: poisson, label: y, baseline: b, time: t, candidates: [x], placebo: {noise: 0}, conditioning: {fields: [f]}}");
+        Assertions.assertEquals(0d, new ConditioningScorer(offset).initialTheta(moments.getValues())[1]);
+    }
+
+    @Test
     public void testGaussianPartialUsesTheResidualVariance() {
         // three rows, y = 2 f + e; conditioning on f leaves a candidate x = f fully explained (r2_F = 1) and a
         // candidate x2 unrelated to f finite, scaled by the residual variance at the fitted model

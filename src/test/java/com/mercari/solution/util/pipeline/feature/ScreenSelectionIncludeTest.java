@@ -52,7 +52,8 @@ public class ScreenSelectionIncludeTest {
         Assertions.assertEquals("abc123", selection.get("planHash").getAsString());
         Assertions.assertEquals("marginal", selection.get("test").getAsString());
         Assertions.assertEquals(1, selection.getAsJsonArray("passed").size());
-        Assertions.assertEquals(64, spec.parametersHash.length());
+        // the width of the feature plan hash it is written beside
+        Assertions.assertEquals(16, spec.parametersHash.length());
 
         final List<String> include = FeaturePlanService.parseIncludeList(selection.toString(), "screen selection");
         Assertions.assertEquals(List.of("x"), include);

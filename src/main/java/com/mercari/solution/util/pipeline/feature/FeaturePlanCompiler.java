@@ -2478,8 +2478,8 @@ public final class FeaturePlanCompiler {
         return sha256(sb.toString());
     }
 
-    /** SHA-256 of a string, first 16 hex characters (the width of the plan hash). */
-    static String sha256(final String text) {
+    /** SHA-256 of a string, first 16 hex characters (the width of the plan hash; the screen transform's screenHash shares it). */
+    public static String sha256(final String text) {
         try {
             final MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update(text.getBytes(StandardCharsets.UTF_8));

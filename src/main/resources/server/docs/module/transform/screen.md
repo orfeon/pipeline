@@ -98,7 +98,11 @@ Cost: one pass for the column moments, one pass per Newton iteration (at most `m
 the step size and costs one more pass; converged iterations are skipped) and one pass for the partial sums —
 `maxIter + 2` passes over the data at most, each a global Combine. The summary reports `conditioningIterations`,
 `conditioningRejectedSteps`, `conditioningConverged` and `conditioningGain` (the in-sample average
-log-likelihood improvement of F over the baseline — a sanity check that the conditioning set is informative).
+log-likelihood improvement of F over the baseline — or, without one, over the prior-mean intercept the fit starts
+from — on the per-unit scale of `est_gain`; for `gaussian` it is divided by the residual variance at the fit, so it
+is invariant to the label scale — a sanity check that the conditioning set is informative). A `gaussian` fit whose
+residual variance is 0 (an exact fit) cannot scale the partial statistics: they are null, `passed` follows the
+marginal test and `notes` says so.
 Conditioning needs the global window (no `strategy` window) and, like every screen run, the default trigger.
 
 ## Input contract
@@ -356,8 +360,9 @@ transforms:
 - `test` says which statistic the cut-off used (`partial` when the conditioning fit accepted a point — the same
   rule as the summary's `test` — else `marginal`).
 - `planHash` / `outputHash` are the upstream feature manifest's identities when `candidates.manifest` was given
-  (null otherwise); `screenHash` is the SHA-256 of this step's canonical parameters without the file locations
-  (`output`, `candidates.manifest`), so it is the same across runs that only move the pass list or the manifest.
+  (null otherwise); `screenHash` is the SHA-256 (16 hex characters, the width of the feature transform's hashes) of
+  this step's canonical parameters without the file locations (`output`, `candidates.manifest`), so it is the same
+  across runs that only move the pass list or the manifest.
   Together they make the pass list traceable to the plan that produced the candidates and the configuration that
   screened them.
 - `threshold` / `thresholdTheoretical` are null when no unit was scored (no `NaN` in the file).

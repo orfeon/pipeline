@@ -32,15 +32,14 @@ public final class ConditioningScorer implements Serializable {
         this.intercept = !spec.isGroupedMultinomial();
         this.k = kF + (intercept ? 1 : 0);
         this.offset = spec.conditioningOffset();
-        this.groups = new GroupScorer(spec);
     }
 
-    /** the family's Fisher weight (shared with the marginal scorer) */
-    private final GroupScorer groups;
-
-    /** Standardisation sums of one row: {@code [n, Σ, Σ²]} per conditioning column over finite values. */
+    /**
+     * Standardisation sums of one row: {@code [n, Σ, Σ²]} per conditioning column over finite values, then the
+     * weighted label sums {@code [Σ w y, Σ w]} (the starting point of the intercept, see {@link #initialTheta}).
+     */
     public double[] moments(final ScreenRow row) {
-        final double[] m = new double[3 * kF];
+        final double[] m = new double[3 * kF + 2];
         for (int j = 0; j < kF; j++) {
             final double v = row.x[offset + j];
             if (!ScreenMath.isFinite(v)) continue;
@@ -48,7 +47,29 @@ public final class ConditioningScorer implements Serializable {
             m[3 * j + 1] += v;
             m[3 * j + 2] += v * v;
         }
+        m[3 * kF] = row.weight * row.label;
+        m[3 * kF + 1] = row.weight;
         return m;
+    }
+
+    /**
+     * The starting point of the Newton passes: θ = 0, except that without a baseline the intercept starts at the
+     * link of the weighted label mean, so the first pass already sits at the prior-mean model. At θ = 0 the poisson
+     * mean is 1 for every row and the first step on the intercept is ≈ log ȳ in one jump: for count labels with a
+     * large mean the proposal overshoots (exp(η) overflows), the step halvings eat the pass budget and the partial
+     * test runs at a non-MLE point. The binomial start moves from 0.5 to the prior rate, the gaussian from 0 to ȳ.
+     */
+    public double[] initialTheta(final double[] moments) {
+        final double[] theta = new double[k];
+        if (!intercept || spec.hasBaseline() || moments == null || moments.length < 3 * kF + 2) return theta;
+        final double w = moments[3 * kF + 1];
+        if (!(w > 0)) return theta;
+        double mean = moments[3 * kF] / w;
+        if (spec.isBinomial()) mean = Math.min(1 - GroupScorer.EPS, Math.max(GroupScorer.EPS, mean));
+        if (spec.isPoisson() && !(mean > 0)) return theta;
+        final double eta = spec.link(mean);
+        if (Double.isFinite(eta)) theta[kF] = eta;
+        return theta;
     }
 
     /** {@code [mean[], std[]]} from the summed moments; a constant column keeps std 1 (it becomes all zeros). */
@@ -171,7 +192,7 @@ public final class ConditioningScorer implements Serializable {
                 final double y = unit.y[i];
                 wsum += w;
                 ll += w * rowLogLikelihood(y, p[i]);
-                final double v = groups.fisherWeight(p[i]);
+                final double v = spec.fisherWeight(p[i]);
                 for (int a = 0; a < k; a++) {
                     out[2 + a] += w * (y - p[i]) * f[i][a];
                     for (int b = 0; b < k; b++) out[2 + k + a * k + b] += w * v * f[i][a] * f[i][b];
@@ -241,7 +262,7 @@ public final class ConditioningScorer implements Serializable {
                     for (int i = 0; i < n; i++) {
                         if (!ScreenMath.isFinite(v[i])) continue;
                         final double w = unit.w[i];
-                        final double vv = groups.fisherWeight(p[i]);
+                        final double vv = spec.fisherWeight(p[i]);
                         acc[0] += w * v[i] * (unit.y[i] - p[i]);
                         acc[1] += w * vv * v[i] * v[i];
                         for (int j = 0; j < k; j++) acc[2 + j] += w * vv * v[i] * f[i][j];

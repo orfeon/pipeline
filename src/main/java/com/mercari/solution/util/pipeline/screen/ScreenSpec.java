@@ -6,7 +6,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
-import com.mercari.solution.util.domain.text.template.StringFunctions;
 import com.mercari.solution.util.pipeline.feature.FeaturePlanCompiler;
 
 import java.io.Serializable;
@@ -100,7 +99,7 @@ public final class ScreenSpec implements Serializable {
 
     /** output.selection: URI / path of the pass-list file (null = not written) */
     public String selectionUri;
-    /** SHA-256 of the canonical parameters without the file locations (output, candidates.manifest): the identity of this screen configuration */
+    /** SHA-256 (16 hex, the feature plan hash width) of the canonical parameters without the file locations (output, candidates.manifest): the identity of this screen configuration */
     public String parametersHash;
     /** plan / output hash of the upstream feature manifest (candidates.manifest), when given */
     public String manifestPlanHash;
@@ -133,6 +132,23 @@ public final class ScreenSpec implements Serializable {
 
     public boolean isPoisson() {
         return FAMILY_POISSON.equals(family);
+    }
+
+    /**
+     * The Fisher weight of a row family at the mean μ: binomial μ(1 − μ), poisson μ, gaussian 1 (σ² is applied by
+     * the report). One definition for the marginal moments, the conditioning fit and the report's prior mode.
+     */
+    public double fisherWeight(final double mu) {
+        if (isBinomial()) return mu * (1 - mu);
+        if (isPoisson()) return mu;
+        return 1d;
+    }
+
+    /** The link of a row family at the mean μ (the intercept that reproduces μ without a baseline). */
+    public double link(final double mu) {
+        if (isBinomial()) return Math.log(mu / (1 - mu));
+        if (isPoisson()) return Math.log(mu);
+        return mu;
     }
 
     public boolean hasBaseline() {
@@ -365,7 +381,8 @@ public final class ScreenSpec implements Serializable {
                 errors.add("output must be an object {selection: <uri>}");
             }
         }
-        s.parametersHash = StringFunctions.sha256Hex(FeaturePlanCompiler.canonical(withoutLocations(p)));
+        // the same digest (and width) as the feature manifest's planHash / outputHash written beside it
+        s.parametersHash = FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(withoutLocations(p)));
 
         // rules that depend on group are checked in resolve (group may still come from the manifest roles)
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));

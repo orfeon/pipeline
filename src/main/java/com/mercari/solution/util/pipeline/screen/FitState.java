@@ -43,8 +43,13 @@ public final class FitState implements Serializable {
     }
 
     public static FitState initial(final int k) {
+        return initial(k, new double[k]);
+    }
+
+    /** The state before the first pass, evaluating {@code theta} (see {@code ConditioningScorer.initialTheta}). */
+    public static FitState initial(final int k, final double[] theta) {
         final FitState s = new FitState(k);
-        s.proposal = new double[k];
+        s.proposal = theta.clone();
         return s;
     }
 
@@ -122,7 +127,7 @@ public final class FitState implements Serializable {
         return this;
     }
 
-    /** In-sample gain per unit of the fitted conditioning model over θ = 0. */
+    /** In-sample gain per unit of the fitted conditioning model over the starting point (the baseline, or the prior-mean intercept without one). */
     public double gainPerUnit() {
         return hasBest && nUnits > 0 && !Double.isNaN(ll0) ? (bestLl - ll0) / nUnits : Double.NaN;
     }

@@ -275,7 +275,7 @@ public final class GroupScorer implements Serializable {
                 c[ScoreAccumulator.C6] += w[i] * y[i] * y[i];
             } else {
                 final double r = y[i] - mu[i];
-                final double vv = fisherWeight(mu[i]);
+                final double vv = spec.fisherWeight(mu[i]);
                 c[ScoreAccumulator.C1] += w[i] * x * r;
                 c[ScoreAccumulator.C2] += w[i] * r;
                 c[ScoreAccumulator.C3] += w[i] * vv * x * x;
@@ -285,13 +285,6 @@ public final class GroupScorer implements Serializable {
             }
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
-    }
-
-    /** The Fisher weight of a row family at the mean μ: binomial μ(1 − μ), poisson μ, gaussian 1 (σ² applied by the report). */
-    double fisherWeight(final double mu) {
-        if (spec.isBinomial()) return mu * (1 - mu);
-        if (spec.isPoisson()) return mu;
-        return 1d;
     }
 
     /** Applies a transform variant within the unit; NaN inputs stay NaN. */
