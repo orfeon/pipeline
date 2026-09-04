@@ -1,14 +1,28 @@
 package com.mercari.solution.config.options;
 
+import com.google.cloud.ServiceOptions;
 import com.mercari.solution.util.cloud.google.GcpCredentialsCache;
 import com.mercari.solution.util.cloud.google.MCredentialFactory;
 import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.List;
+import java.util.function.Supplier;
 
 public class GCPOptions implements Serializable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(GCPOptions.class);
+
+    // Beam's GcpOptions only infers the project from the gcloud config files, which a container
+    // (Cloud Run Jobs / Services running the direct or prism image) does not have; the google-cloud
+    // client resolution below adds GOOGLE_CLOUD_PROJECT and the GCE metadata server. Resolved once
+    // per JVM: the metadata lookup is a network call and the answer cannot change during a run.
+    private static final Object DEFAULT_PROJECT_LOCK = new Object();
+    private static boolean defaultProjectResolved = false;
+    private static String defaultProject;
 
     private String project;
     private String credentials;
@@ -76,6 +90,45 @@ public class GCPOptions implements Serializable {
         PubsubOptions.setOptions(pipelineOptions, gcp.pubsub);
         BigQueryOptions.setOptions(pipelineOptions, gcp.bigquery);
         FirestoreOptions.setOptions(pipelineOptions, gcp.firestore);
+    }
+
+    /**
+     * Fills {@code GcpOptions.project} when neither the config, the command line nor Beam's own
+     * gcloud-config inference set it, from the execution environment ({@code GOOGLE_CLOUD_PROJECT},
+     * gcloud, the GCE metadata server on Cloud Run / GCE). BigQueryIO query and load jobs and the
+     * Datastore sink take their project from this option, so without it the direct / prism images
+     * fail at run time with "Required parameter projectId must be specified".
+     */
+    public static void applyDefaultProject(final PipelineOptions pipelineOptions) {
+        final GcpOptions gcpOptions = pipelineOptions.as(GcpOptions.class);
+        final String project = resolveProject(gcpOptions.getProject(), GCPOptions::defaultProject);
+        if(project != null && !project.equals(gcpOptions.getProject())) {
+            LOG.info("options.gcp.project is not set: using the execution environment's project {}", project);
+            gcpOptions.setProject(project);
+        }
+    }
+
+    static String resolveProject(final String current, final Supplier<String> fallback) {
+        if(current != null && !current.isBlank()) {
+            return current;
+        }
+        final String resolved = fallback.get();
+        return resolved == null || resolved.isBlank() ? null : resolved;
+    }
+
+    private static String defaultProject() {
+        synchronized (DEFAULT_PROJECT_LOCK) {
+            if(!defaultProjectResolved) {
+                try {
+                    defaultProject = ServiceOptions.getDefaultProjectId();
+                } catch (final Throwable e) {
+                    LOG.warn("Failed to resolve the default GCP project from the execution environment", e);
+                    defaultProject = null;
+                }
+                defaultProjectResolved = true;
+            }
+            return defaultProject;
+        }
     }
 
     public static class PubsubOptions implements Serializable {

@@ -40,7 +40,7 @@ Schema is automatically inferred from the query result or table definition; no `
 | queryTempDataset | optional           | String | Temporary dataset to store query results. Format: `dataset_id` or `project_id.dataset_id`. If not specified, a temporary dataset is created automatically (requires dataset create/delete permissions).                                                                |
 | queryLocation    | optional           | String | Query execution location (e.g. `US`, `asia-northeast1`). If not specified, it is automatically estimated from the datasets referenced in the query (requires `bigquery.datasets.get` permission).                                                                      |
 | queryPriority    | optional           | Enum   | Query execution priority. Values: `INTERACTIVE`, `BATCH`. Default: `INTERACTIVE`.                                                                                                                                                                                      |
-| queryRunProjectId | optional          | String | Project ID to use for running the query. If not specified, the pipeline execution environment's project is used.                                                                                                                                                        |
+| queryRunProjectId | optional          | String | Project ID to use for running the query. If not specified, the pipeline's project (`options.gcp.project`) is used. When specified, it also becomes the pipeline-wide BigQuery job project (`options.gcp.bigquery.bigqueryProject`) unless that option is set explicitly, since BigQueryIO has no per-source job project. |
 
 ### Table direct read parameters
 
@@ -52,6 +52,14 @@ Schema is automatically inferred from the query result or table definition; no `
 | fields         | optional           | Array<String\> | Field names to read from the table (column projection). Only the specified fields are read, reducing data transfer. Only available for table direct read.                                                                                                   |
 | rowRestriction | optional           | String         | SQL predicate to filter rows at the storage level before reading. Uses the same syntax as a `WHERE` clause (e.g. `age > 18 AND status = 'active'`). Only available for table direct read.                                                                  |
 | format         | optional           | Enum           | Data format for Storage Read API. Values: `AVRO`, `ARROW`. Only available for table direct read.                                                                                                                                                           |
+
+A `table` that is a logical **view** or an **external table** cannot be read by the Storage Read
+API or by an extract job, so the module reads it with a query job instead (`SELECT <fields> FROM
+table WHERE <rowRestriction>`, then the query result is read as for a `query`): the query
+parameters `queryTempDataset`, `queryLocation`, `queryPriority` and `queryRunProjectId` apply,
+`format` is ignored, the caller needs query job permissions in addition to the view's read
+access, and a nested path in `fields` (`a.b`) is output as a top-level column. Materialized views,
+snapshots and native tables are read directly.
 
 For table (and view) reads, the field descriptions of the table are attached to the output schema
 (`description` of each field, visible in the dry-run output schema and carried to sinks that store
@@ -85,6 +93,7 @@ Standard batch read. The query or table is read once and all results are output.
 
 - For query read: uses `BigQueryIO.read().fromQuery()` with Standard SQL
 - For table direct read: uses `BigQueryIO.read().from()` with Storage Read API (default) or export method
+- For a view or external table given as `table`: rewritten to a query read (see above)
 
 ### View mode
 

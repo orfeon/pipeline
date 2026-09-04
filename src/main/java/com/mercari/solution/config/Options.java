@@ -111,6 +111,7 @@ public class Options implements Serializable {
             if(OptionUtil.getRunner(pipelineOptions) == MPipeline.Runner.prism) {
                 PrismOptions.setOptions(pipelineOptions, null);
             }
+            GCPOptions.applyDefaultProject(pipelineOptions);
             return;
         }
 
@@ -132,6 +133,7 @@ public class Options implements Serializable {
         }
 
         GCPOptions.setOptions(pipelineOptions, options.gcp);
+        GCPOptions.applyDefaultProject(pipelineOptions);
         AWSOptions.setOptions(pipelineOptions, options.aws);
 
         final MPipeline.Runner runner = OptionUtil.getRunner(pipelineOptions);

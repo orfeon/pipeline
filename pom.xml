@@ -6,7 +6,7 @@
 
   <groupId>com.mercari.solution</groupId>
   <artifactId>pipeline</artifactId>
-  <version>1.0.0-beta4</version>
+  <version>1.0.0</version>
   <name>Mercari Pipeline</name>
 
   <packaging>${packaging}</packaging>
@@ -15,8 +15,8 @@
     <!-- The prism image bundles the prism release of this version: bump prism.zip.sha256 (prism profile) with it. -->
     <beam.version>2.76.0</beam.version>
 
-    <snakeyaml.version>2.6</snakeyaml.version>
-    <freemarker.version>2.3.34</freemarker.version>
+    <snakeyaml.version>2.7</snakeyaml.version>
+    <freemarker.version>2.3.35</freemarker.version>
     <lucene.version>10.5.1</lucene.version>
     <pdfbox.version>3.0.8</pdfbox.version>
     <jsoup.version>1.23.2</jsoup.version>
@@ -32,7 +32,7 @@
     <hikaricp.version>7.1.0</hikaricp.version>
     <h2.version>2.4.240</h2.version>
 
-    <drive.version>v3-rev20260624-2.0.0</drive.version>
+    <drive.version>v3-rev20260823-2.0.0</drive.version>
     <sheets.version>v4-rev20260610-2.0.0</sheets.version>
     <docs.version>v1-rev20260427-2.0.0</docs.version>
     <slides.version>v1-rev20260408-2.0.0</slides.version>
@@ -311,8 +311,11 @@
       <properties>
         <!-- Local debugging image: skip DirectRunner's per-element encode/mutation checks by default.
              Re-enable per run via config options.direct.enforceImmutability/enforceEncodability
-             (args cannot override: duplicating a flag fails PipelineOptionsFactory.fromArgs). -->
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=DirectRunner,--enforceImmutability=false,--enforceEncodability=false</jib.entrypoint>
+             (args cannot override: duplicating a flag fails PipelineOptionsFactory.fromArgs).
+             The classpath (same as command-spec.json for the Dataflow image) must include the bare
+             /template/MPipeline/resources directory: jib lays src/main/resources there, and classpath
+             resources (profile report template, bundled schemas) are read from it at runtime. -->
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=DirectRunner,--enforceImmutability=false,--enforceEncodability=false</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
@@ -447,7 +450,7 @@
              Heap at 50% (not the direct image's 75%): the container is shared with the prism Go child
              process, which holds the whole in-memory GBK/shuffle state — the JVM (loopback SDK harness)
              and prism split the container memory roughly evenly. -->
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=50.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=50.0,com.mercari.solution.MPipeline,--runner=PrismRunner</jib.entrypoint>
       </properties>
       <build>
         <plugins>
@@ -528,7 +531,7 @@
         <activeByDefault>false</activeByDefault>
       </activation>
       <properties>
-        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=PortableRunner</jib.entrypoint>
+        <jib.entrypoint>java,-cp,/template/MPipeline/libs/*:/template/MPipeline/classes:/template/MPipeline/resources:/template/MPipeline/resources/libs/*,-XX:MaxRAMPercentage=75.0,com.mercari.solution.MPipeline,--runner=PortableRunner</jib.entrypoint>
       </properties>
       <dependencies>
         <dependency>
