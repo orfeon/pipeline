@@ -355,6 +355,46 @@ public class ScreenTransformTest {
     }
 
     @Test
+    public void testSelectionFileClosesTheLoop() throws Exception {
+        // relative path: Beam FileSystems treats a Windows drive letter as a URI scheme
+        final String selection = "target/screen-selection/" + java.util.UUID.randomUUID() + "/passed.json";
+        final String config = sessionsConfig(120, 4, 42) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      baseline: {field: p_model, form: prob}
+                      time: {field: session_time, to: "2024-12-31T23:59:59Z"}
+                      candidates: {include: ["f_*"]}
+                      transforms: [raw]
+                      placebo: {noise: 20, seed: 5}
+                      output: {selection: SELECTION}
+                """.replace("SELECTION", selection);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            Assertions.assertEquals(1, ((List<?>) rows.iterator().next().getPrimitiveValue("passedColumns")).size());
+            return null;
+        });
+        pipeline.run();
+
+        final java.nio.file.Path file = java.nio.file.Paths.get(selection);
+        Assertions.assertTrue(java.nio.file.Files.exists(file), "selection file written: " + selection);
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(file)).getAsJsonObject();
+        Assertions.assertEquals(1, json.get("version").getAsInt());
+        Assertions.assertEquals(List.of("f_extra"), json.getAsJsonArray("columns").asList().stream().map(com.google.gson.JsonElement::getAsString).toList());
+        Assertions.assertEquals("marginal", json.get("test").getAsString());
+        Assertions.assertEquals("2024-12-31T23:59:59Z", json.get("timeTo").getAsString());
+        Assertions.assertTrue(json.get("threshold").getAsDouble() > 0);
+        Assertions.assertEquals(64, json.get("screenHash").getAsString().length());
+        Assertions.assertTrue(json.get("planHash").isJsonNull());
+        Assertions.assertEquals("f_extra", json.getAsJsonArray("passed").get(0).getAsJsonObject().get("candidate").getAsString());
+    }
+
+    @Test
     public void testAssemblyRejectsUnresolvableSpec() {
         final String config = sessionsConfig(2, 2, 1) + """
                 transforms:

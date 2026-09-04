@@ -20,6 +20,9 @@ user-facing documentation lives in `src/main/resources/server/docs/` and is bund
   transform: sources contract (`availableAt` / `ingestionLag` / `snapshotOf`), the four scopes, the
   unified encoding with structured keys and shrinkage, the availability algebra behind the leak check,
   naming / lineage / `validate --expand`, and the implementation phases.
+* [Screen Transform](feature-screen.md) — baseline-conditioned feature screening before training: the
+  Rao score test as one bounded Combine, placebo calibration, the unrolled Newton conditioning (partial test),
+  the DirectRunner findings and the pass-list loop back into the feature transform.
 * [Feature Transform Engine](feature-engine.md) — how that DSL runs on Beam: the pure compile layer,
   stage scheduling, per-scope evaluators, static fits and artifacts, the spill sorter, the parallel wave
   DAG, runner findings, and the implementation status / deferred items.
