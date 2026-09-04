@@ -10,8 +10,17 @@ import com.mercari.solution.util.pipeline.feature.FeatureSpec.Scope;
 import com.mercari.solution.util.pipeline.feature.SequenceEvaluator.Past;
 import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.DoubleCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Metrics;
+import org.apache.beam.sdk.transforms.ApproximateQuantiles;
+import org.apache.beam.sdk.transforms.Count;
+import org.apache.beam.sdk.transforms.Filter;
+import org.apache.beam.sdk.transforms.MapElements;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
@@ -111,13 +120,21 @@ public final class FeatureStages {
         // the time axis of all keyed stages (strictly-past windows, maxAge, ordering)
         final TupleTag<MElement> elementTag = new TupleTag<>() {};
         final TupleTag<BadRecord> elementFailureTag = new TupleTag<>() {};
+        final TupleTag<KV<String, Double>> auditTag = new TupleTag<>() {};
         final SourceContract.FieldContract timeContract = plan.getInputFields().get(spec.timeField);
         final String timeFieldType = timeContract == null || timeContract.getType() == null ? "timestamp" : timeContract.getType().getType().name();
+        // the observedAt audit (DSL spec §7) rides the same pass: counters always, the quantile samples only
+        // when a run manifest will be written (batch)
+        final boolean streaming = com.mercari.solution.util.pipeline.OptionUtil.isStreaming(input);
+        final List<FeaturePlan.ObservedAtAudit> audits = plan.getRunnableObservedAtAudits();
+        final boolean runManifest = spec.output.manifest != null && !streaming;
         final PCollectionTuple elements = input.apply("ToElement", ParDo
-                .of(new ToElementDoFn(spec.timeField, timeFieldType, parallel ? spec.engine.rowId : null, failFast, elementFailureTag))
-                .withOutputTags(elementTag, TupleTagList.of(elementFailureTag)));
+                .of(new ToElementDoFn(spec.timeField, timeFieldType, parallel ? spec.engine.rowId : null, failFast, elementFailureTag,
+                        audits, "fail".equals(spec.audit.observedAt), runManifest ? auditTag : null))
+                .withOutputTags(elementTag, TupleTagList.of(elementFailureTag).and(auditTag)));
         failures.add(elements.get(elementFailureTag));
         PCollection<MElement> current = elements.get(elementTag).setCoder(elementCoder);
+        final PCollection<KV<String, Double>> auditSamples = elements.get(auditTag).setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()));
 
         final Wiring wiring = new Wiring(plan, columns, elementCoder, kvCoder, sortKvCoder, sorter, loggings, failFast, failures);
         PCollection<MElement> pending = null; // base + partials of the last wave, merged inside the groupBy finalize
@@ -176,22 +193,133 @@ public final class FeatureStages {
 
         final TupleTag<MElement> outputTag = new TupleTag<>() {};
         final TupleTag<BadRecord> failureTag = new TupleTag<>() {};
+        final TupleTag<KV<String, Double>> countTag = new TupleTag<>() {};
         final PCollectionTuple finalized;
         if (groupBy == null) {
             finalized = current.apply("Finalize", ParDo
-                    .of(new FinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, spec.output.nullPolicy, loggings, failFast, failureTag))
-                    .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                    .of(new FinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, spec.output.nullPolicy, loggings, failFast, failureTag, runManifest ? countTag : null))
+                    .withOutputTags(outputTag, TupleTagList.of(failureTag).and(countTag)));
         } else {
             finalized = (pending != null ? pending : current)
                     .apply("Finalize_Key", ParDo.of(new KeyDoFn(groupBy.keys()))).setCoder(kvCoder)
                     .apply("Finalize_Group", GroupByKey.create())
                     .apply("Finalize", ParDo
                             .of(new GroupedFinalizeDoFn(plan.getEmittedColumns(), inputSchema, outputSchema, spec.output.nullPolicy,
-                                    groupBy.keys(), spec.output.parentFields, spec.output.childName, pendingBranches, loggings, failFast, failureTag))
-                            .withOutputTags(outputTag, TupleTagList.of(failureTag)));
+                                    groupBy.keys(), spec.output.parentFields, spec.output.childName, pendingBranches, loggings, failFast, failureTag, runManifest ? countTag : null))
+                            .withOutputTags(outputTag, TupleTagList.of(failureTag).and(countTag)));
         }
         failures.add(finalized.get(failureTag));
+        if (runManifest) {
+            final PCollection<KV<String, Double>> outputCounts = finalized.get(countTag).setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()));
+            writeRunManifest(plan, PCollectionList.of(auditSamples).and(outputCounts).apply("RunManifest_Samples", Flatten.pCollections()), audits);
+        }
         return new Result(finalized.get(outputTag).setCoder(ElementCoder.of(outputSchema)), failures);
+    }
+
+    /**
+     * The run manifest ({@code <output.manifest>.run.json}, batch only): what only execution knows — the output
+     * row count and the observedAt audit (per field: rows, late = observed after the declared availability,
+     * afterPredictAt, missing, and deciles of {@code predictAt − observedAt} in seconds). Everything is reduced
+     * in the global window to one element and written by one worker, like a fit artifact.
+     */
+    private static void writeRunManifest(final FeaturePlan plan,
+                                         final PCollection<KV<String, Double>> auditSamples,
+                                         final List<FeaturePlan.ObservedAtAudit> audits) {
+        final PCollection<KV<String, Double>> samples = auditSamples.apply("RunManifest_AuditGlobal", Window.<KV<String, Double>>into(new GlobalWindows())
+                .triggering(org.apache.beam.sdk.transforms.windowing.DefaultTrigger.of())
+                .withAllowedLateness(org.joda.time.Duration.ZERO)
+                .discardingFiredPanes());
+        final PCollection<String> counts = samples
+                .apply("RunManifest_AuditCount", Count.perKey())
+                .apply("RunManifest_AuditCountJson", MapElements.into(TypeDescriptors.strings())
+                        .via(kv -> "{\"key\":\"" + kv.getKey() + "\",\"count\":" + kv.getValue() + "}"));
+        final PCollection<String> quantiles = samples
+                .apply("RunManifest_AuditSamples", Filter.by(kv -> !kv.getKey().contains("#")))
+                .apply("RunManifest_AuditQuantiles", ApproximateQuantiles.perKey(11))
+                .apply("RunManifest_AuditQuantilesJson", MapElements.into(TypeDescriptors.strings())
+                        .via(kv -> "{\"key\":\"" + kv.getKey() + "\",\"quantiles\":" + kv.getValue() + "}"));
+        final PCollectionView<List<String>> facts = PCollectionList.of(counts).and(quantiles)
+                .apply("RunManifest_Facts", Flatten.pCollections())
+                .apply("RunManifest_FactsView", View.asList());
+        final List<String> auditFields = new ArrayList<>();
+        for (final FeaturePlan.ObservedAtAudit a : audits) auditFields.add(a.field());
+        auditSamples.getPipeline()
+                .apply("RunManifest_Trigger", Create.of(plan.getSpec().output.manifest))
+                .apply("RunManifest_Write", ParDo.of(new WriteRunManifestDoFn(plan.getHash(), plan.getOutputHash(), auditFields, facts)).withSideInputs(facts));
+    }
+
+    /** Sample key of the finalize row count ({@code #} keeps it out of the quantile keys). */
+    static final String OUTPUT_COUNT_KEY = "#rows";
+
+    /** {@code <manifest>.run.json}: the run manifest path next to the assembly-time manifest. */
+    public static String runManifestPath(final String manifest) {
+        return manifest.endsWith(".json") ? manifest.substring(0, manifest.length() - ".json".length()) + ".run.json" : manifest + ".run.json";
+    }
+
+    static class WriteRunManifestDoFn extends DoFn<String, Void> {
+        private final String planHash;
+        private final String outputHash;
+        private final List<String> auditFields;
+        private final PCollectionView<List<String>> facts;
+
+        WriteRunManifestDoFn(final String planHash, final String outputHash, final List<String> auditFields, final PCollectionView<List<String>> facts) {
+            this.planHash = planHash;
+            this.outputHash = outputHash;
+            this.auditFields = auditFields;
+            this.facts = facts;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final Map<String, Long> counts = new HashMap<>();
+            final Map<String, com.google.gson.JsonArray> quantiles = new HashMap<>();
+            for (final String fact : c.sideInput(facts)) {
+                final com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(fact).getAsJsonObject();
+                final String key = o.get("key").getAsString();
+                if (o.has("count")) counts.put(key, o.get("count").getAsLong());
+                if (o.has("quantiles")) quantiles.put(key, o.getAsJsonArray("quantiles"));
+            }
+            final com.google.gson.JsonObject run = new com.google.gson.JsonObject();
+            run.addProperty("version", 1);
+            run.addProperty("planHash", planHash);
+            run.addProperty("outputHash", outputHash);
+            run.addProperty("finishedAt", java.time.Instant.now().toString());
+            run.addProperty("rows", counts.getOrDefault(OUTPUT_COUNT_KEY, 0L));
+            final com.google.gson.JsonObject audit = new com.google.gson.JsonObject();
+            for (final String field : auditFields) {
+                final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+                o.addProperty("rows", counts.getOrDefault(field + "#rows", 0L));
+                o.addProperty("nullValue", counts.getOrDefault(field + "#nullValue", 0L));
+                o.addProperty("missing", counts.getOrDefault(field + "#missing", 0L));
+                o.addProperty("late", counts.getOrDefault(field + "#late", 0L));
+                o.addProperty("afterPredictAt", counts.getOrDefault(field + "#afterPredictAt", 0L));
+                o.addProperty("measured", counts.getOrDefault(field, 0L));
+                // [min, p10, p20, ..., p90, max] of predictAt − observedAt in seconds (positive = observed before predictAt)
+                o.add("leadSecondsDeciles", quantiles.getOrDefault(field, new com.google.gson.JsonArray()));
+                audit.add(field, o);
+                LOG.info("feature observedAt audit {}: {}", field, o);
+            }
+            run.add("observedAtAudit", audit);
+            final String path = runManifestPath(c.element());
+            com.mercari.solution.util.domain.file.ResourceUtil.writeString(path, new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(run));
+            LOG.info("feature run manifest written to {}", path);
+        }
+    }
+
+    /** Artifact paths per fitted block for the manifest (static / fold encodings, factorization, discretize) — declared or not yet written. */
+    public static Map<String, String> artifactPaths(final FeaturePlan plan) {
+        final Map<String, String> paths = new LinkedHashMap<>();
+        final String version = plan.getArtifactVersion();
+        for (final FitLevel level : fitLevels(plan.getColumns())) {
+            if (level.artifactUri() != null) paths.put(level.block(), FitArtifact.statsPath(level.artifactUri(), version, level.block()));
+        }
+        for (final StaticFitBlock<?> block : fmSpecs(plan.getColumns())) {
+            if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
+        }
+        for (final StaticFitBlock<?> block : discretizeSpecs(plan.getColumns())) {
+            if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
+        }
+        return paths;
     }
 
     /** The shared objects of the stage wiring: one stage = one ParDo / GroupByKey, whatever wave it runs in. */
@@ -1218,14 +1346,85 @@ public final class FeatureStages {
         private final List<String> rowIdFields;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+        /** observedAt audit entries (observation column present); empty = no audit */
+        private final List<FeaturePlan.ObservedAtAudit> audits;
+        /** audit.observedAt: fail — a row observed after its declared availability goes to the failure output */
+        private final boolean failOnLate;
+        /** audit samples for the run manifest (null = counters only) */
+        private final TupleTag<KV<String, Double>> auditTag;
+        private transient Map<String, Counter> counters;
 
         ToElementDoFn(final String timeField, final String timeFieldType, final List<String> rowIdFields,
                       final boolean failFast, final TupleTag<BadRecord> failureTag) {
+            this(timeField, timeFieldType, rowIdFields, failFast, failureTag, List.of(), false, null);
+        }
+
+        ToElementDoFn(final String timeField, final String timeFieldType, final List<String> rowIdFields,
+                      final boolean failFast, final TupleTag<BadRecord> failureTag,
+                      final List<FeaturePlan.ObservedAtAudit> audits, final boolean failOnLate, final TupleTag<KV<String, Double>> auditTag) {
             this.timeField = timeField;
             this.timeFieldType = timeFieldType;
             this.rowIdFields = rowIdFields;
             this.failFast = failFast;
             this.failureTag = failureTag;
+            this.audits = audits;
+            this.failOnLate = failOnLate;
+            this.auditTag = auditTag;
+        }
+
+        @Setup
+        public void setup() {
+            counters = new HashMap<>();
+        }
+
+        private void count(final String name) {
+            counters.computeIfAbsent(name, n -> Metrics.counter("feature", n)).inc();
+        }
+
+        private void sample(final ProcessContext c, final String key, final double value) {
+            if (auditTag != null) c.output(auditTag, KV.of(key, value));
+        }
+
+        /**
+         * The observedAt audit of one row: for every audited field, the observation time is compared with the
+         * declared availability ({@code event_time + availableAt}; predictAt when the declaration is dynamic)
+         * and with predictAt. Counters {@code feature/observedAt_<field>_late|afterPredictAt|missing};
+         * {@code predictAt − observedAt} (seconds) is sampled for the run manifest quantiles.
+         */
+        private void audit(final ProcessContext c, final Map<String, Object> values, final long eventMillis) {
+            for (final FeaturePlan.ObservedAtAudit a : audits) {
+                final String field = a.field();
+                sample(c, field + "#rows", 1d);
+                if (values.get(field) == null) {
+                    sample(c, field + "#nullValue", 1d);
+                    continue;
+                }
+                final Long observed = FeatureValues.toEpochMillis(values.get(a.observedAtField()), a.observedAtType());
+                if (observed == null) {
+                    count("observedAt_" + field + "_missing");
+                    sample(c, field + "#missing", 1d);
+                    continue;
+                }
+                final Long deadlineOffset = a.deadlineOffsetMillis();
+                final Long predictOffset = a.predictAtOffsetMillis();
+                final Long deadline = deadlineOffset != null ? eventMillis + deadlineOffset : predictOffset != null ? eventMillis + predictOffset : null;
+                if (deadline != null && observed > deadline) {
+                    count("observedAt_" + field + "_late");
+                    sample(c, field + "#late", 1d);
+                    if (failOnLate) {
+                        throw new IllegalStateException("observedAt audit: '" + field + "' observed at " + Instant.ofEpochMilli(observed)
+                                + " after its declared availability " + Instant.ofEpochMilli(deadline) + " (" + a.availableAt().describe() + ")");
+                    }
+                }
+                if (predictOffset != null) {
+                    final long predictAt = eventMillis + predictOffset;
+                    if (observed > predictAt) {
+                        count("observedAt_" + field + "_afterPredictAt");
+                        sample(c, field + "#afterPredictAt", 1d);
+                    }
+                    sample(c, field, (predictAt - observed) / 1000d);
+                }
+            }
         }
 
         @Override
@@ -1244,6 +1443,7 @@ public final class FeatureStages {
                     throw new IllegalArgumentException("time.field '" + timeField + "' is null or not a timestamp; rows cannot be ordered");
                 }
                 final Instant ts = Instant.ofEpochMilli(millis);
+                if (!audits.isEmpty()) audit(c, values, millis);
                 if (rowIdFields != null) {
                     // a declared engine.rowId must be deterministic across retries (null components become a
                     // token; rows genuinely colliding on it surface through the merge's uniqueness rejection);
@@ -1620,7 +1820,7 @@ public final class FeatureStages {
      * {@code SELECT *} over a full pass-through can pick up post-event columns; {@code keys} makes the
      * feature table safe to consume wholesale.
      */
-    static Set<String> passThroughInputs(final FeaturePlan plan, final Schema inputSchema) {
+    public static Set<String> passThroughInputs(final FeaturePlan plan, final Schema inputSchema) {
         final FeatureSpec spec = plan.getSpec();
         final Set<String> names = new LinkedHashSet<>();
         final String mode = spec.output.passThrough == null ? "all" : spec.output.passThrough;
@@ -1635,6 +1835,9 @@ public final class FeatureStages {
             }
             default -> { for (final Schema.Field f : inputSchema.getFields()) names.add(f.getName()); }
         }
+        // a role names a column the consumer reads (group / time / label ...): an input field with a role is
+        // always passed through, whatever the mode
+        names.addAll(spec.output.roles.values());
         final Set<String> present = new LinkedHashSet<>();
         for (final Schema.Field f : inputSchema.getFields()) if (names.contains(f.getName())) present.add(f.getName());
         return present;
@@ -1686,14 +1889,17 @@ public final class FeatureStages {
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+        /** one sample per output row for the run manifest (null = not counted) */
+        private final TupleTag<KV<String, Double>> countTag;
 
         FinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
-                     final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+                     final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag, final TupleTag<KV<String, Double>> countTag) {
             this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy, Finalizer.outputFieldNames(outputSchema, null));
             this.outputSchema = outputSchema;
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
+            this.countTag = countTag;
         }
 
         @Setup
@@ -1709,6 +1915,7 @@ public final class FeatureStages {
                 final Map<String, Object> out = finalizer.outputValues(input.asPrimitiveMap(), finalizer.inputNames, null);
                 final MElement output = MElement.of(outputSchema, out, c.timestamp()).convert(outputSchema);
                 c.output(output);
+                if (countTag != null) c.output(countTag, KV.of(OUTPUT_COUNT_KEY, 1d));
                 Logging.log(LOG, logs, "output", output);
             } catch (final Throwable e) {
                 c.output(failureTag, Module.processError("Failed to finalize features", input, e, failFast));
@@ -1727,10 +1934,11 @@ public final class FeatureStages {
         private final Map<String, Logging> logs;
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
+        private final TupleTag<KV<String, Double>> countTag;
 
         GroupedFinalizeDoFn(final List<OutputColumn> emitted, final Schema inputSchema, final Schema outputSchema, final FeatureSpec.NullPolicy nullPolicy,
                             final List<String> keys, final List<String> parentFields, final String childName, final int fanInBranches,
-                            final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
+                            final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag, final TupleTag<KV<String, Double>> countTag) {
             this.finalizer = new Finalizer(emitted, inputSchema, nullPolicy, Finalizer.outputFieldNames(outputSchema, childName));
             this.outputSchema = outputSchema;
             this.keys = keys;
@@ -1740,6 +1948,7 @@ public final class FeatureStages {
             this.logs = Logging.map(loggings);
             this.failFast = failFast;
             this.failureTag = failureTag;
+            this.countTag = countTag;
         }
 
         @Setup
@@ -1794,6 +2003,7 @@ public final class FeatureStages {
                 parent.put(childName, children);
                 final MElement output = MElement.of(outputSchema, parent, ts).convert(outputSchema);
                 c.outputWithTimestamp(output, ts);
+                if (countTag != null) c.outputWithTimestamp(countTag, KV.of(OUTPUT_COUNT_KEY, 1d), ts);
                 Logging.log(LOG, logs, "output", output);
             } catch (final Throwable e) {
                 for (final MElement element : elements) {

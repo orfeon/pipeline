@@ -75,6 +75,34 @@ public class FeaturePlan implements Serializable {
     private final Schema outputSchema;
     private final Diagnostics diagnostics;
     private final String hash;
+    private final String outputHash;
+    private final List<ObservedAtAudit> observedAtAudits;
+
+    /**
+     * One observedAt audit entry (DSL spec §7): an input field whose contract names the column holding its real
+     * observation time. The engine compares that column with the declared availability
+     * ({@code event_time + availableAt}; predictAt when the declaration is dynamic) and with predictAt.
+     * {@code present} is false when the input schema is known and lacks the observation column (the entry is
+     * reported but cannot run).
+     */
+    public record ObservedAtAudit(String field, String source, String observedAtField, String observedAtType, boolean present,
+                                  AvailableAt availableAt, AvailableAt predictAt) implements Serializable {
+
+        /** Millis to add to event time for the declared deadline; null when the declaration is not static (predictAt is used). */
+        public Long deadlineOffsetMillis() {
+            return availableAt.isStatic() && !availableAt.isPreEvent() ? availableAt.getOffset().toMillis() : null;
+        }
+
+        public Long predictAtOffsetMillis() {
+            return predictAt != null && predictAt.isStatic() && !predictAt.isPreEvent() ? predictAt.getOffset().toMillis() : null;
+        }
+
+        public String describe() {
+            return field + " observedAt=" + observedAtField + " declared=" + availableAt.describe()
+                    + (deadlineOffsetMillis() == null ? " (dynamic: checked against predictAt)" : "")
+                    + (present ? "" : " (observation column missing: not audited)");
+        }
+    }
 
     FeaturePlan(final FeatureSpec spec,
                 final Map<String, SourceContract> sources,
@@ -83,7 +111,9 @@ public class FeaturePlan implements Serializable {
                 final List<Stage> stages,
                 final Schema outputSchema,
                 final Diagnostics diagnostics,
-                final String hash) {
+                final String hash,
+                final String outputHash,
+                final List<ObservedAtAudit> observedAtAudits) {
         this.spec = spec;
         this.sources = sources;
         this.inputFields = inputFields;
@@ -92,6 +122,8 @@ public class FeaturePlan implements Serializable {
         this.outputSchema = outputSchema;
         this.diagnostics = diagnostics;
         this.hash = hash;
+        this.outputHash = outputHash;
+        this.observedAtAudits = observedAtAudits;
     }
 
     public FeatureSpec getSpec() { return spec; }
@@ -111,6 +143,30 @@ public class FeaturePlan implements Serializable {
     public String getHash() { return hash; }
     /** Version directory of fit artifacts: {@code fit.artifact.id} when pinned, else the plan hash. */
     public String getArtifactVersion() { return spec.fit.artifactId != null ? spec.fit.artifactId : hash; }
+    /** Identity of the output table: plan hash + projection (emitted names, roles, include content). */
+    public String getOutputHash() { return outputHash; }
+    /** The observedAt audit entries (input fields with an {@code observedAtField}), runnable ones and not. */
+    public List<ObservedAtAudit> getObservedAtAudits() { return Collections.unmodifiableList(observedAtAudits); }
+    /** The audit entries the engine runs: observation column present and the audit not switched off. */
+    public List<ObservedAtAudit> getRunnableObservedAtAudits() {
+        if ("off".equals(spec.audit.observedAt)) return List.of();
+        return observedAtAudits.stream().filter(ObservedAtAudit::present).toList();
+    }
+    /** Emitted columns that a role names (never features for the consumer). */
+    public Map<String, String> getRoleColumns() {
+        final Map<String, String> roles = new java.util.LinkedHashMap<>();
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+            final String name = e.getValue();
+            String resolved = inputFields.containsKey(name) ? name : null;
+            if (resolved == null) {
+                for (final OutputColumn c : columns) {
+                    if (!c.intermediate && (c.canonicalName.equals(name) || c.outputName.equals(name))) { resolved = c.outputName; break; }
+                }
+            }
+            if (resolved != null) roles.put(e.getKey(), resolved);
+        }
+        return roles;
+    }
 
     public OutputColumn getColumn(final String canonicalName) {
         for (final OutputColumn c : columns) {
@@ -360,6 +416,22 @@ public class FeaturePlan implements Serializable {
         }
         sb.append("-- columns\n");
         for (final OutputColumn c : columns) sb.append("  ").append(c.describe()).append('\n');
+        if (!spec.output.roles.isEmpty() || spec.output.include != null) {
+            sb.append("-- output contract (outputHash=").append(outputHash).append(")\n");
+            for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+                sb.append("  role ").append(e.getKey()).append('=').append(e.getValue()).append('\n');
+            }
+            if (spec.output.include != null) {
+                sb.append("  include ").append(spec.output.include.size()).append(" names")
+                        .append(spec.output.includeSource != null ? " from " + spec.output.includeSource : "")
+                        .append(spec.output.includeHash != null ? " (hash " + spec.output.includeHash + ")" : "")
+                        .append(" -> ").append(getEmittedColumns().size()).append(" columns emitted\n");
+            }
+        }
+        if (!observedAtAudits.isEmpty()) {
+            sb.append("-- observedAt audit (").append(spec.audit.observedAt).append("; counters feature/observedAt_*, quantiles in the run manifest)\n");
+            for (final ObservedAtAudit a : observedAtAudits) sb.append("  ").append(a.describe()).append('\n');
+        }
         final List<AuditQuery> audit = getAuditQueries();
         if (!audit.isEmpty()) {
             sb.append("-- audit (hot keys; {input} = the transform input relation)\n");
@@ -375,6 +447,7 @@ public class FeaturePlan implements Serializable {
     public JsonObject toJson() {
         final JsonObject json = new JsonObject();
         json.addProperty("hash", hash);
+        json.addProperty("outputHash", outputHash);
         json.addProperty("predictAt", spec.predictAt.describe());
         json.addProperty("shuffles", getShuffleCount());
         final List<List<Integer>> waves = getWaves();
@@ -430,6 +503,19 @@ public class FeaturePlan implements Serializable {
             auditArray.add(o);
         }
         json.add("audit", auditArray);
+        json.add("roles", rolesJson());
+        if (spec.output.include != null) json.add("include", includeJson());
+        final JsonArray observedAtArray = new JsonArray();
+        for (final ObservedAtAudit a : observedAtAudits) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("field", a.field());
+            o.addProperty("source", a.source());
+            o.addProperty("observedAtField", a.observedAtField());
+            o.addProperty("availableAt", a.availableAt().describe());
+            o.addProperty("present", a.present());
+            observedAtArray.add(o);
+        }
+        json.add("observedAtAudit", observedAtArray);
         final JsonArray messages = new JsonArray();
         for (final Diagnostics.Message m : diagnostics.getMessages()) {
             final JsonObject o = new JsonObject();
@@ -445,6 +531,147 @@ public class FeaturePlan implements Serializable {
 
     static List<OutputColumn> mutableColumns() {
         return new ArrayList<>();
+    }
+
+    private JsonObject rolesJson() {
+        final JsonObject roles = new JsonObject();
+        final Map<String, String> resolved = getRoleColumns();
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("name", e.getValue());
+            o.addProperty("column", resolved.get(e.getKey()));
+            // a group / entity role naming a context / entity: the key columns the consumer groups by
+            List<String> keys = null;
+            for (final FeatureSpec.ContextDef c : spec.contexts) if (c.name().equals(e.getValue())) keys = c.keys();
+            for (final FeatureSpec.EntityDef d : spec.entities) if (d.name().equals(e.getValue())) keys = d.keys();
+            if (keys != null && !inputFields.containsKey(e.getValue())) {
+                final JsonArray array = new JsonArray();
+                keys.forEach(array::add);
+                o.add("keys", array);
+            }
+            roles.add(e.getKey(), o);
+        }
+        return roles;
+    }
+
+    private JsonObject includeJson() {
+        final JsonObject include = new JsonObject();
+        if (spec.output.includeSource != null) include.addProperty("source", spec.output.includeSource);
+        if (spec.output.includeHash != null) include.addProperty("hash", spec.output.includeHash);
+        final JsonArray listed = new JsonArray();
+        spec.output.include.forEach(listed::add);
+        include.add("listed", listed);
+        final Set<String> known = new HashSet<>();
+        for (final OutputColumn c : columns) {
+            if (c.intermediate) continue;
+            known.add(c.canonicalName);
+            known.add(c.outputName);
+        }
+        final JsonArray unknown = new JsonArray();
+        for (final String name : spec.output.include) {
+            final String base = name.endsWith("_isnull") ? name.substring(0, name.length() - "_isnull".length()) : name;
+            if (!known.contains(name) && !known.contains(base)) unknown.add(name);
+        }
+        include.add("unknown", unknown);
+        return include;
+    }
+
+    /**
+     * The assembly-time manifest ({@code output.manifest}): the data contract of the output table — roles,
+     * every emitted column with its lineage, the pass-through input fields with their contract, the hashes and
+     * the include resolution — plus the full plan report. Everything here is decided at assembly, so a dry run
+     * writes the same file as a run; execution-dependent facts (row counts, the observedAt audit) go to the
+     * run manifest written at finalize.
+     */
+    public JsonObject toManifest(final List<Schema.Field> passThroughFields, final Map<String, String> artifacts) {
+        final JsonObject manifest = new JsonObject();
+        manifest.addProperty("version", 1);
+        manifest.addProperty("planHash", hash);
+        manifest.addProperty("outputHash", outputHash);
+        manifest.addProperty("artifactVersion", getArtifactVersion());
+        manifest.addProperty("createdAt", java.time.Instant.now().toString());
+        manifest.addProperty("predictAt", spec.predictAt.describe());
+        manifest.addProperty("timeField", spec.timeField);
+        manifest.add("roles", rolesJson());
+        if (spec.output.include != null) manifest.add("include", includeJson());
+        final JsonObject output = new JsonObject();
+        output.addProperty("prefix", spec.output.prefix);
+        output.addProperty("passThrough", spec.output.passThrough);
+        output.addProperty("nullPolicy", spec.output.nullPolicy.name());
+        if (spec.output.groupBy != null) {
+            output.addProperty("groupBy", spec.output.groupBy);
+            output.addProperty("childName", spec.output.childName);
+        }
+        manifest.add("output", output);
+        final Map<String, String> roleColumns = getRoleColumns();
+        final JsonArray fields = new JsonArray();
+        if (passThroughFields != null) {
+            for (final Schema.Field f : passThroughFields) {
+                final JsonObject o = new JsonObject();
+                o.addProperty("name", f.getName());
+                o.addProperty("type", f.getFieldType().getType().name());
+                final SourceContract.FieldContract contract = inputFields.get(f.getName());
+                if (contract != null) {
+                    if (contract.getSourceName() != null && !contract.getSourceName().isEmpty()) o.addProperty("source", contract.getSourceName());
+                    if (contract.getKind() != null) o.addProperty("kind", contract.getKind());
+                    if (contract.getAvailableAt() != null) o.addProperty("availableAt", contract.getAvailableAt().describe());
+                    o.addProperty("evidence", contract.isDeclared() ? "declared" : "measured");
+                }
+                final String role = roleOf(roleColumns, f.getName());
+                if (role != null) o.addProperty("role", role);
+                fields.add(o);
+            }
+        }
+        manifest.add("fields", fields);
+        final JsonArray columnArray = new JsonArray();
+        for (final OutputColumn c : getEmittedColumns()) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("name", c.outputName);
+            o.addProperty("canonical", c.canonicalName);
+            o.addProperty("type", c.fieldType == null ? null : c.fieldType.getType().name());
+            // categorical for the consumer (a model's categorical feature list): text / enum / flags and crosses; counts and bin ids are ordinal
+            o.addProperty("categorical", c.fieldType != null && (switch (c.fieldType.getType()) {
+                case string, enumeration, bool -> true;
+                default -> false;
+            } || "cross".equals(c.operator)));
+            o.addProperty("scope", c.scope.name());
+            o.addProperty("block", c.block);
+            o.addProperty("operator", c.operator);
+            o.addProperty("availableAt", c.availableAt == null ? null : c.availableAt.describe());
+            o.addProperty("computeAt", c.computeAt == null ? null : c.computeAt.describe());
+            o.addProperty("status", c.status == null ? null : c.status.name());
+            o.addProperty("placement", c.placement.name());
+            o.addProperty("fitted", c.fitted);
+            final JsonObject lineage = new JsonObject();
+            final JsonArray derivedFrom = new JsonArray();
+            c.derivedFrom.forEach(derivedFrom::add);
+            lineage.add("derivedFrom", derivedFrom);
+            final JsonArray sourceNames = new JsonArray();
+            c.sources.forEach(sourceNames::add);
+            lineage.add("sources", sourceNames);
+            lineage.addProperty("evidence", c.declaredEvidence ? "declared" : "measured");
+            final JsonArray inputs = new JsonArray();
+            c.inputs.forEach(inputs::add);
+            lineage.add("inputs", inputs);
+            o.add("lineage", lineage);
+            if (c.validFor != null) o.addProperty("validFor", c.validFor.toString());
+            final String role = roleOf(roleColumns, c.outputName);
+            if (role != null) o.addProperty("role", role);
+            columnArray.add(o);
+        }
+        manifest.add("columns", columnArray);
+        final JsonObject artifactJson = new JsonObject();
+        if (artifacts != null) artifacts.forEach(artifactJson::addProperty);
+        manifest.add("artifacts", artifactJson);
+        manifest.add("plan", toJson());
+        return manifest;
+    }
+
+    private static String roleOf(final Map<String, String> roleColumns, final String column) {
+        for (final Map.Entry<String, String> e : roleColumns.entrySet()) {
+            if (e.getValue().equals(column)) return e.getKey();
+        }
+        return null;
     }
 
 }

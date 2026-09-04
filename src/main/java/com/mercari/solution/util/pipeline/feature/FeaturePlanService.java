@@ -38,7 +38,75 @@ public final class FeaturePlanService {
             }
             copy.add("features", features);
         }
+        resolveInclude(copy, templateArgs);
         return new Documents(sources, copy);
+    }
+
+    /**
+     * {@code output.include} given as a URI / path (a screening step's pass list, a hand-written list) is read
+     * here and replaced by its column list; {@code output.includeSource} keeps the reference and
+     * {@code output.includeHash} the content hash, so the manifest records what was applied even when the
+     * file changes later. Accepted content: a JSON array of names, a JSON object with a {@code columns} /
+     * {@code fields} / {@code passed} / {@code include} array, or one name per line ({@code #} comments).
+     */
+    static void resolveInclude(final JsonObject parameters, final Map<String, String> templateArgs) {
+        if (!parameters.has("output") || !parameters.get("output").isJsonObject()) return;
+        final JsonObject output = parameters.getAsJsonObject("output");
+        if (!output.has("include") || !output.get("include").isJsonPrimitive()) return;
+        final String reference = output.get("include").getAsString();
+        final String raw;
+        try {
+            raw = Config.readContent(reference);
+        } catch (final IOException e) {
+            throw new IllegalArgumentException("failed to read output.include: " + reference, e);
+        }
+        final String text = templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs);
+        final List<String> names = parseIncludeList(text, reference);
+        final JsonArray array = new JsonArray();
+        names.forEach(array::add);
+        output.add("include", array);
+        output.addProperty("includeSource", reference);
+        output.addProperty("includeHash", FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(array)));
+    }
+
+    static List<String> parseIncludeList(final String text, final String reference) {
+        final String trimmed = text == null ? "" : text.trim();
+        final List<String> names = new ArrayList<>();
+        if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+            final JsonElement parsed;
+            try {
+                parsed = com.google.gson.JsonParser.parseString(trimmed);
+            } catch (final RuntimeException e) {
+                throw new IllegalArgumentException("output.include " + reference + " is not valid JSON: " + e.getMessage(), e);
+            }
+            JsonElement list = parsed;
+            if (parsed.isJsonObject()) {
+                list = null;
+                for (final String key : List.of("columns", "fields", "passed", "include")) {
+                    if (parsed.getAsJsonObject().has(key) && parsed.getAsJsonObject().get(key).isJsonArray()) {
+                        list = parsed.getAsJsonObject().get(key);
+                        break;
+                    }
+                }
+                if (list == null) {
+                    throw new IllegalArgumentException("output.include " + reference + " must be a JSON array or an object with a columns / fields / passed / include array");
+                }
+            }
+            for (final JsonElement e : list.getAsJsonArray()) {
+                if (e.isJsonPrimitive()) {
+                    names.add(e.getAsString());
+                } else if (e.isJsonObject() && e.getAsJsonObject().has("name") && e.getAsJsonObject().get("name").isJsonPrimitive()) {
+                    names.add(e.getAsJsonObject().get("name").getAsString());
+                }
+            }
+            return names;
+        }
+        for (final String line : trimmed.split("\\r?\\n")) {
+            final String name = line.trim();
+            if (name.isEmpty() || name.startsWith("#")) continue;
+            names.add(name);
+        }
+        return names;
     }
 
     /**

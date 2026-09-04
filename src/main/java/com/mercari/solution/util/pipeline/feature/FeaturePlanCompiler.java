@@ -52,6 +52,7 @@ public final class FeaturePlanCompiler {
     private boolean unresolvedBlocks = false;
     /** Hint codes already reported per block (some hints are per block, not per column). */
     private final Set<String> hintedBlocks = new HashSet<>();
+    private final List<FeaturePlan.ObservedAtAudit> observedAtAudits = new ArrayList<>();
     private int anonymousCounter = 0;
 
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
@@ -75,15 +76,100 @@ public final class FeaturePlanCompiler {
     private FeaturePlan run(final JsonElement sourcesDocument, final JsonObject parameters) {
         if (!diagnostics.hasErrors() || (!sources.isEmpty() && !spec.features.isEmpty() && spec.timeField != null)) {
             resolveLineage();
+            resolveObservedAtAudits();
             resolveDefinitions();
             expandAll();
             finalizeColumns();
+            resolveRoles();
         }
         final List<FeaturePlan.Stage> stages = buildStages();
         hintGlobalKeyStages(stages);
         final Schema outputSchema = buildSchema();
         final String hash = hash(sourcesDocument, parameters);
-        return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash);
+        final String outputHash = outputHash(hash);
+        return new FeaturePlan(spec, sources, inputFields, columns, stages, outputSchema, diagnostics, hash, outputHash, observedAtAudits);
+    }
+
+    /**
+     * The observedAt audit (DSL spec §7): every input field whose contract names an {@code observedAtField}
+     * gets an audit entry — the engine counts rows observed after the declared availability (and after
+     * predictAt) and measures the {@code predictAt − observedAt} distribution. The declaration says when the
+     * value is supposed to exist; the audit checks the data against it, which is where a hand-written
+     * point-in-time selection upstream goes wrong (a later observation slipping into a "t-10" column).
+     */
+    private void resolveObservedAtAudits() {
+        final Map<String, Schema.FieldType> schemaTypes = new HashMap<>();
+        if (inputSchemaFields != null) {
+            for (final Schema.Field f : inputSchemaFields) schemaTypes.put(f.getName(), f.getFieldType());
+        }
+        for (final FieldContract field : inputFields.values()) {
+            final String observedAt = field.getObservedAtField();
+            if (observedAt == null || field.getAvailableAt() == null) continue;
+            final boolean known = inputSchemaFields != null;
+            final boolean present = known ? schemaTypes.containsKey(observedAt) : inputFields.containsKey(observedAt);
+            if (known && !present) {
+                diagnostics.warning("sources.observedAt.missingInput", "sources." + field.getSourceName() + "." + field.getName(),
+                        "observedAtField '" + observedAt + "' is not in the input relation: the observedAt audit of '" + field.getName()
+                                + "' cannot run (pass the observation-time column through, or the claim stays unverified)");
+            }
+            final Schema.FieldType type = schemaTypes.containsKey(observedAt) ? schemaTypes.get(observedAt)
+                    : inputFields.containsKey(observedAt) ? inputFields.get(observedAt).getType() : null;
+            final String typeName = type == null ? "timestamp" : type.getType().name();
+            observedAtAudits.add(new FeaturePlan.ObservedAtAudit(field.getName(), field.getSourceName(), observedAt, typeName,
+                    present || !known, field.getAvailableAt(), spec.predictAt));
+        }
+    }
+
+    /**
+     * output.roles: the data contract of the output table. Every role names something that exists (an input
+     * field, a context / entity for group / entity, a baseline for baseline); the role columns are recorded in
+     * the manifest so consumers can exclude them from the feature set mechanically.
+     */
+    private void resolveRoles() {
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+            final String role = e.getKey();
+            final String name = e.getValue();
+            final String loc = "output.roles." + role;
+            final boolean input = inputFields.containsKey(name);
+            switch (role) {
+                case "group" -> {
+                    if (!input && !contexts.containsKey(name)) {
+                        diagnostics.error("output.roles.unresolved", loc, "group role '" + name + "' is neither an input field nor a context");
+                    }
+                }
+                case "entity" -> {
+                    if (!input && !entities.containsKey(name)) {
+                        diagnostics.error("output.roles.unresolved", loc, "entity role '" + name + "' is neither an input field nor an entity");
+                    }
+                }
+                case "baseline" -> {
+                    if (baselineColumns.containsKey(name)) {
+                        final OutputColumn b = columnsByCanonical.get(baselineColumns.get(name));
+                        if (b != null && b.intermediate) {
+                            diagnostics.warning("output.roles.baseline.notEmitted", loc,
+                                    "baseline '" + name + "' is not an output column (baselines are intermediate): consumers reading the role from the manifest will not find it; derive it as a feature (e.g. shareOfTotal) and name that column, or wait for baselines[].emit");
+                        }
+                    } else if (!input && !isEmittedColumn(name)) {
+                        diagnostics.error("output.roles.unresolved", loc, "baseline role '" + name + "' is neither a baseline name, an input field nor an output column");
+                    }
+                }
+                default -> {
+                    if (!input && !isEmittedColumn(name)) {
+                        diagnostics.error("output.roles.unresolved", loc, role + " role '" + name + "' is neither an input field nor an output column");
+                    }
+                }
+            }
+            if ("time".equals(role) && input && !name.equals(spec.timeField)) {
+                diagnostics.warning("output.roles.time", loc, "time role '" + name + "' differs from time.field '" + spec.timeField + "'");
+            }
+        }
+    }
+
+    private boolean isEmittedColumn(final String name) {
+        for (final OutputColumn c : columns) {
+            if (!c.intermediate && (c.canonicalName.equals(name) || c.outputName.equals(name))) return true;
+        }
+        return false;
     }
 
     /**
@@ -1768,9 +1854,10 @@ public final class FeaturePlanCompiler {
         final Set<String> consumed = new HashSet<>();
         for (final OutputColumn c : columns) consumed.addAll(c.inputs);
 
+        applyInclude();
         final List<OutputColumn> indicators = new ArrayList<>();
         for (final OutputColumn c : columns) {
-            if (!c.intermediate && isExcluded(c)) c.intermediate = true;
+            if (!c.intermediate && spec.output.include == null && isExcluded(c)) c.intermediate = true;
             final String loc = "features." + c.block;
             boolean lint = false;
             if (c.scope == FeatureSpec.Scope.sequence || (c.scope == FeatureSpec.Scope.population && !FitMode.isLookupToken(c.coordinates.get("fit")))) {
@@ -1836,6 +1923,40 @@ public final class FeaturePlanCompiler {
         }
         if (spec.orderTieBreak.isEmpty() && columns.stream().anyMatch(c -> c.scope == Scope.sequence || c.scope == Scope.population)) {
             diagnostics.hint("time.orderTieBreak", "time", "sequence/encoding features present without time.orderTieBreak; rows sharing a timestamp exclude each other (strict past) but declare a tie-break for cross-engine determinism");
+        }
+    }
+
+    /**
+     * output.include: the output projection (a screening step pass list, a hand-written list). When declared it
+     * replaces {@code exclude}: a column is emitted iff its canonical or output name is listed (an
+     * {@code <name>_isnull} entry keeps its base column); names that match nothing are a warning (the list may
+     * come from another plan version). Columns already intermediate (violations, hidden levels, baselines)
+     * stay so.
+     */
+    private void applyInclude() {
+        if (spec.output.include == null) return;
+        if (!spec.output.exclude.isEmpty()) {
+            diagnostics.info("output.include.exclude", "output", "output.include is declared: output.exclude is ignored (include is the projection)");
+        }
+        final Set<String> listed = new LinkedHashSet<>(spec.output.include);
+        final Set<String> matched = new LinkedHashSet<>();
+        for (final OutputColumn c : columns) {
+            if (c.intermediate || c.fieldType == null) continue;
+            final String outputName = (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
+            boolean included = false;
+            for (final String candidate : List.of(c.canonicalName, outputName, c.canonicalName + "_isnull", outputName + "_isnull")) {
+                if (listed.contains(candidate)) {
+                    matched.add(candidate);
+                    included = true;
+                }
+            }
+            if (!included) c.intermediate = true;
+        }
+        final List<String> unknown = new ArrayList<>();
+        for (final String name : listed) if (!matched.contains(name)) unknown.add(name);
+        if (!unknown.isEmpty()) {
+            diagnostics.warning("output.include.unknown", "output.include", "include names no column of this plan: " + unknown
+                    + (spec.output.includeSource != null ? " (from " + spec.output.includeSource + ")" : ""));
         }
     }
 
@@ -2133,13 +2254,33 @@ public final class FeaturePlanCompiler {
     // ------------------------------------------------------------------------------------------
 
     static String hash(final JsonElement sourcesDocument, final JsonObject parameters) {
+        // fit.artifact (uri / refit / id) is excluded: re-fitting or relocating artifacts must not change
+        // the identity of what was fitted
+        return sha256(canonical(sourcesDocument) + "\u0000" + canonical(withoutArtifact(parameters)));
+    }
+
+    /**
+     * The output-table identity: the plan hash plus the projection (emitted output names, roles, the include
+     * list content). {@code output.include} is outside the plan hash (a projection does not change what is
+     * fitted, so artifacts stay valid), which is why the output needs a hash of its own.
+     */
+    private String outputHash(final String planHash) {
+        final StringBuilder sb = new StringBuilder(planHash);
+        sb.append("\u0000");
+        for (final OutputColumn c : columns) if (!c.intermediate && c.fieldType != null) sb.append(c.outputName).append(',');
+        sb.append("\u0000");
+        final JsonObject roles = new JsonObject();
+        spec.output.roles.forEach(roles::addProperty);
+        sb.append(canonical(roles));
+        sb.append("\u0000").append(spec.output.includeHash == null ? "" : spec.output.includeHash);
+        return sha256(sb.toString());
+    }
+
+    /** SHA-256 of a string, first 16 hex characters (the width of the plan hash). */
+    static String sha256(final String text) {
         try {
             final MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(canonical(sourcesDocument).getBytes(StandardCharsets.UTF_8));
-            digest.update((byte) 0);
-            // fit.artifact (uri / refit / id) is excluded: re-fitting or relocating artifacts must not change
-            // the identity of what was fitted
-            digest.update(canonical(withoutArtifact(parameters)).getBytes(StandardCharsets.UTF_8));
+            digest.update(text.getBytes(StandardCharsets.UTF_8));
             final StringBuilder sb = new StringBuilder();
             for (final byte b : digest.digest()) sb.append(String.format("%02x", b));
             return sb.substring(0, 16);
@@ -2148,10 +2289,18 @@ public final class FeaturePlanCompiler {
         }
     }
 
-    /** The parameters without what does not change the plan: artifact locations and the engine knobs. */
+    /**
+     * The parameters without what does not change the plan: artifact locations, the engine knobs, and the
+     * output projection ({@code output.include} + its source / hash, {@code output.manifest}) — a projection
+     * does not change what is fitted, so it lives in the output hash instead.
+     */
     static JsonObject withoutArtifact(final JsonObject parameters) {
         final JsonObject copy = parameters.deepCopy();
         copy.remove("engine");
+        if (copy.has("output") && copy.get("output").isJsonObject()) {
+            final JsonObject output = copy.getAsJsonObject("output");
+            for (final String key : List.of("include", "includeSource", "includeHash", "manifest")) output.remove(key);
+        }
         if (copy.has("fit") && copy.get("fit").isJsonObject()) copy.getAsJsonObject("fit").remove("artifact");
         if (copy.has("features") && copy.get("features").isJsonArray()) {
             for (final JsonElement f : copy.getAsJsonArray("features")) {

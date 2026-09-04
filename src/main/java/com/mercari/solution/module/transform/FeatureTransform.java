@@ -1,10 +1,12 @@
 package com.mercari.solution.module.transform;
 
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.*;
 import com.mercari.solution.module.Module;
+import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.feature.*;
@@ -58,6 +60,16 @@ public class FeatureTransform extends Transform {
 
         final DataType outputType = Optional.ofNullable(getOutputType()).orElse(DataType.AVRO);
         final Schema outputSchema = FeatureStages.createOutputSchema(plan, inputSchema, outputType);
+        if (plan.getSpec().output.manifest != null) {
+            // the data contract of the output table is decided here, so it is written here (a dry run too);
+            // the run manifest (row counts, observedAt audit) is written by the engine at finalize
+            final java.util.Set<String> passThrough = FeatureStages.passThroughInputs(plan, inputSchema);
+            final List<Schema.Field> fields = inputSchema.getFields().stream().filter(f -> passThrough.contains(f.getName())).toList();
+            final JsonObject manifest = plan.toManifest(fields, FeatureStages.artifactPaths(plan));
+            final String uri = plan.getSpec().output.manifest;
+            ResourceUtil.writeString(uri, new GsonBuilder().setPrettyPrinting().create().toJson(manifest));
+            LOG.info("feature manifest for {} written to {} (planHash={}, outputHash={})", getName(), uri, plan.getHash(), plan.getOutputHash());
+        }
 
         final PCollection<MElement> input = inputs
                 .apply("Union", Union.flatten()

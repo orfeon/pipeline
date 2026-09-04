@@ -424,6 +424,22 @@ at the entry (`ToElementDoFn`), so Avro inputs and sources without a timestamp a
 keyed stages correctly; a null time field is a failure record. Keyed stages are GBK + time-ordered
 replay (§4.3), not Beam state.
 
+**Output contract and audit.** `output.roles` / `include` / `manifest` (DSL spec §7) are compile-layer
+facts: roles are validated against input fields / contexts / entities / baselines, `include` is applied
+in `finalizeColumns` as the projection (it replaces `exclude`; a URI is resolved by
+`FeaturePlanService.resolve` before compile and its content hash kept), and `FeaturePlan.toManifest`
+builds the manifest the transform writes at assembly. `include`, `includeSource`, `includeHash` and
+`manifest` are stripped from the plan hash (`withoutArtifact`), and `FeaturePlan.getOutputHash` =
+plan hash + emitted names + roles + include hash identifies the output table. The observedAt audit
+(`FeaturePlan.ObservedAtAudit`, one entry per input field with an `observedAtField`) runs inside
+`ToElementDoFn`: counters `feature/observedAt_<field>_late|afterPredictAt|missing`, `audit.observedAt:
+fail` throws into the failure path, and — batch only, when a manifest URI is declared — samples of
+`predictAt − observedAt` ride a side output into `ApproximateQuantiles` / `Count` per key, reduced with
+the finalize row count into one `View.asList` and written as `manifest.run.json` by one worker
+(`WriteRunManifestDoFn`, the artifact writer pattern). The output PCollection itself is never consumed
+inside the engine (the module sets its coder once more), hence the count side output from the finalize
+DoFns.
+
 **Fits.** Static: per-level sufficient statistics from the whole input (global window), lookup per
 row, `fitStat` for count / mean / rate / std, artifact write / load, `refit`; the hidden columns'
 availability is the fit boundary (`computeAt`), and an info diagnostic states that training rows contain
