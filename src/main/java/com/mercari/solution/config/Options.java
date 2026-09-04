@@ -111,6 +111,7 @@ public class Options implements Serializable {
             if(OptionUtil.getRunner(pipelineOptions) == MPipeline.Runner.prism) {
                 PrismOptions.setOptions(pipelineOptions, null);
             }
+            GCPOptions.applyDefaultProject(pipelineOptions);
             return;
         }
 
@@ -143,6 +144,9 @@ public class Options implements Serializable {
             case flink -> FlinkOptions.setOptions(pipelineOptions, options.flink);
             case spark -> SparkOptions.setOptions(pipelineOptions, options.spark);
         }
+
+        // after the runner options: options.dataflow.project also sets GcpOptions.project
+        GCPOptions.applyDefaultProject(pipelineOptions);
 
         BeamSQLOptions.setOptions(pipelineOptions, options.beamsql);
         ExpansionOptions.setOptions(pipelineOptions, options.expansion);

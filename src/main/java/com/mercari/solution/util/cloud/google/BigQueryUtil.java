@@ -17,6 +17,7 @@ import com.google.api.services.bigquery.Bigquery;
 import com.google.api.services.bigquery.model.*;
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.api.services.bigquery.model.TableSchema;
+import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.auth.Credentials;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
@@ -380,7 +381,7 @@ public class BigQueryUtil {
         final String srcTable = String.format(
                 "projects/%s/datasets/%s/tables/%s",
                 table.getProjectId(), table.getDatasetId(), table.getTableId());
-        try(final BigQueryReadClient client = BigQueryReadClient.create()) {
+        try(final BigQueryReadClient client = createBigQueryReadClient()) {
             final String parent = String.format("projects/%s", project);
             ReadSession.TableReadOptions.Builder options = ReadSession.TableReadOptions.newBuilder();
             if(fields != null) {
@@ -435,6 +436,14 @@ public class BigQueryUtil {
             return null;
         }
         return host.contains("://") ? host : "http://" + host;
+    }
+
+    /** Storage Read API client on the same credential source as the REST client (GcpCredentialsCache). */
+    private static BigQueryReadClient createBigQueryReadClient() throws IOException {
+        final BigQueryReadSettings settings = BigQueryReadSettings.newBuilder()
+                .setCredentialsProvider(FixedCredentialsProvider.create(GcpCredentialsCache.credentials()))
+                .build();
+        return BigQueryReadClient.create(settings);
     }
 
     private static Bigquery createBigqueryClient() throws IOException {

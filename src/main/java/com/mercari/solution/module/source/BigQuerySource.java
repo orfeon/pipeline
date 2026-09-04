@@ -3,7 +3,6 @@ package com.mercari.solution.module.source;
 import com.google.api.services.bigquery.Bigquery;
 import com.google.api.services.bigquery.model.*;
 import com.google.cloud.bigquery.storage.v1.DataFormat;
-import com.mercari.solution.MPipeline;
 import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.TemplateUtil;
@@ -34,6 +33,7 @@ import org.slf4j.LoggerFactory;
 import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.stream.Collectors;
 
 
 @Source.Module(name="bigquery")
@@ -142,6 +142,9 @@ public class BigQuerySource extends Source {
                 mode = Mode.batch;
             }
             if(queryRunProjectId == null) {
+                // the schema dry run and the Storage Read session parent; the query job itself runs in
+                // options.gcp.bigquery.bigqueryProject, else options.gcp.project (BigQueryIO has no
+                // per-source job project)
                 queryRunProjectId = DataflowOptions.getProject(input.getPipeline().getOptions());
             }
             if(view != null) {
@@ -172,7 +175,7 @@ public class BigQuerySource extends Source {
         return switch (parameters.mode) {
             case batch -> {
                 final KV<org.apache.avro.Schema, BigQueryIO.TypedRead<GenericRecord>> schemaAndRead = createRead(
-                        parameters, getTemplateArgs(), getRunner(), errorHandler);
+                        parameters, getTemplateArgs(), errorHandler);
                 final org.apache.avro.Schema outputAvroSchema = schemaAndRead.getKey();
                 if(outputAvroSchema == null) {
                     throw new IllegalModuleException("Could not create schema from bigquery source");
@@ -235,7 +238,6 @@ public class BigQuerySource extends Source {
     private static KV<org.apache.avro.Schema, BigQueryIO.TypedRead<GenericRecord>> createRead(
             final Parameters parameters,
             final Map<String, String> templateArgs,
-            final MPipeline.Runner runner,
             final MErrorHandler errorHandler) {
 
         BigQueryIO.TypedRead<GenericRecord> read = BigQueryIO
@@ -264,37 +266,25 @@ public class BigQuerySource extends Source {
             }
 
             final String query = TemplateUtil.executeStrictTemplate(rawQuery, templateArgs);
-
-            read = read
-                    .fromQuery(query)
-                    .usingStandardSql()
-                    .withQueryPriority(parameters.queryPriority);
-
-            if(parameters.queryLocation != null) {
-                read = read.withQueryLocation(parameters.queryLocation);
-            }
-            if(parameters.queryTempDataset != null) {
-                if(parameters.queryTempDataset.contains(".")) {
-                    final String[] strs = parameters.queryTempDataset.split("\\.", 2);
-                    read = read.withQueryTempProjectAndDataset(strs[0], strs[1]);
-                } else {
-                    read = read.withQueryTempDataset(parameters.queryTempDataset);
-                }
-            }
-
-            final TableSchema tableSchema = BigQueryUtil.getTableSchemaFromQuery(parameters.queryRunProjectId, query);
-            final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(tableSchema);
-
-            final BigQueryIO.TypedRead.Method method = Optional
-                    .ofNullable(parameters.method)
-                    .orElseGet(() -> BigQueryUtil.getPreferReadMethod(tableSchema));
-            read = read.withMethod(method);
-
-            read = errorHandler.apply(read);
-
-            return KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
+            return createQueryRead(read, parameters, query, errorHandler);
         } else if(parameters.table != null || (parameters.datasetId != null)) {
             final TableReference tableReference = createTableReference(parameters);
+
+            // Logical views and external tables can be read neither by the Storage Read API nor by
+            // an extract job, so they go through the query path (query job -> temp table -> read).
+            // The metadata lookup decides that, so its failure fails the assembly.
+            final Table table = BigQueryUtil.getTable(tableReference);
+            if(requiresQueryRead(table.getType())) {
+                final String query = createTableQuery(tableReference, parameters.fields, parameters.rowRestriction);
+                LOG.info("table {} is a {}, which the Storage Read API cannot read: reading it with a query job instead: {}",
+                        tableReference.getTableId(), table.getType(), query);
+                if(parameters.format != null) {
+                    LOG.warn("format {} is ignored for {} {}: query results are read as Avro",
+                            parameters.format, table.getType(), tableReference.getTableId());
+                }
+                return createQueryRead(read, parameters, query, errorHandler);
+            }
+
             read = read
                     .from(tableReference)
                     .withoutValidation();
@@ -314,30 +304,94 @@ public class BigQuerySource extends Source {
 
             read = errorHandler.apply(read);
 
-            return switch (runner) {
-                case direct -> {
-                    final Table table = BigQueryUtil.getTable(tableReference);
-                    final org.apache.avro.Schema avroSchema = AvroSchemaUtil.withDoc(
-                            AvroSchemaUtil.convertSchema(table.getSchema()), table.getDescription());
-                    yield KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
-                }
-                case dataflow -> {
-                    org.apache.avro.Schema avroSchema = BigQueryUtil.getTableSchemaFromTableStorage(
-                            tableReference, parameters.queryRunProjectId, parameters.fields, parameters.rowRestriction);
-                    // the read session schema carries no descriptions; take them from the table metadata
-                    try {
-                        final Table table = BigQueryUtil.getTable(tableReference);
-                        avroSchema = AvroSchemaUtil.mergeDescriptions(avroSchema, table);
-                    } catch (final Exception e) {
-                        LOG.warn("Failed to get field descriptions of table: {}, cause: {}", tableReference, e.getMessage());
-                    }
-                    yield KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
-                }
-                default -> throw new IllegalArgumentException();
-            };
+            // The coder schema is the Storage Read API session schema on every runner and read method:
+            // it reflects the selected fields and covers every column type (the table-schema conversion
+            // has no BIGNUMERIC / RANGE / INTERVAL). Avro DIRECT_READ records carry exactly this schema.
+            // Known gap: with format ARROW, Beam converts the rows through its Row schema (timestamps as
+            // millis, generated record names), which this coder schema does not describe.
+            if(DataFormat.ARROW.equals(parameters.format)) {
+                LOG.warn("bigquery source {}: format ARROW records are converted through the Beam Row schema, which can differ from the coder schema (timestamp precision, nested record names); prefer AVRO",
+                        tableReference.getTableId());
+            }
+            // the session is created under the query project; fall back to the table's own project
+            final String sessionProject = Optional
+                    .ofNullable(parameters.queryRunProjectId)
+                    .orElse(tableReference.getProjectId());
+            final org.apache.avro.Schema sessionSchema = BigQueryUtil.getTableSchemaFromTableStorage(
+                    tableReference, sessionProject, parameters.fields, parameters.rowRestriction);
+            // the read session schema carries no descriptions; take them from the table metadata
+            final org.apache.avro.Schema avroSchema = AvroSchemaUtil.mergeDescriptions(sessionSchema, table);
+            return KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
         } else {
             throw new IllegalModuleException("bigquery module support only query or table");
         }
+    }
+
+    private static KV<org.apache.avro.Schema, BigQueryIO.TypedRead<GenericRecord>> createQueryRead(
+            BigQueryIO.TypedRead<GenericRecord> read,
+            final Parameters parameters,
+            final String query,
+            final MErrorHandler errorHandler) {
+
+        read = read
+                .fromQuery(query)
+                .usingStandardSql()
+                .withQueryPriority(parameters.queryPriority);
+
+        if(parameters.queryLocation != null) {
+            read = read.withQueryLocation(parameters.queryLocation);
+        }
+        if(parameters.queryTempDataset != null) {
+            if(parameters.queryTempDataset.contains(".")) {
+                final String[] strs = parameters.queryTempDataset.split("\\.", 2);
+                read = read.withQueryTempProjectAndDataset(strs[0], strs[1]);
+            } else {
+                read = read.withQueryTempDataset(parameters.queryTempDataset);
+            }
+        }
+
+        final TableSchema tableSchema = BigQueryUtil.getTableSchemaFromQuery(parameters.queryRunProjectId, query);
+        final org.apache.avro.Schema avroSchema = AvroSchemaUtil.convertSchema(tableSchema);
+
+        final BigQueryIO.TypedRead.Method method = Optional
+                .ofNullable(parameters.method)
+                .orElseGet(() -> BigQueryUtil.getPreferReadMethod(tableSchema));
+        read = read.withMethod(method);
+
+        read = errorHandler.apply(read);
+
+        return KV.of(avroSchema, read.withCoder(AvroGenericCoder.of(avroSchema)));
+    }
+
+    /** Table types the Storage Read API (and an extract job) cannot read: {@code Table.getType()} values. */
+    static boolean requiresQueryRead(final String tableType) {
+        return "VIEW".equals(tableType) || "EXTERNAL".equals(tableType);
+    }
+
+    /**
+     * The query equivalent of a table read: {@code fields} become the select list and
+     * {@code rowRestriction} the WHERE clause. Nested field paths are rejected: a SELECT of `a.b`
+     * flattens the leaf into a top-level column (and collides on repeated leaf names, or fails on a
+     * repeated parent), unlike the Storage Read API projection which keeps the struct.
+     */
+    static String createTableQuery(final TableReference tableReference, final List<String> fields, final String rowRestriction) {
+        final String tableName = tableReference.getProjectId() + "." + tableReference.getDatasetId() + "." + tableReference.getTableId();
+        if(fields != null) {
+            final List<String> nested = fields.stream().map(String::trim).filter(f -> f.contains(".")).toList();
+            if(!nested.isEmpty()) {
+                throw new IllegalModuleException("fields " + nested + " are nested paths, which cannot be projected when reading the view / external table "
+                        + tableName + " (it is read with a query job): use a query parameter with the SELECT you need instead");
+            }
+        }
+        final String select = fields == null || fields.isEmpty() ? "*" : fields.stream()
+                .map(field -> "`" + field.trim() + "`")
+                .collect(Collectors.joining(", "));
+        final StringBuilder query = new StringBuilder("SELECT ").append(select)
+                .append(" FROM `").append(tableName).append("`");
+        if(rowRestriction != null && !rowRestriction.isBlank()) {
+            query.append(" WHERE ").append(rowRestriction.trim());
+        }
+        return query.toString();
     }
 
     private static class ViewSource extends PTransform<PBegin, PCollectionTuple> {
