@@ -53,16 +53,26 @@ public final class ScreenReport {
             s = a[ScoreAccumulator.S];
             h = a[ScoreAccumulator.H];
         } else {
-            final double c1 = a[ScoreAccumulator.C1], c2 = a[ScoreAccumulator.C2], c3 = a[ScoreAccumulator.C3], c4 = a[ScoreAccumulator.C4], c5 = a[ScoreAccumulator.C5];
+            final double c1 = a[ScoreAccumulator.C1], c2 = a[ScoreAccumulator.C2], c3 = a[ScoreAccumulator.C3], c4 = a[ScoreAccumulator.C4], c5 = a[ScoreAccumulator.C5], c6 = a[ScoreAccumulator.C6];
             if (!(c5 > 0)) return Stats.degenerate(nObs);
             final double xMean = c4 / c5;
-            s = c1 - xMean * c2;
             final double sxx = c3 - c4 * c4 / c5;
-            if (spec.hasBaseline()) {
-                h = sxx;
+            final double rMean = c2 / c5;
+            if (spec.isGaussian()) {
+                // identity link: S = Σ x̃ r / σ², H = Σ x̃² / σ² with σ² the residual (offset) / label (prior) variance
+                final double sigma2 = c6 / c5 - rMean * rMean;
+                if (!(sigma2 > 0)) return Stats.degenerate(nObs);
+                s = (c1 - xMean * c2) / sigma2;
+                h = sxx / sigma2;
             } else {
-                final double yMean = c2 / c5;
-                h = yMean * (1 - yMean) * sxx;
+                s = c1 - xMean * c2;
+                if (spec.hasBaseline()) {
+                    h = sxx;
+                } else if (spec.isPoisson()) {
+                    h = rMean * sxx;
+                } else {
+                    h = rMean * (1 - rMean) * sxx;
+                }
             }
         }
         return fromScore(s, h, nObs, nUnits);
@@ -83,10 +93,15 @@ public final class ScreenReport {
      * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator).
      */
     public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs) {
+        return partial(vec, fit, nUnits, l2, nObs, 1d);
+    }
+
+    /** @param sigma2 the gaussian family's residual variance at the fitted model (1 for the other families) */
+    public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs, final double sigma2) {
         final int k = fit.k;
         final double s = vec[0];
         final double b = vec[1];
-        if (!(b > 0) || !fit.hasBest) return new Partial(Stats.degenerate(nObs), Double.NaN);
+        if (!(b > 0) || !fit.hasBest || !(sigma2 > 0)) return new Partial(Stats.degenerate(nObs), Double.NaN);
         final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
         final double[] gamma = MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);
         final double sPerp = s - MatrixOps.dot(gamma, fit.bestGrad);
@@ -95,7 +110,7 @@ public final class ScreenReport {
         final double hPerp = b - 2 * MatrixOps.dot(gamma, a) + gGg;
         final double r2 = Math.min(1d, Math.max(0d, 1d - hPerp / b));
         if (hPerp <= 1e-10 * b) return new Partial(Stats.degenerate(nObs), 1d);
-        return new Partial(fromScore(sPerp, hPerp, nObs, nUnits), r2);
+        return new Partial(fromScore(sPerp / sigma2, hPerp / sigma2, nObs, nUnits), r2);
     }
 
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators) {
@@ -114,6 +129,12 @@ public final class ScreenReport {
         final List<String> names = spec.columnNames();
         final int nTransforms = spec.transforms.size();
         final boolean conditioned = spec.hasConditioning() && fit != null && fit.hasBest && partials != null;
+        // gaussian: the residual variance at the fitted conditioning model ([Σ w r̂², Σ w] under SIGMA_KEY)
+        double sigma2 = 1d;
+        if (conditioned && spec.isGaussian()) {
+            final double[] sig = partials.get(ConditioningScorer.SIGMA_KEY);
+            sigma2 = sig != null && sig[1] > 0 ? sig[0] / sig[1] : Double.NaN;
+        }
         final List<String> notes = new ArrayList<>(spec.notes);
         if (spec.hasConditioning() && !conditioned) {
             notes.add("conditioning: the fit accepted no point (no scorable unit); partial statistics are null and passed / threshold / qValue follow the marginal test");
@@ -170,7 +191,7 @@ public final class ScreenReport {
                     final double[] vec = partials.get(key);
                     final Partial partial = vec == null
                             ? new Partial(Stats.degenerate(st.nObs), Double.NaN)
-                            : partial(vec, fit, nUnits, spec.conditioningL2, st.nObs);
+                            : partial(vec, fit, nUnits, spec.conditioningL2, st.nObs, sigma2);
                     final Stats pst = partial.stats;
                     r.put("r2_F", Double.isNaN(partial.r2) ? null : partial.r2);
                     r.put("partial_S", pst.s);

@@ -199,7 +199,7 @@ public class GroupScorerTest {
 
     @Test
     public void testSpecValidation() {
-        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: gaussian, label: y, candidates: [x]}"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: gamma, label: y, candidates: [x]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, transforms: [rank], candidates: [x]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: groupedMultinomial, label: y, candidates: [x]}"));
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [nothing_matches]}"));

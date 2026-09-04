@@ -30,8 +30,24 @@ public final class ScreenSpec implements Serializable {
 
     public static final String FAMILY_GROUPED_MULTINOMIAL = "groupedMultinomial";
     public static final String FAMILY_BINOMIAL = "binomial";
-    public static final List<String> FAMILIES = List.of(FAMILY_GROUPED_MULTINOMIAL, FAMILY_BINOMIAL);
-    public static final List<String> PLANNED_FAMILIES = List.of("gaussian", "poisson");
+    public static final String FAMILY_GAUSSIAN = "gaussian";
+    public static final String FAMILY_POISSON = "poisson";
+    public static final List<String> FAMILIES = List.of(FAMILY_GROUPED_MULTINOMIAL, FAMILY_BINOMIAL, FAMILY_GAUSSIAN, FAMILY_POISSON);
+
+    /** gaussian baseline: the predicted value itself */
+    public static final String FORM_VALUE = "value";
+    /** poisson baseline: the predicted rate, or its log */
+    public static final String FORM_RATE = "rate";
+    public static final String FORM_LOG_RATE = "logRate";
+
+    /** Baseline forms accepted by a family, the first one being the default. */
+    public static List<String> formsFor(final String family) {
+        return switch (family == null ? "" : family) {
+            case FAMILY_GAUSSIAN -> List.of(FORM_VALUE);
+            case FAMILY_POISSON -> List.of(FORM_RATE, FORM_LOG_RATE);
+            default -> BASELINE_FORMS;
+        };
+    }
 
     public static final String TRANSFORM_RAW = "raw";
     public static final String TRANSFORM_RANK = "rank";
@@ -107,6 +123,18 @@ public final class ScreenSpec implements Serializable {
         return FAMILY_GROUPED_MULTINOMIAL.equals(family);
     }
 
+    public boolean isBinomial() {
+        return FAMILY_BINOMIAL.equals(family);
+    }
+
+    public boolean isGaussian() {
+        return FAMILY_GAUSSIAN.equals(family);
+    }
+
+    public boolean isPoisson() {
+        return FAMILY_POISSON.equals(family);
+    }
+
     public boolean hasBaseline() {
         return baselineField != null;
     }
@@ -168,9 +196,7 @@ public final class ScreenSpec implements Serializable {
 
         s.family = string(p, "family");
         if (s.family == null) s.family = FAMILY_GROUPED_MULTINOMIAL;
-        if (PLANNED_FAMILIES.contains(s.family)) {
-            errors.add("family '" + s.family + "' is not implemented in this version (available: " + FAMILIES + ")");
-        } else if (!FAMILIES.contains(s.family)) {
+        if (!FAMILIES.contains(s.family)) {
             errors.add("unknown family '" + s.family + "' (available: " + FAMILIES + ")");
         }
         s.group = string(p, "group");
@@ -193,16 +219,17 @@ public final class ScreenSpec implements Serializable {
 
         final JsonElement baseline = p.get("baseline");
         if (baseline != null && !baseline.isJsonNull()) {
+            final List<String> forms = formsFor(s.family);
             if (baseline.isJsonPrimitive()) {
                 s.baselineField = baseline.getAsString();
-                s.baselineForm = FORM_PROB;
+                s.baselineForm = forms.get(0);
             } else if (baseline.isJsonObject()) {
                 final JsonObject o = baseline.getAsJsonObject();
                 s.baselineField = string(o, "field");
                 s.baselineForm = string(o, "form");
-                if (s.baselineForm == null) s.baselineForm = FORM_PROB;
+                if (s.baselineForm == null) s.baselineForm = forms.get(0);
                 if (s.baselineField == null) errors.add("baseline.field is required when baseline is declared");
-                if (!BASELINE_FORMS.contains(s.baselineForm)) errors.add("unknown baseline.form '" + s.baselineForm + "' (available: " + BASELINE_FORMS + ")");
+                if (!forms.contains(s.baselineForm)) errors.add("baseline.form '" + s.baselineForm + "' is not valid for family " + s.family + " (available: " + forms + ")");
             } else {
                 errors.add("baseline must be a field name or an object {field, form}");
             }
@@ -459,7 +486,7 @@ public final class ScreenSpec implements Serializable {
         }
         if (baselineField == null && l.roles.containsKey("baseline")) {
             baselineField = l.roles.get("baseline");
-            if (baselineForm == null) baselineForm = FORM_PROB;
+            if (baselineForm == null) baselineForm = formsFor(family).get(0);
             notes.add("baseline defaulted to manifest role: " + baselineField);
         }
         if (weightField == null && l.roles.containsKey("weight")) {

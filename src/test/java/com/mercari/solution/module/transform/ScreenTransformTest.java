@@ -86,9 +86,14 @@ public class ScreenTransformTest {
             }
             final String time = Instant.ofEpochMilli(start + s * 2L * 86_400_000L).toString();
             for (int i = 0; i < listings; i++) {
+                // continuous and count labels for the gaussian / poisson families: both driven by f_extra only
+                // (a separate generator keeps the main random stream, and the other tests' data, unchanged)
+                final Random labels = new Random(seed * 1_000_003L + s * 131L + i);
+                final double value = 2 * extra[i] + labels.nextGaussian();
+                final long bids = Math.round(Math.exp(0.8 * extra[i] + 0.3 * labels.nextGaussian()));
                 sb.append(String.format(Locale.ROOT,
-                        "        - {session_id: S%d, listing_id: L%d_%d, f_known: %.6f, f_extra: %.6f, f_noise: %.6f, start_price: %.2f, p_model: %.6f, sold: %d, session_time: \"%s\"}\n",
-                        s, s, i, known[i], extra[i], noise[i], price[i], base[i], i == winner ? 1 : 0, time));
+                        "        - {session_id: S%d, listing_id: L%d_%d, f_known: %.6f, f_extra: %.6f, f_noise: %.6f, start_price: %.2f, p_model: %.6f, sold: %d, v_price: %.6f, n_bids: %d, session_time: \"%s\"}\n",
+                        s, s, i, known[i], extra[i], noise[i], price[i], base[i], i == winner ? 1 : 0, value, bids, time));
             }
         }
         sb.append("""
@@ -102,6 +107,8 @@ public class ScreenTransformTest {
                           - {name: start_price, type: float64}
                           - {name: p_model, type: float64}
                           - {name: sold, type: int32}
+                          - {name: v_price, type: float64}
+                          - {name: n_bids, type: int64}
                           - {name: session_time, type: timestamp}
                 """);
         return sb.toString();
@@ -218,7 +225,7 @@ public class ScreenTransformTest {
                       family: binomial
                       label: {expr: "sold > 0 ? 1 : 0"}
                       time: {field: session_time, to: "2024-06-30T23:59:59Z"}
-                      candidates: {include: ["*"], exclude: ["p_model", "start_price"]}
+                      candidates: {include: ["*"], exclude: ["p_model", "start_price", "v_price", "n_bids"]}
                       periods: {field: session_time, bucket: quarter}
                       placebo: {noise: 10, quantile: 0.95, seed: 1}
                 """;
@@ -392,6 +399,71 @@ public class ScreenTransformTest {
         Assertions.assertEquals(64, json.get("screenHash").getAsString().length());
         Assertions.assertTrue(json.get("planHash").isJsonNull());
         Assertions.assertEquals("f_extra", json.getAsJsonArray("passed").get(0).getAsJsonObject().get("candidate").getAsString());
+    }
+
+    @Test
+    public void testGaussianAndPoissonFamilies() throws Exception {
+        // gaussian: a continuous label linear in f_extra (f_noise is the noise); poisson: a count driven by f_extra
+        final String gaussian = sessionsConfig(150, 4, 11) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: gaussian
+                      label: v_price
+                      time: {field: session_time}
+                      candidates: {include: ["f_known", "f_extra"]}
+                      placebo: {noise: 20, seed: 2}
+                      conditioning: {fields: [f_known], maxIter: 3}
+                """;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(gaussian));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            final MElement extra = records.get("f_extra:raw");
+            final MElement known = records.get("f_known:raw");
+            Assertions.assertEquals("gaussian", extra.getAsString("family"));
+            Assertions.assertEquals(600L, extra.getAsLong("n_groups"));
+            Assertions.assertTrue(extra.getAsDouble("z") > 10, "gaussian z of f_extra: " + extra.getAsDouble("z"));
+            Assertions.assertEquals(Boolean.TRUE, extra.getPrimitiveValue("passed"));
+            Assertions.assertTrue(extra.getAsDouble("partial_z") > 10, "gaussian partial z of f_extra: " + extra.getAsDouble("partial_z"));
+            Assertions.assertTrue(Math.abs(known.getAsDouble("z")) < 4, "gaussian z of f_known: " + known.getAsDouble("z"));
+            Assertions.assertEquals(1d, known.getAsDouble("r2_F"), 1e-6);
+            return null;
+        });
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            final MElement summary = rows.iterator().next();
+            Assertions.assertEquals(Boolean.TRUE, summary.getPrimitiveValue("conditioningConverged"));
+            Assertions.assertTrue(summary.getAsLong("conditioningIterations") <= 3);   // least squares: one Newton step
+            return null;
+        });
+        pipeline.run();
+
+        final TestPipeline second = createPipeline();
+        final String poisson = sessionsConfig(150, 4, 12) + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: poisson
+                      label: n_bids
+                      time: {field: session_time}
+                      candidates: {include: ["f_known", "f_extra"]}
+                      placebo: {noise: 20, seed: 2}
+                """;
+        final Map<String, MCollection> counts = MPipeline.apply(second, Config.load(poisson));
+        PAssert.that(counts.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            final MElement extra = records.get("f_extra:raw");
+            final MElement known = records.get("f_known:raw");
+            Assertions.assertEquals("poisson", extra.getAsString("family"));
+            Assertions.assertTrue(extra.getAsDouble("z") > 5, "poisson z of f_extra: " + extra.getAsDouble("z"));
+            Assertions.assertEquals(Boolean.TRUE, extra.getPrimitiveValue("passed"));
+            Assertions.assertEquals(Boolean.FALSE, known.getPrimitiveValue("passed"));
+            return null;
+        });
+        second.run();
     }
 
     @Test

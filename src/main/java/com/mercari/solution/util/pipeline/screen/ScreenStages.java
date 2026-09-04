@@ -223,6 +223,7 @@ public final class ScreenStages {
                 final Double weight = spec.weightField == null ? 1d : ScreenMath.toDouble(values.get(spec.weightField));
                 final boolean invalid = label == null || !Double.isFinite(label)
                         || (spec.group != null && group == null)
+                        || (spec.isPoisson() && label != null && label < 0)
                         || weight == null || !Double.isFinite(weight) || weight < 0;
                 if (invalid) {
                     book[ScoreAccumulator.ROWS_INVALID] = 1;

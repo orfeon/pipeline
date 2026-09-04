@@ -124,7 +124,7 @@ public final class GroupScorer implements Serializable {
                     groupedContribution(v, unit.y, unit.p, unit.unitWeight, contribution);
                     acc.add(unitPeriod, contribution);
                 } else {
-                    binomialContributions(unit.rows, v, unit.y, unit.p, unit.w, prior, acc);
+                    rowContributions(unit.rows, v, unit.y, unit.p, unit.w, prior, acc);
                 }
             }
         }
@@ -170,7 +170,10 @@ public final class GroupScorer implements Serializable {
         return cols;
     }
 
-    /** Fills {@code p} from the baselines; NONE when every row is usable. */
+    /**
+     * Fills {@code p} (the baseline mean per row: a share / probability, the gaussian value, the poisson rate)
+     * from the baselines; NONE when every row is usable.
+     */
     private Skip probabilities(final List<ScreenRow> rows, final double[] p) {
         final int n = rows.size();
         final String form = spec.baselineForm;
@@ -192,6 +195,15 @@ public final class GroupScorer implements Serializable {
                     if (!(b > 0)) return Skip.INVALID_BASELINE;
                     p[i] = 1d / b;
                 }
+                case ScreenSpec.FORM_VALUE -> p[i] = b;
+                case ScreenSpec.FORM_RATE -> {
+                    if (!(b > 0)) return Skip.INVALID_BASELINE;
+                    p[i] = b;
+                }
+                case ScreenSpec.FORM_LOG_RATE -> {
+                    p[i] = Math.exp(b);
+                    if (!(p[i] > 0) || Double.isInfinite(p[i])) return Skip.INVALID_BASELINE;
+                }
                 default -> throw new IllegalStateException("unknown baseline form " + form);
             }
         }
@@ -204,7 +216,7 @@ public final class GroupScorer implements Serializable {
             if (!(sum > 0)) return Skip.INVALID_BASELINE;
             for (int i = 0; i < n; i++) p[i] /= sum;
         }
-        if (!spec.isGroupedMultinomial()) {
+        if (spec.isBinomial()) {
             for (int i = 0; i < n; i++) p[i] = Math.min(1 - EPS, Math.max(EPS, p[i]));
         }
         return Skip.NONE;
@@ -240,12 +252,14 @@ public final class GroupScorer implements Serializable {
     }
 
     /**
-     * Binomial contributions, one per row (its own period), as moment sums that the report centres at the end:
-     * offset mode (a baseline) c1 = Σ w x r, c2 = Σ w r, c3 = Σ w v x², c4 = Σ w v x, c5 = Σ w v with r = y − p,
-     * v = p(1 − p); prior mode (no baseline) c1 = Σ w x y, c2 = Σ w y, c3 = Σ w x², c4 = Σ w x, c5 = Σ w.
+     * Row-family contributions (binomial / gaussian / poisson), one per row (its own period), as moment sums that
+     * the report centres at the end: offset mode (a baseline μ) c1 = Σ w x r, c2 = Σ w r, c3 = Σ w v x², c4 = Σ w v x,
+     * c5 = Σ w v, c6 = Σ w r² with r = y − μ and the Fisher weight v = μ(1 − μ) (binomial), μ (poisson), 1 (gaussian);
+     * prior mode (no baseline) the raw moments c1 = Σ w x y, c2 = Σ w y, c3 = Σ w x², c4 = Σ w x, c5 = Σ w, c6 = Σ w y²
+     * (the report supplies the prior-rate weight and, for gaussian, the variance).
      */
-    private static void binomialContributions(final List<ScreenRow> rows, final double[] v, final double[] y, final double[] p,
-                                              final double[] w, final boolean prior, final ScoreAccumulator acc) {
+    private void rowContributions(final List<ScreenRow> rows, final double[] v, final double[] y, final double[] mu,
+                                  final double[] w, final boolean prior, final ScoreAccumulator acc) {
         final Map<String, double[]> byPeriod = new HashMap<>();
         for (int i = 0; i < v.length; i++) {
             if (!ScreenMath.isFinite(v[i])) continue;
@@ -258,17 +272,26 @@ public final class GroupScorer implements Serializable {
                 c[ScoreAccumulator.C3] += w[i] * x * x;
                 c[ScoreAccumulator.C4] += w[i] * x;
                 c[ScoreAccumulator.C5] += w[i];
+                c[ScoreAccumulator.C6] += w[i] * y[i] * y[i];
             } else {
-                final double r = y[i] - p[i];
-                final double vv = p[i] * (1 - p[i]);
+                final double r = y[i] - mu[i];
+                final double vv = fisherWeight(mu[i]);
                 c[ScoreAccumulator.C1] += w[i] * x * r;
                 c[ScoreAccumulator.C2] += w[i] * r;
                 c[ScoreAccumulator.C3] += w[i] * vv * x * x;
                 c[ScoreAccumulator.C4] += w[i] * vv * x;
                 c[ScoreAccumulator.C5] += w[i] * vv;
+                c[ScoreAccumulator.C6] += w[i] * r * r;
             }
         }
         for (final Map.Entry<String, double[]> e : byPeriod.entrySet()) acc.add(e.getKey(), e.getValue());
+    }
+
+    /** The Fisher weight of a row family at the mean μ: binomial μ(1 − μ), poisson μ, gaussian 1 (σ² applied by the report). */
+    double fisherWeight(final double mu) {
+        if (spec.isBinomial()) return mu * (1 - mu);
+        if (spec.isPoisson()) return mu;
+        return 1d;
     }
 
     /** Applies a transform variant within the unit; NaN inputs stay NaN. */
