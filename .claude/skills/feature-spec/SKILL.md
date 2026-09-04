@@ -35,7 +35,9 @@ launch and monitoring).
    availability status, the stages / shuffles / waves, hot-key audit SQL, and structured diagnostics
    with codes. Iterate on that until it is clean.
 5. `fit.mode` is a **modeling decision**: `expanding` (default) is the leak-safe backfill for training;
-   `static` freezes whole-input statistics (serving / offline); `fold` is out-of-fold cross-fitting.
+   `static` freezes whole-input statistics (serving / offline); `fold` is out-of-fold cross-fitting;
+   `forward` reads complete earlier time blocks only (leak-free, stepwise expanding, parallel — the
+   replacement for an expanding global-level stage).
    Switching modes changes the values, so validate a switch with model metrics, never with output diffs.
 
 ## Workflow
@@ -197,7 +199,8 @@ sequence ops never see the current row.
   `structure: cross` need the single-key keySets in the same block and an explicit `shrinkage.scale`.
 - The **global level** (`[]`, or any `share` denominator) is one key holding every row — a single
   worker thread. The plan flags it (`encoding.globalKey`). If it dominates the run time, consider
-  `fit.mode: static` / `fold` for that block — a modeling change, see the model note in step 0.
+  `fit.mode: forward` (leak-free, `blocks: {size: P90D}` default) / `static` / `fold` for that block — a
+  modeling change, see the model note in step 0.
 - `weights: varianceComponents` estimates the pseudo-counts from the whole batch (a hyper-parameter,
   not time-expanding; the validator says so as info). `fixed` + `priorWeight` is the fully expanding
   alternative.

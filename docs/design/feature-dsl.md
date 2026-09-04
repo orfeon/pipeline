@@ -354,9 +354,11 @@ parameters:
   features: [...]                  # the feature blocks (§4); each block may carry computeAt (default predictAt)
   fit:                             # defaults for population blocks (overridable per block)
     orderBy: session_time
-    mode: expanding                # expanding | fold | static
+    mode: expanding                # expanding | fold | forward | static
     minHistory: P90D
     groupBy: seller                # fold unit (an entity name); effective with mode: fold
+    blocks: {size: P90D}           # forward: time blocks ({bucket: year | quarter | month | week | day} or size)
+    minBlocks: 1                   # forward: rows with fewer preceding blocks read nothing
   output:
     prefix: f_
     nullPolicy: keep               # keep | fillZero | indicator
@@ -757,7 +759,13 @@ factorization = transfer to sparse cells, tree embeddings = discovery of interac
 
 Every population definition carries fit metadata (top-level defaults + per-block overrides).
 `mode: expanding` computes statistics from data up to each row's time (the generalisation of ordered
-target statistics); `mode: fold` fits on out-of-fold data; `mode: static` fits once on the whole input.
+target statistics); `mode: fold` fits on out-of-fold data; `mode: static` fits once on the whole input;
+`mode: forward` reads, per row, the complete time blocks (`fit.blocks`) whose targets are known at
+predictAt — block `b` qualifies when `end(b) ≤ predictAt(row) − lag`, `lag` = the target's availability
+delay after its event — and never the row's own block: a stepwise expanding fit computed as a parallel
+Combine per (key, block) + a per-key prefix over blocks (no time-ordered replay, hence no single-key
+global stage), leak-free unlike `fold`. Sufficient statistics only; `maxAge` windows round up to whole
+blocks; with `varianceComponents` the pseudo-count is estimated per block from the keys' prefix.
 
 ---
 

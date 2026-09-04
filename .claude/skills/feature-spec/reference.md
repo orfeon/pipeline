@@ -27,7 +27,7 @@ and review a spec quickly.
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
-| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold`, `groupBy: <entity>`, `folds` (default 5), `artifact: {uri, refit, id}` or the URI string. `minHistory` accepted, ignored |
+| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` (forward), `artifact: {uri, refit, id}` or the URI string. `minHistory` accepted, ignored |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
 | `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
 | `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
@@ -156,7 +156,7 @@ filters use the Filter grammar (`module/common/filter.md`); expressions are nume
   type: encoding
   keySets:
     - keys: [k1, k2]
-      windows: [{maxAge: P365D}]                 # optional; ignored in static / fold
+      windows: [{maxAge: P365D}]                 # optional; ignored in static / fold, rounded to blocks in forward
       structure: flat | hierarchy | cross        # hierarchy needs parentRef (+ maxDepth); sequence not implemented
       parentRef: <field>
       hierarchy: [[coarser keys], additive, []]  # explicit lattice, fine → coarse
@@ -176,7 +176,7 @@ filters use the Filter grammar (`module/common/filter.md`); expressions are nume
     leaveNodeOut: true
     output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
   smoothing: {type: bayesian, priorWeight: N}    # legacy sugar for fixed weights
-  fit: {mode: expanding | static | fold, groupBy: <entity>, folds: 5, artifact: {...}}
+  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, blocks: {size: P90D}, minBlocks: 1, artifact: {...}}
   maxFeatures: 200
 ```
 

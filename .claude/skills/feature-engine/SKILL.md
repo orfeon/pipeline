@@ -135,7 +135,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   quantiles; `isSupported(stat)` is what `engineConstraints` checks; NaN counts as missing.
 - `VarianceComponents` — per-level (n, Σy, Σy²) per key as a Beam `Combine`, λ = σ²/τ² by the method
   of moments (side input `Map<levelNColumn, λ>`), fold-tagged entries for `fit.mode: fold`,
-  `lambdasInMemory` for loaded artifacts.
+  `lambdasInMemory` for loaded artifacts; `forwardSeries` / `forwardTotals` / `lambdasByBlock` for
+  `fit.mode: forward` (`ForwardBlocks` = block arithmetic + the cumulative `Series`; coordinates
+  `blockBucket` | `blockSizeMillis`, `minBlocks`, `forwardLagMillis` (target availability delay), `windowBlocks`,
+  `blockField` / `blockFieldType` written by `FeaturePlanCompiler.forwardCoordinates`; the engine side is
+  `FitLevel.forward` + `FitApplyDoFn.forwardStats`, which also swaps the row's per-block λ into the evaluator).
 
 ### Beam engine (`FeatureStages`)
 
@@ -260,8 +264,9 @@ shape the output schema (lineage in field options).
   Wave 1 is *throughput-bound*: Dataflow's autoscaler shrinks the pool at the fan-out, so a parallel
   batch run needs `options.dataflow.autoscalingAlgorithm: NONE` + fixed `numWorkers` (the
   `autoscalingAlgorithm` option itself was broken until PR #93). The remaining critical path is the
-  single-key global-level stage (`encoding.globalKey` hint → `fit.mode: static` / `fold` is a
-  modeling change, not a drop-in); §9.4.4 prefix-scan is the unimplemented next lever.
+  single-key global-level stage (`encoding.globalKey` hint → `fit.mode: forward` / `static` / `fold` is a
+  modeling change, not a drop-in; `forward` = per-(key, block) Combine + per-key prefix, the coarse
+  prefix-scan of §9.4.4 restricted to sufficient statistics); the full §9.4.4 prefix-scan is unimplemented.
 - DirectRunner (§9.5): its GroupByKey clones a key's whole buffered bag per touching bundle
   (`CopyOnAccessInMemoryStateInternals`), so a global key costs (upstream bundles × all rows)
   coder clones — orders of magnitude slower on coarse keys, not fixable from our side. **Never

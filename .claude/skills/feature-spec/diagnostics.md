@@ -46,7 +46,8 @@ not expand because another block failed).
 | `baselines.invalid` | error | each baseline needs `name` and `expr` |
 | `baselines.context` | error | the baseline's `context` is unknown |
 | `baselines.declaredMarket` | error | a baseline reads a `market` field with `evidence: declared`; baselines must be time-consistent (`measured`, or `allowDeclared`) |
-| `fit.mode` | error | `expanding`, `static` or `fold` |
+| `fit.mode` | error | `expanding`, `static`, `fold` or `forward` |
+| `fit.blocks` / `fit.blocks.bucket` / `fit.blocks.size` / `fit.blocks.field` / `fit.minBlocks` | error | forward blocks: `{bucket: year \| quarter \| month \| week \| day}` or `{size: <positive duration>}` (not both); `field` must be `time.field`; `minBlocks` ≥ 1 |
 | `fit.orderBy` | error | must equal `time.field` |
 | `fit.groupBy` | error | must name an entity |
 | `fit.folds` | error | at least 2 |
@@ -174,6 +175,10 @@ not expand because another block failed).
 | `encoding.globalKey` | hint | a key-less stage (global level / `share` denominator) runs on one thread and is the critical path: consider `fit.mode: static` / `fold` for that block (values change — a modeling decision) |
 | `fit.mode.static` / `fit.mode.fold` | info | how the block is fitted, where the artifact goes, and the caveat (static: rows see their own outcome; fold: other folds contain later rows) |
 | `fit.mode.static.windows` | warning | keySet windows are ignored in static / fold |
+| `fit.mode.forward` | info | how the forward block fit reads the data (complete known blocks, own block excluded) |
+| `fit.mode.forward.window` | info | `maxAge` rounded up to whole blocks |
+| `fit.mode.forward.windowIgnored` | warning | `maxEvents` / `filter` windows are ignored in forward |
+| `fit.mode.forward.dynamic` | error | the target's availability is not static (`atRowCreation`): the block boundary cannot be decided per row |
 | `fit.fold.identity` | warning | fold by `time.field` alone (no `groupBy`, no tie-break): rows sharing a timestamp share a fold — declare `orderTieBreak` |
 | `fit.groupBy.required` | error | a key derives from a past target and `fit.mode: fold` needs entity-level folds: set `fit.groupBy` |
 | `factorization.fields` / `.latentDim` / `.task` / `.outputs` / `.offset` / `.variant` / `.als` | error | ≥ 2 categorical fields; latentDim ≥ 1; `task.target` or `task.expr`; outputs as `pair` / `embedding` / `sum` naming the block's fields; offset names a baseline; variant `fm \| fwfm`; numeric ALS settings |
@@ -189,6 +194,7 @@ Reported as `engineErrors` in the dry run / `IllegalModuleException` at launch:
 |---|---|
 | `sequence / population features are supported in batch only` | the pipeline is streaming; keep row / context features only, or run in batch |
 | `fit.mode fold is supported in batch only` | use `static` with an artifact for streaming |
+| `fit.mode forward is supported in batch only` | use `static` with an artifact for streaming |
 | `<column>: per-row availability filtering (atRowCreation / event_date time) is not implemented` | declare a constant `availableAt` / `ingestionLag` for that field |
 | `<column>: stat '...' is not implemented yet` | the stat is not served by the engine; see `encoding.stat` |
 | `fit.mode static in streaming requires an existing artifact for plan <hash>` | fit with a batch run first (same config, `artifact.uri`), then run streaming |

@@ -52,6 +52,129 @@ public final class VarianceComponents {
     /** Prefix of the per-fold entries in the per-key statistics map: {@code #<fold>} + separator + level entry. */
     static final String FOLD_PREFIX = "#";
 
+    /**
+     * One level of {@code fit.mode: forward}: per-key statistics are combined per time block ({@code blocks} of the
+     * row's {@code timeField}) and turned into a cumulative {@link ForwardBlocks.Series} per (level, key).
+     */
+    public record ForwardSpec(String id, List<String> keys, String field, String offsetColumn, ForwardBlocks blocks,
+                              String timeField, String timeFieldType) implements Serializable {}
+
+    /**
+     * fit.mode forward: {@code KV<levelId + (char)1 + key, Series>} — the cumulative sufficient statistics of every
+     * (level, key) over its blocks. Two Combines (per (key, block), then the per-key prefix over at most one entry
+     * per block) instead of one time-ordered replay per key.
+     */
+    public static PCollection<KV<String, ForwardBlocks.Series>> forwardSeries(final PCollection<MElement> input, final List<ForwardSpec> specs, final String label) {
+        return input
+                .apply(label + "_Values", ParDo.of(new ForwardExtractDoFn(specs)))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()))
+                .apply(label + "_PerBlock", Combine.perKey(new KeyStatsFn()))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(KeyStats.class)))
+                .apply(label + "_ByKey", ParDo.of(new DoFn<KV<String, KeyStats>, KV<String, KV<Long, KeyStats>>>() {
+                    @ProcessElement
+                    public void processElement(final ProcessContext c) {
+                        final String composite = c.element().getKey();
+                        final int at = composite.lastIndexOf(SEPARATOR);
+                        c.output(KV.of(composite.substring(0, at), KV.of(Long.parseLong(composite.substring(at + 1)), c.element().getValue())));
+                    }
+                }))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), KvCoder.of(org.apache.beam.sdk.coders.VarLongCoder.of(), SerializableCoder.of(KeyStats.class))))
+                .apply(label + "_Group", org.apache.beam.sdk.transforms.GroupByKey.create())
+                .apply(label + "_Series", ParDo.of(new DoFn<KV<String, Iterable<KV<Long, KeyStats>>>, KV<String, ForwardBlocks.Series>>() {
+                    @ProcessElement
+                    public void processElement(final ProcessContext c) {
+                        final List<KV<Long, KeyStats>> entries = new ArrayList<>();
+                        for (final KV<Long, KeyStats> e : c.element().getValue()) entries.add(e);
+                        entries.sort(Comparator.comparingLong(KV::getKey));
+                        final long[] blocks = new long[entries.size()];
+                        final double[] n = new double[entries.size()], sum = new double[entries.size()], sumSq = new double[entries.size()];
+                        double cn = 0, cs = 0, cq = 0;
+                        for (int i = 0; i < entries.size(); i++) {
+                            final KeyStats s = entries.get(i).getValue();
+                            cn += s.n;
+                            cs += s.sum;
+                            cq += s.sumSq;
+                            blocks[i] = entries.get(i).getKey();
+                            n[i] = cn;
+                            sum[i] = cs;
+                            sumSq[i] = cq;
+                        }
+                        c.output(KV.of(c.element().getKey(), new ForwardBlocks.Series(blocks, n, sum, sumSq)));
+                    }
+                }))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(ForwardBlocks.Series.class)));
+    }
+
+    /** The whole-input totals of every forward series (what a static artifact holds). */
+    public static Map<String, KeyStats> forwardTotals(final Map<String, ForwardBlocks.Series> series) {
+        final Map<String, KeyStats> totals = new HashMap<>();
+        for (final Map.Entry<String, ForwardBlocks.Series> e : series.entrySet()) {
+            final KeyStats t = e.getValue().totals();
+            if (t != null) totals.put(e.getKey(), t);
+        }
+        return totals;
+    }
+
+    /**
+     * fit.mode forward: λ per level and block — the moments over the keys' cumulative statistics up to each block
+     * (what a row reading that block shrinks with). Levels with too few keys at a block have no entry there.
+     */
+    public static Map<String, TreeMap<Long, Double>> lambdasByBlock(final Map<String, ForwardBlocks.Series> series) {
+        final Map<String, List<ForwardBlocks.Series>> byLevel = new HashMap<>();
+        final Map<String, TreeSet<Long>> blocksByLevel = new HashMap<>();
+        for (final Map.Entry<String, ForwardBlocks.Series> e : series.entrySet()) {
+            final String level = e.getKey().substring(0, e.getKey().indexOf(SEPARATOR));
+            byLevel.computeIfAbsent(level, l -> new ArrayList<>()).add(e.getValue());
+            final TreeSet<Long> blocks = blocksByLevel.computeIfAbsent(level, l -> new TreeSet<>());
+            for (int i = 0; i < e.getValue().size(); i++) blocks.add(e.getValue().blockAt(i));
+        }
+        final MomentsFn fn = new MomentsFn();
+        final Map<String, TreeMap<Long, Double>> lambdas = new HashMap<>();
+        for (final Map.Entry<String, List<ForwardBlocks.Series>> e : byLevel.entrySet()) {
+            final TreeMap<Long, Double> perBlock = new TreeMap<>();
+            for (final long block : blocksByLevel.get(e.getKey())) {
+                Moments m = new Moments();
+                for (final ForwardBlocks.Series s : e.getValue()) {
+                    final KeyStats stats = s.statsBetween(-1, s.floor(block));
+                    if (stats != null) m = fn.addInput(m, stats);
+                }
+                final Double lambda = Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+                if (lambda != null) perBlock.put(block, lambda);
+            }
+            lambdas.put(e.getKey(), perBlock);
+        }
+        return lambdas;
+    }
+
+    static class ForwardExtractDoFn extends DoFn<MElement, KV<String, Double>> {
+        private final List<ForwardSpec> specs;
+
+        ForwardExtractDoFn(final List<ForwardSpec> specs) {
+            this.specs = specs;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Map<String, Object> row = element.asPrimitiveMap();
+            for (final ForwardSpec spec : specs) {
+                Double y = spec.field() == null ? Double.valueOf(0d) : FeatureValues.toDouble(row.get(spec.field()));
+                if (y == null) continue;
+                if (spec.offsetColumn() != null) {
+                    final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
+                    if (b == null) continue;
+                    y -= b;
+                }
+                final String key = FeatureValues.key(row, spec.keys());
+                if (key == null) continue;
+                final Long millis = FeatureValues.toEpochMillis(row.get(spec.timeField()), spec.timeFieldType());
+                if (millis == null) continue;
+                c.output(KV.of(spec.id() + SEPARATOR + key + SEPARATOR + spec.blocks().indexOf(millis), y));
+            }
+        }
+    }
+
     /** Deterministic fold of a fold-unit key (Java's String hash is stable across JVMs). */
     public static int foldOf(final String unitKey, final int folds) {
         return Math.floorMod(unitKey.hashCode(), folds);

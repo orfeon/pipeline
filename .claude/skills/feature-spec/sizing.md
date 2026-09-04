@@ -141,7 +141,7 @@ The Pipeline Builder agent exposes the same steps as `validateFeature`, `run` (d
 | symptom | cause | lever |
 |---|---|---|
 | the pool shrinks to one worker early in the job | default autoscaler at the fan-out | `autoscalingAlgorithm: NONE` + fixed `numWorkers` |
-| one branch of wave 1 runs alone for minutes after the others finish | the global-level stage (single thread) | `fit.mode: static` / `fold` for that encoding block (modeling change), or accept |
+| one branch of wave 1 runs alone for minutes after the others finish | the global-level stage (single thread) | `fit.mode: forward` (leak-free, parallel per block) / `static` / `fold` for that encoding block (modeling change), or accept |
 | `No space left on device` / keys failing with sort errors | concurrent spills exceed the disk | raise `diskSizeGb`, add `maxAge` to unbounded columns, fewer concurrent branches (`engine.parallelWaves: false` as a stop-gap) |
 | OOM on the workers | large context groups, factorization example set, or too many unbounded columns | high-memory machines, `maxAge`, split static fits into their own step |
 | many stages, each short | the linear chain's barrier per keyed stage (`engine.parallelWaves: false`, or streaming) | keep `parallelWaves: true` in batch; fuse blocks on the same key into the same stage by sharing `entity` / keySet keys |

@@ -87,6 +87,12 @@ public final class FitArtifact {
 
     public static void write(final String artifactUri, final String planHash, final String block,
                              final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels) {
+        write(artifactUri, planHash, block, stats, levels, null);
+    }
+
+    /** @param extra additional manifest members (fit.mode forward: the per-block λ), or null */
+    public static void write(final String artifactUri, final String planHash, final String block,
+                             final Map<String, VarianceComponents.KeyStats> stats, final List<String> levels, final JsonObject extra) {
         final String path = statsPath(artifactUri, planHash, block);
         try {
             final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
@@ -119,6 +125,7 @@ public final class FitArtifact {
                 lambdas.addProperty(e.getKey(), e.getValue());
             }
             manifest.add("lambdas", lambdas);
+            if (extra != null) for (final Map.Entry<String, com.google.gson.JsonElement> e : extra.entrySet()) manifest.add(e.getKey(), e.getValue());
             ResourceUtil.writeString(manifestPath(artifactUri, planHash, block), manifest.toString());
             LOG.info("wrote fit artifact {} ({} entries)", path, stats.size());
         } catch (final IOException e) {
