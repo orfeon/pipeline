@@ -150,7 +150,7 @@ comes back through a sink / source. Using a selector without any lineage availab
 | baseline | optional | String or Object | Field name (the family's default form), or `{field, form}`: `prob` / `logProb` / `inverseShare` (groupedMultinomial, binomial), `value` (gaussian), `rate` / `logRate` (poisson). |
 | time | optional | String or Object | Field name, or `{field, to, from}` with ISO-8601 instants. Rows after `to` / before `from` are not screened. |
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
-| rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time). Default: every field value. |
+| rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time; the unit key for independent rows). Default: every field value. The identity travels as a 128-bit hash. |
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
 | transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |

@@ -447,7 +447,8 @@ output:
   are intermediate columns today, so derive the value as a feature (`shareOfTotal`) and name that column.
 - **include** is the projection: only the listed columns (canonical or output names; a `<name>_isnull`
   entry keeps its base column) are emitted, plus the pass-through fields. Names matching no column are a
-  warning (`output.include.unknown`) — the list may come from another plan version. `include` and
+  warning (`output.include.unknown`) — the list may come from another plan version. An empty list is an error
+  (`output.include.empty`): the table would carry no feature column (a screening step that passed nothing). `include` and
   `exclude` are not combined: when `include` is declared, `exclude` is ignored (`output.include.exclude`).
   A URI is read at assembly and its content hash recorded, so a file that changes later is still traceable.
 - **manifest** writes `manifest.json` at assembly (a dry run writes it too): `planHash`, **`outputHash`**

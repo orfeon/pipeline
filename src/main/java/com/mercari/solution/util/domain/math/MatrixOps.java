@@ -371,5 +371,15 @@ public final class MatrixOps {
         if (matrix.length == 0 || matrix[0].length == 0) {
             throw new IllegalArgumentException(op + " requires a non-empty matrix");
         }
+        // ojalgo's SVD does not terminate on NaN / infinite entries (the solveGram fallback would hang the worker):
+        // reject them up front, where the caller can still say which sums went wrong
+        for (int i = 0; i < matrix.length; i++) {
+            final double[] row = matrix[i];
+            for (int j = 0; j < row.length; j++) {
+                if (!Double.isFinite(row[j])) {
+                    throw new IllegalArgumentException(op + " requires finite values, but found " + row[j] + " at [" + i + "][" + j + "]");
+                }
+            }
+        }
     }
 }

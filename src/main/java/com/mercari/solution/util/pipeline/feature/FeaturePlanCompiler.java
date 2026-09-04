@@ -2139,6 +2139,13 @@ public final class FeaturePlanCompiler {
             diagnostics.info("output.include.exclude", "output", "output.include is declared: output.exclude is ignored (include is the projection)");
         }
         final Set<String> listed = new LinkedHashSet<>(spec.output.include);
+        if (listed.isEmpty()) {
+            // a screening step that passed nothing, or a broken list: the table would carry no feature column
+            diagnostics.error("output.include.empty", "output.include", "output.include is empty: no feature column would be emitted"
+                    + (spec.output.includeSource != null ? " (from " + spec.output.includeSource + ")" : "")
+                    + "; remove output.include to emit every column, or list the columns to keep");
+            return;
+        }
         final Set<String> matched = new LinkedHashSet<>();
         for (final OutputColumn c : columns) {
             if (c.intermediate || c.fieldType == null) continue;

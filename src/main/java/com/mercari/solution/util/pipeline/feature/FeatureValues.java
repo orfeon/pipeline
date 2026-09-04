@@ -19,7 +19,7 @@ public final class FeatureValues {
 
     private FeatureValues() {}
 
-    static Double toDouble(final Object value) {
+    public static Double toDouble(final Object value) {
         if (value == null) return null;
         if (value instanceof Number n) return n.doubleValue();
         if (value instanceof Boolean b) return b ? 1d : 0d;
@@ -48,7 +48,7 @@ public final class FeatureValues {
      * @param type schema type name of the field: {@code date} values are epoch days (Integer/Long) in the
      *             primitive-map convention; everything else numeric is epoch microseconds
      */
-    static Long toEpochMillis(final Object value, final String type) {
+    public static Long toEpochMillis(final Object value, final String type) {
         if ("date".equals(type)) {
             if (value instanceof Number n) return n.longValue() * 86_400_000L;
             if (value instanceof String s) {
@@ -129,7 +129,7 @@ public final class FeatureValues {
      * value: {@link #appendKeyComponent} always starts a component with its length.
      */
     /** A generator seeded by a 64-bit hash of (seed, key): a pure function of its arguments (same across re-runs, workers and branches). */
-    static java.util.SplittableRandom seededRandom(final long seed, final String key) {
+    public static java.util.SplittableRandom seededRandom(final long seed, final String key) {
         final long h = com.google.common.hash.Hashing.murmur3_128((int) (seed ^ (seed >>> 32)))
                 .hashString(seed + "\u0000" + key, java.nio.charset.StandardCharsets.UTF_8).asLong();
         return new java.util.SplittableRandom(h);

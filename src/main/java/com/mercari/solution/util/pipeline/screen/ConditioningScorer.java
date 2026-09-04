@@ -27,11 +27,16 @@ public final class ConditioningScorer implements Serializable {
     public final int k;
 
     public ConditioningScorer(final ScreenSpec spec) {
+        this(spec, spec.conditioningOffset());
+    }
+
+    /** @param offset position of the first conditioning column in {@link ScreenRow#x} (0 for the projected rows of the fit passes) */
+    public ConditioningScorer(final ScreenSpec spec, final int offset) {
         this.spec = spec;
         this.kF = spec.conditioningFields.size();
         this.intercept = !spec.isGroupedMultinomial();
         this.k = kF + (intercept ? 1 : 0);
-        this.offset = spec.conditioningOffset();
+        this.offset = offset;
     }
 
     /**

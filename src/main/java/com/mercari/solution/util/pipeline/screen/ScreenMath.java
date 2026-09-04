@@ -1,8 +1,8 @@
 package com.mercari.solution.util.pipeline.screen;
 
-import com.google.common.hash.Hashing;
+import com.mercari.solution.util.pipeline.feature.FeatureValues;
+import com.mercari.solution.util.pipeline.feature.OrderStatistics;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -100,11 +100,7 @@ public final class ScreenMath {
     /** Type-7 (linear interpolation) sample quantile of a sorted array; NaN for an empty array. */
     public static double quantile(final double[] sorted, final double q) {
         if (sorted == null || sorted.length == 0) return Double.NaN;
-        if (sorted.length == 1) return sorted[0];
-        final double h = (sorted.length - 1) * Math.min(1d, Math.max(0d, q));
-        final int lo = (int) Math.floor(h);
-        final int hi = Math.min(lo + 1, sorted.length - 1);
-        return sorted[lo] + (h - lo) * (sorted[hi] - sorted[lo]);
+        return OrderStatistics.quantile(q, sorted, sorted.length);
     }
 
     /** Median of the finite entries of an array (NaN when none). */
@@ -149,11 +145,9 @@ public final class ScreenMath {
         return q;
     }
 
-    /** Deterministic generator from a seed and a key (same derivation as the feature transform's noise op). */
+    /** Deterministic generator from a seed and a key: the feature transform's noise derivation. */
     public static SplittableRandom seededRandom(final long seed, final String key) {
-        final long h = Hashing.murmur3_128((int) (seed ^ (seed >>> 32)))
-                .hashString(seed + String.valueOf((char) 0) + key, StandardCharsets.UTF_8).asLong();
-        return new SplittableRandom(h);
+        return FeatureValues.seededRandom(seed, key);
     }
 
     /** Calendar bucket label of an epoch-millisecond instant in UTC. */
@@ -184,46 +178,13 @@ public final class ScreenMath {
         return Pattern.compile(sb.append('$').toString());
     }
 
-    /** Epoch millis of a timestamp-like primitive: micros Long, Integer/Long epoch days for {@code date}, Instant, ISO string. */
+    /** Epoch millis of a timestamp-like primitive, exactly as the feature transform reads its time field. */
     public static Long toEpochMillis(final Object value, final String type) {
-        if (value == null) return null;
-        if ("date".equals(type)) {
-            if (value instanceof Number n) return n.longValue() * 86_400_000L;
-            if (value instanceof String s) {
-                try {
-                    return LocalDate.parse(s).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli();
-                } catch (final RuntimeException e) {
-                    return null;
-                }
-            }
-            return null;
-        }
-        if (value instanceof Long l) return l / 1000L;
-        if (value instanceof Integer i) return i.longValue() / 1000L;
-        if (value instanceof Instant i) return i.toEpochMilli();
-        if (value instanceof org.joda.time.Instant i) return i.getMillis();
-        if (value instanceof String s) {
-            try {
-                return Instant.parse(s).toEpochMilli();
-            } catch (final RuntimeException e) {
-                return null;
-            }
-        }
-        return null;
+        return FeatureValues.toEpochMillis(value, type);
     }
 
-    /** Numeric coercion of a primitive: numbers, booleans (1 / 0) and numeric strings; null otherwise. */
+    /** Numeric coercion of a primitive (numbers, booleans, numeric strings, instants), as the feature transform does. */
     public static Double toDouble(final Object value) {
-        if (value == null) return null;
-        if (value instanceof Number n) return n.doubleValue();
-        if (value instanceof Boolean b) return b ? 1d : 0d;
-        if (value instanceof String s) {
-            try {
-                return Double.parseDouble(s);
-            } catch (final NumberFormatException e) {
-                return null;
-            }
-        }
-        return null;
+        return FeatureValues.toDouble(value);
     }
 }

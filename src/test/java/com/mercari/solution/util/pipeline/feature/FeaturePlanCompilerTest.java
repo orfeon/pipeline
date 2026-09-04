@@ -1302,6 +1302,14 @@ public class FeaturePlanCompilerTest {
             + "  manifest: target/feature-manifests/test/manifest.json\n";
 
     @Test
+    public void testEmptyIncludeIsAnError() {
+        // a screening step that passed nothing: the table would carry no feature column
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  include: []\n"));
+        Assertions.assertTrue(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "output.include.empty"), plan::describe);
+    }
+
+    @Test
     public void testOutputRolesAndInclude() {
         final FeaturePlan plan = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", OUTPUT_CONTRACT));
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
