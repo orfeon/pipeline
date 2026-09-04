@@ -1,8 +1,10 @@
 package com.mercari.solution.util.pipeline.screen;
 
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.domain.math.MatrixOps;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -13,7 +15,8 @@ import java.util.Set;
 
 /**
  * Turns the combined accumulators into the scoring records and the run summary. Pure: the statistics,
- * placebo threshold, q-values and flags are all closed-form over the (small) accumulator set.
+ * placebo threshold, q-values, flags and (with conditioning) the orthogonalisation are all closed-form over
+ * the (small) accumulator set.
  */
 public final class ScreenReport {
 
@@ -27,6 +30,9 @@ public final class ScreenReport {
             return new Stats(0d, 0d, Double.NaN, 0d, 0d, 0d, 1d, nObs, true);
         }
     }
+
+    /** The partial test of a column: its statistics after orthogonalisation and the redundancy r²_F. */
+    public record Partial(Stats stats, double r2) {}
 
     /** Result of {@link #build}: the scoring records and the summary, as output-schema maps. */
     public record Result(List<Map<String, Object>> records, Map<String, Object> summary) {}
@@ -56,6 +62,10 @@ public final class ScreenReport {
                 h = yMean * (1 - yMean) * sxx;
             }
         }
+        return fromScore(s, h, nObs, nUnits);
+    }
+
+    static Stats fromScore(final double s, final double h, final long nObs, final double nUnits) {
         if (nObs < 2 || !(h > 0) || Double.isNaN(s) || h < 1e-300) return Stats.degenerate(nObs);
         final double chi2 = s * s / h;
         final double z = Math.signum(s) * Math.sqrt(chi2);
@@ -63,24 +73,58 @@ public final class ScreenReport {
         return new Stats(s, h, s / h, chi2, z, estGain, ScreenMath.chiSquare1UpperTail(chi2), nObs, false);
     }
 
+    /**
+     * Partial test from the sums {@code [s, b, a]} at the fitted p̂ and the fit's (g, G): γ = (G + l2·N·I)⁻¹ a
+     * with N the fit's (weighted) unit mass, i.e. the same ridge as the fit's Newton system, S⊥ = s − γ'g,
+     * H⊥ = b − 2γ'a + γ'Gγ, r²_F = 1 − H⊥ / b. A column fully explained by F (H⊥ ≈ 0) is degenerate with
+     * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator).
+     */
+    public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs) {
+        final int k = fit.k;
+        final double s = vec[0];
+        final double b = vec[1];
+        if (!(b > 0) || !fit.hasBest) return new Partial(Stats.degenerate(nObs), Double.NaN);
+        final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
+        final double[] gamma = MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);
+        final double sPerp = s - MatrixOps.dot(gamma, fit.bestGrad);
+        double gGg = 0;
+        for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) gGg += gamma[i] * fit.bestG[i][j] * gamma[j];
+        final double hPerp = b - 2 * MatrixOps.dot(gamma, a) + gGg;
+        final double r2 = Math.min(1d, Math.max(0d, 1d - hPerp / b));
+        if (hPerp <= 1e-10 * b) return new Partial(Stats.degenerate(nObs), 1d);
+        return new Partial(fromScore(sPerp, hPerp, nObs, nUnits), r2);
+    }
+
     public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators) {
+        return build(spec, accumulators, null, null);
+    }
+
+    /**
+     * @param partials the partial-test sums per key (null without conditioning)
+     * @param fit      the final fit state (null without conditioning)
+     */
+    public static Result build(final ScreenSpec spec, final Map<Integer, ScoreAccumulator> accumulators,
+                               final Map<Integer, double[]> partials, final FitState fit) {
         final ScoreAccumulator book = accumulators.getOrDefault(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator());
         final double[] b = book.getTotal();
         final double nUnits = b[ScoreAccumulator.UNITS_SCORED];
         final List<String> names = spec.columnNames();
         final int nTransforms = spec.transforms.size();
+        final boolean conditioned = spec.hasConditioning() && fit != null && fit.hasBest && partials != null;
+        final List<String> notes = new ArrayList<>(spec.notes);
+        if (spec.hasConditioning() && !conditioned) {
+            notes.add("conditioning: the fit accepted no point (no scorable unit); partial statistics are null and passed / threshold / qValue follow the marginal test");
+        }
 
         // statistics per key
         final List<Map<String, Object>> records = new ArrayList<>();
-        final List<Stats> statsList = new ArrayList<>();
+        final List<Stats> effective = new ArrayList<>();
         final List<Double> placeboGains = new ArrayList<>();
         for (int c = 0; c < names.size(); c++) {
             for (int t = 0; t < nTransforms; t++) {
                 final int key = spec.key(c, t);
                 final ScoreAccumulator acc = accumulators.getOrDefault(key, new ScoreAccumulator());
                 final Stats st = stats(spec, acc.getTotal(), nUnits);
-                statsList.add(st);
-                if (spec.isPlacebo(c)) placeboGains.add(st.degenerate ? 0d : st.estGain);
                 final Map<String, Object> r = new LinkedHashMap<>();
                 r.put("candidate", names.get(c));
                 r.put("transform", spec.transforms.get(t));
@@ -117,6 +161,33 @@ public final class ScreenReport {
                 r.put("periods_agree", agree);
                 r.put("n_periods", nPeriods);
                 r.put("period_z", periodRecords);
+                // partial test
+                Stats used = st;
+                if (conditioned) {
+                    final double[] vec = partials.get(key);
+                    final Partial partial = vec == null
+                            ? new Partial(Stats.degenerate(st.nObs), Double.NaN)
+                            : partial(vec, fit, nUnits, spec.conditioningL2, st.nObs);
+                    final Stats pst = partial.stats;
+                    r.put("r2_F", Double.isNaN(partial.r2) ? null : partial.r2);
+                    r.put("partial_S", pst.s);
+                    r.put("partial_H", pst.h);
+                    r.put("partial_chi2", pst.chi2);
+                    r.put("partial_z", pst.z);
+                    r.put("partial_gain", pst.estGain);
+                    r.put("partial_pValue", pst.pValue);
+                    used = pst;
+                } else {
+                    r.put("r2_F", null);
+                    r.put("partial_S", null);
+                    r.put("partial_H", null);
+                    r.put("partial_chi2", null);
+                    r.put("partial_z", null);
+                    r.put("partial_gain", null);
+                    r.put("partial_pValue", null);
+                }
+                effective.add(used);
+                if (spec.isPlacebo(c)) placeboGains.add(used.degenerate ? 0d : used.estGain);
                 r.put("placebo", spec.isPlacebo(c));
                 r.put("degenerate", st.degenerate);
                 records.add(r);
@@ -133,11 +204,11 @@ public final class ScreenReport {
             threshold = ScreenMath.quantile(sorted, spec.quantile);
         }
 
-        // q-values over the candidate records
+        // q-values over the candidate records (of the effective test: partial when conditioned)
         final List<Integer> candidateRecords = new ArrayList<>();
         for (int i = 0; i < records.size(); i++) if (!(Boolean) records.get(i).get("placebo")) candidateRecords.add(i);
         final double[] p = new double[candidateRecords.size()];
-        for (int i = 0; i < p.length; i++) p[i] = statsList.get(candidateRecords.get(i)).pValue;
+        for (int i = 0; i < p.length; i++) p[i] = effective.get(candidateRecords.get(i)).pValue;
         final double[] q = ScreenMath.benjaminiHochberg(p);
         for (int i = 0; i < p.length; i++) records.get(candidateRecords.get(i)).put("qValue", q[i]);
 
@@ -146,10 +217,11 @@ public final class ScreenReport {
         final Map<String, Double> passedBest = new HashMap<>();
         for (int i = 0; i < records.size(); i++) {
             final Map<String, Object> r = records.get(i);
-            final Stats st = statsList.get(i);
+            final Stats st = effective.get(i);
             final boolean placebo = (Boolean) r.get("placebo");
             final boolean passed = !placebo && !st.degenerate && !Double.isNaN(threshold) && st.estGain > threshold;
-            final boolean leak = spec.leakZ != null && !st.degenerate && Math.abs(st.z) > spec.leakZ;
+            final double marginalZ = (Double) r.get("z");
+            final boolean leak = spec.leakZ != null && Math.abs(marginalZ) > spec.leakZ;
             r.put("threshold", threshold);
             r.put("passed", passed);
             r.put("leakSuspect", leak);
@@ -195,7 +267,14 @@ public final class ScreenReport {
         summary.put("transforms", new ArrayList<>(spec.transforms));
         summary.put("candidates", new ArrayList<>(spec.candidates));
         summary.put("passedColumns", passedColumns);
-        summary.put("notes", new ArrayList<>(spec.notes));
+        summary.put("conditioningFields", new ArrayList<>(spec.conditioningFields));
+        summary.put("conditioningK", fit == null ? null : (long) fit.k);
+        summary.put("conditioningIterations", fit == null ? null : (long) fit.iteration);
+        summary.put("conditioningRejectedSteps", fit == null ? null : (long) fit.rejected);
+        summary.put("conditioningConverged", fit == null ? null : fit.hasBest && fit.converged);
+        summary.put("conditioningGain", fit == null || Double.isNaN(fit.gainPerUnit()) ? null : fit.gainPerUnit());
+        summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
+        summary.put("notes", notes);
         return new Result(records, summary);
     }
 
@@ -226,6 +305,13 @@ public final class ScreenReport {
                 .withField("periods_agree", Schema.FieldType.INT64)
                 .withField("n_periods", Schema.FieldType.INT64)
                 .withField("period_z", Schema.FieldType.array(Schema.FieldType.element(period)))
+                .withField("r2_F", Schema.FieldType.FLOAT64)
+                .withField("partial_S", Schema.FieldType.FLOAT64)
+                .withField("partial_H", Schema.FieldType.FLOAT64)
+                .withField("partial_chi2", Schema.FieldType.FLOAT64)
+                .withField("partial_z", Schema.FieldType.FLOAT64)
+                .withField("partial_gain", Schema.FieldType.FLOAT64)
+                .withField("partial_pValue", Schema.FieldType.FLOAT64)
                 .withField("threshold", Schema.FieldType.FLOAT64)
                 .withField("passed", Schema.FieldType.BOOLEAN)
                 .withField("leakSuspect", Schema.FieldType.BOOLEAN)
@@ -268,6 +354,13 @@ public final class ScreenReport {
                 .withField("transforms", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("candidates", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("passedColumns", Schema.FieldType.array(Schema.FieldType.STRING))
+                .withField("conditioningFields", Schema.FieldType.array(Schema.FieldType.STRING))
+                .withField("conditioningK", Schema.FieldType.INT64)
+                .withField("conditioningIterations", Schema.FieldType.INT64)
+                .withField("conditioningRejectedSteps", Schema.FieldType.INT64)
+                .withField("conditioningConverged", Schema.FieldType.BOOLEAN)
+                .withField("conditioningGain", Schema.FieldType.FLOAT64)
+                .withField("conditioningL2", Schema.FieldType.FLOAT64)
                 .withField("notes", Schema.FieldType.array(Schema.FieldType.STRING))
                 .build();
     }
@@ -286,6 +379,7 @@ public final class ScreenReport {
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.leakZ != null) parts.add("leakZ=" + spec.leakZ);
+        if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " (" + spec.conditioningMaxIter + " + 2 passes)");
         if (!spec.notes.isEmpty()) parts.add("notes=" + spec.notes);
         return "screen " + String.join(" ", parts);
     }

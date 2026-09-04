@@ -3,6 +3,7 @@ package com.mercari.solution.util.pipeline.screen;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
 
@@ -62,7 +63,10 @@ public final class ScreenSpec implements Serializable {
     public List<String> candidateExclude = new ArrayList<>();
     public String candidateManifest;
     public List<String> transforms = new ArrayList<>();
+    /** True when the config lists transforms explicitly (a defaulted group must not override them). */
+    public boolean transformsExplicit;
     public String periodsField;
+    public String periodsFieldType;
     public String periodsBucket;
     public int noise = 100;
     public String shuffleField;
@@ -70,9 +74,16 @@ public final class ScreenSpec implements Serializable {
     public double quantile = 0.99;
     public long seed = 0L;
     public Double leakZ;
+    /** conditioning.fields as written (names / globs); empty = no partial test */
+    public List<String> conditioningPatterns = new ArrayList<>();
+    public double conditioningL2 = 1e-4;
+    public int conditioningMaxIter = 10;
+    public double conditioningTol = 1e-8;
 
     /** resolved candidate column names (input schema order) */
     public List<String> candidates = new ArrayList<>();
+    /** resolved conditioning column names (input schema order) */
+    public List<String> conditioningFields = new ArrayList<>();
     /** informational notes produced by resolution (role defaults applied, columns excluded by lineage) */
     public List<String> notes = new ArrayList<>();
 
@@ -92,6 +103,28 @@ public final class ScreenSpec implements Serializable {
 
     public boolean hasShuffle() {
         return shuffleField != null && shuffleN > 0;
+    }
+
+    public boolean hasConditioning() {
+        return !conditioningFields.isEmpty();
+    }
+
+    /** Position of the shuffle reference column in {@link ScreenRow#x} (after the candidates). */
+    public int shuffleIndex() {
+        return candidates.size();
+    }
+
+    /** Position of the first conditioning column in {@link ScreenRow#x}. */
+    public int conditioningOffset() {
+        return candidates.size() + (hasShuffle() ? 1 : 0);
+    }
+
+    /** Every column carried in {@link ScreenRow#x}: candidates, the shuffle reference, the conditioning fields. */
+    public List<String> rowColumns() {
+        final List<String> columns = new ArrayList<>(candidates);
+        if (hasShuffle()) columns.add(shuffleField);
+        columns.addAll(conditioningFields);
+        return columns;
     }
 
     /** Column names in key order: candidates, noise placebos, shuffle placebos. */
@@ -213,6 +246,7 @@ public final class ScreenSpec implements Serializable {
                 errors.add("transforms must be a list (available: " + TRANSFORMS + ")");
             }
         }
+        s.transformsExplicit = !s.transforms.isEmpty();
         if (s.transforms.isEmpty()) {
             s.transforms = s.group != null ? new ArrayList<>(TRANSFORMS) : new ArrayList<>(List.of(TRANSFORM_RAW));
         }
@@ -262,8 +296,27 @@ public final class ScreenSpec implements Serializable {
             if (s.leakZ != null && s.leakZ <= 0) errors.add("flags.leakZ must be > 0");
         }
 
-        if (p.has("conditioning") && !p.get("conditioning").isJsonNull()) {
-            errors.add("conditioning (partial test) is not implemented in this version");
+        final JsonElement conditioning = p.get("conditioning");
+        if (conditioning != null && !conditioning.isJsonNull()) {
+            if (conditioning.isJsonObject()) {
+                final JsonObject o = conditioning.getAsJsonObject();
+                s.conditioningPatterns = strings(o, "fields", errors);
+                if (s.conditioningPatterns.isEmpty()) errors.add("conditioning.fields is required (names or globs of the conditioning columns)");
+                final Double l2 = number(o, "l2");
+                if (l2 != null) s.conditioningL2 = l2;
+                final Integer maxIter = integer(o, "maxIter");
+                if (maxIter != null) s.conditioningMaxIter = maxIter;
+                final Double tol = number(o, "tol");
+                if (tol != null) s.conditioningTol = tol;
+                if (s.conditioningL2 < 0) errors.add("conditioning.l2 must be >= 0");
+                if (s.conditioningMaxIter < 1 || s.conditioningMaxIter > 100) errors.add("conditioning.maxIter must be in [1, 100] (every iteration is one pass over the data)");
+                if (s.conditioningTol <= 0) errors.add("conditioning.tol must be > 0");
+            } else if (conditioning.isJsonArray()) {
+                s.conditioningPatterns = strings(p, "conditioning", errors);
+                if (s.conditioningPatterns.isEmpty()) errors.add("conditioning must list at least one field (names or globs of the conditioning columns)");
+            } else {
+                errors.add("conditioning must be an object {fields, l2, maxIter, tol} or a list of field names");
+            }
         }
         if (p.has("output") && p.get("output").isJsonObject() && p.getAsJsonObject("output").has("selection")) {
             errors.add("output.selection is not implemented in this version (the summary output carries passedColumns)");
@@ -312,7 +365,12 @@ public final class ScreenSpec implements Serializable {
         /** Reads a feature transform manifest (see {@code FeaturePlan.toManifest}). */
         public static Lineage fromManifest(final String json) {
             final Lineage l = new Lineage();
-            final JsonObject m = JsonParser.parseString(json).getAsJsonObject();
+            final JsonObject m;
+            try {
+                m = JsonParser.parseString(json).getAsJsonObject();
+            } catch (final JsonParseException | IllegalStateException e) {
+                throw new IllegalArgumentException("candidates.manifest is not a JSON object (a local path that does not exist is read as literal content): " + e.getMessage());
+            }
             l.timeField = string(m, "timeField");
             if (m.has("roles") && m.get("roles").isJsonObject()) {
                 for (final Map.Entry<String, JsonElement> e : m.getAsJsonObject("roles").entrySet()) {
@@ -368,7 +426,7 @@ public final class ScreenSpec implements Serializable {
         if (group == null && l.roles.containsKey("group")) {
             group = l.roles.get("group");
             notes.add("group defaulted to manifest role: " + group);
-            if (transforms.equals(List.of(TRANSFORM_RAW))) transforms = new ArrayList<>(TRANSFORMS);
+            if (!transformsExplicit) transforms = new ArrayList<>(TRANSFORMS);
         }
         if (labelField == null && labelExpr == null && l.roles.containsKey("label")) {
             labelField = l.roles.get("label");
@@ -388,6 +446,9 @@ public final class ScreenSpec implements Serializable {
             notes.add("time.field defaulted to manifest timeField: " + timeField);
         }
         if (periodsBucket != null && periodsField == null) periodsField = timeField;
+        if (timeField == null && (timeToMillis != null || timeFromMillis != null)) {
+            errors.add("time.from / time.to require time.field (or a manifest timeField): the element timestamp of a bounded source is not an event time");
+        }
 
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGroupedMultinomial() && group == null) errors.add("group is required for family groupedMultinomial");
@@ -408,6 +469,10 @@ public final class ScreenSpec implements Serializable {
         }
         for (final String id : rowId) if (!fields.containsKey(id)) errors.add("rowId '" + id + "' is not an input field");
         if (timeField != null && fields.containsKey(timeField)) timeFieldType = fields.get(timeField).getFieldType().getType().name();
+        if (periodsField != null && fields.containsKey(periodsField)) periodsFieldType = fields.get(periodsField).getFieldType().getType().name();
+        if (shuffleField != null && fields.containsKey(shuffleField) && !isNumeric(fields.get(shuffleField))) {
+            errors.add("placebo.shuffle.field '" + shuffleField + "' must be numeric (" + fields.get(shuffleField).getFieldType().getType() + "); a non-numeric reference makes every shuffle placebo degenerate");
+        }
 
         final Set<String> reserved = new HashSet<>();
         for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) reserved.add(r);
@@ -452,6 +517,25 @@ public final class ScreenSpec implements Serializable {
                     + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");
         }
         if (candidates.isEmpty()) errors.add("no candidate column: candidates.include " + candidateInclude + " matched no numeric input field (after exclusions)");
+
+        // conditioning columns: numeric fields matching the patterns, never the label / group / time / weight roles
+        conditioningFields = new ArrayList<>();
+        if (!conditioningPatterns.isEmpty() && inputSchema != null) {
+            final Set<String> roleOnly = new HashSet<>();
+            for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) roleOnly.add(r);
+            if (labelExpr != null) roleOnly.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
+            for (final String pattern : conditioningPatterns) {
+                final Pattern glob = ScreenMath.glob(pattern);
+                boolean matched = false;
+                for (final Schema.Field f : inputSchema.getFields()) {
+                    if (!isNumeric(f) || roleOnly.contains(f.getName()) || !glob.matcher(f.getName()).matches()) continue;
+                    matched = true;
+                    if (!conditioningFields.contains(f.getName())) conditioningFields.add(f.getName());
+                }
+                if (!matched) errors.add("conditioning.fields '" + pattern + "' matched no numeric input field (role fields cannot be conditioned on)");
+            }
+            if (conditioningFields.size() > 500) errors.add("conditioning.fields resolved to " + conditioningFields.size() + " columns; the Newton Gram matrix is k x k, keep k <= 500");
+        }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
     }

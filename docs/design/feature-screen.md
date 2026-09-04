@@ -1,8 +1,9 @@
 # Screen transform — baseline-conditioned feature screening
 
 Status: PR 1 implemented (marginal score test, placebo calibration, periods, time window, leak flags;
-families `groupedMultinomial` / `binomial`). PR 2 (conditioning) / PR 3 (gaussian, poisson, independent-row
-rank) / PR 4 (`output.selection`) are design positions only. User-facing reference:
+families `groupedMultinomial` / `binomial`); PR 2 implemented (conditioning = partial test against an existing
+feature set, §2 `ConditioningScorer` / `FitState` and §3). PR 3 (gaussian, poisson, independent-row rank) / PR 4
+(`output.selection`) are design positions only. User-facing reference:
 `src/main/resources/server/docs/module/transform/screen.md`.
 
 ## 1. Position
@@ -48,12 +49,31 @@ current model misses): candidates = the model's own features gives a drift / sta
   period, min / max time; key `BOOKKEEPING_KEY = -1` reuses the slots for run counts (`ROWS_IN`,
   `ROWS_TIME_FILTERED`, `ROWS_INVALID`, `UNITS_SCORED`, `UNITS_SKIPPED`, `ROWS_SCORED`). Custom coder;
   `Fn` is the Combine (input = accumulator = output).
-- `ScreenReport` — `stats` per slot array, `build` (records + summary maps), output schemas, `describe`.
-- `ScreenStages` — `Prepare` (time window, validity, identity; bookkeeping side output) → `Group`
-  (`GroupByKey` on the unit key; skipped for independent rows) → `ScoreGroups` / `ScoreRows` (bundle-local
-  accumulator map flushed at `@FinishBundle` = a partial combine, so the shuffle carries keys × bundles
-  elements, not rows × columns) → `Combine.perKey` → `Gather` (`Combine.globally` of the few combined
-  accumulators) → `Finalize` (records to the default output, one summary to `summary`).
+- `ConditioningScorer` — pure per-unit computations of the conditioning passes: `moments` (standardisation sums
+  of F), `design` (F̃, missing → 0, intercept column for the binomial family), `fitted` (softmax of log p + F̃θ
+  within the group / σ(logit p + F̃θ)), `evaluate` (`[units, ll, g, G]` at θ), `partial` (`[s, b, a]` per column x
+  transform at p̂: s = x̃'(ỹ − p̂), b = x̃'Wx̃, a = F̃'Wx̃, W the Fisher metric — block diagonal diag(p̂) − p̂p̂' with x̃
+  centred by p̂ within the group, or diag(p̂(1 − p̂)) with the intercept doing the centring).
+- `FitState` — the Newton controller state (proposal, best point with its ll / g / G, direction, step size,
+  convergence, history) and `advance(eval, l2, tol)`: accept when the penalised average objective did not
+  decrease and propose a full Newton step `(G/n + l2 I) d = g/n − l2 θ` (`MatrixOps.solveGram`), else halve the
+  step from the best point; converged when the direction or the improvement is below tolerance, or the step
+  size fell under 1e-3.
+- `ScreenReport` — `stats` per slot array, `partial` (γ = (G + l2·N·I)⁻¹a, S⊥ = s − γ'g, H⊥ = b − 2γ'a + γ'Gγ,
+  r²_F = 1 − H⊥/b; fully explained columns are degenerate with r²_F = 1), `build` (records + summary maps; with
+  conditioning `passed` / threshold / q-values follow the partial test), output schemas, `describe`.
+- `ScreenStages` — `Prepare` (time window, validity, identity; bookkeeping side output) → units (`Group` =
+  `GroupByKey` on the unit key, or one row per unit) → `ScoreUnits` (bundle-local accumulator map per window
+  flushed at `@FinishBundle` = a partial combine, so the shuffle carries keys × bundles elements, not rows ×
+  columns) → `Combine.perKey` → `Gather` (`Combine.globally` of the few combined accumulators) → `Finalize`
+  (records to the default output, one summary to `summary`). With conditioning: `ConditioningMoments` (one
+  global Combine → singleton view), `ConditioningInit` (`Create` of the initial state → view), then for
+  `it = 1..maxIter` `ConditioningFit<it>` (a ParDo over the units with the moments and the previous state as
+  side inputs, bundle-local sum, `Combine.globally` with defaults so a skipped pass yields an empty vector) →
+  `ConditioningFit<it>_Advance` (the controller on a copy of the previous state) → view; finally
+  `ConditioningPartial` (bundle-local `[s, b, a]` per key → `Combine.perKey` → map view) and the
+  fit view join `Finalize` as side inputs. `engineConstraints` rejects conditioning outside the global window
+  (the Combines carry defaults).
 
 `module/transform/ScreenTransform` is thin: streaming rejected, parse → lineage → resolve, `describe` to the
 log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
@@ -85,19 +105,37 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
 - **Batch only, windowing respected.** Every stage is a Combine in the module's windowing strategy, so a
   fixed window yields one record set per window (the streaming case is rejected at assembly: the summary and
   q-values need the whole window).
+- **Conditioning is `maxIter + 2` passes, one Combine each.** Beam cannot iterate, so the Newton fit is
+  unrolled at graph construction; the controller (`FitState.advance`) runs after every pass on the pass's
+  `[n, ll, g, G]` and decides what the next pass evaluates. Backtracking is folded into the same pass kind:
+  a rejected step halves the step from the best point and costs one more pass, never a second kind of pass
+  (the proposal's separate line-search pass is unnecessary). Converged iterations are skipped inside the
+  DoFn (empty vector out) — the pass still exists in the graph but reads nothing. The orthogonalisation and
+  the partial test collapse into one pass because both are bilinear in x: `[s, b, a]` at p̂ plus the fit's
+  (g, G) give γ, S⊥, H⊥ and r²_F in closed form, so the proposal's two extra passes are one. Penalty and
+  tolerance are on the *average* log-likelihood (per weighted unit, the unit count carrying the same weight as the sums), so `l2` and `tol` are size-free and weight-scale-free; F is
+  standardised so `l2` is scale-free; the binomial family always carries an intercept in F̃ (a calibration
+  shift beyond the baseline, the prior rate without one), which also centres the partial statistics.
 - Field names follow the proposal (`est_gain`, `n_groups`, `period_z`, `leakSuspect` …) with additions that
   cost nothing now and keep later extensions schema-compatible: `df` (block tests), `pValue` / `qValue`,
   `degenerate`, `family`, and the summary's `passedColumns` (the selection list of PR 4).
 
+## 3.1 DirectRunner note
+
+The unrolled conditioning graph is large (each pass = ParDo + global Combine + controller + view) and the
+DirectRunner processes a GroupByKey output as one bundle per key. Two DirectRunner mechanisms then dominate
+the run time, independently of the data size: its immutability enforcement traverses the whole pipeline
+graph once per bundle (`ImmutabilityEnforcementFactory.isReadTransform`, CPU-bound with 16 workers for a
+1,200-row test), and its watermark manager updates every downstream transform per completed bundle. The e2e
+tests therefore disable `enforceImmutability` (as the Spanner / Datastore ITs do) and use small datasets. The
+state chain uses singleton views over default-carrying `Combine.globally` (every pass yields exactly one
+element); a variant with list views and `withoutDefaults` Combines ran an order of magnitude slower on the
+DirectRunner (its quiescence driver spun on pushed-back bundles). None of this applies to Dataflow, where bundles are large and side inputs are
+materialised once — measure conditioning there or on the prism image, never on direct (engine doc §9.5 has
+the same finding for keyed feature stages).
+
 ## 4. Deferred (design position)
 
-- **PR 2 — conditioning (partial test).** Beam cannot iterate: the Newton fit of the conditional logit on the
-  conditioning set F is unrolled to `maxIter` passes at graph construction (no early stop — converged
-  iterations become no-op passes), and the backtracking line search becomes "evaluate the log-likelihood at
-  several step sizes in the same pass" (two passes per iteration). Recommended default `maxIter` 8–10. Then one
-  pass for `F'Wx` per candidate (k-vector per column), the Cholesky solve (`util/domain/math/MatrixOps.solveGram`,
-  ojalgo) on the driver side of the DoFn, and one more marginal pass on the orthogonalised x⊥ →
-  `partial_gain`, `r2_F`. Placebos take the same route.
 - **PR 3 — gaussian / poisson** (`σ²` from `Σ(y − μ)²` in the same accumulator: one pass) and the
   independent-row `rank` / `absdev` via a KLL pass.
 - **PR 4 — `output.selection`** (writes `{"columns": [...], "threshold": ..., "planHash": ...}` for the feature
