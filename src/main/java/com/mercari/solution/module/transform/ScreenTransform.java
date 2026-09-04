@@ -1,6 +1,7 @@
 package com.mercari.solution.module.transform;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.IllegalModuleException;
@@ -48,13 +49,23 @@ public class ScreenTransform extends Transform {
             final ScreenSpec parsed = ScreenSpec.parse(parameters);
             ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromSchema(inputSchema);
             if (parsed.candidateManifest != null) {
-                lineage = lineage.merge(ScreenSpec.Lineage.fromManifest(Config.readContent(parsed.candidateManifest)));
+                final String manifest;
+                try {
+                    manifest = Config.readContent(parsed.candidateManifest);
+                } catch (final RuntimeException e) {
+                    throw new IllegalModuleException(getName(), "screen", "failed to read candidates.manifest '" + parsed.candidateManifest + "': " + e.getMessage());
+                }
+                lineage = lineage.merge(ScreenSpec.Lineage.fromManifest(manifest));
             }
             spec = parsed.resolve(inputSchema, lineage);
-        } catch (final IllegalArgumentException | IllegalStateException e) {
+        } catch (final IllegalArgumentException | IllegalStateException | JsonParseException e) {
             throw new IllegalModuleException(getName(), "screen", e.getMessage());
         } catch (final IOException e) {
             throw new IllegalModuleException(getName(), "screen", "failed to read candidates.manifest: " + e.getMessage());
+        }
+        final java.util.List<String> constraints = ScreenStages.engineConstraints(input, spec);
+        if (!constraints.isEmpty()) {
+            throw new IllegalModuleException(getName(), "screen", constraints);
         }
         LOG.info(ScreenReport.describe(spec));
 

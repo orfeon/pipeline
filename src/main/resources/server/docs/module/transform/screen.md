@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Screen Transform Module
-description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Families groupedMultinomial (conditional logit within a group) and binomial. Batch only.
+description: Baseline-conditioned feature screening before training. Scores every numeric candidate column against the label with a Rao score test of an offset GLM (one closed-form Combine, no learner), so the score is the one-step log-likelihood improvement over an existing prediction. Placebo-calibrated pass threshold (noise and within-group shuffle columns), transform variants (raw / rank / absdev), per-period sign agreement, a time window that fences off the test period, leak-suspect flags, Benjamini–Hochberg q-values. Optional conditioning (partial test) fits an existing feature set by unrolled Newton passes and scores what each candidate adds beyond it (r2_F, partial gain). Families groupedMultinomial (conditional logit within a group) and binomial. Batch only.
 tags: [transform, screen, feature-selection, machine-learning, statistics, placebo, batch]
 timestamp: 2026-09-04T00:00:00Z
 ---
@@ -75,6 +75,29 @@ statistics); independent rows support `raw` only in this version.
 - `flags.leakZ` marks a candidate with |z| above the value as `leakSuspect` (a known leak typically stands out by
   a factor of several over the healthy top). **It is a flag only, never a rejection.**
 
+### Conditioning (partial test)
+
+`conditioning.fields` names an existing feature set F. The transform fits the conditioning model
+η = offset + F̃·θ (the conditional logit within the group for `groupedMultinomial`; the logistic model with an
+intercept for `binomial`; F̃ = F standardised, missing → mean) by Newton's method with an L2 penalty on the
+*average* log-likelihood, then orthogonalises every candidate against F in the Fisher metric W of the fitted
+model and reads the score test of what is left:
+
+- `r2_F = 1 − x⊥'Wx⊥ / x'Wx` — how much of the candidate F already explains (1 = fully redundant);
+- `partial_S`, `partial_H`, `partial_chi2`, `partial_z`, `partial_gain`, `partial_pValue` — the score test of x⊥.
+
+With conditioning, `passed`, `threshold` and `qValue` refer to the **partial** test (the placebo columns take
+the same route, so the threshold is calibrated for it); the marginal statistics stay in the record. Reading the
+two together classifies a candidate: marginal high × partial high = new information; marginal high × partial ≈ 0
+= redundant with F (high `r2_F`); marginal ≈ 0 × partial high = a suppressor effect.
+
+Cost: one pass for the column moments, one pass per Newton iteration (at most `maxIter`; a rejected step halves
+the step size and costs one more pass; converged iterations are skipped) and one pass for the partial sums —
+`maxIter + 2` passes over the data at most, each a global Combine. The summary reports `conditioningIterations`,
+`conditioningRejectedSteps`, `conditioningConverged` and `conditioningGain` (the in-sample average
+log-likelihood improvement of F over the baseline — a sanity check that the conditioning set is informative).
+Conditioning needs the global window (no `strategy` window) and, like every screen run, the default trigger.
+
 ## Input contract
 
 | role | description |
@@ -82,7 +105,7 @@ statistics); independent rows support `raw` only in this version.
 | `group` (optional) | mutually exclusive samples of one unit (a query's candidates, a session's listings, a lot's bids). Required for `groupedMultinomial`. Omitted: every row is independent. |
 | `label` | the label field, or an expression over numeric fields (`{expr: "rank == 1 ? 1 : 0"}`). Several positives in a group are normalised (`normalizeTies: true`). |
 | `baseline` (optional) | the reference prediction: `form: prob` (a probability; normalised within the group for `groupedMultinomial`), `logProb`, `inverseShare` (1/x made a share within the group — odds, prices). Omitted: the prior (uniform share / prior rate). |
-| `time` (recommended) | the time field (`timestamp` / `date` / ISO string); `to` / `from` fence the window. Omitted: the element timestamp is used. |
+| `time` (recommended) | the time field (`timestamp` / `date` / ISO string); `to` / `from` fence the window. Omitted: the element timestamp is used (set the source's `timestampAttribute`; bounded sources otherwise carry the minimum timestamp, so `to` / `from` require `field`). |
 | `weight` (optional) | a sample-weight field. |
 | candidates | numeric input fields (`int32` / `int64` / `float32` / `float64` / `bool`) selected by name globs or lineage selectors; role fields are never candidates. |
 
@@ -126,7 +149,7 @@ comes back through a sink / source. Using a selector without any lineage availab
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
 | placebo | optional | Object | `noise` (standard-normal columns, default 100), `shuffle: {field, n}` (within-group permutations of `field`, default n 100; needs `group`), `quantile` (default 0.99), `seed` (default 0). `noise: 0` without shuffle falls back to the theoretical threshold. |
 | flags | optional | Object | `leakZ`: flag candidates with \|z\| above it as `leakSuspect`. Default: no flag. |
-| conditioning | — | — | Partial test conditioned on an existing feature set: planned, rejected with a message in this version. |
+| conditioning | optional | Object or Array | `{fields: [names / globs], l2, maxIter, tol}` or a list of fields: the partial test against an existing feature set (see [Conditioning](#conditioning-partial-test)). `l2` (default 1e-4) penalises the average log-likelihood; `maxIter` (default 10, at most 100) is the number of Newton passes over the data; `tol` (default 1e-8) the objective improvement that ends the fit. Needs the global window. |
 | output.selection | — | — | Planned: writing the pass list to a URI. The summary's `passedColumns` already carries the list. |
 
 ## Outputs
@@ -149,8 +172,10 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 | n_obs | INT64 | rows whose transformed value is finite |
 | periods_agree, n_periods | INT64 | buckets agreeing with the overall sign / non-degenerate buckets |
 | period_z | ARRAY<STRUCT<period STRING, z FLOAT64, S FLOAT64, H FLOAT64, n INT64\>\> | per bucket |
-| threshold | FLOAT64 | the placebo quantile (or theoretical) threshold |
-| passed | BOOL | `est_gain > threshold`, candidate columns only |
+| r2_F | FLOAT64 | conditioning only: redundancy of the candidate with F (1 = fully explained) |
+| partial_S, partial_H, partial_chi2, partial_z, partial_gain, partial_pValue | FLOAT64 | conditioning only: the score test of the candidate orthogonalised against F |
+| threshold | FLOAT64 | the placebo quantile (or theoretical) threshold — of the partial gain with conditioning |
+| passed | BOOL | `est_gain > threshold` (`partial_gain` with conditioning), candidate columns only |
 | leakSuspect | BOOL | \|z\| > `flags.leakZ` |
 | placebo | BOOL | placebo column |
 | degenerate | BOOL | no usable information (constant / too few rows) |
@@ -159,11 +184,13 @@ The default output (`<name>`) holds one scoring record per column × transform, 
 
 `family`, `method`, `group`, `label`, `baseline`, `baselineForm`, `weight`, `threshold`, `thresholdTheoretical`,
 `quantile`, `seed`, `nRows`, `nRowsTimeFiltered`, `nRowsInvalid` (null label / group / weight), `nRowsScored`,
-`nUnits`, `nUnitsSkipped` (groups without a positive label or with an invalid baseline), `nCandidates`,
+`nUnits`, `nUnitsSkipped` (in the same unit as `nUnits`: groups without a positive label or with an invalid baseline; for `binomial` with a `group`, the rows of a group holding an invalid baseline), `nCandidates`,
 `nTransforms`, `nScored`, `nPassed`, `nPlacebo`, `nLeakSuspect`, `timeField`, `timeFrom`, `timeTo`, `minTime`,
 `maxTime` (TIMESTAMP, of the scored rows), `periodsBucket`, `transforms`, `candidates`, `passedColumns` (candidate
 names with a passing transform, best gain first — the list to feed back into the feature transform's
-`output.include`), `notes` (role defaults applied, columns excluded by lineage).
+`output.include`), `conditioningFields`, `conditioningK`, `conditioningIterations`, `conditioningRejectedSteps`,
+`conditioningConverged`, `conditioningGain`, `conditioningL2` (null without conditioning), `notes` (role defaults
+applied, columns excluded by lineage).
 
 ## Examples
 
@@ -243,6 +270,30 @@ transforms:
       placebo: {noise: 100, quantile: 0.99}
 ```
 
+### Example 4: partial test against the current feature set
+
+Candidates are scored for what they add beyond the features the current model uses (and beyond the market
+baseline); a candidate with `r2_F` near 1 is a re-encoding of something the model already has.
+
+```yaml
+transforms:
+  - name: screen
+    module: screen
+    inputs: [rows]
+    parameters:
+      family: groupedMultinomial
+      group: session_id
+      label: sold
+      baseline: {field: p_market, form: inverseShare}
+      time: {field: session_time, to: "2025-06-30T23:59:59Z"}
+      candidates: {include: ["cand_*"]}
+      conditioning:
+        fields: ["model_*"]
+        l2: 1.0e-4
+        maxIter: 10
+      placebo: {noise: 100, shuffle: {field: cand_start_price, n: 100}}
+```
+
 ## Reading the output
 
 - Rank candidates by `est_gain` (or `z`); `passed` is the placebo-calibrated cut-off, `qValue` the
@@ -260,12 +311,15 @@ transforms:
 - Univariate, linear probe: pure interactions are invisible (false negatives); a high linear gain can still
   add nothing to a tree model (false positives). A ranking device, not an acceptance test.
 - A non-linear re-encoding of a variable the baseline already uses (its rank or absolute deviation) can still
-  score: the baseline is a fixed offset, not a conditioning on the variable's transforms.
+  score: the baseline is a fixed offset, not a conditioning on the variable's transforms. The same holds for
+  `conditioning`: it is linear in F, so a non-linear re-encoding of F overstates its novelty — trust low `r2_F`
+  candidates more.
 - Multiple comparisons: the placebo quantile calibrates *per candidate*; `qValue` gives the FDR view, but
   neither controls the family-wise error of a large candidate set.
 - Blind to time dynamics: the statistic is a window average; read `period_z` for decay.
 - Batch only (every statistic is a global Combine); under a windowing strategy the records are per window.
 - Independent rows (`group` omitted) support `raw` only; `rank` / `absdev` over the whole window need a
   quantile sketch (planned).
-- Planned: `gaussian` / `poisson` families, `conditioning` (partial test against an existing feature set),
-  `output.selection`.
+- Conditioning needs the global window and costs `maxIter + 2` passes; keep the conditioning set to a few
+  hundred columns (the Newton Gram matrix is k × k).
+- Planned: `gaussian` / `poisson` families, `output.selection`.
