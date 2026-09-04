@@ -24,6 +24,7 @@ not expand because another block failed).
 | `sources.fields.evidence` | error | must be `measured` or `declared` |
 | `sources.fields.declaredMarket` | error / warning | `kind: market` with `evidence: declared` is an error; `allowDeclared: true` + `justification` turns it into this warning. Prefer adding `observedAtField` |
 | `sources.fields.allowDeclared` | error | `allowDeclared: true` without a `justification` string |
+| `sources.observedAt.missingInput` | warning | the declared `observedAtField` is not in the input relation, so the observedAt audit of that field cannot run: pass the observation-time column through from upstream |
 | `duration.invalid` | error | an ISO-8601 duration does not parse (`PT30M`, `P6D`, `P1Y`; no `1d`) |
 
 ## Spec structure
@@ -56,6 +57,14 @@ not expand because another block failed).
 | `output.groupBy` | error | must name a context |
 | `output.nullPolicy` / `output.passThrough` | error | `keep \| fillZero \| indicator` / `all \| keys \| none` |
 | `output.childName` | error | collides with an input field |
+| `output.roles` / `output.roles.unknown` / `output.roles.value` | error | `roles` must be an object of `group \| time \| entity \| label \| baseline \| weight` → one name |
+| `output.roles.unresolved` | error | a role names nothing: an input field (any role), a context (`group`), an entity (`entity`), a baseline or output column (`baseline`) |
+| `output.roles.baseline.notEmitted` | warning | the `baseline` role names a baseline, which is an intermediate column: derive it as a feature (`shareOfTotal`) and name that column |
+| `output.roles.time` | warning | the `time` role differs from `time.field` |
+| `output.include.unresolved` | error | `include` must be a list (a URI is resolved before compile; a bare string reached the compiler) |
+| `output.include.unknown` | warning | listed names match no column of this plan (the list may come from another plan version) |
+| `output.include.exclude` | info | both declared: `include` is the projection, `exclude` is ignored |
+| `audit.observedAt` | error | `count \| fail \| off` |
 
 ## Feature blocks (all scopes)
 

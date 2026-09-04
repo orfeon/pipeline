@@ -29,10 +29,16 @@ and review a spec quickly.
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
 | `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold`, `groupBy: <entity>`, `folds` (default 5), `artifact: {uri, refit, id}` or the URI string. `minHistory` accepted, ignored |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
-| `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none` |
+| `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
+| `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
 
 `output.exclude` selectors: name globs (`block.*`), `derivedFrom:<kind>`, `evidence:declared`,
-`scope:<scope>`, `block:<name>`.
+`scope:<scope>`, `block:<name>`. `output.include` accepts canonical or output names (a `<name>_isnull`
+entry keeps its base column); a URI may point to a JSON array, `{columns | fields | passed | include: [...]}`
+(objects with `name` allowed) or one name per line. `output.manifest` writes `manifest.json` at
+assembly (`planHash`, `outputHash`, `roles`, `include`, `fields`, `columns` with lineage, `artifacts`,
+`plan`) and, in batch, `manifest.run.json` at finalize (`rows`, `observedAtAudit.<field>` with `rows` /
+`nullValue` / `missing` / `late` / `afterPredictAt` / `measured` / `leadSecondsDeciles`).
 
 ## Sources document
 

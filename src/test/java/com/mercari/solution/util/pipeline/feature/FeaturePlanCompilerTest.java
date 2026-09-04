@@ -1292,4 +1292,141 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("10m", Durations.shortName(Durations.parse("PT10M")));
     }
 
+    // ------------------------------------------------------------------------------------------
+    // output contract: roles / include / manifest hashes, and the observedAt audit entries
+    // ------------------------------------------------------------------------------------------
+
+    private static final String OUTPUT_CONTRACT = "output:\n  prefix: f_\n"
+            + "  roles: {group: session, time: session_time, entity: seller_id, label: sold, baseline: market}\n"
+            + "  include: [price_per_unit, f_relative_start_price_rank, nope]\n"
+            + "  manifest: target/feature-manifests/test/manifest.json\n";
+
+    @Test
+    public void testOutputRolesAndInclude() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", OUTPUT_CONTRACT));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        // include is the projection: only the listed columns are emitted, by canonical or output name
+        Assertions.assertEquals(List.of("f_price_per_unit", "f_relative_start_price_rank"),
+                plan.getEmittedColumns().stream().map(OutputColumn::getOutputName).toList());
+        Assertions.assertTrue(hasCode(plan, "output.include.unknown"), plan::describe);
+        // the baseline role names an intermediate column: reported, not an error (baselines[].emit is the follow-up)
+        Assertions.assertTrue(hasCode(plan, "output.roles.baseline.notEmitted"), plan::describe);
+        Assertions.assertEquals("session", plan.getSpec().output.roles.get("group"));
+        Assertions.assertEquals("sold", plan.getRoleColumns().get("label"));
+        Assertions.assertNull(plan.getRoleColumns().get("group")); // a context, not a column
+        Assertions.assertTrue(plan.describe().contains("-- output contract"), plan::describe);
+        final JsonObject json = plan.toJson();
+        Assertions.assertEquals("sold", json.getAsJsonObject("roles").getAsJsonObject("label").get("column").getAsString());
+        Assertions.assertEquals(3, json.getAsJsonObject("include").getAsJsonArray("listed").size());
+    }
+
+    @Test
+    public void testIncludeAndManifestAreOutsideThePlanHash() {
+        final FeaturePlan base = compile(SOURCES, SPEC);
+        final FeaturePlan projected = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n",
+                "output:\n  prefix: f_\n  include: [price_per_unit]\n  includeHash: abc\n  manifest: gs://b/m.json\n"));
+        // a projection does not change what is fitted: same plan hash (artifacts stay valid), different output hash
+        Assertions.assertEquals(base.getHash(), projected.getHash());
+        Assertions.assertNotEquals(base.getOutputHash(), projected.getOutputHash());
+        Assertions.assertEquals(List.of("f_price_per_unit"), projected.getEmittedColumns().stream().map(OutputColumn::getOutputName).toList());
+        // roles are part of the output hash too
+        final FeaturePlan roles = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {label: sold}\n"));
+        Assertions.assertNotEquals(base.getOutputHash(), roles.getOutputHash());
+        // include replaces exclude
+        final FeaturePlan both = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n",
+                "output:\n  prefix: f_\n  include: [price_per_unit]\n  exclude: [price_per_unit]\n"));
+        Assertions.assertTrue(hasCode(both, "output.include.exclude"));
+        Assertions.assertEquals(1, both.getEmittedColumns().size());
+    }
+
+    @Test
+    public void testOutputRolesDiagnostics() {
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {rank: sold}\n")), "output.roles.unknown"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {label: nope}\n")), "output.roles.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {group: nope}\n")), "output.roles.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {time: quantity}\n")), "output.roles.time"));
+        // a URI must be resolved by FeaturePlanService before the compiler sees it
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  include: gs://b/passed.json\n")), "output.include.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC + "audit: {observedAt: maybe}\n"), "audit.observedAt"));
+    }
+
+    @Test
+    public void testIncludeListParsing() {
+        Assertions.assertEquals(List.of("a", "b"), FeaturePlanService.parseIncludeList("[\"a\", \"b\"]", "x"));
+        Assertions.assertEquals(List.of("a", "b"), FeaturePlanService.parseIncludeList("{\"passed\": [\"a\", {\"name\": \"b\", \"gain\": 1}]}", "x"));
+        Assertions.assertEquals(List.of("a", "b"), FeaturePlanService.parseIncludeList("# comment\na\n\nb\n", "x"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> FeaturePlanService.parseIncludeList("{\"other\": 1}", "x"));
+        final JsonObject parameters = new JsonObject();
+        final JsonObject output = new JsonObject();
+        output.addProperty("include", "data:" + java.util.Base64.getEncoder().encodeToString("a\nb".getBytes()));
+        parameters.add("output", output);
+        FeaturePlanService.resolveInclude(parameters, null);
+        Assertions.assertEquals(2, output.getAsJsonArray("include").size());
+        Assertions.assertTrue(output.get("includeSource").getAsString().startsWith("data:"));
+        Assertions.assertEquals(16, output.get("includeHash").getAsString().length());
+    }
+
+    private static List<Schema.Field> inputFields(final boolean withSnapshotTime) {
+        final List<Schema.Field> fields = new java.util.ArrayList<>(List.of(
+                Schema.Field.of("session_id", Schema.FieldType.STRING), Schema.Field.of("seller_id", Schema.FieldType.STRING),
+                Schema.Field.of("category", Schema.FieldType.STRING), Schema.Field.of("quantity", Schema.FieldType.INT32),
+                Schema.Field.of("start_price", Schema.FieldType.FLOAT64), Schema.Field.of("condition_grade", Schema.FieldType.STRING),
+                Schema.Field.of("current_bid_t10", Schema.FieldType.FLOAT64), Schema.Field.of("sold", Schema.FieldType.INT32),
+                Schema.Field.of("final_price", Schema.FieldType.FLOAT64), Schema.Field.of("session_time", Schema.FieldType.TIMESTAMP)));
+        if (withSnapshotTime) fields.add(Schema.Field.of("snapshot_time", Schema.FieldType.TIMESTAMP));
+        return fields;
+    }
+
+    @Test
+    public void testObservedAtAuditEntries() {
+        final JsonObject sourcesJson = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final JsonObject specJson = Config.convertConfigJson(SPEC, Config.Format.yaml);
+        // observation column present: one runnable entry with the declared deadline (event_time - 10 min)
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sourcesJson, specJson, inputFields(true));
+        Assertions.assertEquals(1, plan.getObservedAtAudits().size(), plan::describe);
+        final FeaturePlan.ObservedAtAudit audit = plan.getObservedAtAudits().get(0);
+        Assertions.assertEquals("current_bid_t10", audit.field());
+        Assertions.assertEquals("snapshot_time", audit.observedAtField());
+        Assertions.assertTrue(audit.present());
+        Assertions.assertEquals(-10L * 60 * 1000, audit.deadlineOffsetMillis());
+        Assertions.assertEquals(-8L * 60 * 1000, audit.predictAtOffsetMillis());
+        Assertions.assertEquals(1, plan.getRunnableObservedAtAudits().size());
+        Assertions.assertFalse(hasCode(plan, "sources.observedAt.missingInput"), plan::describe);
+        Assertions.assertTrue(plan.describe().contains("-- observedAt audit"), plan::describe);
+        Assertions.assertEquals(1, plan.toJson().getAsJsonArray("observedAtAudit").size());
+        // observation column absent from the input: the declaration cannot be checked -> warning, entry not runnable
+        final FeaturePlan missing = FeaturePlanCompiler.compile(sourcesJson, specJson, inputFields(false));
+        Assertions.assertTrue(hasCode(missing, "sources.observedAt.missingInput"), missing::describe);
+        Assertions.assertEquals(1, missing.getObservedAtAudits().size());
+        Assertions.assertTrue(missing.getRunnableObservedAtAudits().isEmpty());
+        // audit.observedAt: off keeps the entries in the report but the engine runs none
+        final JsonObject off = specJson.deepCopy();
+        final JsonObject auditSpec = new JsonObject();
+        auditSpec.addProperty("observedAt", "off");
+        off.add("audit", auditSpec);
+        Assertions.assertTrue(FeaturePlanCompiler.compile(sourcesJson, off, inputFields(true)).getRunnableObservedAtAudits().isEmpty());
+    }
+
+    @Test
+    public void testManifestContent() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", OUTPUT_CONTRACT));
+        final JsonObject manifest = plan.toManifest(List.of(Schema.Field.of("session_id", Schema.FieldType.STRING), Schema.Field.of("sold", Schema.FieldType.INT32)),
+                java.util.Map.of("enc", "gs://b/artifacts/hash/enc.avro"));
+        Assertions.assertEquals(plan.getHash(), manifest.get("planHash").getAsString());
+        Assertions.assertEquals(plan.getOutputHash(), manifest.get("outputHash").getAsString());
+        Assertions.assertEquals(2, manifest.getAsJsonArray("columns").size());
+        final JsonObject first = manifest.getAsJsonArray("columns").get(0).getAsJsonObject();
+        Assertions.assertEquals("f_price_per_unit", first.get("name").getAsString());
+        Assertions.assertEquals("row", first.get("scope").getAsString());
+        Assertions.assertFalse(first.get("categorical").getAsBoolean());
+        Assertions.assertTrue(first.getAsJsonObject("lineage").has("derivedFrom"));
+        // pass-through fields carry their contract and role
+        final JsonObject sold = manifest.getAsJsonArray("fields").get(1).getAsJsonObject();
+        Assertions.assertEquals("label", sold.get("role").getAsString());
+        Assertions.assertEquals("auction_results", sold.get("source").getAsString());
+        Assertions.assertEquals("outcome", sold.get("kind").getAsString());
+        Assertions.assertEquals("gs://b/artifacts/hash/enc.avro", manifest.getAsJsonObject("artifacts").get("enc").getAsString());
+        Assertions.assertTrue(manifest.getAsJsonObject("plan").has("stages"));
+    }
+
 }

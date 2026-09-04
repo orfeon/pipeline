@@ -66,7 +66,8 @@ time; warnings and hints from the compiler are part of that report.
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts* and *Out-of-fold fits*). `minHistory` is accepted but not implemented yet (warning). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
-| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`). |
+| output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (name globs such as `block.*` or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`), `roles` (the data contract: `group` / `time` / `entity` / `label` / `baseline` / `weight` → an input field, a context / entity name or a baseline name; role fields always pass through and are recorded in the manifest so consumers never treat them as features), `include` (the output projection: a list of column names, or a URI / path to a JSON array / `{columns: [...]}` / one-name-per-line file such as a screening step's pass list; when declared it replaces `exclude`), `manifest` (URI of the assembly-time manifest, see [Output contract](#output-contract-roles-include-manifest)). |
+| audit      | optional | Object                         | `observedAt` (`count` (default) \| `fail` \| `off`): what the [observedAt audit](#observedat-audit-declaration-vs-data) does with a row whose observation time is after the declared availability — count it (metrics + run manifest), route it to the failure output, or skip the audit. |
 
 ### Sources contract
 
@@ -339,6 +340,70 @@ columns add the constraint that a past row at t' contributes only when
   (+ the predictAt offset) later. This is what makes training features reproducible at serving time.
 - **violation** — an emitted column would use information available after `predictAt`: assembly fails.
   Such a column may still exist as an intermediate consumed by a sequence feature (its past values are fine).
+
+### Output contract (roles, include, manifest)
+
+The output table is the shared input of a training job, a screening step and an evaluation step. Three
+`output` parameters make its contract explicit instead of leaving it to each consumer:
+
+```yaml
+output:
+  prefix: f_
+  passThrough: keys
+  roles:
+    group: session          # a context name (its keys are recorded) or an input field
+    time: session_time      # ordering for time-series splits
+    entity: seller_id       # join key of predictions
+    label: sold             # the outcome the consumer derives its target from
+    baseline: market        # a baseline name or an output column
+  include: gs://bucket/screen/${args.version}/passed.json   # optional projection
+  manifest: gs://bucket/features/${args.version}/manifest.json
+```
+
+- **roles** name what a consumer must not treat as a feature. Every role must resolve (an input field,
+  a context / entity for `group` / `entity`, a baseline for `baseline`; `output.roles.unresolved`
+  otherwise). An input field with a role is passed through whatever `passThrough` says. A `baseline`
+  role naming a baseline that is not emitted is reported (`output.roles.baseline.notEmitted`): baselines
+  are intermediate columns today, so derive the value as a feature (`shareOfTotal`) and name that column.
+- **include** is the projection: only the listed columns (canonical or output names; a `<name>_isnull`
+  entry keeps its base column) are emitted, plus the pass-through fields. Names matching no column are a
+  warning (`output.include.unknown`) — the list may come from another plan version. `include` and
+  `exclude` are not combined: when `include` is declared, `exclude` is ignored (`output.include.exclude`).
+  A URI is read at assembly and its content hash recorded, so a file that changes later is still traceable.
+- **manifest** writes `manifest.json` at assembly (a dry run writes it too): `planHash`, **`outputHash`**
+  (plan hash + emitted names + roles + include content — the identity of the output table, since a
+  projection does not change the plan hash), `roles` (with the resolved column / keys), `include` (source,
+  hash, listed and unknown names), `fields` (pass-through input fields with source / kind / availability
+  and their role), `columns` (every emitted column: type, `categorical`, scope, block, operator,
+  availableAt / computeAt / status, placement, lineage — `derivedFrom`, `sources`, `evidence`, inputs),
+  `artifacts` (fitted blocks → artifact path) and the full `plan` report. A batch run also writes
+  `manifest.run.json` next to it at finalize with what only execution knows: the output row count and the
+  observedAt audit results.
+
+`include` and `manifest` are outside the plan hash (artifacts stay valid across projections);
+`roles` and the projection are inside `outputHash`.
+
+### observedAt audit (declaration vs. data)
+
+`availableAt` is a declaration the data may violate: a "t-10 price" column whose rows were actually
+observed after `event_time - PT10M` leaks whatever happened in between, and no static check can see
+it. For every input field whose contract names an `observedAtField`, the engine compares that column
+with the declared availability on every row:
+
+- **late** — `observedAt > event_time + availableAt` (the declaration is wrong for this row); for a
+  dynamic declaration (`atRowCreation`) the deadline is `predictAt`.
+- **afterPredictAt** — `observedAt > predictAt`: the value would not have existed when the prediction
+  was made. This is the leak.
+- **missing** — the field has a value but no observation time.
+
+Counts are Beam metrics (`feature/observedAt_<field>_late|afterPredictAt|missing`, visible in the job
+UI), the plan report lists the audited fields (`-- observedAt audit`), and with `output.manifest` the
+run manifest holds per field the counts plus the deciles of `predictAt − observedAt` in seconds
+(`leadSecondsDeciles`: `[min, p10, …, p90, max]`; negative = observed after predictAt). A declared
+`observedAtField` that is not in the input relation is a warning (`sources.observedAt.missingInput`) —
+pass the observation-time column through from upstream to make the claim auditable. `audit.observedAt:
+fail` routes late rows to the failure output (fatal under `failFast`), which turns the audit into a
+guard for a serving pipeline.
 
 ## Validating without running (validate --expand)
 

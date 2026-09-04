@@ -132,6 +132,16 @@ parameters:
   an input field's name (`column.shadowsInput`); names contain no `.` and do not start with `_`.
 - `output.passThrough: keys` makes the output table safe for `SELECT *` (input fields are not
   availability-checked, so a full pass-through can carry post-event columns into a model).
+- When the table feeds a training / screening / evaluation step, declare its contract:
+  `output.roles: {group, time, entity, label, baseline, weight}` (role columns are never features and
+  always pass through), `output.manifest: <uri>` (written at assembly, also by a dry run: roles, every
+  emitted column with lineage and availability, `planHash` / `outputHash`; a batch run adds
+  `manifest.run.json` with the row count and the observedAt audit), and `output.include: <uri or list>`
+  to project the columns a screening step passed (replaces `exclude`; outside the plan hash).
+- Make pre-event claims auditable: pass the `observedAtField` column through from upstream. The engine
+  then counts rows observed after the declared availability / after predictAt (metrics
+  `feature/observedAt_<field>_*`, run manifest deciles of `predictAt − observedAt`);
+  `audit.observedAt: fail` turns it into a guard.
 - **Template arguments** (`sources`, `features` files and the config itself): only the exact form
   `${args.<name>}` is substituted — a bare `${name}` stays literal. The config's own `args:` block
   supplies the defaults; the `args` of `run-pipeline` / `launch-pipeline` (or `--args` on the CLI)
@@ -236,9 +246,11 @@ not alter values).
 
 ### Step 7 — iterate safely
 
-- The **plan hash** covers the sources contract and the spec except `fit.artifact` and `engine`.
-  Changing a feature changes the hash and the artifact directory (`<uri>/<planHash>/`); `artifact.id`
-  pins a version for a serving config with `fit.mode: static`.
+- The **plan hash** covers the sources contract and the spec except `fit.artifact`, `engine`,
+  `output.include` and `output.manifest`. Changing a feature changes the hash and the artifact directory
+  (`<uri>/<planHash>/`); `artifact.id` pins a version for a serving config with `fit.mode: static`.
+  The **output hash** (manifest) adds the projection, roles and include content: compare it, not the
+  plan hash, to tell whether two runs produced the same table.
 - `engine.*` (`parallelWaves`, `rowId`, `spill.*`) never changes values — use `engine.parallelWaves:
   false` as an A/B control when a result looks wrong.
 - Any change that should not alter values (renames, `engine`, worker settings, runner) is verified by a

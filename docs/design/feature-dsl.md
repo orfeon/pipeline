@@ -1189,6 +1189,18 @@ exclusion and fit-only leak audits. `validate --expand` lists `derivedFrom` per 
 incident of the type "most of the lift concentrates in one column" is visible beforehand when
 market-derived columns are identifiable from the lineage.
 
+**Output contract**: `output.roles` (`group` / `time` / `entity` / `label` / `baseline` / `weight`)
+declares which output columns are the consumer's keys, ordering, label and baseline rather than
+features — the rule "a role column is never a feature" becomes mechanical for the training, screening
+and evaluation steps that share the table. `output.include` is the projection (a list or a URI to a
+screening step's pass list; it replaces `exclude` when declared, unknown names are a warning), and
+`output.manifest` writes the contract at assembly: roles, every emitted column with lineage,
+availability, status and placement, the pass-through fields with their contract, the plan hash and an
+**output hash** (plan hash + projection + roles + include content). `include` / `manifest` are outside
+the plan hash — a projection does not change what is fitted, so fit artifacts stay valid — which is why
+the output table carries a hash of its own. A batch run appends `manifest.run.json` with the row count
+and the observedAt audit results.
+
 **Validation (`validate --expand`)**: a dry run returning (a) DAG cycles, undefined references, ref
 resolution; (b) rejection of a population reading a sequence's future; (c) every expanded (desugared)
 output column with type and evaluation order, plus the estimate of partition switches (key changes)
@@ -1225,8 +1237,11 @@ EWMA) are distinguished by type.
 
 **Data audit (declaration vs. data)**: `availableAt` is a declaration the data may violate (rows of a
 "t-10 bid" column timestamped after `event_time − 10 min`). For `measured` fields (`observedAtField`),
-an audit query detecting `observedAt > availableAt` rows is generated from the sources document (see
-feature-engine.md). `declared` fields cannot be audited and are marked "not auditable" in the
+the engine audits every row at the entry (implemented): rows observed after the declared availability
+(`late`), after `predictAt` (`afterPredictAt`, the actual leak) and rows without an observation time
+are counted as metrics and, with `output.manifest`, written to the run manifest together with the
+deciles of `predictAt − observedAt`; `audit.observedAt: fail` routes late rows to the failure output.
+`declared` fields cannot be audited and are marked "not auditable" in the
 `validate --expand` output and the lineage — an unauditable declaration is an untrusted declaration,
 and its derived columns carry a warning (market = error, §2.3). Likewise for `ingestionLag`: when the
 input relation has an ingestion-time column (`ingestedAtField`), an audit detects `ingestedAt >
@@ -1306,7 +1321,7 @@ tooling's domain.
 ## 9. Implementation phases
 
 **v0**: sources (types, descriptions, `availableAt`, **`ingestionLag`**, **`observedAtField` /
-`evidence`**, **`kind`**, **`snapshotOf`** (declaration and lineage resolution; the snapshot join itself
+`evidence`** (+ the runtime observedAt audit, §7), **`kind`**, **`snapshotOf`** (declaration and lineage resolution; the snapshot join itself
 stays upstream), `validFor`, default inheritance) + **the availability check for row / context /
 sequence** (propagation on `effectiveAvailableAt`, static checks, near-edge shift, availability-filter
 directive, `validFor` expiry, prefix lint, missing `observedAtField`, declared-origin warnings,
@@ -1320,7 +1335,7 @@ could execute it). The sources contract items (`ingestionLag` / `observedAtField
 v0 because retrofitting leak checks forces a full revision of existing definitions, and checks without
 them mass-produce "legal" skew.
 
-**v0 additions**: the shrinkage block (`weights: fixed | varianceComponents`, recursive shrinkage of
+**v0 additions**: the output contract (`output.roles` / `include` / `manifest`, §7) + the shrinkage block (`weights: fixed | varianceComponents`, recursive shrinkage of
 chain lattices, `leaveNodeOut`; the legacy `smoothing` stays as sugar) + keySet `structure: hierarchy |
 cross` + generalised `hierarchy` (§5.3.1: coarse-cross entries, `additive`) + **keySet `windows`
 (§5.3 rule 5) and the sequence → encoding rewrite lint** + **per-keySet `shrinkage` override (§5.3 rule

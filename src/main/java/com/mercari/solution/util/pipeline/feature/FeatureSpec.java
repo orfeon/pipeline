@@ -8,7 +8,9 @@ import com.mercari.solution.util.pipeline.feature.SourceContract.Json;
 import java.io.Serializable;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The "intent" side of the DSL (docs/design/feature-dsl.md §3–§5): the parsed {@code parameters} block of a
@@ -192,6 +194,24 @@ public class FeatureSpec implements Serializable {
         public String childName = "rows";
         /** Which input fields pass through to the output: all (default) | keys (time.field, entity / context keys, parentFields) | none. */
         public String passThrough = "all";
+        /** Data-contract roles (group / time / entity / label / baseline / weight → input field, context, entity or baseline name); a role column is never a feature. */
+        public Map<String, String> roles = new LinkedHashMap<>();
+        /** Output projection: the columns to emit (canonical or output names); null = not declared (exclude applies). */
+        public List<String> include;
+        /** Where {@code include} came from when it was a URI (resolved by FeaturePlanService before compile). */
+        public String includeSource;
+        /** SHA-256 (16 hex) of the resolved include list content, recorded in the manifest / output hash. */
+        public String includeHash;
+        /** URI of the assembly-time manifest ({@code manifest.json}); the run manifest is written next to it. */
+        public String manifest;
+
+        public static final List<String> ROLE_NAMES = List.of("group", "time", "entity", "label", "baseline", "weight");
+    }
+
+    /** The observedAt audit (sources with {@code observedAtField}): what to do with a row observed after its declared availability. */
+    public static class AuditSpec implements Serializable {
+        /** count (default: counters + run manifest) | fail (route the row to the failure output) | off. */
+        public String observedAt = "count";
     }
 
     /** Engine (runtime) knobs that do not change the plan: {@code engine.spill} of the keyed stages' sorter, the wave fan-out. */
@@ -210,6 +230,7 @@ public class FeatureSpec implements Serializable {
 
     public List<LineageEntry> lineage = new ArrayList<>();
     public EngineSpec engine = new EngineSpec();
+    public AuditSpec audit = new AuditSpec();
     public String timeField;
     public List<String> orderTieBreak = new ArrayList<>();
     public String predictAtExpression;
@@ -332,6 +353,44 @@ public class FeatureSpec implements Serializable {
                     diagnostics.error("output.passThrough", "output", "output.passThrough must be all | keys | none: " + passThrough);
                 } else {
                     spec.output.passThrough = passThrough;
+                }
+            }
+            if (out.has("roles") && out.get("roles").isJsonObject()) {
+                for (final Map.Entry<String, JsonElement> e : out.getAsJsonObject("roles").entrySet()) {
+                    if (!OutputSpec.ROLE_NAMES.contains(e.getKey())) {
+                        diagnostics.error("output.roles.unknown", "output.roles", "unknown role '" + e.getKey() + "' (roles: " + OutputSpec.ROLE_NAMES + ")");
+                        continue;
+                    }
+                    if (e.getValue() == null || e.getValue().isJsonNull()) continue;
+                    if (!e.getValue().isJsonPrimitive()) {
+                        diagnostics.error("output.roles.value", "output.roles", "role '" + e.getKey() + "' must name one field / context / entity / baseline");
+                        continue;
+                    }
+                    spec.output.roles.put(e.getKey(), e.getValue().getAsString());
+                }
+            } else if (out.has("roles") && !out.get("roles").isJsonNull()) {
+                diagnostics.error("output.roles", "output", "output.roles must be an object (group / time / entity / label / baseline / weight)");
+            }
+            if (out.has("include") && !out.get("include").isJsonNull()) {
+                if (out.get("include").isJsonArray()) {
+                    spec.output.include = Json.strings(out, "include");
+                } else {
+                    // a URI is resolved by FeaturePlanService.resolve before the compiler sees the parameters
+                    diagnostics.error("output.include.unresolved", "output", "output.include must be a list of column names (a URI is resolved before compile): " + out.get("include"));
+                }
+            }
+            spec.output.includeSource = Json.string(out, "includeSource");
+            spec.output.includeHash = Json.string(out, "includeHash");
+            spec.output.manifest = Json.string(out, "manifest");
+        }
+        if (parameters.has("audit") && parameters.get("audit").isJsonObject()) {
+            final JsonObject audit = parameters.getAsJsonObject("audit");
+            final String observedAt = Json.string(audit, "observedAt");
+            if (observedAt != null) {
+                if (!List.of("count", "fail", "off").contains(observedAt)) {
+                    diagnostics.error("audit.observedAt", "audit", "audit.observedAt must be count | fail | off: " + observedAt);
+                } else {
+                    spec.audit.observedAt = observedAt;
                 }
             }
         }

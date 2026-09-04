@@ -820,4 +820,102 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    // ------------------------------------------------------------------------------------------
+    // output contract (roles / include / manifest) and the observedAt audit
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * The source with the observation-time column of {@code current_bid_t10} (declared availability event_time - 10 min,
+     * predictAt event_time - 8 min): A/s1 on time, A/s2 after predictAt, B exactly at the deadline, C/s1 late but
+     * before predictAt, C/s2 without observation time, D on time.
+     */
+    private static final String AUDIT_SOURCE_CONFIG = SOURCE_CONFIG
+            .replace("final_price: 150.0, session_time: \"2025-01-01T10:00:00Z\"}", "final_price: 150.0, session_time: \"2025-01-01T10:00:00Z\", snapshot_time: \"2025-01-01T09:49:00Z\"}")
+            .replace("final_price: 0.0,   session_time: \"2025-01-01T10:00:00Z\"}", "final_price: 0.0,   session_time: \"2025-01-01T10:00:00Z\", snapshot_time: \"2025-01-01T09:55:00Z\"}")
+            .replace("final_price: 0.0,   session_time: \"2025-01-03T10:00:00Z\"}", "final_price: 0.0,   session_time: \"2025-01-03T10:00:00Z\", snapshot_time: \"2025-01-03T09:50:00Z\"}")
+            .replace("final_price: 95.0,  session_time: \"2025-01-20T10:00:00Z\"}", "final_price: 95.0,  session_time: \"2025-01-20T10:00:00Z\", snapshot_time: \"2025-01-20T09:51:00Z\"}")
+            .replace("final_price: 140.0, session_time: \"2025-02-01T10:00:00Z\"}", "final_price: 140.0, session_time: \"2025-02-01T10:00:00Z\", snapshot_time: \"2025-02-01T09:45:00Z\"}")
+            .replace("        - {name: session_time, type: timestamp}\n", "        - {name: session_time, type: timestamp}\n        - {name: snapshot_time, type: timestamp}\n");
+
+    private static String contractConfig(final String manifest) {
+        return FEATURE_CONFIG.replace("      output:\n        prefix: f_\n",
+                "      output:\n        prefix: f_\n        passThrough: keys\n"
+                        + "        roles: {group: session, time: session_time, entity: seller_id, label: sold}\n"
+                        + "        include: [f_price_per_unit, f_relative_start_price_rank, enc__seller_id__count, f_nope]\n"
+                        + "        manifest: " + manifest + "\n");
+    }
+
+    @Test
+    public void testManifestIncludeAndObservedAtAudit() throws java.io.IOException {
+        Assertions.assertEquals(5, AUDIT_SOURCE_CONFIG.split("snapshot_time: \"").length - 1);
+        final String dir = "target/feature-manifests/" + java.util.UUID.randomUUID(); // relative: Beam FileSystems treats a Windows drive letter as a scheme
+        final String manifest = dir + "/manifest.json";
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(AUDIT_SOURCE_CONFIG + contractConfig(manifest)));
+        final MCollection output = outputs.get("features");
+        final Schema schema = output.getSchema();
+        // include projects the features; passThrough keys + the role fields (sold is a label, not a key) pass through
+        Assertions.assertEquals(Set.of("session_id", "seller_id", "sold", "session_time", "f_price_per_unit", "f_relative_start_price_rank", "f_enc__seller_id__count"),
+                new HashSet<>(schema.getFields().stream().map(Schema.Field::getName).toList()));
+        Assertions.assertNull(schema.getField("snapshot_time"));
+        Assertions.assertNull(schema.getField("f_vs_market"));
+
+        // the assembly-time manifest exists before the run (a dry run writes the same file)
+        final com.google.gson.JsonObject assembled = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(java.nio.file.Path.of(manifest))).getAsJsonObject();
+        Assertions.assertEquals(List.of("f_price_per_unit", "f_relative_start_price_rank", "f_enc__seller_id__count"),
+                assembled.getAsJsonArray("columns").asList().stream().map(e -> e.getAsJsonObject().get("name").getAsString()).toList());
+        Assertions.assertEquals("session", assembled.getAsJsonObject("roles").getAsJsonObject("group").get("name").getAsString());
+        Assertions.assertEquals("sold", assembled.getAsJsonObject("roles").getAsJsonObject("label").get("column").getAsString());
+        Assertions.assertEquals(16, assembled.get("outputHash").getAsString().length());
+        Assertions.assertTrue(assembled.getAsJsonObject("include").getAsJsonArray("unknown").toString().contains("f_nope"));
+        final List<String> fieldNames = assembled.getAsJsonArray("fields").asList().stream().map(e -> e.getAsJsonObject().get("name").getAsString()).toList();
+        Assertions.assertEquals(List.of("session_id", "seller_id", "sold", "session_time"), fieldNames);
+        Assertions.assertEquals(1, assembled.getAsJsonObject("plan").getAsJsonArray("observedAtAudit").size());
+
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int n = 0;
+            for (final MElement row : rows) {
+                n++;
+                Assertions.assertNotNull(row.getPrimitiveValue("sold"));
+            }
+            Assertions.assertEquals(6, n);
+            return null;
+        });
+        pipeline.run();
+
+        // the run manifest: row count and the observedAt audit of current_bid_t10
+        final com.google.gson.JsonObject run = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(java.nio.file.Path.of(dir + "/manifest.run.json"))).getAsJsonObject();
+        Assertions.assertEquals(assembled.get("planHash").getAsString(), run.get("planHash").getAsString());
+        Assertions.assertEquals(assembled.get("outputHash").getAsString(), run.get("outputHash").getAsString());
+        Assertions.assertEquals(6, run.get("rows").getAsLong());
+        final com.google.gson.JsonObject audit = run.getAsJsonObject("observedAtAudit").getAsJsonObject("current_bid_t10");
+        Assertions.assertEquals(6, audit.get("rows").getAsLong());
+        Assertions.assertEquals(1, audit.get("missing").getAsLong());          // C/s2
+        Assertions.assertEquals(2, audit.get("late").getAsLong());             // A/s2 (09:55), C/s1 (09:51) after the 09:50 deadline
+        Assertions.assertEquals(1, audit.get("afterPredictAt").getAsLong());   // A/s2 after 09:52
+        Assertions.assertEquals(5, audit.get("measured").getAsLong());
+        final com.google.gson.JsonArray deciles = audit.getAsJsonArray("leadSecondsDeciles");
+        Assertions.assertEquals(11, deciles.size());
+        Assertions.assertEquals(-180.0, deciles.get(0).getAsDouble(), 1e-9);   // A/s2: predictAt 09:52 - observed 09:55
+        Assertions.assertEquals(420.0, deciles.get(10).getAsDouble(), 1e-9);   // D: 09:52 - 09:45
+    }
+
+    @Test
+    public void testObservedAtAuditFailRoutesLateRows() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("    inputs: [create]\n", "    inputs: [create]\n    failFast: false\n")
+                .replace("      output:\n        prefix: f_\n", "      audit: {observedAt: fail}\n      output:\n        prefix: f_\n");
+        Assertions.assertTrue(config.contains("failFast: false"));
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(AUDIT_SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Set<String> keys = new HashSet<>();
+            for (final MElement row : rows) keys.add(row.getAsString("session_id") + "/" + row.getAsString("seller_id"));
+            // the two rows observed after their declared availability went to the failure output
+            Assertions.assertEquals(Set.of("A/s1", "B/s1", "C/s2", "D/s1"), keys);
+            return null;
+        });
+        pipeline.run();
+    }
+
 }

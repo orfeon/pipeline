@@ -85,6 +85,13 @@ reads what the compile layer wrote into each column's `coordinates`.
   agent loop reads them — keep codes stable, and say what is available in the message
   (`"(available: " + OperatorCatalog.AVAILABLE_STATS + ")"`). One hint per block for repetitive
   advice (`hintedBlocks`); secondary failures are demoted to caused-by info.
+- Output contract + audit (PR after #102): `OutputSpec.roles / include / includeSource / includeHash /
+  manifest` and `AuditSpec.observedAt` in `FeatureSpec`; `FeaturePlanService.resolveInclude` reads an
+  include URI before compile (list + content hash); the compiler validates roles (`resolveRoles`), applies
+  `include` as the projection in `finalizeColumns` (`applyInclude`, replaces `exclude`) and builds one
+  `FeaturePlan.ObservedAtAudit` per input field with an `observedAtField` (`resolveObservedAtAudits`;
+  `present` = the observation column is in the input schema). `FeaturePlan.toManifest` is the manifest the
+  transform writes at assembly; `FeatureStages.artifactPaths` fills its `artifacts`.
 - `FeaturePlan` — the result: columns, `Stage` records (`index`, `kind`, `keys`, `blocks`,
   `columnNames`, `dependsOn`; predicates `isKeyed` / `isReplay` / `runsUnderSingleKey`),
   `getShuffleCount` (linear), `getWaves` / `getDagShuffleEstimate` (DAG), the **engine geometry**
@@ -130,6 +137,13 @@ reads what the compile layer wrote into each column's `coordinates`.
 `apply(input, inputSchema, plan, outputSchema, loggings, failFast)`:
 
 1. `ToElementDoFn`: every row → `DataType.ELEMENT` map keyed by canonical names, **re-timestamped
+   from `time.field`**; also runs the observedAt audit (`plan.getRunnableObservedAtAudits()`: counters
+   `feature/observedAt_<field>_*`, `audit.observedAt: fail` throws into the failure path, and with a
+   manifest URI in batch a `KV<String, Double>` side output of `predictAt − observedAt` samples).
+   The run manifest (`writeRunManifest`: `ApproximateQuantiles.perKey(11)` + `Count.perKey` in the
+   global window + the finalize DoFns' `#rows` count side output → `View.asList` →
+   `WriteRunManifestDoFn`) is written next to the manifest; never consume the output PCollection inside
+   the engine — the module calls `setCoder` on it once more, which fails after a use. **Re-timestamped
    from `time.field`** (null → failure output); assigns `__rowId` (declared `engine.rowId` via
    `keyWithNullTokens`, else a UUID) only when the run is parallel.
 2. Stage loop — linear (`engine.parallelWaves: false`, or streaming, or no wave with ≥ 2 stages) or
@@ -209,7 +223,9 @@ shape the output schema (lineage in field options).
    `finishStaticFitted` (lookup fits: the artifact is available at `computeAt` by declaration, only
    the row side decides). A violation that is consumed becomes a `_` intermediate; a terminal
    violation is `availability.violation`.
-8. **Plan hash / artifacts.** `withoutArtifact` strips `engine` and `fit.artifact`. A new
+8. **Plan hash / artifacts.** `withoutArtifact` strips `engine`, `fit.artifact` and the output
+   projection (`output.include` / `includeSource` / `includeHash` / `manifest`); the projection, roles
+   and include content go into `FeaturePlan.getOutputHash` instead (the output-table identity). A new
    *runtime-only* knob goes under `engine` (or is stripped explicitly); a new *semantic* parameter
    must stay in the hash. Artifacts are content-addressed by that hash under `<uri>/<planHash>/`
    and cached per JVM (`ARTIFACT_CACHE` / `MODEL_CACHE`), so a path must never be reused for
