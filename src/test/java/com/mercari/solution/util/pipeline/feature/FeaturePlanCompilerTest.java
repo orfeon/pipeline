@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.feature;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.Schema;
@@ -8,6 +9,8 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class FeaturePlanCompilerTest {
 
@@ -1326,6 +1329,108 @@ public class FeaturePlanCompilerTest {
         final JsonObject json = plan.toJson();
         Assertions.assertEquals("sold", json.getAsJsonObject("roles").getAsJsonObject("label").get("column").getAsString());
         Assertions.assertEquals(3, json.getAsJsonObject("include").getAsJsonArray("listed").size());
+    }
+
+    @Test
+    public void testIncludeKeepsRoleColumns() {
+        // a pass list never names a role column (roles were never candidates): the baseline's emitted copy and a
+        // label derived as a column stay emitted under the projection, and the report says which were kept
+        final String spec = SPEC.replace("output:\n  prefix: f_\n", OUTPUT_CONTRACT.replace("label: sold", "label: price_per_unit").replace("include: [price_per_unit, ", "include: ["))
+                .replace("baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
+                        "baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(Set.of("f_marketProb", "f_price_per_unit", "f_relative_start_price_rank"),
+                plan.getEmittedColumns().stream().map(OutputColumn::getOutputName).collect(java.util.stream.Collectors.toSet()));
+        Assertions.assertTrue(hasCode(plan, "output.include.role"), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "output.roles.baseline.notEmitted"), plan::describe);
+        Assertions.assertEquals("f_marketProb", plan.getRoleColumns().get("baseline"));
+        Assertions.assertEquals("f_price_per_unit", plan.getRoleColumns().get("label"));
+        final JsonObject manifest = plan.toManifest(List.of(), Map.of());
+        Assertions.assertEquals("baseline", manifest.getAsJsonArray("columns").asList().stream().map(JsonElement::getAsJsonObject)
+                .filter(c -> "f_marketProb".equals(c.get("name").getAsString())).findFirst().orElseThrow().get("role").getAsString());
+        // without a role the same copy column is projected away like any feature
+        final FeaturePlan noRole = compile(SOURCES, spec.replace(", baseline: market}", "}"));
+        Assertions.assertFalse(noRole.getEmittedColumns().stream().anyMatch(c -> c.getOutputName().equals("f_marketProb")), noRole::describe);
+        // the label role still keeps its column; the kept list no longer mentions the copy
+        final String kept = noRole.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("output.include.role")).findFirst().orElseThrow().message();
+        Assertions.assertTrue(kept.contains("f_price_per_unit (label)") && !kept.contains("marketProb"), kept);
+    }
+
+    @Test
+    public void testRoleColumnsSurviveExcludeAndCarryNoIndicator() {
+        final String emit = SPEC.replace("baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
+                "baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}");
+        // exclude follows the include rule: the market baseline's emitted copy survives derivedFrom:market (the
+        // features derived from the market field do not), and the report says so
+        final FeaturePlan excluded = compile(SOURCES, emit.replace("output:\n  prefix: f_\n",
+                "output:\n  prefix: f_\n  nullPolicy: indicator\n  roles: {baseline: market}\n  exclude: [\"derivedFrom:market\"]\n"));
+        Assertions.assertFalse(excluded.getDiagnostics().hasErrors(), excluded::describe);
+        Assertions.assertFalse(column(excluded, "marketProb").isIntermediate(), excluded::describe);
+        Assertions.assertEquals("baseline", column(excluded, "marketProb").getRole());
+        Assertions.assertTrue(column(excluded, "relative_current_bid_t10_rank").isIntermediate(), excluded::describe);
+        Assertions.assertTrue(hasCode(excluded, "output.exclude.role"), excluded::describe);
+        Assertions.assertFalse(hasCode(excluded, "output.roles.baseline.notEmitted"), excluded::describe);
+        Assertions.assertEquals("f_marketProb", excluded.getRoleColumns().get("baseline"));
+        // a column kept only as a role gets no indicator (its validFor would trigger one): the flag would be a
+        // feature column the projection never admitted
+        Assertions.assertNull(excluded.getColumn("marketProb_isnull"), excluded::describe);
+        final FeaturePlan roleOnly = compile(SOURCES, emit.replace("output:\n  prefix: f_\n",
+                "output:\n  prefix: f_\n  nullPolicy: indicator\n  roles: {baseline: market}\n  include: [price_per_unit]\n"));
+        Assertions.assertNull(roleOnly.getColumn("marketProb_isnull"), roleOnly::describe);
+        Assertions.assertEquals("baseline", column(roleOnly, "marketProb").toField().getOptions().get("feature.role"));
+        // the same column admitted by the projection keeps its indicator like any feature
+        final FeaturePlan included = compile(SOURCES, emit.replace("output:\n  prefix: f_\n",
+                "output:\n  prefix: f_\n  nullPolicy: indicator\n  roles: {baseline: market}\n  include: [marketProb, price_per_unit]\n"));
+        Assertions.assertNotNull(included.getColumn("marketProb_isnull"), included::describe);
+        Assertions.assertFalse(hasCode(included, "output.include.role"), included::describe);
+    }
+
+    @Test
+    public void testGroupRoleNamingAContextNeverResolvesToAColumn() {
+        // a feature that happens to share the context's name is not the group column: the role resolves to the
+        // context's keys, the column is a feature the projection drops like any other
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("features:\n", "features:\n  - {name: session, scope: row, expr: \"quantity * 2\"}\n")
+                .replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {group: session}\n  include: [price_per_unit]\n"));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertNull(column(plan, "session").getRole());
+        Assertions.assertTrue(column(plan, "session").isIntermediate(), plan::describe);
+        Assertions.assertNull(plan.getRoleColumns().get("group"));
+        final JsonObject group = plan.toManifest(List.of(), Map.of()).getAsJsonObject("roles").getAsJsonObject("group");
+        Assertions.assertTrue(group.get("column").isJsonNull(), group::toString);
+        Assertions.assertEquals("session_id", group.getAsJsonArray("keys").get(0).getAsString());
+    }
+
+    @Test
+    public void testPassThroughOptionsReplaceUpstreamLineage() {
+        final FeaturePlan plan = compile(SOURCES, SPEC.replace("output:\n  prefix: f_\n", "output:\n  prefix: f_\n  roles: {label: sold, time: session_time}\n"));
+        // an input that arrives from another feature transform: its feature.* options describe that table, except
+        // the derivedFrom lineage, which is carried forward; non-feature options are untouched
+        final Schema.Field upstream = Schema.Field.of("sold", Schema.FieldType.INT64).withOptions(new java.util.HashMap<>(Map.of(
+                "feature.scope", "row", "feature.block", "upstream", "feature.role", "weight", "feature.derivedFrom", "market", "sqlType", "INT64")));
+        final Map<String, String> options = plan.passThroughOptions(upstream);
+        Assertions.assertEquals("input", options.get("feature.scope"));
+        Assertions.assertEquals("outcome", options.get("feature.kind"));
+        Assertions.assertEquals("market,outcome", options.get("feature.derivedFrom"));
+        Assertions.assertEquals("auction_results", options.get("feature.sources"));
+        Assertions.assertEquals("label", options.get("feature.role"));
+        Assertions.assertFalse(options.containsKey("feature.block"));
+        final Schema.Field field = FeatureStages.passThroughField(plan, upstream);
+        Assertions.assertEquals("label", field.getOptions().get("feature.role"));
+        Assertions.assertNull(field.getOptions().get("feature.block"));
+        Assertions.assertEquals("INT64", field.getOptions().get("sqlType"));
+        Assertions.assertEquals("row", upstream.getOptions().get("feature.scope")); // the input schema is not mutated
+        // the manifest's fields entry is built from the same map
+        final JsonObject entry = plan.toManifest(List.of(upstream), Map.of()).getAsJsonArray("fields").get(0).getAsJsonObject();
+        Assertions.assertEquals("input", entry.get("scope").getAsString());
+        Assertions.assertEquals("label", entry.get("role").getAsString());
+        Assertions.assertEquals("auction_results", entry.get("source").getAsString());
+        Assertions.assertEquals(List.of("market", "outcome"), entry.getAsJsonArray("derivedFrom").asList().stream().map(JsonElement::getAsString).toList());
+        // no kind, no upstream lineage, no role: no derivedFrom at all (not an empty string) and no role
+        final Map<String, String> plain = plan.passThroughOptions(Schema.Field.of("category", Schema.FieldType.STRING));
+        Assertions.assertEquals("input", plain.get("feature.scope"));
+        Assertions.assertFalse(plain.containsKey("feature.derivedFrom"));
+        Assertions.assertFalse(plain.containsKey("feature.role"));
     }
 
     @Test

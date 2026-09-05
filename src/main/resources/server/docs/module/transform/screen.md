@@ -119,15 +119,21 @@ Conditioning needs the global window (no `strategy` window) and, like every scre
 The transform takes the `feature` transform's row form (one row = entity × context). The `output.groupBy`
 parent/child form is not accepted (unnest upstream).
 
-**Defaults from the feature manifest.** When `candidates.manifest` points at the upstream feature transform's
-`output.manifest`, its `roles` fill `group` / `label` / `baseline` / `weight` and its `timeField` fills `time.field`
-when they are not set — the data contract declared once on the feature side is reused here.
+**Defaults from the feature transform.** The roles the feature transform declared (`output.roles`) fill `group` /
+`label` / `baseline` / `weight` and its time field fills `time.field` when they are not set — the data contract
+declared once on the feature side is reused here. They are read from the input schema when the feature transform is
+the direct upstream (`feature.role` field options), or from the `roles` / `timeField` of the manifest that
+`candidates.manifest` points at (the upstream's `output.manifest`) when the table comes back through a sink / source.
 
 **Lineage selectors.** `candidates.include` / `exclude` accept, next to name globs (`f_*`, `odds*`), the
-lineage selectors of the feature transform's `output.exclude`: `derivedFrom:<field>`, `scope:<row|context|sequence|population>`,
+lineage selectors of the feature transform's `output.exclude`: `derivedFrom:<kind>` (a source field's `kind`, e.g.
+`market` / `outcome`, propagated to every column derived from it), `scope:<input|row|context|sequence|population>`,
 `block:<name>`, `evidence:<declared|measured>`. Lineage is read from the input schema when the feature transform is
-the direct upstream (its column options travel with the schema), or from `candidates.manifest` when the table
-comes back through a sink / source. Using a selector without any lineage available is an assembly error.
+the direct upstream (its field options travel with the schema — the pass-through input fields carry `scope: input`
+and their `kind` as `derivedFrom`, so `derivedFrom:market` or `scope:input` drops a passed-through market column
+as well as the columns derived from it), or from `candidates.manifest` when the table comes back through a sink /
+source (its `columns` and `fields` entries carry the same lineage). Using a selector without any lineage available
+is an assembly error.
 
 ## Transform module common parameters
 
@@ -258,7 +264,7 @@ transforms:
     parameters:
       candidates:
         manifest: gs://bucket/feature/${args.version}/manifest.json
-        exclude: ["derivedFrom:final_price", "derivedFrom:current_bid", "scope:row"]
+        exclude: ["derivedFrom:outcome", "derivedFrom:market", "scope:row"]
       placebo: {noise: 100, shuffle: {field: start_price, n: 100}}
 ```
 
@@ -317,7 +323,7 @@ transforms:
     parameters:
       candidates:
         manifest: gs://bucket/feature/${args.version}/manifest.json
-        exclude: ["derivedFrom:final_price", "scope:row"]
+        exclude: ["derivedFrom:outcome", "scope:row"]
       placebo: {noise: 100, shuffle: {field: start_price, n: 100}}
       output:
         selection: gs://bucket/screen/${args.version}/passed.json

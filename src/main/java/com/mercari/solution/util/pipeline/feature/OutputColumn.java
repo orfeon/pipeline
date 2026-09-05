@@ -50,6 +50,8 @@ public class OutputColumn implements Serializable {
     boolean anonymous;
     boolean fitted;
     Placement placement = Placement.child;
+    /** The {@code output.roles} entry that names this column (data contract, never a feature), null for a feature column. */
+    String role;
 
     public String getCanonicalName() { return canonicalName; }
     public String getOutputName() { return outputName; }
@@ -73,6 +75,7 @@ public class OutputColumn implements Serializable {
     public boolean isAnonymous() { return anonymous; }
     public boolean isFitted() { return fitted; }
     public Placement getPlacement() { return placement; }
+    public String getRole() { return role; }
 
     /** Lineage metadata as stored in {@code Schema.Field.options}. */
     public Map<String, String> toOptions() {
@@ -91,6 +94,7 @@ public class OutputColumn implements Serializable {
         options.put("feature.placement", placement.name());
         if (validFor != null) options.put("feature.validFor", validFor.toString());
         if (computeAt != null) options.put("feature.computeAt", computeAt.describe());
+        if (role != null) options.put("feature.role", role);
         for (final Map.Entry<String, String> e : coordinates.entrySet()) {
             options.put("feature.coord." + e.getKey(), e.getValue());
         }

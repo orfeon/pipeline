@@ -858,6 +858,17 @@ public class FeatureTransformTest {
                 new HashSet<>(schema.getFields().stream().map(Schema.Field::getName).toList()));
         Assertions.assertNull(schema.getField("snapshot_time"));
         Assertions.assertNull(schema.getField("f_vs_market"));
+        // pass-through fields carry their source contract as lineage options (the schema twin of the manifest's
+        // fields entries): a consumer's derivedFrom: / scope: selectors see them, and roles are named
+        Assertions.assertEquals("input", schema.getField("sold").getOptions().get("feature.scope"));
+        Assertions.assertEquals("outcome", schema.getField("sold").getOptions().get("feature.kind"));
+        Assertions.assertEquals("outcome", schema.getField("sold").getOptions().get("feature.derivedFrom"));
+        Assertions.assertEquals("auction_results", schema.getField("sold").getOptions().get("feature.sources"));
+        Assertions.assertEquals("label", schema.getField("sold").getOptions().get("feature.role"));
+        Assertions.assertEquals("time", schema.getField("session_time").getOptions().get("feature.role"));
+        Assertions.assertEquals("entity", schema.getField("seller_id").getOptions().get("feature.role"));
+        Assertions.assertNull(schema.getField("f_price_per_unit").getOptions().get("feature.role"));
+        Assertions.assertEquals("row", schema.getField("f_price_per_unit").getOptions().get("feature.scope"));
 
         // the assembly-time manifest exists before the run (a dry run writes the same file)
         final com.google.gson.JsonObject assembled = com.google.gson.JsonParser.parseString(
@@ -870,6 +881,10 @@ public class FeatureTransformTest {
         Assertions.assertTrue(assembled.getAsJsonObject("include").getAsJsonArray("unknown").toString().contains("f_nope"));
         final List<String> fieldNames = assembled.getAsJsonArray("fields").asList().stream().map(e -> e.getAsJsonObject().get("name").getAsString()).toList();
         Assertions.assertEquals(List.of("session_id", "seller_id", "sold", "session_time"), fieldNames);
+        final com.google.gson.JsonObject soldField = assembled.getAsJsonArray("fields").get(2).getAsJsonObject();
+        Assertions.assertEquals("input", soldField.get("scope").getAsString());
+        Assertions.assertEquals("outcome", soldField.get("kind").getAsString());
+        Assertions.assertEquals("label", soldField.get("role").getAsString());
         Assertions.assertEquals(1, assembled.getAsJsonObject("plan").getAsJsonArray("observedAtAudit").size());
 
         PAssert.that(output.getCollection()).satisfies(rows -> {
@@ -947,6 +962,32 @@ public class FeatureTransformTest {
             .replace("- {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
                     "- {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}")
             .replace("      output:\n", PROB_BLOCKS + "      output:\n");
+
+    @Test
+    public void testIncludeKeepsEmittedBaselineRole() throws java.io.IOException {
+        // the closed loop: a screening pass list projects the features, and the baseline role's emitted copy
+        // (never a candidate, so never in the list) must still reach the consumer with its role
+        final String config = PROB_CONFIG.replace("      output:\n        prefix: f_\n",
+                "      output:\n        prefix: f_\n        roles: {group: session, label: sold, baseline: market}\n        include: [f_prob_pWin_softmax]\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertNotNull(schema.getField("f_prob_pWin_softmax"));
+        Assertions.assertNotNull(schema.getField("f_marketProb"));
+        Assertions.assertEquals("baseline", schema.getField("f_marketProb").getOptions().get("feature.role"));
+        Assertions.assertEquals("label", schema.getField("sold").getOptions().get("feature.role"));
+        Assertions.assertNull(schema.getField("f_placeboNoise"));
+        Assertions.assertNull(schema.getField("f_placebo_start_price_shuffle"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int n = 0;
+            for (final MElement row : rows) {
+                n++;
+                Assertions.assertEquals(row.getAsDouble("f_marketProb"), row.getAsDouble("f_prob_pWin_softmax"), 1e-12);
+            }
+            Assertions.assertEquals(6, n);
+            return null;
+        });
+        pipeline.run();
+    }
 
     @Test
     public void testSoftmaxEmitAndPlacebos() throws java.io.IOException {

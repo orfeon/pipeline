@@ -229,6 +229,41 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testLineageFromManifestFieldsAndFromSchemaRoles() {
+        // manifest: the pass-through fields carry scope input and their kind as derivedFrom (an older manifest has
+        // kind only), so a selector drops a passed-through market input on the manifest path too
+        final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}, baseline: {name: b, column: b}},"
+                + " fields: [{name: x, scope: input, kind: market}, {name: x2, kind: attribute, derivedFrom: [attribute]}], columns: []}";
+        final ScreenSpec.Lineage fromManifest = ScreenSpec.Lineage.fromManifest(manifest);
+        Assertions.assertEquals("input", fromManifest.columns.get("x2").scope());
+        final ScreenSpec byManifest = ScreenSpec.parse(JsonParser.parseString("{candidates: {include: ['scope:input'], exclude: ['derivedFrom:market']}, placebo: {noise: 0}}").getAsJsonObject())
+                .resolve(SCHEMA, fromManifest);
+        Assertions.assertEquals(List.of("x2"), byManifest.candidates);
+        // schema: the direct upstream's field options carry the roles and the time field as feature.role
+        final Schema schema = Schema.builder()
+                .withField(Schema.Field.of("g", Schema.FieldType.STRING).withOptions(options("feature.scope", "input", "feature.role", "group")))
+                .withField(Schema.Field.of("y", Schema.FieldType.INT64).withOptions(options("feature.scope", "input", "feature.role", "label")))
+                .withField(Schema.Field.of("b", Schema.FieldType.FLOAT64).withOptions(options("feature.scope", "row", "feature.role", "baseline")))
+                .withField(Schema.Field.of("t", Schema.FieldType.TIMESTAMP).withOptions(options("feature.scope", "input", "feature.role", "time")))
+                .withField(Schema.Field.of("x", Schema.FieldType.FLOAT64).withOptions(options("feature.scope", "input", "feature.derivedFrom", "market")))
+                .withField("x2", Schema.FieldType.FLOAT64)
+                .build();
+        final ScreenSpec bySchema = ScreenSpec.parse(JsonParser.parseString("{candidates: {exclude: ['derivedFrom:market']}, placebo: {noise: 0}}").getAsJsonObject())
+                .resolve(schema, ScreenSpec.Lineage.fromSchema(schema));
+        Assertions.assertEquals("g", bySchema.group);
+        Assertions.assertEquals("y", bySchema.labelField);
+        Assertions.assertEquals("b", bySchema.baselineField);
+        Assertions.assertEquals("t", bySchema.timeField);
+        Assertions.assertEquals(List.of("x2"), bySchema.candidates);
+    }
+
+    private static Map<String, String> options(final String... keyValues) {
+        final Map<String, String> options = new HashMap<>();
+        for (int i = 0; i < keyValues.length; i += 2) options.put(keyValues[i], keyValues[i + 1]);
+        return options;
+    }
+
+    @Test
     public void testExplicitTransformsSurviveGroupDefault() {
         final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}}}";
         final ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromManifest(manifest);

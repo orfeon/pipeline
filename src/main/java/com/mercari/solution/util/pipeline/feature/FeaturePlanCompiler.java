@@ -2042,10 +2042,16 @@ public final class FeaturePlanCompiler {
         final Set<String> consumed = new HashSet<>();
         for (final OutputColumn c : columns) consumed.addAll(c.inputs);
 
-        applyInclude();
+        resolveRoleColumns();
+        final Set<String> keptByRole = applyInclude();
         final List<OutputColumn> indicators = new ArrayList<>();
+        final List<String> excludedRoles = new ArrayList<>();
         for (final OutputColumn c : columns) {
-            if (!c.intermediate && spec.output.include == null && isExcluded(c)) c.intermediate = true;
+            if (!c.intermediate && spec.output.include == null && isExcluded(c)) {
+                // a role column is the data contract, not a feature: no projection removes it (see applyInclude)
+                if (c.role == null) c.intermediate = true;
+                else { keptByRole.add(c.canonicalName); excludedRoles.add(outputNameOf(c) + " (" + c.role + ")"); }
+            }
             final String loc = "features." + c.block;
             boolean lint = false;
             if (c.scope == FeatureSpec.Scope.sequence || (c.scope == FeatureSpec.Scope.population && !FitMode.isLookupToken(c.coordinates.get("fit")))) {
@@ -2086,10 +2092,12 @@ public final class FeaturePlanCompiler {
                     && c.availableAt.getOffset().plus(c.validFor).compareTo(spec.predictAt.getOffset()) < 0) {
                 diagnostics.warning("validFor.alwaysExpired", loc, c.canonicalName + " expires before predictAt for every row (validFor " + c.validFor + ")");
             }
-            c.outputName = (lint ? "_" : "") + (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
+            c.outputName = (lint ? "_" : "") + outputNameOf(c);
             if (spec.output.groupBy == null) c.placement = Placement.child;
-            if (!c.intermediate && spec.output.nullPolicy == NullPolicy.indicator
-                    && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || "softmax".equals(c.operator))) {
+            // a column kept only as a role gets no indicator: the flag would be a feature column the projection
+            // never admitted (the role's null-ness is the value itself)
+            final boolean indicator = !c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && !keptByRole.contains(c.canonicalName);
+            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || "softmax".equals(c.operator))) {
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_isnull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_isnull";
                 flag.inputs.add(c.canonicalName);
@@ -2099,8 +2107,7 @@ public final class FeaturePlanCompiler {
                 flag.coordinates.put("indicatorOf", c.canonicalName);
                 indicators.add(flag);
             }
-            if (!c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && "softmax".equals(c.operator)
-                    && "zero".equals(c.coordinates.get("scoreNull"))) {
+            if (indicator && "softmax".equals(c.operator) && "zero".equals(c.coordinates.get("scoreNull"))) {
                 // the score fell back to 0 (the row took its offset's probability): the consumer must be able to tell
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_scoreNull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_scoreNull";
@@ -2114,6 +2121,9 @@ public final class FeaturePlanCompiler {
         }
         columns.addAll(indicators);
         for (final OutputColumn i : indicators) columnsByCanonical.put(i.canonicalName, i);
+        if (!excludedRoles.isEmpty()) {
+            diagnostics.info("output.exclude.role", "output.exclude", "role columns are emitted although output.exclude matches them (roles are the data contract, not features): " + excludedRoles);
+        }
 
         final Set<String> names = new HashSet<>();
         for (final OutputColumn c : columns) {
@@ -2131,10 +2141,17 @@ public final class FeaturePlanCompiler {
      * replaces {@code exclude}: a column is emitted iff its canonical or output name is listed (an
      * {@code <name>_isnull} entry keeps its base column); names that match nothing are a warning (the list may
      * come from another plan version). Columns already intermediate (violations, hidden levels, baselines)
-     * stay so.
+     * stay so. A column an {@code output.roles} entry names ({@link OutputColumn#role}: a baseline's emitted
+     * copy, a label derived as a column) is part of the data contract, not of the feature set: it stays emitted
+     * whether or not the list names it — a pass list never contains role columns (they were never candidates),
+     * and dropping them would leave the consumer's manifest with a role that resolves to nothing.
+     *
+     * @return the canonical names of the columns kept only by their role (not listed); the caller adds the
+     *         columns {@code output.exclude} would have dropped
      */
-    private void applyInclude() {
-        if (spec.output.include == null) return;
+    private Set<String> applyInclude() {
+        final Set<String> keptByRole = new HashSet<>();
+        if (spec.output.include == null) return keptByRole;
         if (!spec.output.exclude.isEmpty()) {
             diagnostics.info("output.include.exclude", "output", "output.include is declared: output.exclude is ignored (include is the projection)");
         }
@@ -2144,12 +2161,13 @@ public final class FeaturePlanCompiler {
             diagnostics.error("output.include.empty", "output.include", "output.include is empty: no feature column would be emitted"
                     + (spec.output.includeSource != null ? " (from " + spec.output.includeSource + ")" : "")
                     + "; remove output.include to emit every column, or list the columns to keep");
-            return;
+            return keptByRole;
         }
         final Set<String> matched = new LinkedHashSet<>();
+        final List<String> keptRoles = new ArrayList<>();
         for (final OutputColumn c : columns) {
             if (c.intermediate || c.fieldType == null) continue;
-            final String outputName = (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
+            final String outputName = outputNameOf(c);
             boolean included = false;
             for (final String candidate : List.of(c.canonicalName, outputName, c.canonicalName + "_isnull", outputName + "_isnull")) {
                 if (listed.contains(candidate)) {
@@ -2157,13 +2175,48 @@ public final class FeaturePlanCompiler {
                     included = true;
                 }
             }
-            if (!included) c.intermediate = true;
+            if (included) continue;
+            if (c.role == null) c.intermediate = true;
+            else { keptByRole.add(c.canonicalName); keptRoles.add(outputName + " (" + c.role + ")"); }
+        }
+        if (!keptRoles.isEmpty()) {
+            diagnostics.info("output.include.role", "output.include", "role columns are emitted although output.include does not list them (roles are the data contract, not features): " + keptRoles);
         }
         final List<String> unknown = new ArrayList<>();
         for (final String name : listed) if (!matched.contains(name)) unknown.add(name);
         if (!unknown.isEmpty()) {
             diagnostics.warning("output.include.unknown", "output.include", "include names no column of this plan: " + unknown
                     + (spec.output.includeSource != null ? " (from " + spec.output.includeSource + ")" : ""));
+        }
+        return keptByRole;
+    }
+
+    /** The name a column is emitted under, before the {@code _} lint prefix of a violation is decided. */
+    private String outputNameOf(final OutputColumn c) {
+        return (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
+    }
+
+    /**
+     * Stamps {@link OutputColumn#role} on the columns that {@code output.roles} name — the one resolution the
+     * projection ({@link #applyInclude}, {@code output.exclude}), the schema options, the manifest and
+     * {@link FeaturePlan#getRoleColumns} all read. An input-field role passes through outside the column set; a
+     * baseline role resolves to its {@code baselines[].emit} copy; a group / entity role naming a context / entity
+     * resolves to keys, never to a column that merely shares the name; anything else matches a column by its
+     * canonical or output name. The first role naming a column wins.
+     */
+    private void resolveRoleColumns() {
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+            final String role = e.getKey();
+            final String name = e.getValue();
+            if (inputFields.containsKey(name)) continue;
+            if (("group".equals(role) && contexts.containsKey(name)) || ("entity".equals(role) && entities.containsKey(name))) continue;
+            OutputColumn column = "baseline".equals(role) && baselineEmits.containsKey(name) ? columnsByCanonical.get(baselineEmits.get(name)) : null;
+            if (column == null) {
+                for (final OutputColumn c : columns) {
+                    if (c.canonicalName.equals(name) || outputNameOf(c).equals(name)) { column = c; break; }
+                }
+            }
+            if (column != null && column.role == null) column.role = role;
         }
     }
 

@@ -109,7 +109,14 @@ durations into the algebraic `AvailableAt`:
   relative to the availability and is not added to the pre-event sentinel.
 - The derived availability and the origin source are stored in `Schema.Field.withOptions(...)` of the
   output schema (`feature.*` options) — the existing schema mechanism is the lineage's persistence; the
-  `_` prefix lint (spec §6.4) is applied by the compiler when generating output names.
+  `_` prefix lint (spec §6.4) is applied by the compiler when generating output names. Pass-through
+  input fields get the same treatment from their source contract (`FeaturePlan.passThroughOptions`, the
+  one source of the schema options and the manifest's `fields` entries: `feature.scope = input`,
+  `feature.kind`, `feature.derivedFrom` = the kind plus the lineage the field already carried from an
+  upstream feature transform, `feature.sources`, `feature.availableAt`, `feature.evidence`; the other
+  `feature.*` options of an upstream column are dropped), and a role's field / column carries
+  `feature.role` (`OutputColumn.role`, stamped once by the compiler), so a downstream lineage selector
+  (`derivedFrom:market`, `scope:input`) and the screen's role defaults work without the manifest.
 
 ---
 
@@ -427,7 +434,11 @@ replay (§4.3), not Beam state.
 **Output contract and audit.** `output.roles` / `include` / `manifest` (DSL spec §7) are compile-layer
 facts: roles are validated against input fields / contexts / entities / baselines, `include` is applied
 in `finalizeColumns` as the projection (it replaces `exclude`; a URI is resolved by
-`FeaturePlanService.resolve` before compile and its content hash kept), and `FeaturePlan.toManifest`
+`FeaturePlanService.resolve` before compile and its content hash kept; roles are resolved once before the
+projection — `resolveRoleColumns` stamps `OutputColumn.role`, read by `applyInclude`, the `exclude` pass,
+`toOptions`, the manifest and `FeaturePlan.getRoleColumns` — so a role column is kept whether or not the
+list names it or an exclude pattern matches it, `output.include.role` / `output.exclude.role`, and a
+column kept only as a role gets no `_isnull` indicator), and `FeaturePlan.toManifest`
 builds the manifest the transform writes at assembly. `include`, `includeSource`, `includeHash` and
 `manifest` are stripped from the plan hash (`withoutArtifact`), and `FeaturePlan.getOutputHash` =
 plan hash + emitted names + roles + include hash identifies the output table. The observedAt audit
