@@ -60,13 +60,6 @@ public class ScreenMathTest {
     }
 
     @Test
-    public void testSeededRandomIsDeterministic() {
-        Assertions.assertEquals(ScreenMath.seededRandom(7, "a").nextLong(), ScreenMath.seededRandom(7, "a").nextLong());
-        Assertions.assertNotEquals(ScreenMath.seededRandom(7, "a").nextLong(), ScreenMath.seededRandom(8, "a").nextLong());
-        Assertions.assertNotEquals(ScreenMath.seededRandom(7, "a").nextLong(), ScreenMath.seededRandom(7, "b").nextLong());
-    }
-
-    @Test
     public void testPeriodBucket() {
         final long t = Instant.parse("2025-05-17T10:00:00Z").toEpochMilli();
         Assertions.assertEquals("2025", ScreenMath.periodBucket(t, "year"));
@@ -84,15 +77,5 @@ public class ScreenMathTest {
         Assertions.assertTrue(ScreenMath.glob("*").matcher("anything.with.dots").matches());
         Assertions.assertTrue(ScreenMath.glob("a?c").matcher("abc").matches());
         Assertions.assertFalse(ScreenMath.glob("a.c").matcher("abc").matches());
-    }
-
-    @Test
-    public void testCoercions() {
-        Assertions.assertEquals(1d, ScreenMath.toDouble(true));
-        Assertions.assertEquals(2.5, ScreenMath.toDouble("2.5"));
-        Assertions.assertNull(ScreenMath.toDouble("x"));
-        Assertions.assertEquals(1_700_000_000_000L, ScreenMath.toEpochMillis(1_700_000_000_000_000L, "timestamp"));
-        Assertions.assertEquals(86_400_000L * 2, ScreenMath.toEpochMillis(2, "date"));
-        Assertions.assertEquals(Instant.parse("2025-01-01T00:00:00Z").toEpochMilli(), ScreenMath.toEpochMillis("2025-01-01T00:00:00Z", null));
     }
 }

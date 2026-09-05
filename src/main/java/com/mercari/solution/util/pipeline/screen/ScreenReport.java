@@ -123,12 +123,16 @@ public final class ScreenReport {
         return true;
     }
 
-    /** The partial test given the column's orthogonalisation coefficients (see {@link #gammas}). */
+    /**
+     * The partial test given the column's orthogonalisation coefficients from {@link #gammas}, the one degeneracy
+     * gate: a column without γ (no information or non-finite sums, or a fit without an accepted point / residual
+     * variance, for which the caller computes no γ at all) is degenerate.
+     */
     static Partial partial(final double[] vec, final FitState fit, final double nUnits, final long nObs, final double sigma2, final double[] gamma) {
         final int k = fit.k;
         final double s = vec[0];
         final double b = vec[1];
-        if (!(b > 0) || !fit.hasBest || !(sigma2 > 0) || gamma == null) return new Partial(Stats.degenerate(nObs), Double.NaN);
+        if (gamma == null) return new Partial(Stats.degenerate(nObs), Double.NaN);
         final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
         final double sPerp = s - MatrixOps.dot(gamma, fit.bestGrad);
         double gGg = 0;

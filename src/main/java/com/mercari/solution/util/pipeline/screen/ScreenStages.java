@@ -4,6 +4,7 @@ import com.google.common.hash.Hashing;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.mercari.solution.module.Logging;
+import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
@@ -219,7 +220,6 @@ public final class ScreenStages {
         public void processElement(final ProcessContext c, final BoundedWindow window) {
             final MElement input = c.element();
             if (input == null) return;
-            final ScoreAccumulator bookkeeping = books.computeIfAbsent(window, w -> new ScoreAccumulator());
             try {
                 Logging.log(LOG, logs, "input", input);
                 final Map<String, Object> values = input.asPrimitiveMap();
@@ -228,7 +228,7 @@ public final class ScreenStages {
 
                 final long time;
                 if (spec.timeField != null) {
-                    final Long millis = ScreenMath.toEpochMillis(values.get(spec.timeField), spec.timeFieldType);
+                    final Long millis = FeatureValues.toEpochMillis(values.get(spec.timeField), spec.timeFieldType);
                     if (millis == null) throw new IllegalArgumentException("time.field '" + spec.timeField + "' is null or not a timestamp");
                     time = millis;
                 } else {
@@ -238,50 +238,55 @@ public final class ScreenStages {
                 }
                 if ((spec.timeToMillis != null && time > spec.timeToMillis) || (spec.timeFromMillis != null && time < spec.timeFromMillis)) {
                     book[ScoreAccumulator.ROWS_TIME_FILTERED] = 1;
-                    bookkeeping.add(null, book);
+                    count(window, book);
                     return;
                 }
 
                 final Double label = label(values);
                 final String group = spec.group == null ? null : text(values.get(spec.group));
-                final Double weight = spec.weightField == null ? 1d : ScreenMath.toDouble(values.get(spec.weightField));
+                final Double weight = spec.weightField == null ? 1d : FeatureValues.toDouble(values.get(spec.weightField));
                 final boolean invalid = label == null || !Double.isFinite(label)
                         || (spec.group != null && group == null)
                         || (spec.isPoisson() && label < 0)
                         || weight == null || !Double.isFinite(weight) || weight < 0;
                 if (invalid) {
                     book[ScoreAccumulator.ROWS_INVALID] = 1;
-                    bookkeeping.add(null, book);
+                    count(window, book);
                     Logging.log(LOG, logs, "invalid", input);
                     return;
                 }
-                final Double baseline = spec.hasBaseline() ? ScreenMath.toDouble(values.get(spec.baselineField)) : null;
+                final Double baseline = spec.hasBaseline() ? FeatureValues.toDouble(values.get(spec.baselineField)) : null;
                 final double[] x = new double[columns.size()];
                 for (int i = 0; i < x.length; i++) {
-                    final Double v = ScreenMath.toDouble(values.get(columns.get(i)));
+                    final Double v = FeatureValues.toDouble(values.get(columns.get(i)));
                     x[i] = v == null ? Double.NaN : v;
                 }
                 String period = null;
                 if (spec.periodsBucket != null) {
                     final Long periodMillis = spec.periodsField.equals(spec.timeField)
                             ? time
-                            : ScreenMath.toEpochMillis(values.get(spec.periodsField), spec.periodsFieldType);
+                            : FeatureValues.toEpochMillis(values.get(spec.periodsField), spec.periodsFieldType);
                     if (periodMillis != null) period = ScreenMath.periodBucket(periodMillis, spec.periodsBucket);
                 }
                 final String identity = identity(values);
                 final ScreenRow row = new ScreenRow(group, identity, time, period, label, baseline == null ? Double.NaN : baseline, weight, x);
                 c.output(rowTag, KV.of(group == null ? identity : group, row));
-                bookkeeping.add(null, book);
+                count(window, book);
             } catch (final Throwable e) {
                 c.output(failureTag, Module.processError("Failed to prepare screen input", input, e, failFast));
             }
         }
 
+        /** Adds a row's run counts to the bundle's bookkeeping of its window (a row that failed is not counted). */
+        private void count(final BoundedWindow window, final double[] book) {
+            books.computeIfAbsent(window, w -> new ScoreAccumulator()).add(null, book);
+        }
+
         private Double label(final Map<String, Object> values) {
-            if (labelExpression == null) return ScreenMath.toDouble(values.get(spec.labelField));
+            if (labelExpression == null) return FeatureValues.toDouble(values.get(spec.labelField));
             expressionValues.clear();
             for (final String v : labelExpression.getVariableNames()) {
-                final Double d = ScreenMath.toDouble(values.get(v));
+                final Double d = FeatureValues.toDouble(values.get(v));
                 expressionValues.put(v, d == null ? Double.NaN : d);
             }
             return labelExpression.evaluate(expressionValues);

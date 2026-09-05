@@ -169,8 +169,13 @@ public class MatrixOpsTest {
         Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solve(nan, new double[]{1, 1}));
         final double[][] inf = {{1, 0}, {0, Double.POSITIVE_INFINITY}};
         Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(inf, new double[]{1, 1}, 1e-3));
-        Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(new double[][]{{2, 0}, {0, 2}}, new double[]{1, Double.NaN}, 0d));
         Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.inverse(nan));
+        // a ridge that is not finite, or overflows the diagonal, would hand the fallback a non-finite matrix
+        Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(new double[][]{{2, 0}, {0, 2}}, new double[]{1, 1}, Double.POSITIVE_INFINITY));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(new double[][]{{2, 0}, {0, 2}}, new double[]{1, 1}, Double.NaN));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(new double[][]{{1e308, 0}, {0, 1e308}}, new double[]{1, 1}, 1e308));
+        // a right-hand side is substituted, not decomposed: NaN propagates (the regression aggregation relies on it)
+        Assertions.assertTrue(Double.isNaN(MatrixOps.solveGram(new double[][]{{2, 0}, {0, 2}}, new double[]{1, Double.NaN}, 0d)[1]));
         // the plain products keep propagating NaN like the scalar ops (no decomposition to hang)
         Assertions.assertTrue(Double.isNaN(MatrixOps.multiply(nan, new double[]{1, 1})[0]));
         Assertions.assertTrue(Double.isNaN(MatrixOps.mahalanobis(new double[]{1, 1}, new double[]{0, 0}, nan)));

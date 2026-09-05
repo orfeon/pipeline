@@ -1,6 +1,5 @@
 package com.mercari.solution.util.pipeline.screen;
 
-import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.feature.OrderStatistics;
 
 import java.time.Instant;
@@ -10,12 +9,12 @@ import java.time.ZonedDateTime;
 import java.time.temporal.IsoFields;
 import java.util.Arrays;
 import java.util.List;
-import java.util.SplittableRandom;
 import java.util.regex.Pattern;
 
 /**
  * Pure numeric helpers of the screen transform: tail probabilities, quantiles, multiple-comparison
- * correction, deterministic randomness, calendar buckets and name globs. No Beam, no state.
+ * correction, calendar buckets and name globs. No Beam, no state. Randomness and value coercions are the
+ * feature transform's ({@code FeatureValues}), used directly.
  */
 public final class ScreenMath {
 
@@ -145,11 +144,6 @@ public final class ScreenMath {
         return q;
     }
 
-    /** Deterministic generator from a seed and a key: the feature transform's noise derivation. */
-    public static SplittableRandom seededRandom(final long seed, final String key) {
-        return FeatureValues.seededRandom(seed, key);
-    }
-
     /** Calendar bucket label of an epoch-millisecond instant in UTC. */
     public static String periodBucket(final long epochMillis, final String bucket) {
         final ZonedDateTime t = Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC);
@@ -176,15 +170,5 @@ public final class ScreenMath {
             }
         }
         return Pattern.compile(sb.append('$').toString());
-    }
-
-    /** Epoch millis of a timestamp-like primitive, exactly as the feature transform reads its time field. */
-    public static Long toEpochMillis(final Object value, final String type) {
-        return FeatureValues.toEpochMillis(value, type);
-    }
-
-    /** Numeric coercion of a primitive (numbers, booleans, numeric strings, instants), as the feature transform does. */
-    public static Double toDouble(final Object value) {
-        return FeatureValues.toDouble(value);
     }
 }
