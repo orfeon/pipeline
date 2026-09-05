@@ -87,7 +87,7 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
 
 ## Recipe E — population type with a static fit (worked example: `discretize`)
 
-The pattern for `quantileTransform`, `svd`, `spectralEmbedding`, `transitionStats`: fitted once
+The pattern `quantileTransform` and `svd` follow, and the one for `spectralEmbedding` / `transitionStats`: fitted once
 over the whole input (or loaded from an artifact), applied per row by lookup.
 
 1. **Model class** (pure Java, `Serializable`, like `Discretization`): `fit...(...)`, `apply` /

@@ -1297,7 +1297,136 @@ public final class FeaturePlanCompiler {
             expandDiscretize(def, computeAt);
             return;
         }
+        if ("quantileTransform".equals(def.type)) {
+            expandQuantileTransform(def, computeAt);
+            return;
+        }
+        if ("svd".equals(def.type)) {
+            expandSvd(def, computeAt);
+            return;
+        }
         expandEncoding(def, computeAt);
+    }
+
+    /**
+     * §4.4 quantileTransform: the empirical CDF position of a numeric field (or its normal score), the quantile
+     * knots fitted on the whole input (static fit) and applied by interpolation — one FLOAT64 column.
+     */
+    private void expandQuantileTransform(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final String input = singleInput(def);
+        if (input == null) return;
+        final Ref ref = resolve(input);
+        if (ref == null) {
+            diagnostics.error("reference.unknown", loc, "unknown field: " + input);
+            return;
+        }
+        if (!OperatorCatalog.isNumeric(ref.type())) diagnostics.error("quantileTransform.input", loc, "quantileTransform input '" + input + "' must be numeric");
+        final int bins = def.bins == null ? QuantileTransform.DEFAULT_BINS : def.bins;
+        if (bins < 2) diagnostics.error("quantileTransform.bins", loc, "bins must be >= 2");
+        final String distribution = def.distribution == null ? QuantileTransform.UNIFORM : def.distribution;
+        if (!List.of(QuantileTransform.UNIFORM, QuantileTransform.NORMAL).contains(distribution)) {
+            diagnostics.error("quantileTransform.distribution", loc, "distribution must be uniform | normal: " + distribution);
+        }
+        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "quantileTransform", "the quantiles are fitted", "quantile knots fitted on the whole input");
+        diagnostics.info("fit.mode.static", loc, "quantileTransform fits " + bins + " quantile intervals on the whole input" + artifactPhrase(fitSpec)
+                + (isOutcomeLike(ref) ? "; the input is outcome-like, so training rows' own outcomes shape the knots (static-fit caveat)" : ""));
+
+        final OutputColumn c = newColumn(def.name, Scope.population, "quantileTransform", def.name, Schema.FieldType.FLOAT64, computeAt);
+        c.fitted = true;
+        c.coordinates.put("fit", "static");
+        c.coordinates.put("field", canonicalOf(input));
+        c.coordinates.put("bins", Integer.toString(bins));
+        c.coordinates.put("distribution", distribution);
+        if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
+        if (fitSpec.refit) c.coordinates.put("refit", "true");
+        addSelfInput(c, input);
+        addPastInput(c, input);
+        finishStaticFitted(c, def);
+        register(c);
+    }
+
+    /**
+     * §4.4 svd: truncated SVD / PCA of a numeric vector — several numeric {@code inputs}, or one {@code input} of
+     * array type — fitted from (n, Σx, Σxxᵀ) over the whole input (static fit); {@code rank} FLOAT64 score columns
+     * {@code <name>_<k>} ordered by explained variance.
+     */
+    private void expandSvd(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final List<String> fields = new ArrayList<>();
+        String arrayField = null;
+        Integer dimension = null;
+        if (def.inputs.size() >= 2) {
+            if (def.input != null) diagnostics.error("svd.input", loc, "svd takes either 'inputs' (numeric fields) or one array 'input', not both");
+            for (final String f : def.inputs) {
+                final Ref ref = resolve(f);
+                if (ref == null) {
+                    diagnostics.error("reference.unknown", loc, "unknown field: " + f);
+                    return;
+                }
+                if (!OperatorCatalog.isNumeric(ref.type())) diagnostics.error("svd.input", loc, "svd input '" + f + "' must be numeric");
+                fields.add(f);
+            }
+            dimension = fields.size();
+        } else {
+            final String input = def.input != null ? def.input : def.inputs.size() == 1 ? def.inputs.get(0) : null;
+            if (input == null) {
+                diagnostics.error("svd.input", loc, "svd requires 'inputs' (two or more numeric fields) or one array-typed 'input'");
+                return;
+            }
+            final Ref ref = resolve(input);
+            if (ref == null) {
+                diagnostics.error("reference.unknown", loc, "unknown field: " + input);
+                return;
+            }
+            if (ref.type() == null || ref.type().getType() != Schema.Type.array || !OperatorCatalog.isNumeric(ref.type().getArrayValueType())) {
+                diagnostics.error("svd.input", loc, "svd input '" + input + "' must be an array of numbers (or list two or more numeric fields under 'inputs')");
+                return;
+            }
+            arrayField = input;
+        }
+        if (def.rank == null && dimension == null) {
+            diagnostics.error("svd.rank", loc, "svd on an array input requires 'rank' (the vector length is not known at compile time)");
+            return;
+        }
+        final int rank = def.rank == null ? Math.min(dimension, 8) : def.rank;
+        if (rank < 1) diagnostics.error("svd.rank", loc, "rank must be >= 1");
+        else if (dimension != null && rank > dimension) diagnostics.error("svd.rank", loc, "rank " + rank + " exceeds the vector length " + dimension);
+        final boolean center = def.center == null || def.center;
+        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "svd", "the components are fitted", "covariance eigendecomposition on the whole input");
+        boolean outcome = false;
+        for (final String f : arrayField != null ? List.of(arrayField) : fields) {
+            final Ref ref = resolve(f);
+            if (ref != null && isOutcomeLike(ref)) outcome = true;
+        }
+        diagnostics.info("fit.mode.static", loc, "svd fits " + rank + " component(s) of " + (dimension == null ? "the vector" : dimension + " inputs")
+                + " from (n, Σx, Σxxᵀ) over the whole input" + (center ? "" : ", uncentred") + (def.standardize ? ", standardised" : "") + artifactPhrase(fitSpec)
+                + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the components (static-fit caveat)" : ""));
+
+        int produced = 0;
+        for (int k = 0; k < rank; k++) {
+            final OutputColumn c = newColumn(def.name, Scope.population, "svd", def.name + "_" + k, Schema.FieldType.FLOAT64, computeAt);
+            c.fitted = true;
+            c.coordinates.put("fit", "static");
+            if (arrayField != null) c.coordinates.put("arrayField", canonicalOf(arrayField));
+            else c.coordinates.put("fields", String.join(",", fields.stream().map(this::canonicalOf).toList()));
+            c.coordinates.put("rank", Integer.toString(rank));
+            c.coordinates.put("component", Integer.toString(k));
+            c.coordinates.put("center", Boolean.toString(center));
+            c.coordinates.put("standardize", Boolean.toString(def.standardize));
+            if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
+            if (fitSpec.refit) c.coordinates.put("refit", "true");
+            for (final String f : arrayField != null ? List.of(arrayField) : fields) {
+                addSelfInput(c, f);
+                addPastInput(c, f);
+            }
+            finishStaticFitted(c, def);
+            register(c);
+            produced++;
+        }
+        if (def.maxFeatures != null && produced > def.maxFeatures) {
+            diagnostics.error("svd.maxFeatures", loc, "rank " + rank + " produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
+        }
     }
 
     /**

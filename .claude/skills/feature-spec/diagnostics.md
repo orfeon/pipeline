@@ -154,7 +154,7 @@ not expand because another block failed).
 
 | code | level | meaning / fix |
 |---|---|---|
-| `population.type` / `population.unsupported` | error | `type` required; only `encoding`, `factorization`, `discretize` are implemented |
+| `population.type` / `population.unsupported` | error | `type` required; `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd` are implemented (`spectralEmbedding` / `transitionStats` are not) |
 | `encoding.keySets` / `encoding.targets` / `encoding.keySet.keys` | error | required parts |
 | `encoding.keySet.structure` | error | `flat \| hierarchy \| cross` (`sequence` not implemented) |
 | `encoding.keySet.parentRef` / `encoding.keySet.cross` | error | `hierarchy` needs `parentRef`; `cross` needs ≥ 2 keys |
@@ -185,9 +185,11 @@ not expand because another block failed).
 | `fit.fold.identity` | warning | fold by `time.field` alone (no `groupBy`, no tie-break): rows sharing a timestamp share a fold — declare `orderTieBreak` |
 | `fit.groupBy.required` | error | a key derives from a past target and `fit.mode: fold` needs entity-level folds: set `fit.groupBy` |
 | `factorization.fields` / `.latentDim` / `.task` / `.outputs` / `.offset` / `.variant` / `.als` | error | ≥ 2 categorical fields; latentDim ≥ 1; `task.target` or `task.expr`; outputs as `pair` / `embedding` / `sum` naming the block's fields; offset names a baseline; variant `fm \| fwfm`; numeric ALS settings |
-| `factorization.fit.mode` / `discretize.fit.mode` | error | these types are always `static` |
-| `factorization.fit.*` / `discretize.fit.*` | warning | `cadence` / `window` / `warmStart` not implemented |
+| `factorization.fit.mode` / `discretize.fit.mode` / `quantileTransform.fit.mode` / `svd.fit.mode` | error | these types are always `static` |
+| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `window` / `warmStart` not implemented |
 | `discretize.input` / `.bins` / `.minSamplesPerBin` / `.method` / `.target` | error / warning | numeric input; bins ≥ 2; minSamplesPerBin ≥ 1; only `quantile`; `target` is ignored by `quantile` |
+| `quantileTransform.input` / `.bins` / `.distribution` | error | numeric input; bins ≥ 2; `uniform \| normal` |
+| `svd.input` / `.rank` / `.maxFeatures` | error | two or more numeric `inputs`, or one array<numeric> `input` (then `rank` is required); 1 ≤ rank ≤ vector length; rank columns count towards `maxFeatures` |
 
 ## Engine errors at assembly (after a clean compile)
 

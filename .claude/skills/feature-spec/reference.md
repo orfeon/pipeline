@@ -201,6 +201,19 @@ offset}`, `als: {epochs, reg, seed}`, `outputs: [{pair: [a, b], as}, {embedding:
 `minSamplesPerBin`, `fit: {artifact}`. Output int64: `-1` missing, `0` below, `1..B`, `B+1` above.
 Typically the key of a following encoding.
 
+### `type: quantileTransform` (always static)
+
+`input` (numeric), `bins` (default 100), `distribution: uniform | normal`, `fit: {artifact}`. Output
+float64 `<name>`: the value's position in the fitted distribution (0..1, interpolated between the quantile
+knots; ties read the middle of their range; out of range clamps to 0 / 1) or its normal score. Missing → null.
+
+### `type: svd` (always static)
+
+`inputs: [numeric fields]` (the vector) or `input: <array<numeric> field>` (then `rank` is required), `rank`
+(default min(d, 8)), `center` (default true), `standardize` (default false), `fit: {artifact}`. Output
+float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained variance. A vector with a missing
+component (or a wrong array length) → null scores. Fitted from (n, Σx, Σxxᵀ): no row leaves the workers.
+
 ## Availability expressions
 
 | expression | meaning |

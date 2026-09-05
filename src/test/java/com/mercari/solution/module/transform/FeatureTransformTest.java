@@ -1026,6 +1026,124 @@ public class FeatureTransformTest {
     }
 
     // ------------------------------------------------------------------------------------------
+    // quantileTransform / svd
+    // ------------------------------------------------------------------------------------------
+
+    /** start_price over the 6 rows is 50, 60, 80, 100, 120, 200: with bins = 5 every value is a knot at i / 5. */
+    @Test
+    public void testQuantileTransform() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                      bins: 5
+                      fit: {artifact: "%s"}
+                    - name: price_z
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                      bins: 5
+                      distribution: normal
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), output.getSchema().getField("f_price_q").getFieldType().getType());
+        Assertions.assertEquals("quantileTransform", output.getSchema().getField("f_price_z").getOptions().get("feature.operator"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            final Map<String, Double> positions = Map.of("A/s1", 0.6, "A/s2", 0.0, "B/s1", 1.0, "C/s1", 0.4, "C/s2", 0.2, "D/s1", 0.8);
+            for (final Map.Entry<String, Double> e : positions.entrySet()) {
+                Assertions.assertEquals(e.getValue(), byKey.get(e.getKey()).getAsDouble("f_price_q"), 1e-9, e.getKey());
+            }
+            // normal scores: Φ⁻¹(0.4) and Φ⁻¹(0.6) are symmetric, the extremes are finite
+            Assertions.assertEquals(-0.2533471031, byKey.get("C/s1").getAsDouble("f_price_z"), 1e-6);
+            Assertions.assertEquals(0.2533471031, byKey.get("A/s1").getAsDouble("f_price_z"), 1e-6);
+            Assertions.assertTrue(Double.isFinite(byKey.get("B/s1").getAsDouble("f_price_z")) && byKey.get("B/s1").getAsDouble("f_price_z") > 4);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs);
+        final java.io.File artifact = new java.io.File(dirs[0], "price_q.quantiles.json");
+        Assertions.assertTrue(artifact.exists());
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject();
+        Assertions.assertEquals(5, json.get("bins").getAsInt());
+        Assertions.assertEquals(6, json.get("n").getAsLong());
+        Assertions.assertEquals("uniform", json.get("distribution").getAsString());
+        Assertions.assertEquals(6, json.getAsJsonArray("knots").size());
+        Assertions.assertEquals(50.0, json.getAsJsonArray("knots").get(0).getAsDouble(), 1e-9);
+        Assertions.assertEquals(200.0, json.getAsJsonArray("knots").get(5).getAsDouble(), 1e-9);
+        Assertions.assertFalse(new java.io.File(dirs[0], "price_z.quantiles.json").exists(), "no artifact URI for the second block");
+    }
+
+    /**
+     * svd over (start_price, current_bid_t10): the bid tracks the price (+5..+10), so the first component carries
+     * nearly all the variance and the scores are centred and uncorrelated; the artifact holds the fitted moments.
+     */
+    @Test
+    public void testSvd() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: price_pc
+                      scope: population
+                      type: svd
+                      inputs: [start_price, current_bid_t10]
+                      rank: 2
+                      fit: {artifact: "%s"}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertNotNull(output.getSchema().getField("f_price_pc_0"));
+        Assertions.assertNotNull(output.getSchema().getField("f_price_pc_1"));
+        Assertions.assertNull(output.getSchema().getField("f_price_pc_2"));
+        // current_bid_t10 is market information available 10 minutes before the event: the scores inherit it
+        Assertions.assertTrue(output.getSchema().getField("f_price_pc_0").getOptions().get("feature.derivedFrom").contains("market"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final List<MElement> list = new ArrayList<>();
+            for (final MElement row : rows) list.add(row);
+            Assertions.assertEquals(6, list.size());
+            double sum0 = 0, sum1 = 0, cross = 0, var0 = 0, var1 = 0;
+            for (final MElement row : list) {
+                final double s0 = row.getAsDouble("f_price_pc_0"), s1 = row.getAsDouble("f_price_pc_1");
+                sum0 += s0;
+                sum1 += s1;
+                cross += s0 * s1;
+                var0 += s0 * s0;
+                var1 += s1 * s1;
+            }
+            Assertions.assertEquals(0.0, sum0, 1e-9);
+            Assertions.assertEquals(0.0, sum1, 1e-9);
+            Assertions.assertEquals(0.0, cross, 1e-6);
+            Assertions.assertTrue(var0 > 100 * var1, "the first component carries the shared price variance: " + var0 + " vs " + var1);
+            // the most expensive listing (B/s1: 200 / 210) has the largest positive score on the price axis
+            MElement max = list.get(0);
+            for (final MElement row : list) if (row.getAsDouble("f_price_pc_0") > max.getAsDouble("f_price_pc_0")) max = row;
+            Assertions.assertEquals("B", max.getAsString("session_id"));
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs);
+        final java.io.File artifact = new java.io.File(dirs[0], "price_pc.svd.json");
+        Assertions.assertTrue(artifact.exists());
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject();
+        Assertions.assertEquals(2, json.get("dimension").getAsInt());
+        Assertions.assertEquals(2, json.get("rank").getAsInt());
+        Assertions.assertEquals(6, json.get("n").getAsLong());
+        Assertions.assertEquals(610.0 / 6, json.getAsJsonArray("mean").get(0).getAsDouble(), 1e-9);
+        Assertions.assertEquals(675.0 / 6, json.getAsJsonArray("mean").get(1).getAsDouble(), 1e-9);
+        final double v0 = json.getAsJsonArray("variances").get(0).getAsDouble(), v1 = json.getAsJsonArray("variances").get(1).getAsDouble();
+        Assertions.assertEquals(json.get("totalVariance").getAsDouble(), v0 + v1, 1e-6);
+        Assertions.assertTrue(v0 > v1);
+    }
+
+    // ------------------------------------------------------------------------------------------
     // fit.mode forward
     // ------------------------------------------------------------------------------------------
 
