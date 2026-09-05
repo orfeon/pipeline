@@ -33,6 +33,8 @@ Supports:
   composed values, per-level deviations and effective sample size. **factorization** machines (fm / fwfm,
   ALS) over categorical fields: pair interaction scores, embeddings, linear predictor. **discretize**: bin
   edges fitted on the input (quantile method), a fitted categorical column to key an encoding on.
+  **quantileTransform**: a value's position in the fitted distribution (rank normalisation, optionally as a
+  normal score). **svd**: PCA / truncated-SVD scores of a numeric vector (several fields or an array).
 - **Leakage checking** — every column carries a derived availability time and lineage (source, kind,
   evidence). Columns available after `predictAt` are rejected unless they are only consumed as
   intermediates; history windows over late-arriving fields are shifted automatically.
@@ -303,6 +305,57 @@ bin 1 and the artifact is written. The values are gathered on one worker for the
 The artifact `<planHash>/<block>.bins.json` (edges, min, max, n) is written and reused like the other static
 artifacts; `fit.cadence / window / warmStart` are accepted but ignored. For a cross key, keep the bins
 coarse (4–8): the cardinality multiplies.
+
+### Quantile transform (population, type: quantileTransform)
+
+```yaml
+  - name: price_q
+    scope: population
+    type: quantileTransform
+    input: start_price                 # numeric field or feature
+    bins: 100                          # quantile intervals of the fitted CDF (default 100)
+    distribution: uniform              # uniform (default): F(v) in [0, 1] | normal: the normal score Φ⁻¹(F(v))
+    fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
+```
+
+Rank-based normalisation: the whole input's distribution is summarised by `bins + 1` knots (the type-7
+quantiles at `0, 1/B, …, 1`) and a value maps to its position in it, interpolated linearly between knots —
+monotone, scale-free and robust to outliers, and the same map at training and serving time. A value below
+the fitted minimum reads 0, above the maximum 1 (`normal`: clamped at `±Φ⁻¹(1 − 1e-6)`, never infinite); a
+value equal to a run of tied knots (a mass point, also one sitting at the minimum or the maximum — a
+zero-inflated count's zeros) reads the middle of the run's probability range; missing (null / NaN) reads
+null. Like discretize the values are gathered on one worker for the fit
+(8 bytes per row) and an input without a single value still fits (n = 0: every value reads null). The
+artifact is `<planHash>/<block>.quantiles.json` (knots, bins, n, distribution).
+
+### SVD / PCA (population, type: svd)
+
+```yaml
+  - name: hist_pc
+    scope: population
+    type: svd
+    inputs: [recent_n5_start_price_lag1, recent_n5_start_price_lag2, recent_n5_start_price_lag3]   # the vector
+    # input: embedding                 # or one array<numeric> field / feature
+    rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
+    center: true                       # subtract the fitted means (default true)
+    standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
+    fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
+```
+
+The "Compress" step of the sequence frame: the vector is centred (and optionally standardised) with the
+whole-input moments and projected onto the leading `rank` right singular vectors, giving decorrelated scores
+ordered by explained variance (`<name>_0` carries the most). The fit needs only (n, Σx, Σxxᵀ), accumulated
+relative to the first vector so a large offset (epoch times, ids) does not cancel the covariance away — one
+Combine over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d =
+the vector length, tens to a few hundred). Components are oriented so the largest loading is positive (a
+re-fit reproduces the scores). A vector with a missing component (null / NaN) takes no part in the fit and
+reads null scores. An array input must have one length: vectors of another length are skipped (and read
+null) and the run logs a warning — the fitted length is whichever the fit saw first, so normalise the array
+length upstream; when `rank` exceeds an array's length the fit caps the components at the length, the
+surplus score columns read null and a warning names the cap (for `inputs` the compiler rejects the rank). A
+fit with fewer than two vectors has no components and reads null everywhere. The artifact is `<planHash>/<block>.svd.json` (mean, scale,
+components, per-component variances, total variance, n) — the explained-variance ratio is `variances[k] /
+totalVariance`.
 
 ### Shrinkage and key lattices (population)
 
@@ -631,8 +684,10 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   GroupByKey).
 - Key set `structure: sequence`, nested encoding targets, the `quantile` / `distribution` stats in
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
-  `factorization` / `discretize` are parsed but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
-  and non-static fits. Discretize: `method: tree` / `optimal` (supervised) and non-static fits. In `shrinkage`,
+  `factorization` / `discretize` / `quantileTransform` / `svd` (`spectralEmbedding`, `transitionStats`) are parsed
+  but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
+  and non-static fits. Discretize, quantileTransform and svd: non-static fits (`fit.cadence / window /
+  warmStart` are accepted and ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
   `estimator: joint`, `weights: heldOut` and an `offset` on a logit / log scale are rejected;
   `parentStatistic: type` falls back to token with a warning. `weights: varianceComponents` estimates the
   per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding); a level whose

@@ -87,7 +87,7 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
 
 ## Recipe E — population type with a static fit (worked example: `discretize`)
 
-The pattern for `quantileTransform`, `svd`, `spectralEmbedding`, `transitionStats`: fitted once
+The pattern `quantileTransform` and `svd` follow, and the one for `spectralEmbedding` / `transitionStats`: fitted once
 over the whole input (or loaded from an artifact), applied per row by lookup.
 
 1. **Model class** (pure Java, `Serializable`, like `Discretization`): `fit...(...)`, `apply` /
@@ -113,8 +113,9 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    label, planHash)` = extract → `Combine.globally(<gather fn with a default accumulator>)` →
    fit DoFn (writes the artifact when `artifactUri != null`) → `View.asList`; `fitInputs()` lists
    the fields read from the stage input (same-stage producers are rejected); `apply(model,
-   values)` fills the column (`model == null` → null). Register it in `applyFit`
-   (`blocks.addAll(<type>Specs(stageColumns))`) — `FitApplyDoFn` needs no change. Copy before
+   values)` fills the column (`model == null` → null). Register it once in `staticFitBlocks`
+   (`blocks.addAll(<type>Specs(columns))`), which feeds both `applyFit` and the manifest's
+   `artifactPaths` — `FitApplyDoFn` needs no change. Copy before
    sorting (DirectRunner immutability). The whole training set lands on one worker: state the
    memory cost in the docs (discretize: 8 bytes per row).
 6. Docs: a `### <Type> (population, type: <type>)` section in `feature.md` (example, fit semantics,

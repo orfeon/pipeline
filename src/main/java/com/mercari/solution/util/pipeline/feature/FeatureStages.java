@@ -306,20 +306,31 @@ public final class FeatureStages {
         }
     }
 
-    /** Artifact paths per fitted block for the manifest (static / fold encodings, factorization, discretize) — declared or not yet written. */
+    /** Artifact paths per fitted block for the manifest (static / fold encodings and every static-fit block) — declared or not yet written. */
     public static Map<String, String> artifactPaths(final FeaturePlan plan) {
         final Map<String, String> paths = new LinkedHashMap<>();
         final String version = plan.getArtifactVersion();
         for (final FitLevel level : fitLevels(plan.getColumns())) {
             if (level.artifactUri() != null) paths.put(level.block(), FitArtifact.statsPath(level.artifactUri(), version, level.block()));
         }
-        for (final StaticFitBlock<?> block : fmSpecs(plan.getColumns())) {
-            if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
-        }
-        for (final StaticFitBlock<?> block : discretizeSpecs(plan.getColumns())) {
+        for (final StaticFitBlock<?> block : staticFitBlocks(plan.getColumns())) {
             if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
         }
         return paths;
+    }
+
+    /**
+     * Every static-fit block among the columns, rebuilt from their coordinates — the single registry of the
+     * static-fit population types (factorization, discretize, quantileTransform, svd): a new type is added here
+     * and nowhere else.
+     */
+    static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
+        final List<StaticFitBlock<?>> blocks = new ArrayList<>();
+        blocks.addAll(fmSpecs(columns));
+        blocks.addAll(discretizeSpecs(columns));
+        blocks.addAll(quantileTransformSpecs(columns));
+        blocks.addAll(svdSpecs(columns));
+        return blocks;
     }
 
     /** The shared objects of the stage wiring: one stage = one ParDo / GroupByKey, whatever wave it runs in. */
@@ -699,11 +710,9 @@ public final class FeatureStages {
                                 .withSideInputs(seriesView));
             }
         }
-        // static-fit blocks (factorization / discretize): fitted on one worker over the whole input, or loaded
+        // static-fit blocks (see staticFitBlocks): fitted on one worker over the whole input, or loaded
         // from their artifact, and applied per row through a side input
-        final List<StaticFitBlock<?>> blocks = new ArrayList<>();
-        blocks.addAll(fmSpecs(stageColumns));
-        blocks.addAll(discretizeSpecs(stageColumns));
+        final List<StaticFitBlock<?>> blocks = staticFitBlocks(stageColumns);
         final Map<String, PCollectionView<?>> blockViews = new LinkedHashMap<>();
         final Set<String> blockLoad = new LinkedHashSet<>();
         for (final StaticFitBlock<?> block : blocks) {
@@ -749,7 +758,7 @@ public final class FeatureStages {
      * A population block fitted once on the whole input and applied by lookup ({@code fit.mode: static}
      * outside the encoding lattice): its model {@code M} is either fitted in the fit stage (one side input
      * per block) or loaded from its artifact on the worker. Implementations rebuild themselves from their
-     * output columns' coordinates ({@link #fmSpecs}, {@link #discretizeSpecs}).
+     * output columns' coordinates and are enumerated by {@link #staticFitBlocks}.
      */
     interface StaticFitBlock<M extends Serializable> extends Serializable {
         String block();
@@ -991,6 +1000,238 @@ public final class FeatureStages {
                     k.get("artifactUri"), "true".equals(k.get("refit"))));
         }
         return specs;
+    }
+
+    // --- quantileTransform ---------------------------------------------------------------------------
+
+    /** One quantileTransform block of a fit stage, rebuilt from its output column's coordinates. */
+    record QuantileTransformSpec(String block, String column, String field, int bins, String distribution,
+                                 String artifactUri, boolean refit) implements StaticFitBlock<QuantileTransform> {
+        @Override
+        public String artifactPath(final String planHash) {
+            return QuantileTransform.artifactPath(artifactUri, planHash, block);
+        }
+
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return QuantileTransform.exists(artifactUri, planHash, block);
+        }
+
+        @Override
+        public QuantileTransform readArtifact(final String planHash) {
+            return QuantileTransform.read(artifactUri, planHash, block);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            return List.of(field);
+        }
+
+        /** Gathers the non-null values on one worker (8 bytes per row) and fits the quantile knots; an empty input still fits (n = 0). */
+        @Override
+        public PCollectionView<List<QuantileTransform>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            return fitInput
+                    .apply(label + "_Quantiles_" + block + "_Values", ParDo.of(new ExtractValuesDoFn(field)))
+                    .setCoder(DoubleCoder.of())
+                    .apply(label + "_Quantiles_" + block + "_Gather", Combine.globally(new GatherDoublesFn()))
+                    .apply(label + "_Quantiles_" + block + "_Fit", ParDo.of(new FitQuantileTransformDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(QuantileTransform.class))
+                    .apply(label + "_Quantiles_" + block + "_View", View.asList());
+        }
+
+        @Override
+        public void apply(final QuantileTransform q, final Map<String, Object> values) {
+            values.put(column, q == null ? null : q.transform(FeatureValues.toDouble(values.get(field))));
+        }
+    }
+
+    static List<QuantileTransformSpec> quantileTransformSpecs(final List<OutputColumn> stageColumns) {
+        final List<QuantileTransformSpec> specs = new ArrayList<>();
+        for (final OutputColumn c : stageColumns) {
+            if (!"quantileTransform".equals(c.getOperator())) continue;
+            final Map<String, String> k = c.getCoordinates();
+            specs.add(new QuantileTransformSpec(c.getBlock(), c.getCanonicalName(), k.get("field"),
+                    Integer.parseInt(k.getOrDefault("bins", Integer.toString(QuantileTransform.DEFAULT_BINS))),
+                    k.getOrDefault("distribution", QuantileTransform.UNIFORM), k.get("artifactUri"), "true".equals(k.get("refit"))));
+        }
+        return specs;
+    }
+
+    static class FitQuantileTransformDoFn extends DoFn<Doubles, QuantileTransform> {
+        private final QuantileTransformSpec spec;
+        private final String planHash;
+
+        FitQuantileTransformDoFn(final QuantileTransformSpec spec, final String planHash) {
+            this.spec = spec;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final Doubles values = c.element();
+            LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", spec.block(), spec.bins(), values.size);
+            final QuantileTransform q = QuantileTransform.fit(values.values, values.size, spec.bins(), spec.distribution());
+            if (spec.artifactUri() != null) QuantileTransform.write(spec.artifactUri(), planHash, spec.block(), q);
+            c.output(q);
+        }
+    }
+
+    // --- svd ------------------------------------------------------------------------------------------
+
+    /**
+     * One svd block of a fit stage (all its score columns), rebuilt from the columns' coordinates: the vector is
+     * the listed numeric {@code fields} or one array-typed {@code arrayField}.
+     */
+    record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
+                   String artifactUri, boolean refit, List<OutputColumn> columns, int[] components) implements StaticFitBlock<Svd> {
+        @Override
+        public String artifactPath(final String planHash) {
+            return Svd.artifactPath(artifactUri, planHash, block);
+        }
+
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return Svd.exists(artifactUri, planHash, block);
+        }
+
+        @Override
+        public Svd readArtifact(final String planHash) {
+            return Svd.read(artifactUri, planHash, block);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            return arrayField != null ? List.of(arrayField) : fields;
+        }
+
+        /** The row's vector, or null when a component is missing (null / NaN) or the array is absent. */
+        double[] vector(final Map<String, Object> values) {
+            if (arrayField != null) {
+                final Object v = values.get(arrayField);
+                if (v instanceof double[] a) return a;
+                if (!(v instanceof List<?> list)) return null;
+                final double[] x = new double[list.size()];
+                for (int i = 0; i < x.length; i++) {
+                    final Double d = FeatureValues.toDouble(list.get(i));
+                    if (d == null) return null;
+                    x[i] = d;
+                }
+                return x;
+            }
+            final double[] x = new double[fields.size()];
+            for (int i = 0; i < x.length; i++) {
+                final Double d = FeatureValues.toDouble(values.get(fields.get(i)));
+                if (d == null) return null;
+                x[i] = d;
+            }
+            return x;
+        }
+
+        /** Sufficient statistics (n, Σx, Σxxᵀ) in one Combine — no vector leaves the workers — then the eigendecomposition on one worker. */
+        @Override
+        public PCollectionView<List<Svd>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            return fitInput
+                    .apply(label + "_Svd_" + block + "_Vectors", ParDo.of(new ExtractVectorsDoFn(this)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(double[].class))
+                    .apply(label + "_Svd_" + block + "_Moments", Combine.globally(new VectorMomentsFn()))
+                    .apply(label + "_Svd_" + block + "_Fit", ParDo.of(new FitSvdDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Svd.class))
+                    .apply(label + "_Svd_" + block + "_View", View.asList());
+        }
+
+        /** {@code columns.get(i)} carries score {@code components[i]} (resolved once in {@link #svdSpecs}, never parsed per row). */
+        @Override
+        public void apply(final Svd svd, final Map<String, Object> values) {
+            final double[] scores = svd == null ? null : svd.transform(vector(values));
+            for (int i = 0; i < components.length; i++) {
+                final int k = components[i];
+                values.put(columns.get(i).getCanonicalName(), scores == null || k >= scores.length ? null : scores[k]);
+            }
+        }
+    }
+
+    static List<SvdSpec> svdSpecs(final List<OutputColumn> stageColumns) {
+        final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
+        for (final OutputColumn c : stageColumns) {
+            if ("svd".equals(c.getOperator())) columns.computeIfAbsent(c.getBlock(), b -> new ArrayList<>()).add(c);
+        }
+        final List<SvdSpec> specs = new ArrayList<>();
+        for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
+            final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final int[] components = new int[e.getValue().size()];
+            for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
+            specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
+                    Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
+                    Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components));
+        }
+        return specs;
+    }
+
+    static class ExtractVectorsDoFn extends DoFn<MElement, double[]> {
+        private final SvdSpec spec;
+
+        ExtractVectorsDoFn(final SvdSpec spec) {
+            this.spec = spec;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final double[] x = spec.vector(element.asPrimitiveMap());
+            if (x != null) c.output(x);
+        }
+    }
+
+    static class VectorMomentsFn extends Combine.CombineFn<double[], Svd.Moments, Svd.Moments> {
+        @Override
+        public Svd.Moments createAccumulator() { return new Svd.Moments(); }
+
+        @Override
+        public Svd.Moments addInput(final Svd.Moments acc, final double[] x) {
+            acc.add(x);
+            return acc;
+        }
+
+        @Override
+        public Svd.Moments mergeAccumulators(final Iterable<Svd.Moments> accs) {
+            final Svd.Moments out = new Svd.Moments();
+            for (final Svd.Moments a : accs) out.merge(a);
+            return out;
+        }
+
+        @Override
+        public Svd.Moments extractOutput(final Svd.Moments acc) { return acc; }
+
+        @Override
+        public Coder<Svd.Moments> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<double[]> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(Svd.Moments.class);
+        }
+
+        @Override
+        public Coder<Svd.Moments> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<double[]> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(Svd.Moments.class);
+        }
+    }
+
+    static class FitSvdDoFn extends DoFn<Svd.Moments, Svd> {
+        private final SvdSpec spec;
+        private final String planHash;
+
+        FitSvdDoFn(final SvdSpec spec, final String planHash) {
+            this.spec = spec;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final Svd.Moments m = c.element();
+            final Svd svd = Svd.fit(m, spec.rank(), spec.center(), spec.standardize());
+            LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
+                    spec.block(), svd.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
+            if (spec.artifactUri() != null) Svd.write(spec.artifactUri(), planHash, spec.block(), svd);
+            c.output(svd);
+        }
     }
 
     static class ExtractValuesDoFn extends DoFn<MElement, Double> {

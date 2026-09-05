@@ -353,8 +353,8 @@ public class FeaturePlanCompilerTest {
 
     @Test
     public void testUnsupportedPopulationTypeAndFitMode() {
-        final String svd = SPEC.replace("type: encoding", "type: svd");
-        Assertions.assertTrue(hasCode(compile(SOURCES, svd), "population.unsupported"));
+        final String spectral = SPEC.replace("type: encoding", "type: spectralEmbedding");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spectral), "population.unsupported"));
         final String folds = SPEC.replace("output:\n  prefix: f_", "fit: {mode: fold, folds: 1}\noutput:\n  prefix: f_");
         Assertions.assertTrue(hasCode(compile(SOURCES, folds), "fit.folds"));
     }
@@ -925,6 +925,94 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("bins: 4", "bins: 1"))), "discretize.bins"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("fit: {artifact", "fit: {mode: expanding, artifact"))), "discretize.fit.mode"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(DISCRETIZE_BLOCK.replace("bins: 4", "bins: 4\n        target: sold"))), "discretize.target"));
+    }
+
+    private static final String QUANTILE_TRANSFORM_BLOCK = """
+                  - name: price_q
+                    scope: population
+                    type: quantileTransform
+                    input: start_price
+                    bins: 20
+                    distribution: normal
+                    fit: {artifact: "gs://bucket/features", cadence: daily}
+                  - name: price_q_sq
+                    scope: row
+                    expr: "price_q * price_q"
+            """;
+
+    @Test
+    public void testQuantileTransformExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "quantileTransform.fit.cadence"));
+        final OutputColumn c = column(plan, "price_q");
+        Assertions.assertEquals("quantileTransform", c.getOperator());
+        Assertions.assertEquals(FeatureSpec.Scope.population, c.getScope());
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), c.getFieldType().getType());
+        Assertions.assertEquals("static", c.getCoordinates().get("fit"));
+        Assertions.assertEquals("start_price", c.getCoordinates().get("field"));
+        Assertions.assertEquals("20", c.getCoordinates().get("bins"));
+        Assertions.assertEquals("normal", c.getCoordinates().get("distribution"));
+        Assertions.assertEquals("gs://bucket/features", c.getCoordinates().get("artifactUri"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+        Assertions.assertTrue(c.isFitted());
+        // a row expression over the fitted column is evaluated in the fit stage
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.columnNames().containsAll(List.of("price_q", "price_q_sq")), plan::describe);
+        Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("price_q").endsWith("price_q.quantiles.json"));
+        // defaults: 100 intervals, uniform
+        final OutputColumn defaults = column(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("        bins: 20\n        distribution: normal\n", ""))), "price_q");
+        Assertions.assertEquals("100", defaults.getCoordinates().get("bins"));
+        Assertions.assertEquals("uniform", defaults.getCoordinates().get("distribution"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("input: start_price", "input: condition_grade"))), "quantileTransform.input"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("bins: 20", "bins: 1"))), "quantileTransform.bins"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("distribution: normal", "distribution: logistic"))), "quantileTransform.distribution"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("fit: {artifact", "fit: {mode: expanding, artifact"))), "quantileTransform.fit.mode"));
+    }
+
+    private static final String SVD_BLOCK = """
+                  - name: hist
+                    scope: population
+                    type: svd
+                    inputs: [recent_n5_start_price_lag1, recent_n5_start_price_lag2, start_price]
+                    rank: 2
+                    fit: {artifact: "gs://bucket/features"}
+            """;
+
+    @Test
+    public void testSvdExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(SVD_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        for (int k = 0; k < 2; k++) {
+            final OutputColumn c = column(plan, "hist_" + k);
+            Assertions.assertEquals("svd", c.getOperator());
+            Assertions.assertEquals(FeatureSpec.Scope.population, c.getScope());
+            Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), c.getFieldType().getType());
+            Assertions.assertEquals("static", c.getCoordinates().get("fit"));
+            Assertions.assertEquals("recent_n5_start_price_lag1,recent_n5_start_price_lag2,start_price", c.getCoordinates().get("fields"));
+            Assertions.assertEquals("2", c.getCoordinates().get("rank"));
+            Assertions.assertEquals(Integer.toString(k), c.getCoordinates().get("component"));
+            Assertions.assertEquals("true", c.getCoordinates().get("center"));
+            Assertions.assertEquals("false", c.getCoordinates().get("standardize"));
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+            Assertions.assertTrue(c.getInputs().contains("recent_n5_start_price_lag1"), c.getInputs()::toString);
+        }
+        Assertions.assertNull(plan.getColumn("hist_2"));
+        // the fit reads the lag columns from the stage input: the sequence stage runs first, the fit stage after it
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.columnNames().containsAll(List.of("hist_0", "hist_1")), plan::describe);
+        final FeaturePlan.Stage seller = plan.getStages().stream().filter(s -> s.columnNames().contains("recent_n5_start_price_lag1")).findFirst().orElseThrow();
+        Assertions.assertTrue(seller.index() < fit.index(), plan::describe);
+        Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("hist").endsWith("hist.svd.json"));
+        // defaults: rank = min(d, 8)
+        Assertions.assertNotNull(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", ""))).getColumn("hist_2"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("rank: 2", "rank: 4"))), "svd.rank"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("rank: 2", "rank: 0"))), "svd.rank"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace(", start_price]", ", condition_grade]"))), "svd.input"));
+        // a single scalar input is neither a vector nor an array
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("inputs: [recent_n5_start_price_lag1, recent_n5_start_price_lag2, start_price]", "input: start_price"))), "svd.input"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("fit: {artifact", "fit: {mode: fold, artifact"))), "svd.fit.mode"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("rank: 2", "rank: 2\n        maxFeatures: 1"))), "svd.maxFeatures"));
     }
 
     private static final String QUANTILE_BLOCK = """

@@ -28,7 +28,7 @@ util/pipeline/feature/
   FeaturePlan, OutputColumn              — the compiled plan and its columns (Serializable)
   RowEvaluator, ContextEvaluator, SequenceEvaluator, PopulationEvaluator, FeatureValues
                                          — Beam-free evaluators, one instance per stage DoFn
-  Shrinkage, VarianceComponents, Discretization, Factorization, OrderStatistics, FitArtifact
+  Shrinkage, VarianceComponents, Discretization, QuantileTransform, Svd, Factorization, OrderStatistics, FitArtifact
                                          — pure models shared by both layers
   FeatureStages                          — FeaturePlan → Beam transforms (stages, waves, fits, finalize)
   KeyedSpillSorter                       — per-key external sort of the keyed stages (§9.3)
@@ -133,7 +133,7 @@ variable.
 | `row` | none | stateless `ParDo` (`RowStageDoFn`) | row |
 | `context` | context keys | `KeyDoFn` → `GroupByKey` → in-group evaluation (`ContextStageDoFn`) | context |
 | `sequence` / `population` | entity keys / keySet keys | `SortKeyDoFn` → `GroupByKey` → per-key time-ordered replay (`KeyedHistoryDoFn` over `KeyedSpillSorter`) | sequence, expanding encoding |
-| `fit` | (global) | `Combine` → artifact / side input → apply `ParDo` (`FitApplyDoFn`) | population static / fold (encoding levels, factorization, discretize) |
+| `fit` | (global) | `Combine` → artifact / side input → apply `ParDo` (`FitApplyDoFn`) | population static / fold (encoding levels, factorization, discretize, quantileTransform, svd) |
 | `groupBy` | context keys | the finalize (`Finalize_Group` + `GroupedFinalizeDoFn`) | `output.groupBy` |
 
 - Stages form a **linear chain** in the baseline design (each stage receives the row with every field
@@ -303,11 +303,17 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   entity's keys or the row identity), and apply subtracts the row's own fold from the totals (n ≤ 0 →
   "no statistics"). λ comes from the totals.
 - **Static-fit blocks** (`StaticFitBlock<M>`: `FmSpec` for factorization, `DiscretizeSpec` for
-  discretize): rebuilt from the output columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
+  discretize, `QuantileTransformSpec` for quantileTransform, `SvdSpec` for svd): rebuilt from the output
+  columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
   (gather on one worker; the gather has a default accumulator so an empty input still fits) → fit DoFn
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
   `apply(model, values)` fills the block's columns. Adding a population type = one model class + one
-  `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`).
+  `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`). Two gather shapes:
+  discretize and quantileTransform gather the raw values (`Doubles`, 8 bytes per row) because quantiles need
+  the order statistics; svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ taken
+  relative to the first accepted vector so a large offset does not cancel the covariance away; merging
+  re-anchors exactly — one `Combine`, no row leaves the workers) and diagonalises the d × d matrix on the
+  driver (cyclic Jacobi, convergence judged relative to the Frobenius norm).
 - Rejected at construction: a fit target / offset / input produced by the same fit stage (it would
   read null — the compiler's strict-dependency rule keeps them apart, and the engine double-checks),
   and a fit without an existing artifact in streaming.
@@ -319,7 +325,9 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
 - **Format**: Avro for the encoding levels (`FitArtifact`: level / key / n / sum / sumSq +
   `<block>.manifest.json` with λ), `<block>.fm.avro` for factorization (latent vectors stored as
   big-endian `bytes` — Avro on this classpath round-trips `array<double>` at float precision),
-  `<block>.bins.json` for discretize. Reads and writes go through `ResourceUtil` (`gs://`, `s3://` and
+  `<block>.bins.json` for discretize, `<block>.quantiles.json` for quantileTransform (knots),
+  `<block>.svd.json` for svd (mean / scale / components / variances — JSON keeps double precision, and the
+  matrix is rank × d). Reads and writes go through `ResourceUtil` (`gs://`, `s3://` and
   local paths with one code path).
 - **Content addressing**: the artifact root is `{artifactUri}/{planHash}/`, where `planHash` =
   SHA-256 (first 16 hex digits) of the canonical (key-sorted) sources document + parameters **minus
@@ -412,6 +420,7 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 `fit.groupBy`); from **v1 / v1 additions**: `fit.mode: static` and `fold` with artifacts,
 `weights: varianceComponents`, `output: deviations | effectiveN`, `type: factorization` (fm / fwfm,
 ALS, `pair` / `embedding` / `sum` outputs, r-matrix lineage), `type: discretize` (`method: quantile`),
+`type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 the `quantile` stats, `output.groupBy`, hot-key audit queries, `--dryRun` and the server exposure of
 `validate --expand`. Everything else is parsed and rejected with a diagnostic (§9.2 "deferred").
 
@@ -514,8 +523,10 @@ roughly linear in the input).
 **Deferred (parsed, rejected with a diagnostic)**: `estimator: joint`, conjugate families,
 `weights: heldOut`, logit / log scale with `offset`; `structure: sequence`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
-consumption is not modelled); `quantileTransform` / `svd` / `spectralEmbedding` / `transitionStats`;
-factorization `variant: bayesian` and `fit.cadence / window / warmStart`; the run-time availability
+consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
+types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
+sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
+array field); factorization `variant: bayesian` and `fit.cadence / window / warmStart`; the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
 sequence / population stages as fold-in merge targets (composite sorter key, §9.4.3); the prefix-scan
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries
