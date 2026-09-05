@@ -52,6 +52,7 @@ public final class ScreenSpec implements Serializable {
     public static final String MISSING_MEAN = "mean";
     /** conditioning.missing: the unit's baseline-weighted mean of its observed values (grouped family only) */
     public static final String MISSING_GROUP_MEAN = "groupMean";
+    public static final List<String> MISSINGS = List.of(MISSING_MEAN, MISSING_GROUP_MEAN);
     public static final String TRANSFORM_RAW = "raw";
     public static final String TRANSFORM_RANK = "rank";
     public static final String TRANSFORM_ABSDEV = "absdev";
@@ -370,9 +371,9 @@ public final class ScreenSpec implements Serializable {
                 final String missing = string(o, "missing");
                 if (missing != null) {
                     s.conditioningMissing = missing;
-                    if (!MISSING_MEAN.equals(missing) && !MISSING_GROUP_MEAN.equals(missing)) {
-                        errors.add("conditioning.missing must be " + MISSING_MEAN + " or " + MISSING_GROUP_MEAN + ": " + missing);
-                    } else if (MISSING_GROUP_MEAN.equals(missing) && !s.isGroupedMultinomial()) {
+                    if (!MISSINGS.contains(missing)) {
+                        errors.add("unknown conditioning.missing '" + missing + "' (available: " + MISSINGS + ")");
+                    } else if (MISSING_GROUP_MEAN.equals(missing) && FAMILIES.contains(s.family) && !s.isGroupedMultinomial()) {
                         errors.add("conditioning.missing " + MISSING_GROUP_MEAN + " needs family " + FAMILY_GROUPED_MULTINOMIAL + " (the fill is the unit's baseline-weighted mean); the row families use " + MISSING_MEAN);
                     }
                 }

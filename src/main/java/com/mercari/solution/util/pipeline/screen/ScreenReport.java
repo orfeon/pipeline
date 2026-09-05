@@ -41,19 +41,18 @@ public final class ScreenReport {
     public record Result(List<Map<String, Object>> records, Map<String, Object> summary) {}
 
     /**
+     * Relative floor of Σ x̃² for the row families, whose centring is a difference of moment sums
+     * (c3 − c4² / c5): below this ratio of c3 the difference holds fewer than four significant digits, so a
+     * window-constant column — or one whose spread is below 1e-6 of its magnitude — is degenerate. The grouped
+     * family needs no floor: its centring is exact per unit ({@link GroupScorer#pivot}).
+     */
+    static final double ROW_DEGENERATE_REL = 1e-12;
+
+    /**
      * Score-test statistics from one accumulator slot array.
      *
      * @param nUnits the number of scored units (groups, or rows when independent): {@code est_gain = chi2 / (2 nUnits)}
      */
-    /**
-     * Relative floor of H for the grouped family: x is centred per unit before squaring, so a within-unit constant
-     * leaves H ≈ eps² × Σ w Σ p x² (≈ 1e-32 relative); 1e-20 sits twelve orders above that floor and only flags a
-     * column whose within-unit spread is below 1e-10 of its magnitude, which double arithmetic cannot resolve.
-     */
-    static final double GROUPED_DEGENERATE_REL = 1e-20;
-    /** Relative floor of Σ x̃² for the row families, whose centring is a difference of moment sums (see {@link #stats}). */
-    static final double ROW_DEGENERATE_REL = 1e-12;
-
     public static Stats stats(final ScreenSpec spec, final double[] a, final double nUnits) {
         final long nObs = (long) a[ScoreAccumulator.N_OBS];
         final double s;
@@ -61,16 +60,11 @@ public final class ScreenReport {
         if (spec.isGroupedMultinomial()) {
             s = a[ScoreAccumulator.S];
             h = a[ScoreAccumulator.H];
-            // a column constant within every unit leaves H at the rounding floor of the centring (eps² × the raw
-            // second moment): relative, not absolute, so a large-valued constant is degenerate too
-            if (h <= GROUPED_DEGENERATE_REL * a[ScoreAccumulator.X2]) return Stats.degenerate(nObs);
         } else {
             final double c1 = a[ScoreAccumulator.C1], c2 = a[ScoreAccumulator.C2], c3 = a[ScoreAccumulator.C3], c4 = a[ScoreAccumulator.C4], c5 = a[ScoreAccumulator.C5], c6 = a[ScoreAccumulator.C6];
             if (!(c5 > 0)) return Stats.degenerate(nObs);
             final double xMean = c4 / c5;
             final double sxx = c3 - c4 * c4 / c5;
-            // the centring is a difference of moment sums (c3 − c4² / c5): below 1e-12 of c3 it holds fewer than
-            // four significant digits — a window-constant column (or one with a spread far below its magnitude)
             if (sxx <= ROW_DEGENERATE_REL * c3) return Stats.degenerate(nObs);
             final double rMean = c2 / c5;
             if (spec.isGaussian()) {
@@ -239,7 +233,9 @@ public final class ScreenReport {
                 Stats used = st;
                 if (conditioned) {
                     final double[] vec = partials.get(key);
-                    final Partial partial = vec == null
+                    // a column the marginal test cannot score has no partial either: its sums are the same
+                    // rounding noise, and the effective test must not pass what is reported degenerate
+                    final Partial partial = vec == null || st.degenerate
                             ? new Partial(Stats.degenerate(st.nObs), Double.NaN)
                             : partial(vec, fit, nUnits, st.nObs, sigma2, gammas.get(key));
                     final Stats pst = partial.stats;

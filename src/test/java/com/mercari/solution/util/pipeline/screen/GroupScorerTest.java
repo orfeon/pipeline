@@ -282,23 +282,33 @@ public class GroupScorerTest {
     }
 
     @Test
-    public void testDegenerateIsRelativeToTheColumnScale() {
-        // a column constant within every unit leaves H at the rounding floor of the centring, not at zero, when the
-        // values are large: the check is relative to the raw second moment (grouped) / the moment sum (row families)
-        final ScreenSpec grouped = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}}");
+    public void testDegenerateIsExactWithinTheUnit() {
+        // a column constant within every unit gives H = 0 exactly whatever its magnitude: the centring shifts by
+        // the unit's first value, so it works on the spread, not on the values (no rounding residue of the mean)
+        final ScreenSpec grouped = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}}");
         final GroupScorer scorer = new GroupScorer(grouped);
         final Map<Integer, ScoreAccumulator> constant = new HashMap<>();
-        scorer.score(List.of(row("a", 1, 1, Double.NaN, 1e6), row("a", 1, 0, Double.NaN, 1e6), row("a", 1, 0, Double.NaN, 1e6)), "a", constant);
-        Assertions.assertTrue(ScreenReport.stats(grouped, constant.get(grouped.key(0, 0)).getTotal(), 1).degenerate());
+        // a non-uniform baseline: the p-weighted mean of the raw values would round
+        scorer.score(List.of(row("a", 1, 1, 0.37, 1e6), row("a", 1, 0, 0.41, 1e6), row("a", 1, 0, 0.22, 1e6)), "a", constant);
+        final double[] c = constant.get(grouped.key(0, 0)).getTotal();
+        Assertions.assertEquals(0d, c[ScoreAccumulator.H]);
+        Assertions.assertEquals(0d, c[ScoreAccumulator.S]);
+        Assertions.assertTrue(ScreenReport.stats(grouped, c, 1).degenerate());
         // the same magnitude with a within-unit spread of 1 is a real column: x̃ = [1, -1, 0], H = 2/3 (uniform p)
         final Map<Integer, ScoreAccumulator> offset = new HashMap<>();
-        scorer.score(List.of(row("a", 1, 1, Double.NaN, 1e6 + 1), row("a", 1, 0, Double.NaN, 1e6 - 1), row("a", 1, 0, Double.NaN, 1e6)), "a", offset);
-        final double[] a = offset.get(grouped.key(0, 0)).getTotal();
-        final ScreenReport.Stats st = ScreenReport.stats(grouped, a, 1);
+        scorer.score(List.of(row("a", 1, 1, 1d, 1e6 + 1), row("a", 1, 0, 1d, 1e6 - 1), row("a", 1, 0, 1d, 1e6)), "a", offset);
+        final ScreenReport.Stats st = ScreenReport.stats(grouped, offset.get(grouped.key(0, 0)).getTotal(), 1);
         Assertions.assertFalse(st.degenerate());
         Assertions.assertEquals(2d / 3, st.h(), 1e-9);
-        Assertions.assertEquals(3e12 + 2, a[ScoreAccumulator.X2] * 3, 1);
-        // row family: a window-constant column of magnitude 1e6 (its Σ x̃² is a difference of moment sums)
+        // a spread of 1e-10 of the magnitude (an epoch-millisecond column, rows 100 ms apart) keeps every digit:
+        // x̃ = [-100, 0, 100], H = 20000/3
+        final Map<Integer, ScoreAccumulator> narrow = new HashMap<>();
+        scorer.score(List.of(row("a", 1, 1, 1d, 1.7e12), row("a", 1, 0, 1d, 1.7e12 + 100), row("a", 1, 0, 1d, 1.7e12 + 200)), "a", narrow);
+        final ScreenReport.Stats ns = ScreenReport.stats(grouped, narrow.get(grouped.key(0, 0)).getTotal(), 1);
+        Assertions.assertFalse(ns.degenerate());
+        Assertions.assertEquals(20000d / 3, ns.h(), 1e-6);
+        // row family: a window-constant column of magnitude 1e6 (its Σ x̃² is a difference of moment sums, so the
+        // report applies a relative floor)
         final ScreenSpec binomial = spec("{family: binomial, label: y, time: t, candidates: [x], placebo: {noise: 0}}");
         final GroupScorer rows = new GroupScorer(binomial);
         final Map<Integer, ScoreAccumulator> acc = new HashMap<>();

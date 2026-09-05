@@ -39,10 +39,12 @@ nothing to a tree model (false positive). See [Limits](#limits).
   The statistic is invariant to the scale of x and to a constant shift within the group.
 - Output per column × transform: `S`, `H`, `beta = S/H`, `chi2 = S²/H` (χ²(1) under the null), `z = sign(S)·√chi2`,
   `est_gain = chi2 / (2N)`, `pValue` (χ²(1) upper tail), `qValue` (Benjamini–Hochberg over the candidate records).
-- Degenerate columns (fewer than two observed rows, a constant within every group, or an information `H` below
-  a relative floor of the column's raw second moment — 1e-20 for `groupedMultinomial`, whose centring is exact
-  per unit, 1e-12 for the row families, whose centring is a difference of moment sums) get `est_gain = 0` and
-  `degenerate = true`.
+- Degenerate columns (fewer than two observed rows, a constant within every group — exact for
+  `groupedMultinomial` whatever the magnitude, since the group's values are shifted by its first value before
+  centring — or, for the row families, whose centring is a difference of moment sums, `Σ x̃²` below 1e-12 of the
+  raw second moment: a window-constant column or one whose spread is below 1e-6 of its magnitude; centre such a
+  column upstream) get `est_gain = 0` and `degenerate = true`; under conditioning they have no partial test
+  either and never pass.
 - Weights (`weight`): per row for `binomial`; the row mean of the unit for `groupedMultinomial`.
 
 ### Placebo calibration
@@ -86,8 +88,9 @@ statistics); independent rows support `raw` only in this version.
 intercept — logistic for `binomial`, least squares for `gaussian` (one Newton step; the residual variance at the fit
 scales the partial test), log-linear for `poisson`; F̃ = F standardised, a missing value → the window mean, or under
 `conditioning.missing: groupMean` (`groupedMultinomial` only) the unit's baseline-weighted mean of its observed values —
-the fill under which the missing row adds nothing to the unit's centred design, the rule the candidate columns already
-follow) by Newton's method with an L2 penalty on the
+under the baseline the fill at which the missing row adds nothing to the unit's centred design, the rule the candidate
+columns already follow; the later Newton passes centre by the fitted probabilities, where it is the closest fixed
+value) by Newton's method with an L2 penalty on the
 *average* log-likelihood, then orthogonalises every candidate against F in the Fisher metric W of the fitted
 model and reads the score test of what is left:
 
@@ -133,8 +136,8 @@ the direct upstream (`feature.role` field options), or from the `roles` / `timeF
 **Lineage selectors.** `candidates.include` / `exclude` accept, next to name globs (`f_*`, `odds*`), the
 lineage selectors of the feature transform's `output.exclude`: `derivedFrom:<kind>` (a source field's `kind`, e.g.
 `market` / `outcome`, propagated to every column derived from it), `scope:<input|row|context|sequence|population>`,
-`block:<name>`, `evidence:<declared|measured>`, `kind:<kind>` (the origin tag of a pass-through input field itself —
-a derived column has no kind, only `derivedFrom`). Lineage is read from the input schema when the feature transform is
+`block:<name>`, `evidence:<declared|measured>` — and, accepted by the screen only, `kind:<kind>` (the origin tag of a
+pass-through input field itself — a derived column has no kind, only `derivedFrom`). Lineage is read from the input schema when the feature transform is
 the direct upstream (its field options travel with the schema — the pass-through input fields carry `scope: input`
 and their `kind` as `derivedFrom`, so `derivedFrom:market` or `scope:input` drops a passed-through market column
 as well as the columns derived from it), or from `candidates.manifest` when the table comes back through a sink /
