@@ -88,10 +88,17 @@ public final class MatrixOps {
     public static double[][] solve(final double[][] a, final double[][] b) {
         checkMatrix("solve", a);
         checkMatrix("solve", b);
+        checkFinite("solve", a);
+        checkFinite("solve", b);
         if (a.length != b.length) {
             throw new IllegalArgumentException("solve requires matrix rows == rhs rows,"
                     + " but got " + a.length + " and " + b.length);
         }
+        return svdSolve(a, b);
+    }
+
+    /** {@link #solve(double[][], double[][])} after the inputs were checked (the solveGram fallback). */
+    private static double[][] svdSolve(final double[][] a, final double[][] b) {
         final R064Store matrix = R064Store.FACTORY.rows(a);
         final R064Store rhs = R064Store.FACTORY.rows(b);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
@@ -109,6 +116,7 @@ public final class MatrixOps {
      */
     public static double[] firstRightSingularVector(final double[][] m) {
         checkMatrix("firstRightSingularVector", m);
+        checkFinite("firstRightSingularVector", m);
         final R064Store matrix = R064Store.FACTORY.rows(m);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
         if (!svd.decompose(matrix)) {
@@ -126,6 +134,7 @@ public final class MatrixOps {
     /** Moore–Penrose pseudo-inverse via SVD (exact inverse when non-singular). */
     public static double[][] inverse(final double[][] a) {
         checkMatrix("inverse", a);
+        checkFinite("inverse", a);
         final R064Store matrix = R064Store.FACTORY.rows(a);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
         if (!svd.decompose(matrix)) {
@@ -201,6 +210,8 @@ public final class MatrixOps {
     public static double[][] solveGram(final double[][] xtx, final double[][] xty, final double ridge) {
         checkMatrix("solveGram", xtx);
         checkMatrix("solveGram", xty);
+        checkFinite("solveGram", xtx);
+        checkFinite("solveGram", xty);
         if (xtx.length != xtx[0].length || xtx.length != xty.length) {
             throw new IllegalArgumentException("solveGram requires a square matrix matching the"
                     + " rhs rows, but got " + xtx.length + "x" + xtx[0].length
@@ -225,7 +236,7 @@ public final class MatrixOps {
         if (cholesky.decompose(matrix) && cholesky.isSolvable()) {
             return toArray(cholesky.getSolution(rhs));
         }
-        return solve(regularized, xty);
+        return svdSolve(regularized, xty);
     }
 
     /** Coerces a numeric collection/array value to {@code double[]} ({@code null} in → {@code null} out). */
@@ -371,8 +382,14 @@ public final class MatrixOps {
         if (matrix.length == 0 || matrix[0].length == 0) {
             throw new IllegalArgumentException(op + " requires a non-empty matrix");
         }
-        // ojalgo's SVD does not terminate on NaN / infinite entries (the solveGram fallback would hang the worker):
-        // reject them up front, where the caller can still say which sums went wrong
+    }
+
+    /**
+     * ojalgo's SVD does not terminate on NaN / infinite entries (the solveGram fallback would hang the worker):
+     * the decompositions reject them up front, where the caller can still say which sums went wrong. The plain
+     * products ({@link #multiply}, {@link #mahalanobis}) keep propagating NaN like the scalar ops do.
+     */
+    private static void checkFinite(final String op, final double[][] matrix) {
         for (int i = 0; i < matrix.length; i++) {
             final double[] row = matrix[i];
             for (int j = 0; j < row.length; j++) {

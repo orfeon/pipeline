@@ -87,21 +87,16 @@ public final class ScreenReport {
      * H⊥ = b − 2γ'a + γ'Gγ, r²_F = 1 − H⊥ / b. A column fully explained by F (H⊥ ≈ 0) is degenerate with
      * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator);
      * {@code sigma2} is the gaussian family's residual variance at the fitted model (1 for the other families).
-     */
-    public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs, final double sigma2) {
-        if (!fit.hasBest) return new Partial(Stats.degenerate(nObs), Double.NaN);
-        final double[] a = Arrays.copyOfRange(vec, 2, 2 + fit.k);
-        return partial(vec, fit, nUnits, nObs, sigma2, MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits));
-    }
-
-    /**
-     * Orthogonalisation coefficients γ = (G + l2·N·I)⁻¹ a for every key at once: one Cholesky factorisation of the
-     * fit's Gram matrix serves every column x transform (a multi-right-hand-side solve).
+     * <p>
+     * {@code gammas} computes γ for every key at once: one Cholesky factorisation of the fit's Gram matrix serves
+     * every column x transform (a multi-right-hand-side solve); {@code partial} then applies one column's γ.
      */
     static Map<Integer, double[]> gammas(final Map<Integer, double[]> partials, final FitState fit, final double l2) {
         final List<Integer> keys = new ArrayList<>();
         for (final Map.Entry<Integer, double[]> e : partials.entrySet()) {
-            if (e.getKey() >= 0 && e.getValue().length >= 2 + fit.k) keys.add(e.getKey());
+            // the sigma sums are not a column; a column whose sums overflowed stays out of the batched solve
+            // (no gamma = degenerate, as the per-column solve reported it) instead of failing every column
+            if (e.getKey() != ConditioningScorer.SIGMA_KEY && solvable(e.getValue(), fit.k)) keys.add(e.getKey());
         }
         final Map<Integer, double[]> out = new HashMap<>();
         if (keys.isEmpty()) return out;
@@ -117,6 +112,15 @@ public final class ScreenReport {
             out.put(keys.get(c), gamma);
         }
         return out;
+    }
+
+    /** Whether a column's sums {@code [s, b, a]} can be orthogonalised: a positive H and finite a. */
+    private static boolean solvable(final double[] vec, final int k) {
+        if (!(vec[1] > 0)) return false;
+        for (int i = 2; i < 2 + k; i++) {
+            if (!Double.isFinite(vec[i])) return false;
+        }
+        return true;
     }
 
     /** The partial test given the column's orthogonalisation coefficients (see {@link #gammas}). */

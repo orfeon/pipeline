@@ -170,5 +170,9 @@ public class MatrixOpsTest {
         final double[][] inf = {{1, 0}, {0, Double.POSITIVE_INFINITY}};
         Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(inf, new double[]{1, 1}, 1e-3));
         Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.solveGram(new double[][]{{2, 0}, {0, 2}}, new double[]{1, Double.NaN}, 0d));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> MatrixOps.inverse(nan));
+        // the plain products keep propagating NaN like the scalar ops (no decomposition to hang)
+        Assertions.assertTrue(Double.isNaN(MatrixOps.multiply(nan, new double[]{1, 1})[0]));
+        Assertions.assertTrue(Double.isNaN(MatrixOps.mahalanobis(new double[]{1, 1}, new double[]{0, 0}, nan)));
     }
 }

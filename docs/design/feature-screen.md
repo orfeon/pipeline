@@ -136,10 +136,12 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
   fit is least squares at σ² = 1 (one Newton step); the partial test and `conditioningGain` divide by the residual
   variance at the fit (`SIGMA_KEY` sums from the partial pass), and an exact fit (σ² = 0) falls back to the
   marginal test with a note.
-- **Hardening after the four PRs** (review follow-ups): `MatrixOps.checkMatrix` rejects non-finite input
-  (ojalgo's SVD fallback never terminates on NaN — the screen guards its own inputs, the shared solver now
-  guards every caller); the report orthogonalises every column with one multi-right-hand-side `solveGram`
-  (`ScreenReport.gammas`: one Cholesky of the fit's Gram matrix instead of one per column x transform); the
+- **Hardening after the four PRs** (review follow-ups): the `MatrixOps` decompositions (`solve`, `solveGram`,
+  `inverse`, `firstRightSingularVector`) reject non-finite input (ojalgo's SVD never terminates on NaN — the
+  screen guards its own inputs, the shared solver now guards every caller; the plain products keep propagating
+  NaN); the report orthogonalises every column with one multi-right-hand-side `solveGram`
+  (`ScreenReport.gammas`: one Cholesky of the fit's Gram matrix instead of one per column x transform, a column
+  whose sums overflowed stays out of the batch and is reported degenerate); the
   Newton passes read a projection of the units (`ProjectDoFn`: label, baseline, weight, F — `ConditioningScorer`
   takes the F offset, 0 for projected rows) so `maxIter` passes never re-read the candidate columns; the
   prepare step accumulates the run counts per bundle and window (one element per bundle on the bookkeeping

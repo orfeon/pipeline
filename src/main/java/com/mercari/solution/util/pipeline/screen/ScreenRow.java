@@ -45,6 +45,18 @@ public final class ScreenRow implements Serializable {
         this.x = x;
     }
 
+    /**
+     * The row as the conditioning fit reads it: the conditioning columns alone, at offset 0 (a
+     * {@link ConditioningScorer} built with offset 0). The identity only orders rows of a unit and the
+     * evaluation is order-independent, so it is dropped with the period.
+     */
+    ScreenRow conditioningOnly(final ScreenSpec spec) {
+        final int k = spec.conditioningFields.size();
+        final double[] f = new double[k];
+        System.arraycopy(x, spec.conditioningOffset(), f, 0, k);
+        return new ScreenRow(group, "", time, null, label, baseline, weight, f);
+    }
+
     public String getGroup() {
         return group;
     }

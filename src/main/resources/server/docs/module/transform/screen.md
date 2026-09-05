@@ -367,7 +367,8 @@ transforms:
   screened them.
 - `threshold` / `thresholdTheoretical` are null when no unit was scored (no `NaN` in the file).
 - An empty `columns` (nothing passed) is still written and logged as a warning: a feature run reading it as
-  `output.include` keeps no feature column, so check `nPassed` before closing the loop.
+  `output.include` fails at assembly (`output.include.empty`, the table would carry no feature column), so check
+  `nPassed` before closing the loop.
 - The file is written once per run from the finalize step (global window only); a failed write fails the step.
   Keeping a ledger of runs is a matter of versioned paths (`${args.version}`) or an `action/storage` copy.
 

@@ -213,7 +213,6 @@ public final class ScreenStages {
             for (final Map.Entry<BoundedWindow, ScoreAccumulator> e : books.entrySet()) {
                 c.output(bookTag, KV.of(ScoreAccumulator.BOOKKEEPING_KEY, e.getValue()), e.getKey().maxTimestamp(), e.getKey());
             }
-            books = new HashMap<>();
         }
 
         @ProcessElement
@@ -429,14 +428,9 @@ public final class ScreenStages {
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final int offset = spec.conditioningOffset();
-            final int k = spec.conditioningFields.size();
             final List<ScreenRow> projected = new ArrayList<>();
             for (final ScreenRow r : c.element().getValue()) {
-                final double[] f = new double[k];
-                System.arraycopy(r.x, offset, f, 0, k);
-                // the identity only orders rows of a unit; the evaluation is order-independent
-                projected.add(new ScreenRow(r.group, "", r.time, null, r.label, r.baseline, r.weight, f));
+                projected.add(r.conditioningOnly(spec));
             }
             c.output(KV.of(c.element().getKey(), projected));
         }
@@ -642,7 +636,7 @@ public final class ScreenStages {
                 ResourceUtil.writeString(spec.selectionUri, SELECTION_GSON.toJson(ScreenReport.selection(spec, result)));
                 final int nColumns = ((List<?>) result.summary().get("passedColumns")).size();
                 if (nColumns == 0) {
-                    LOG.warn("screen selection written to {} with no column: a feature run reading it as output.include keeps no feature column", spec.selectionUri);
+                    LOG.warn("screen selection written to {} with no column: a feature run reading it as output.include fails at assembly (output.include.empty)", spec.selectionUri);
                 } else {
                     LOG.info("screen selection written to {}: {} columns", spec.selectionUri, nColumns);
                 }

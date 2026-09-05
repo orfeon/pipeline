@@ -63,6 +63,7 @@ not expand because another block failed).
 | `output.roles.baseline.notEmitted` | warning | the `baseline` role names a baseline, which is an intermediate column: derive it as a feature (`shareOfTotal`) and name that column |
 | `output.roles.time` | warning | the `time` role differs from `time.field` |
 | `output.include.unresolved` | error | `include` must be a list (a URI is resolved before compile; a bare string reached the compiler) |
+| `output.include.empty` | error | `include` is an empty list (a screening step that passed nothing, or a broken file): remove `include` to emit every column, or list the columns to keep |
 | `output.include.unknown` | warning | listed names match no column of this plan (the list may come from another plan version) |
 | `output.include.exclude` | info | both declared: `include` is the projection, `exclude` is ignored |
 | `audit.observedAt` | error | `count \| fail \| off` |
