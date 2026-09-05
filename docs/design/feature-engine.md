@@ -310,8 +310,10 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   `apply(model, values)` fills the block's columns. Adding a population type = one model class + one
   `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`). Two gather shapes:
   discretize and quantileTransform gather the raw values (`Doubles`, 8 bytes per row) because quantiles need
-  the order statistics; svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ — one
-  `Combine`, no row leaves the workers) and diagonalises the d × d matrix on the driver (cyclic Jacobi).
+  the order statistics; svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ taken
+  relative to the first accepted vector so a large offset does not cancel the covariance away; merging
+  re-anchors exactly — one `Combine`, no row leaves the workers) and diagonalises the d × d matrix on the
+  driver (cyclic Jacobi, convergence judged relative to the Frobenius norm).
 - Rejected at construction: a fit target / offset / input produced by the same fit stage (it would
   read null — the compiler's strict-dependency rule keeps them apart, and the engine double-checks),
   and a fit without an existing artifact in streaming.

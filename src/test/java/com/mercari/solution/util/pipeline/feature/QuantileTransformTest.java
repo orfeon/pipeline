@@ -48,6 +48,28 @@ public class QuantileTransformTest {
     }
 
     @Test
+    public void testMassPointAtTheMinimumReadsTheMiddleOfItsRun() {
+        // a zero-inflated count: 60 % zeros → knots 0 ×6, 0.4, 1.3, 2.2, 3.1, 4
+        final double[] values = {0, 0, 0, 0, 0, 0, 1, 2, 3, 4};
+        final QuantileTransform q = QuantileTransform.fit(values, values.length, 10, QuantileTransform.UNIFORM);
+        Assertions.assertEquals(0.0, q.knots[5], 1e-12);
+        Assertions.assertTrue(q.knots[6] > 0);
+        Assertions.assertEquals(0.25, q.transform(0.0), 1e-12);
+        Assertions.assertTrue(q.transform(0.0) < q.transform(0.2));
+        Assertions.assertEquals(0.0, q.transform(-1.0), 1e-12);
+        // the normal score of the mass point is Φ⁻¹(0.25), not the ±4.75 clamp
+        final QuantileTransform normal = QuantileTransform.fit(values, values.length, 10, QuantileTransform.NORMAL);
+        Assertions.assertEquals(-0.6744897502, normal.transform(0.0), 1e-7);
+        // a mass point at the maximum mirrors it; a constant field reads 0.5
+        final double[] top = {1, 2, 3, 4, 9, 9, 9, 9, 9, 9};
+        final QuantileTransform t = QuantileTransform.fit(top, top.length, 10, QuantileTransform.UNIFORM);
+        Assertions.assertEquals(1.0, t.transform(10.0), 1e-12);
+        Assertions.assertTrue(t.transform(9.0) < 1.0 && t.transform(9.0) > t.transform(4.0));
+        final double[] constant = {7, 7, 7, 7};
+        Assertions.assertEquals(0.5, QuantileTransform.fit(constant, constant.length, 4, QuantileTransform.UNIFORM).transform(7.0), 1e-12);
+    }
+
+    @Test
     public void testNormalScores() {
         final double[] values = new double[1001];
         for (int i = 0; i < values.length; i++) values[i] = i;

@@ -320,10 +320,11 @@ coarse (4–8): the cardinality multiplies.
 
 Rank-based normalisation: the whole input's distribution is summarised by `bins + 1` knots (the type-7
 quantiles at `0, 1/B, …, 1`) and a value maps to its position in it, interpolated linearly between knots —
-monotone, scale-free and robust to outliers, and the same map at training and serving time. A value at or
-below the fitted minimum reads 0, at or above the maximum 1 (`normal`: clamped at `±Φ⁻¹(1 − 1e-6)`, never
-infinite); a value equal to a run of tied knots (a mass point) reads the middle of the run's probability
-range; missing (null / NaN) reads null. Like discretize the values are gathered on one worker for the fit
+monotone, scale-free and robust to outliers, and the same map at training and serving time. A value below
+the fitted minimum reads 0, above the maximum 1 (`normal`: clamped at `±Φ⁻¹(1 − 1e-6)`, never infinite); a
+value equal to a run of tied knots (a mass point, also one sitting at the minimum or the maximum — a
+zero-inflated count's zeros) reads the middle of the run's probability range; missing (null / NaN) reads
+null. Like discretize the values are gathered on one worker for the fit
 (8 bytes per row) and an input without a single value still fits (n = 0: every value reads null). The
 artifact is `<planHash>/<block>.quantiles.json` (knots, bins, n, distribution).
 
@@ -337,18 +338,22 @@ artifact is `<planHash>/<block>.quantiles.json` (knots, bins, n, distribution).
     # input: embedding                 # or one array<numeric> field / feature
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
-    standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix)
+    standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
     fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
 ```
 
 The "Compress" step of the sequence frame: the vector is centred (and optionally standardised) with the
 whole-input moments and projected onto the leading `rank` right singular vectors, giving decorrelated scores
-ordered by explained variance (`<name>_0` carries the most). The fit needs only (n, Σx, Σxxᵀ) — one Combine
-over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d = the
-vector length, tens to a few hundred). Components are oriented so the largest loading is positive (a re-fit
-reproduces the scores). A vector with a missing component (null / NaN), or an array of a length other than
-the fitted one, takes no part in the fit and reads null scores; a fit with fewer than two vectors has no
-components and reads null everywhere. The artifact is `<planHash>/<block>.svd.json` (mean, scale,
+ordered by explained variance (`<name>_0` carries the most). The fit needs only (n, Σx, Σxxᵀ), accumulated
+relative to the first vector so a large offset (epoch times, ids) does not cancel the covariance away — one
+Combine over the rows, no row leaves the workers — and diagonalises the d × d covariance on the driver (d =
+the vector length, tens to a few hundred). Components are oriented so the largest loading is positive (a
+re-fit reproduces the scores). A vector with a missing component (null / NaN) takes no part in the fit and
+reads null scores. An array input must have one length: vectors of another length are skipped (and read
+null) and the run logs a warning — the fitted length is whichever the fit saw first, so normalise the array
+length upstream; when `rank` exceeds an array's length the fit caps the components at the length, the
+surplus score columns read null and a warning names the cap (for `inputs` the compiler rejects the rank). A
+fit with fewer than two vectors has no components and reads null everywhere. The artifact is `<planHash>/<block>.svd.json` (mean, scale,
 components, per-component variances, total variance, n) — the explained-variance ratio is `variances[k] /
 totalVariance`.
 

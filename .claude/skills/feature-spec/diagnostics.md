@@ -190,6 +190,7 @@ not expand because another block failed).
 | `discretize.input` / `.bins` / `.minSamplesPerBin` / `.method` / `.target` | error / warning | numeric input; bins ≥ 2; minSamplesPerBin ≥ 1; only `quantile`; `target` is ignored by `quantile` |
 | `quantileTransform.input` / `.bins` / `.distribution` | error | numeric input; bins ≥ 2; `uniform \| normal` |
 | `svd.input` / `.rank` / `.maxFeatures` | error | two or more numeric `inputs`, or one array<numeric> `input` (then `rank` is required); 1 ≤ rank ≤ vector length; rank columns count towards `maxFeatures` |
+| `svd.rank` | info | array input: the rank cannot be checked against the array length at compile time — a shorter array caps the components at its length (run-time warning), the surplus score columns read null |
 
 ## Engine errors at assembly (after a clean compile)
 

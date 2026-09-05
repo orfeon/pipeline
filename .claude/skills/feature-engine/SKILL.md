@@ -73,8 +73,9 @@ reads what the compile layer wrote into each column's `coordinates`.
 - `OutputColumn` — one expanded column. `canonicalName` (what other blocks reference) vs
   `outputName` (`_` for intermediates + `output.prefix` + canonical); `block` / `scope` / `operator`
   / `fieldType`; **`coordinates` (a `Map<String,String>`) is the whole contract with the engine** —
-  the evaluators rebuild their plans from it (`SequenceEvaluator.plan`, `fmSpecs`,
-  `discretizeSpecs`, `fitLevels`) and it is exported as `feature.coord.*` schema options;
+  the evaluators rebuild their plans from it (`SequenceEvaluator.plan`, the static-fit specs enumerated by
+  `staticFitBlocks` — `fmSpecs` / `discretizeSpecs` / `quantileTransformSpecs` / `svdSpecs` — and
+  `fitLevels`) and it is exported as `feature.coord.*` schema options;
   `inputs` (read from the row itself) vs `pastInputs` (read from past rows — what the keyed stage
   projects into the history); `availableAt` / `computeAt` / `status` (`staticSafe` /
   `windowShift` / `runtimeFilter` / `violation`) / `windowShift`; `intermediate` (not emitted),

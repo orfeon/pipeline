@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.Map;
 
 /**
@@ -32,7 +33,7 @@ public final class Svd implements Serializable {
     public final int dimension;
     /** Per-dimension mean subtracted before the projection (zeros when {@code center: false}). */
     public final double[] mean;
-    /** Per-dimension divisor (ones unless {@code standardize: true}). */
+    /** Per-dimension divisor (ones unless {@code standardize: true}: the standard deviation, or the RMS when {@code center: false}). */
     public final double[] scale;
     /** {@code rank × dimension} loadings, ordered by decreasing variance. */
     public final double[][] components;
@@ -57,25 +58,27 @@ public final class Svd implements Serializable {
         return components.length;
     }
 
-    /** Sufficient statistics of the vectors: count, per-dimension sums and the flattened d × d sum of products. */
+    /**
+     * Sufficient statistics of the vectors: count, per-dimension sums and the flattened d × d sum of products,
+     * both taken relative to an anchor ({@code shift}, the first accepted vector) so that the covariance is not
+     * formed by cancelling two huge raw moments when the values carry a large offset (epoch times, ids). Merging
+     * re-expresses the other accumulator relative to this anchor (exact algebra, additions only).
+     */
     public static final class Moments implements Serializable {
         public int dimension;
         public long n;
+        /** Vectors that were null or had a NaN component. */
         public long skipped;
+        /** Vectors of a length other than the fitted one (a mixed-length array input). */
+        public long mismatched;
+        public double[] shift = new double[0];
+        /** Σ (x − shift). */
         public double[] sum = new double[0];
+        /** Σ (x − shift)(x − shift)ᵀ, flattened row-major. */
         public double[] products = new double[0];
 
         public void add(final double[] x) {
             if (x == null) {
-                skipped++;
-                return;
-            }
-            if (n == 0 && dimension == 0) {
-                dimension = x.length;
-                sum = new double[dimension];
-                products = new double[dimension * dimension];
-            }
-            if (x.length != dimension) {
                 skipped++;
                 return;
             }
@@ -85,53 +88,75 @@ public final class Svd implements Serializable {
                     return;
                 }
             }
+            if (n == 0) {
+                dimension = x.length;
+                shift = x.clone();
+                sum = new double[dimension];
+                products = new double[dimension * dimension];
+            } else if (x.length != dimension) {
+                mismatched++;
+                return;
+            }
             n++;
             for (int i = 0; i < dimension; i++) {
-                sum[i] += x[i];
-                for (int j = 0; j < dimension; j++) products[i * dimension + j] += x[i] * x[j];
+                final double di = x[i] - shift[i];
+                sum[i] += di;
+                for (int j = 0; j < dimension; j++) products[i * dimension + j] += di * (x[j] - shift[j]);
             }
         }
 
         public void merge(final Moments other) {
-            if (other.n == 0) {
-                skipped += other.skipped;
-                return;
-            }
+            skipped += other.skipped;
+            mismatched += other.mismatched;
+            if (other.n == 0) return;
             if (n == 0) {
                 dimension = other.dimension;
+                shift = other.shift.clone();
                 sum = other.sum.clone();
                 products = other.products.clone();
                 n = other.n;
-                skipped += other.skipped;
                 return;
             }
             if (dimension != other.dimension) {
-                skipped += other.n + other.skipped; // a mixed-length input: the first length seen wins
+                mismatched += other.n; // a mixed-length input: the first length seen wins (reported by fit)
                 return;
             }
+            // other's sums are relative to other.shift; with δ = other.shift − shift and z = y + δ:
+            // Σz = Σy + n_b δ, Σzzᵀ = Σyyᵀ + (Σy)δᵀ + δ(Σy)ᵀ + n_b δδᵀ
+            final int d = dimension;
+            final double[] delta = new double[d];
+            for (int i = 0; i < d; i++) delta[i] = other.shift[i] - shift[i];
+            for (int i = 0; i < d; i++) {
+                for (int j = 0; j < d; j++) {
+                    products[i * d + j] += other.products[i * d + j] + other.sum[i] * delta[j] + delta[i] * other.sum[j] + other.n * delta[i] * delta[j];
+                }
+            }
+            for (int i = 0; i < d; i++) sum[i] += other.sum[i] + other.n * delta[i];
             n += other.n;
-            skipped += other.skipped;
-            for (int i = 0; i < sum.length; i++) sum[i] += other.sum[i];
-            for (int i = 0; i < products.length; i++) products[i] += other.products[i];
         }
     }
 
     /** Fits the leading {@code rank} components (capped at the dimension) from the moments. */
     public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize) {
         final int d = m.dimension;
+        if (m.mismatched > 0) {
+            LOG.warn("svd: {} vector(s) of a length other than the fitted {} were skipped; the fitted length is whichever was seen first, so normalise the array length upstream", m.mismatched, d);
+        }
         if (m.n < 2 || d == 0) {
             LOG.warn("svd: {} vector(s) to fit (dimension {}); no components, every vector maps to null", m.n, d);
             return new Svd(d, new double[d], ones(d), new double[0][], new double[0], 0, m.n);
         }
         final double n = m.n;
         final double[] mean = new double[d];
-        if (center) for (int i = 0; i < d; i++) mean[i] = m.sum[i] / n;
-        // covariance (centred, n − 1) or the uncentred second-moment matrix (n)
+        if (center) for (int i = 0; i < d; i++) mean[i] = m.shift[i] + m.sum[i] / n;
+        // covariance (centred, n − 1) or the uncentred second-moment matrix (n), both from the anchored sums
         final double[][] c = new double[d][d];
-        final double divisor = center ? n - 1 : n;
         for (int i = 0; i < d; i++) {
             for (int j = 0; j < d; j++) {
-                c[i][j] = (m.products[i * d + j] - (center ? n * mean[i] * mean[j] : 0)) / divisor;
+                final double p = m.products[i * d + j];
+                c[i][j] = center
+                        ? (p - m.sum[i] * m.sum[j] / n) / (n - 1)
+                        : (p + m.sum[i] * m.shift[j] + m.shift[i] * m.sum[j] + n * m.shift[i] * m.shift[j]) / n;
             }
         }
         final double[] scale = ones(d);
@@ -143,6 +168,7 @@ public final class Svd implements Serializable {
         for (int i = 0; i < d; i++) trace += c[i][i];
         final double[][] eigen = jacobi(c);
         final int k = Math.min(rank, d);
+        if (k < rank) LOG.warn("svd: rank {} exceeds the vector dimension {}; fitting {} component(s), the remaining score columns are null", rank, d, k);
         final double[][] components = new double[k][];
         final double[] variances = new double[k];
         for (int r = 0; r < k; r++) {
@@ -158,7 +184,7 @@ public final class Svd implements Serializable {
 
     private static double[] ones(final int d) {
         final double[] v = new double[d];
-        java.util.Arrays.fill(v, 1d);
+        Arrays.fill(v, 1d);
         return v;
     }
 
@@ -172,15 +198,19 @@ public final class Svd implements Serializable {
         for (int i = 0; i < d; i++) a[i] = input[i].clone();
         final double[][] v = new double[d][d];
         for (int i = 0; i < d; i++) v[i][i] = 1;
+        // convergence is judged relative to the matrix scale (squared Frobenius norm), not absolutely
+        double norm = 0;
+        for (int i = 0; i < d; i++) for (int j = 0; j < d; j++) norm += a[i][j] * a[i][j];
         for (int sweep = 0; sweep < 100; sweep++) {
             double off = 0;
             for (int i = 0; i < d; i++) for (int j = i + 1; j < d; j++) off += a[i][j] * a[i][j];
-            if (off < 1e-22) break;
+            if (off <= 1e-30 * norm) break;
             for (int p = 0; p < d; p++) {
                 for (int q = p + 1; q < d; q++) {
                     if (Math.abs(a[p][q]) < 1e-300) continue;
                     final double theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
-                    final double t = Math.signum(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+                    // theta == 0 (equal diagonals) must still rotate by 45°: sign(0) would make the rotation a no-op
+                    final double t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
                     final double cos = 1 / Math.sqrt(t * t + 1), sin = t * cos;
                     for (int k = 0; k < d; k++) {
                         final double akp = a[k][p], akq = a[k][q];
@@ -202,7 +232,7 @@ public final class Svd implements Serializable {
         }
         final Integer[] order = new Integer[d];
         for (int i = 0; i < d; i++) order[i] = i;
-        java.util.Arrays.sort(order, (x, y) -> Double.compare(a[y][y], a[x][x]));
+        Arrays.sort(order, (x, y) -> Double.compare(a[y][y], a[x][x]));
         final double[][] out = new double[d + 1][];
         out[0] = new double[d];
         for (int r = 0; r < d; r++) {

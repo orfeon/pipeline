@@ -306,26 +306,31 @@ public final class FeatureStages {
         }
     }
 
-    /** Artifact paths per fitted block for the manifest (static / fold encodings, factorization, discretize) — declared or not yet written. */
+    /** Artifact paths per fitted block for the manifest (static / fold encodings and every static-fit block) — declared or not yet written. */
     public static Map<String, String> artifactPaths(final FeaturePlan plan) {
         final Map<String, String> paths = new LinkedHashMap<>();
         final String version = plan.getArtifactVersion();
         for (final FitLevel level : fitLevels(plan.getColumns())) {
             if (level.artifactUri() != null) paths.put(level.block(), FitArtifact.statsPath(level.artifactUri(), version, level.block()));
         }
-        for (final StaticFitBlock<?> block : fmSpecs(plan.getColumns())) {
-            if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
-        }
-        for (final StaticFitBlock<?> block : discretizeSpecs(plan.getColumns())) {
-            if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
-        }
-        for (final StaticFitBlock<?> block : quantileTransformSpecs(plan.getColumns())) {
-            if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
-        }
-        for (final StaticFitBlock<?> block : svdSpecs(plan.getColumns())) {
+        for (final StaticFitBlock<?> block : staticFitBlocks(plan.getColumns())) {
             if (block.artifactUri() != null) paths.put(block.block(), block.artifactPath(version));
         }
         return paths;
+    }
+
+    /**
+     * Every static-fit block among the columns, rebuilt from their coordinates — the single registry of the
+     * static-fit population types (factorization, discretize, quantileTransform, svd): a new type is added here
+     * and nowhere else.
+     */
+    static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
+        final List<StaticFitBlock<?>> blocks = new ArrayList<>();
+        blocks.addAll(fmSpecs(columns));
+        blocks.addAll(discretizeSpecs(columns));
+        blocks.addAll(quantileTransformSpecs(columns));
+        blocks.addAll(svdSpecs(columns));
+        return blocks;
     }
 
     /** The shared objects of the stage wiring: one stage = one ParDo / GroupByKey, whatever wave it runs in. */
@@ -705,13 +710,9 @@ public final class FeatureStages {
                                 .withSideInputs(seriesView));
             }
         }
-        // static-fit blocks (factorization / discretize): fitted on one worker over the whole input, or loaded
+        // static-fit blocks (see staticFitBlocks): fitted on one worker over the whole input, or loaded
         // from their artifact, and applied per row through a side input
-        final List<StaticFitBlock<?>> blocks = new ArrayList<>();
-        blocks.addAll(fmSpecs(stageColumns));
-        blocks.addAll(discretizeSpecs(stageColumns));
-        blocks.addAll(quantileTransformSpecs(stageColumns));
-        blocks.addAll(svdSpecs(stageColumns));
+        final List<StaticFitBlock<?>> blocks = staticFitBlocks(stageColumns);
         final Map<String, PCollectionView<?>> blockViews = new LinkedHashMap<>();
         final Set<String> blockLoad = new LinkedHashSet<>();
         for (final StaticFitBlock<?> block : blocks) {
@@ -757,7 +758,7 @@ public final class FeatureStages {
      * A population block fitted once on the whole input and applied by lookup ({@code fit.mode: static}
      * outside the encoding lattice): its model {@code M} is either fitted in the fit stage (one side input
      * per block) or loaded from its artifact on the worker. Implementations rebuild themselves from their
-     * output columns' coordinates ({@link #fmSpecs}, {@link #discretizeSpecs}).
+     * output columns' coordinates and are enumerated by {@link #staticFitBlocks}.
      */
     interface StaticFitBlock<M extends Serializable> extends Serializable {
         String block();
@@ -1082,7 +1083,7 @@ public final class FeatureStages {
      * the listed numeric {@code fields} or one array-typed {@code arrayField}.
      */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
-                   String artifactUri, boolean refit, List<OutputColumn> columns) implements StaticFitBlock<Svd> {
+                   String artifactUri, boolean refit, List<OutputColumn> columns, int[] components) implements StaticFitBlock<Svd> {
         @Override
         public String artifactPath(final String planHash) {
             return Svd.artifactPath(artifactUri, planHash, block);
@@ -1138,12 +1139,13 @@ public final class FeatureStages {
                     .apply(label + "_Svd_" + block + "_View", View.asList());
         }
 
+        /** {@code columns.get(i)} carries score {@code components[i]} (resolved once in {@link #svdSpecs}, never parsed per row). */
         @Override
         public void apply(final Svd svd, final Map<String, Object> values) {
             final double[] scores = svd == null ? null : svd.transform(vector(values));
-            for (final OutputColumn col : columns) {
-                final int k = Integer.parseInt(col.getCoordinates().get("component"));
-                values.put(col.getCanonicalName(), scores == null || k >= scores.length ? null : scores[k]);
+            for (int i = 0; i < components.length; i++) {
+                final int k = components[i];
+                values.put(columns.get(i).getCanonicalName(), scores == null || k >= scores.length ? null : scores[k]);
             }
         }
     }
@@ -1156,9 +1158,11 @@ public final class FeatureStages {
         final List<SvdSpec> specs = new ArrayList<>();
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final int[] components = new int[e.getValue().size()];
+            for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
-                    Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
+                    Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components));
         }
         return specs;
     }
@@ -1222,8 +1226,9 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final Svd.Moments m = c.element();
-            LOG.info("svd {}: fitting {} component(s) from {} vectors of dimension {} ({} skipped)", spec.block(), spec.rank(), m.n, m.dimension, m.skipped);
             final Svd svd = Svd.fit(m, spec.rank(), spec.center(), spec.standardize());
+            LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
+                    spec.block(), svd.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
             if (spec.artifactUri() != null) Svd.write(spec.artifactUri(), planHash, spec.block(), svd);
             c.output(svd);
         }

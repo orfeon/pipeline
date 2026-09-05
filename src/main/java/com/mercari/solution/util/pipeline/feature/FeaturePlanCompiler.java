@@ -1390,8 +1390,14 @@ public final class FeaturePlanCompiler {
             return;
         }
         final int rank = def.rank == null ? Math.min(dimension, 8) : def.rank;
-        if (rank < 1) diagnostics.error("svd.rank", loc, "rank must be >= 1");
-        else if (dimension != null && rank > dimension) diagnostics.error("svd.rank", loc, "rank " + rank + " exceeds the vector length " + dimension);
+        if (rank < 1) {
+            diagnostics.error("svd.rank", loc, "rank must be >= 1");
+            return;
+        }
+        if (dimension != null && rank > dimension) diagnostics.error("svd.rank", loc, "rank " + rank + " exceeds the vector length " + dimension);
+        if (dimension == null) {
+            diagnostics.info("svd.rank", loc, "rank " + rank + " cannot be checked against the array length at compile time; if the vectors are shorter, the fit caps the components at their length and the surplus score columns read null (see the run-time svd warning)");
+        }
         final boolean center = def.center == null || def.center;
         final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "svd", "the components are fitted", "covariance eigendecomposition on the whole input");
         boolean outcome = false;
