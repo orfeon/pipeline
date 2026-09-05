@@ -45,6 +45,15 @@ public final class ScreenReport {
      *
      * @param nUnits the number of scored units (groups, or rows when independent): {@code est_gain = chi2 / (2 nUnits)}
      */
+    /**
+     * Relative floor of H for the grouped family: x is centred per unit before squaring, so a within-unit constant
+     * leaves H ≈ eps² × Σ w Σ p x² (≈ 1e-32 relative); 1e-20 sits twelve orders above that floor and only flags a
+     * column whose within-unit spread is below 1e-10 of its magnitude, which double arithmetic cannot resolve.
+     */
+    static final double GROUPED_DEGENERATE_REL = 1e-20;
+    /** Relative floor of Σ x̃² for the row families, whose centring is a difference of moment sums (see {@link #stats}). */
+    static final double ROW_DEGENERATE_REL = 1e-12;
+
     public static Stats stats(final ScreenSpec spec, final double[] a, final double nUnits) {
         final long nObs = (long) a[ScoreAccumulator.N_OBS];
         final double s;
@@ -52,11 +61,17 @@ public final class ScreenReport {
         if (spec.isGroupedMultinomial()) {
             s = a[ScoreAccumulator.S];
             h = a[ScoreAccumulator.H];
+            // a column constant within every unit leaves H at the rounding floor of the centring (eps² × the raw
+            // second moment): relative, not absolute, so a large-valued constant is degenerate too
+            if (h <= GROUPED_DEGENERATE_REL * a[ScoreAccumulator.X2]) return Stats.degenerate(nObs);
         } else {
             final double c1 = a[ScoreAccumulator.C1], c2 = a[ScoreAccumulator.C2], c3 = a[ScoreAccumulator.C3], c4 = a[ScoreAccumulator.C4], c5 = a[ScoreAccumulator.C5], c6 = a[ScoreAccumulator.C6];
             if (!(c5 > 0)) return Stats.degenerate(nObs);
             final double xMean = c4 / c5;
             final double sxx = c3 - c4 * c4 / c5;
+            // the centring is a difference of moment sums (c3 − c4² / c5): below 1e-12 of c3 it holds fewer than
+            // four significant digits — a window-constant column (or one with a spread far below its magnitude)
+            if (sxx <= ROW_DEGENERATE_REL * c3) return Stats.degenerate(nObs);
             final double rMean = c2 / c5;
             if (spec.isGaussian()) {
                 // identity link: S = Σ x̃ r / σ², H = Σ x̃² / σ² with σ² the residual (offset) / label (prior) variance
@@ -337,6 +352,7 @@ public final class ScreenReport {
         final double gain = fit == null ? Double.NaN : conditioned && spec.isGaussian() ? fit.gainPerUnit() / sigma2 : fit.gainPerUnit();
         summary.put("conditioningGain", Double.isNaN(gain) ? null : gain);
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
+        summary.put("conditioningMissing", spec.hasConditioning() ? spec.conditioningMissing : null);
         summary.put("notes", notes);
         return new Result(records, summary);
     }
@@ -483,6 +499,7 @@ public final class ScreenReport {
                 .withField("conditioningConverged", Schema.FieldType.BOOLEAN)
                 .withField("conditioningGain", Schema.FieldType.FLOAT64)
                 .withField("conditioningL2", Schema.FieldType.FLOAT64)
+                .withField("conditioningMissing", Schema.FieldType.STRING)
                 .withField("notes", Schema.FieldType.array(Schema.FieldType.STRING))
                 .build();
     }
@@ -501,7 +518,7 @@ public final class ScreenReport {
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.leakZ != null) parts.add("leakZ=" + spec.leakZ);
-        if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " (" + spec.conditioningMaxIter + " + 2 passes)");
+        if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " missing=" + spec.conditioningMissing + " (" + spec.conditioningMaxIter + " + 2 passes)");
         if (!spec.notes.isEmpty()) parts.add("notes=" + spec.notes);
         return "screen " + String.join(" ", parts);
     }

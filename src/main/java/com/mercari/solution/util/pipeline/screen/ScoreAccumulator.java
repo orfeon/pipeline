@@ -23,7 +23,7 @@ import java.util.TreeMap;
  */
 public final class ScoreAccumulator implements Serializable {
 
-    public static final int SLOTS = 9;
+    public static final int SLOTS = 10;
     /** grouped family: sum of weighted group scores */
     public static final int S = 0;
     /** grouped family: sum of weighted group information */
@@ -34,6 +34,8 @@ public final class ScoreAccumulator implements Serializable {
     public static final int C1 = 3, C2 = 4, C3 = 5, C4 = 6, C5 = 7;
     /** gaussian family: Σ w r² (the residual variance around the baseline / the label variance) */
     public static final int C6 = 8;
+    /** grouped family: Σ w Σ p x² over the observed rows (the raw second moment: the scale of the degenerate check, see {@link ScreenReport#stats}) */
+    public static final int X2 = 9;
 
     /** key of the bookkeeping accumulator (never a column index) */
     public static final int BOOKKEEPING_KEY = -1;

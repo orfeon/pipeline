@@ -94,16 +94,36 @@ public final class ConditioningScorer implements Serializable {
         return new double[][]{mean, std};
     }
 
-    /** The standardised design F̃ of the unit (n × k): (x − mean) / std, missing → 0, intercept column last. */
+    /**
+     * The standardised design F̃ of the unit (n × k): (x − mean) / std, intercept column last. A missing value is
+     * the window mean (0 after standardising; {@code conditioning.missing: mean}) or, for the grouped family under
+     * {@code groupMean}, the unit's baseline-weighted mean of its observed values — the fill under which a missing
+     * row contributes nothing to the unit's p-centred design, the same rule the candidate columns follow
+     * ({@link GroupScorer#groupedContribution}); a unit with no observed value falls back to the window mean.
+     */
     public double[][] design(final GroupScorer.Unit unit, final double[] moments) {
         final double[][] scale = scaling(moments, kF);
         final int n = unit.size();
         final double[][] f = new double[n][k];
+        final double[] fill = new double[kF];
+        final boolean groupMean = ScreenSpec.MISSING_GROUP_MEAN.equals(spec.conditioningMissing);
+        for (int j = 0; j < kF; j++) {
+            fill[j] = 0d;
+            if (!groupMean) continue;
+            double pm = 0, psum = 0;
+            for (int i = 0; i < n; i++) {
+                final double v = unit.rows.get(i).x[offset + j];
+                if (!ScreenMath.isFinite(v)) continue;
+                pm += unit.p[i] * v;
+                psum += unit.p[i];
+            }
+            if (psum > 0) fill[j] = (pm / psum - scale[0][j]) / scale[1][j];
+        }
         for (int i = 0; i < n; i++) {
             final double[] x = unit.rows.get(i).x;
             for (int j = 0; j < kF; j++) {
                 final double v = x[offset + j];
-                f[i][j] = ScreenMath.isFinite(v) ? (v - scale[0][j]) / scale[1][j] : 0d;
+                f[i][j] = ScreenMath.isFinite(v) ? (v - scale[0][j]) / scale[1][j] : fill[j];
             }
             if (intercept) f[i][kF] = 1d;
         }

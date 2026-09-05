@@ -239,17 +239,20 @@ public final class GroupScorer implements Serializable {
             }
         }
         final double mean = psum > 0 ? pm / psum : 0d;
-        double s = 0, h = 0, px = 0;
+        double s = 0, h = 0, px = 0, x2 = 0;
         for (int i = 0; i < n; i++) {
-            final double xt = ScreenMath.isFinite(v[i]) ? v[i] - mean : 0d;
+            if (!ScreenMath.isFinite(v[i])) continue;
+            final double xt = v[i] - mean;
             s += xt * (y[i] - p[i]);
             h += p[i] * xt * xt;
             px += p[i] * xt;
+            x2 += p[i] * v[i] * v[i];
         }
         Arrays.fill(out, 0d);
         out[ScoreAccumulator.S] = weight * s;
         out[ScoreAccumulator.H] = weight * (h - px * px);
         out[ScoreAccumulator.N_OBS] = nObs;
+        out[ScoreAccumulator.X2] = weight * x2;
     }
 
     /**

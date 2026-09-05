@@ -259,6 +259,51 @@ public class ScreenTransformTest {
     }
 
     @Test
+    public void testConditioningGroupMeanFillWithMissingValues() throws Exception {
+        // conditioning.missing: groupMean — a missing conditioning value is the unit's baseline-weighted mean of
+        // its observed values; with the exact conditional baseline the conclusion of the reference test holds
+        // (f_known redundant, f_extra new) when a sixth of the sessions miss f_known on two of their rows
+        final String data = sessionsConfig(80, 8, 42)
+                .replaceAll("(session_id: S\\d*[27], listing_id: L\\d+_[03]), f_known: [-0-9.]+", "$1, f_known: null");
+        Assertions.assertEquals(33, data.split("f_known: null").length);
+        final String config = data + """
+                transforms:
+                  - name: screen
+                    module: screen
+                    inputs: [listings]
+                    parameters:
+                      family: groupedMultinomial
+                      group: session_id
+                      label: sold
+                      baseline: p_model
+                      time: {field: session_time}
+                      candidates: {include: ["f_*"]}
+                      transforms: [raw]
+                      placebo: {noise: 30, seed: 3}
+                      conditioning: {fields: [f_known], maxIter: 6, missing: groupMean}
+                """;
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
+        PAssert.that(outputs.get("screen").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> records = byKey(rows);
+            final MElement known = records.get("f_known:raw");
+            final MElement extra = records.get("f_extra:raw");
+            Assertions.assertEquals(640 - 32, known.getAsLong("n_obs"));
+            Assertions.assertTrue(known.getAsDouble("r2_F") > 0.9, "r2_F of f_known: " + known.getAsDouble("r2_F"));
+            Assertions.assertEquals(Boolean.FALSE, known.getPrimitiveValue("passed"));
+            Assertions.assertTrue(extra.getAsDouble("partial_z") > 4, "partial z of f_extra: " + extra.getAsDouble("partial_z"));
+            Assertions.assertEquals(Boolean.TRUE, extra.getPrimitiveValue("passed"));
+            return null;
+        });
+        PAssert.that(outputs.get("screen.summary").getCollection()).satisfies(rows -> {
+            final MElement summary = rows.iterator().next();
+            Assertions.assertEquals("groupMean", summary.getAsString("conditioningMissing"));
+            Assertions.assertEquals(Boolean.TRUE, summary.getPrimitiveValue("conditioningConverged"));
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testConditioningReplacesTheBaseline() throws Exception {
         // no baseline: the prior sees f_known and f_extra; conditioning on f_known removes f_known (r2_F ≈ 1)
         // while f_extra keeps its partial gain

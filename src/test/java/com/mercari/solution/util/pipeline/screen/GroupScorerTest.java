@@ -264,6 +264,77 @@ public class GroupScorerTest {
     }
 
     @Test
+    public void testKindSelector() {
+        // kind: is the source field's origin tag on both lineage paths (pass-through inputs only; derived columns carry kinds in derivedFrom)
+        final String manifest = "{roles: {group: {column: g}, label: {column: y}, baseline: {column: b}}, fields: [{name: x, scope: input, kind: market, derivedFrom: [market]}, {name: x2, scope: input, kind: attribute}], columns: []}";
+        final ScreenSpec byManifest = ScreenSpec.parse(JsonParser.parseString("{candidates: {exclude: ['kind:market']}, placebo: {noise: 0}}").getAsJsonObject())
+                .resolve(SCHEMA, ScreenSpec.Lineage.fromManifest(manifest));
+        Assertions.assertEquals(List.of("x2"), byManifest.candidates);
+        Assertions.assertTrue(byManifest.notes.stream().anyMatch(n -> n.contains("x (kind:market)")), byManifest.notes::toString);
+        final Schema schema = Schema.builder()
+                .withField("g", Schema.FieldType.STRING).withField("y", Schema.FieldType.INT64).withField("t", Schema.FieldType.TIMESTAMP).withField("b", Schema.FieldType.FLOAT64)
+                .withField(Schema.Field.of("x", Schema.FieldType.FLOAT64).withOptions(options("feature.scope", "input", "feature.kind", "market", "feature.derivedFrom", "market")))
+                .withField(Schema.Field.of("x2", Schema.FieldType.FLOAT64).withOptions(options("feature.scope", "row", "feature.derivedFrom", "market")))
+                .build();
+        final ScreenSpec bySchema = ScreenSpec.parse(JsonParser.parseString("{group: g, label: y, baseline: b, candidates: {exclude: ['kind:market']}, placebo: {noise: 0}}").getAsJsonObject())
+                .resolve(schema, ScreenSpec.Lineage.fromSchema(schema));
+        Assertions.assertEquals(List.of("x2"), bySchema.candidates);   // the derived column has no kind: derivedFrom:market would drop it, kind:market does not
+    }
+
+    @Test
+    public void testDegenerateIsRelativeToTheColumnScale() {
+        // a column constant within every unit leaves H at the rounding floor of the centring, not at zero, when the
+        // values are large: the check is relative to the raw second moment (grouped) / the moment sum (row families)
+        final ScreenSpec grouped = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}}");
+        final GroupScorer scorer = new GroupScorer(grouped);
+        final Map<Integer, ScoreAccumulator> constant = new HashMap<>();
+        scorer.score(List.of(row("a", 1, 1, Double.NaN, 1e6), row("a", 1, 0, Double.NaN, 1e6), row("a", 1, 0, Double.NaN, 1e6)), "a", constant);
+        Assertions.assertTrue(ScreenReport.stats(grouped, constant.get(grouped.key(0, 0)).getTotal(), 1).degenerate());
+        // the same magnitude with a within-unit spread of 1 is a real column: x̃ = [1, -1, 0], H = 2/3 (uniform p)
+        final Map<Integer, ScoreAccumulator> offset = new HashMap<>();
+        scorer.score(List.of(row("a", 1, 1, Double.NaN, 1e6 + 1), row("a", 1, 0, Double.NaN, 1e6 - 1), row("a", 1, 0, Double.NaN, 1e6)), "a", offset);
+        final double[] a = offset.get(grouped.key(0, 0)).getTotal();
+        final ScreenReport.Stats st = ScreenReport.stats(grouped, a, 1);
+        Assertions.assertFalse(st.degenerate());
+        Assertions.assertEquals(2d / 3, st.h(), 1e-9);
+        Assertions.assertEquals(3e12 + 2, a[ScoreAccumulator.X2] * 3, 1);
+        // row family: a window-constant column of magnitude 1e6 (its Σ x̃² is a difference of moment sums)
+        final ScreenSpec binomial = spec("{family: binomial, label: y, time: t, candidates: [x], placebo: {noise: 0}}");
+        final GroupScorer rows = new GroupScorer(binomial);
+        final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
+        final double[] y = {1, 1, 0, 0};
+        for (int i = 0; i < y.length; i++) rows.score(List.of(row(null, i, y[i], Double.NaN, 1e6 + 1e-3 * (i % 2))), "r" + i, acc);
+        Assertions.assertTrue(ScreenReport.stats(binomial, acc.get(binomial.key(0, 0)).getTotal(), 4).degenerate());
+    }
+
+    @Test
+    public void testConditioningMissingGroupMean() {
+        // x2 = [2, missing, 4] under baseline p = [.5, .3, .2]: window moments n = 2, mean 3, std 1;
+        // mean → the missing row is 0 (the window mean), groupMean → the unit's p-weighted mean of the observed
+        // values (.5·2 + .2·4) / .7 = 18/7, standardised (18/7 − 3) = −3/7
+        final String base = "{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}, conditioning: {fields: [x2]";
+        final List<ScreenRow> rows = List.of(row("a", 1, 1, 0.5, 1, 2), row("a", 1, 0, 0.3, 2, Double.NaN), row("a", 1, 0, 0.2, 3, 4));
+        for (final String missing : List.of("mean", "groupMean")) {
+            final ScreenSpec spec = spec(base + ", missing: " + missing + "}}");
+            final ConditioningScorer scorer = new ConditioningScorer(spec);
+            final double[] moments = new double[3 + 2];
+            for (final ScreenRow r : rows) {
+                final double[] m = scorer.moments(r);
+                for (int i = 0; i < m.length; i++) moments[i] += m[i];
+            }
+            final GroupScorer.Unit unit = new GroupScorer(spec).prepare(rows, "a");
+            final double[][] f = scorer.design(unit, moments);
+            Assertions.assertEquals(-1d, f[0][0], 1e-12);
+            Assertions.assertEquals(1d, f[2][0], 1e-12);
+            Assertions.assertEquals("mean".equals(missing) ? 0d : -3d / 7, f[1][0], 1e-12, missing);
+        }
+        Assertions.assertEquals("mean", spec(base + "}}").conditioningMissing);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec(base + ", missing: nope}}"));
+        // the row families have no unit to average over
+        Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, time: t, candidates: [x], placebo: {noise: 0}, conditioning: {fields: [x2], missing: groupMean}}"));
+    }
+
+    @Test
     public void testExplicitTransformsSurviveGroupDefault() {
         final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}}}";
         final ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromManifest(manifest);
