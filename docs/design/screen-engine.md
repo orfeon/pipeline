@@ -13,7 +13,7 @@ feature transform does (engine doc §1.2):
 | class | role | Beam |
 |---|---|---|
 | `ScreenSpec` | parse (`parse(JsonObject)`, every error collected) and resolve (`resolve(schema, lineage)`: manifest role defaults, candidate / conditioning column selection, `parametersHash`); `Lineage` (schema options or manifest); the family's `fisherWeight` / `link` — the single definition the scorers and the report share | no |
-| `ScreenMath` | erfc (series + continued fraction), χ²(1) tail and quantile (Acklam inverse normal + one Halley step), Benjamini–Hochberg, calendar buckets, name globs; randomness, quantile and coercions delegate to `FeatureValues` / `OrderStatistics` | no |
+| `ScreenMath` | erfc (series + continued fraction), χ²(1) tail and quantile (Acklam inverse normal + one Halley step), Benjamini–Hochberg, calendar buckets, name globs; the sample quantile delegates to `OrderStatistics`, and the scorers / Prepare use the feature transform's `FeatureValues` directly for randomness and coercions | no |
 | `ScreenRow` | the prepared sample (unit key, identity, time, period, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
 | `GroupScorer` | per-unit marginal scoring: `prepare` (sort, baseline → mean, labels, weights), `columns` (candidates + placebos), transforms, the family's contribution into `ScoreAccumulator`s | no |
 | `ScoreAccumulator` | 9 slots (`S`, `H`, `N_OBS`, `C1..C6`) for the window plus the same per period, min / max time; the bookkeeping key reuses the slots for run counts; custom coder; `Fn` (input = accumulator = output) | coder + CombineFn |
@@ -103,8 +103,9 @@ Gather ─ Finalize [side: state_max, partial map] ─ records / summary / selec
 - **Singleton views over default-carrying Combines.** Every pass yields exactly one element (an empty vector
   when nothing was evaluated), so the state chain never has an unready or empty view. A variant with list
   views and `withoutDefaults` Combines ran an order of magnitude slower on the DirectRunner (§6).
-- **Projection.** The fit passes read `ScreenRow.conditioningOnly` (label, baseline, weight, F, identity
-  cleared): `maxIter` passes over the conditioning columns only; `ConditioningScorer` takes the F offset (0
+- **Projection.** The fit passes read `ScreenRow.conditioningOnly` (label, baseline, weight, F; the identity
+  kept as the sort tie-break, so the per-unit sums are order-stable): `maxIter` passes over the conditioning
+  columns only; `ConditioningScorer` takes the F offset (0
   for projected rows, `spec.conditioningOffset()` for full rows). The moments and partial passes read the
   full rows.
 - **Partial pass** (one pass): at the fitted p̂, `[s, b, a]` per column × transform into a bundle-local map
@@ -144,7 +145,7 @@ transform) key periods × 9 doubles; per Newton pass `2 + k + k²` doubles (k �
 
 ## 7. Tests
 
-- Pure, hand-computed: `ScreenMathTest` (tails, quantiles, BH, buckets, globs, the delegated coercions),
+- Pure, hand-computed: `ScreenMathTest` (tails, quantiles, BH, buckets, globs),
   `GroupScorerTest` (grouped and binomial S / H / chi2 from small groups, scale-shift invariance, baseline
   forms and skips, transforms, placebo determinism, the report's threshold / flags / q-values, spec
   validation, manifest roles and lineage selectors), `FamilyScorerTest` (gaussian and poisson prior / offset
