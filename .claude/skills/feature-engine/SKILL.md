@@ -88,7 +88,9 @@ reads what the compile layer wrote into each column's `coordinates`.
 - Output contract + audit (PR after #102): `OutputSpec.roles / include / includeSource / includeHash /
   manifest` and `AuditSpec.observedAt` in `FeatureSpec`; `FeaturePlanService.resolveInclude` reads an
   include URI before compile (list + content hash); the compiler validates roles (`resolveRoles`), applies
-  `include` as the projection in `finalizeColumns` (`applyInclude`, replaces `exclude`) and builds one
+  `include` as the projection in `finalizeColumns` (`applyInclude`, replaces `exclude`; the columns that
+  roles resolve to — `roleColumnsByCanonical`, mirror of `FeaturePlan.getRoleColumns` — survive the
+  projection, `output.include.role`) and builds one
   `FeaturePlan.ObservedAtAudit` per input field with an `observedAtField` (`resolveObservedAtAudits`;
   `present` = the observation column is in the input schema). `FeaturePlan.toManifest` is the manifest the
   transform writes at assembly; `FeatureStages.artifactPaths` fills its `artifacts`.
@@ -190,7 +192,10 @@ reads what the compile layer wrote into each column's `coordinates`.
 `engineConstraints(plan, streaming)` adds the engine's own rejections (keyed stages / fold in
 streaming, `runtimeFilter` columns, stats the population evaluator cannot serve). `spillOptions`
 resolves `engine.spill` + `--featureSpillMemoryMB`. `createOutputSchema` / `passThroughInputs`
-shape the output schema (lineage in field options).
+shape the output schema (lineage in field options: `OutputColumn.toOptions` for emitted columns,
+`passThroughField` for inputs — `feature.scope = input`, `feature.kind`, `feature.derivedFrom` = the
+kind, `feature.sources`, `feature.evidence` — and `feature.role` on both; the `screen` transform's
+`Lineage.fromSchema` reads them).
 
 ## Invariants — what a change must keep true
 

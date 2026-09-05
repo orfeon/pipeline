@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.feature;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.config.Config;
 import com.mercari.solution.module.Schema;
@@ -8,6 +9,8 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class FeaturePlanCompilerTest {
 
@@ -1326,6 +1329,32 @@ public class FeaturePlanCompilerTest {
         final JsonObject json = plan.toJson();
         Assertions.assertEquals("sold", json.getAsJsonObject("roles").getAsJsonObject("label").get("column").getAsString());
         Assertions.assertEquals(3, json.getAsJsonObject("include").getAsJsonArray("listed").size());
+    }
+
+    @Test
+    public void testIncludeKeepsRoleColumns() {
+        // a pass list never names a role column (roles were never candidates): the baseline's emitted copy and a
+        // label derived as a column stay emitted under the projection, and the report says which were kept
+        final String spec = SPEC.replace("output:\n  prefix: f_\n", OUTPUT_CONTRACT.replace("label: sold", "label: price_per_unit").replace("include: [price_per_unit, ", "include: ["))
+                .replace("baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",
+                        "baselines:\n  - {name: market, context: session, expr: \"share(1 / current_bid_t10)\", emit: marketProb}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals(Set.of("f_marketProb", "f_price_per_unit", "f_relative_start_price_rank"),
+                plan.getEmittedColumns().stream().map(OutputColumn::getOutputName).collect(java.util.stream.Collectors.toSet()));
+        Assertions.assertTrue(hasCode(plan, "output.include.role"), plan::describe);
+        Assertions.assertFalse(hasCode(plan, "output.roles.baseline.notEmitted"), plan::describe);
+        Assertions.assertEquals("f_marketProb", plan.getRoleColumns().get("baseline"));
+        Assertions.assertEquals("f_price_per_unit", plan.getRoleColumns().get("label"));
+        final JsonObject manifest = plan.toManifest(List.of(), Map.of());
+        Assertions.assertEquals("baseline", manifest.getAsJsonArray("columns").asList().stream().map(JsonElement::getAsJsonObject)
+                .filter(c -> "f_marketProb".equals(c.get("name").getAsString())).findFirst().orElseThrow().get("role").getAsString());
+        // without a role the same copy column is projected away like any feature
+        final FeaturePlan noRole = compile(SOURCES, spec.replace(", baseline: market}", "}"));
+        Assertions.assertFalse(noRole.getEmittedColumns().stream().anyMatch(c -> c.getOutputName().equals("f_marketProb")), noRole::describe);
+        // the label role still keeps its column; the kept list no longer mentions the copy
+        final String kept = noRole.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("output.include.role")).findFirst().orElseThrow().message();
+        Assertions.assertTrue(kept.contains("f_price_per_unit (label)") && !kept.contains("marketProb"), kept);
     }
 
     @Test

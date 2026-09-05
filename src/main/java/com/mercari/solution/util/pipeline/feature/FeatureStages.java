@@ -1296,14 +1296,23 @@ public final class FeatureStages {
         return null;
     }
 
-    /** Output schema: input fields + emitted columns, or the grouped parent/children shape (§3.1). */
+    /**
+     * Output schema: input fields + emitted columns, or the grouped parent/children shape (§3.1). Every field
+     * carries lineage in its options: the emitted columns theirs ({@link OutputColumn#toOptions}), the
+     * pass-through input fields the contract of their source ({@code feature.scope = input}, {@code feature.kind},
+     * {@code feature.derivedFrom} = the kind, {@code feature.sources}, {@code feature.evidence}) so a consumer's
+     * lineage selectors ({@code derivedFrom:market}, {@code scope:input}) see an input column the same way the
+     * manifest's {@code fields} entry describes it; a role names its field / column as {@code feature.role}.
+     */
     public static Schema createOutputSchema(final FeaturePlan plan, final Schema inputSchema, final DataType outputType) {
         final FeatureSpec.ContextDef groupBy = groupByContext(plan);
         final Set<String> passThrough = passThroughInputs(plan, inputSchema);
+        final Map<String, String> roleOf = new HashMap<>();
+        plan.getRoleColumns().forEach((role, column) -> roleOf.putIfAbsent(column, role));
         if (groupBy == null) {
             final Schema.Builder builder = Schema.builder();
-            for (final Schema.Field f : inputSchema.getFields()) if (passThrough.contains(f.getName())) builder.withField(f.copy());
-            for (final OutputColumn c : plan.getEmittedColumns()) builder.withField(c.toField());
+            for (final Schema.Field f : inputSchema.getFields()) if (passThrough.contains(f.getName())) builder.withField(passThroughField(plan, f, roleOf));
+            for (final OutputColumn c : plan.getEmittedColumns()) builder.withField(emittedField(c, roleOf));
             return builder.withType(outputType).build();
         }
         final Set<String> parentInputs = new LinkedHashSet<>(groupBy.keys());
@@ -1312,13 +1321,38 @@ public final class FeatureStages {
         final Schema.Builder child = Schema.builder();
         for (final Schema.Field f : inputSchema.getFields()) {
             if (!passThrough.contains(f.getName())) continue;
-            (parentInputs.contains(f.getName()) ? parent : child).withField(f.copy());
+            (parentInputs.contains(f.getName()) ? parent : child).withField(passThroughField(plan, f, roleOf));
         }
         for (final OutputColumn c : plan.getEmittedColumns()) {
-            (c.getPlacement() == OutputColumn.Placement.parent ? parent : child).withField(c.toField());
+            (c.getPlacement() == OutputColumn.Placement.parent ? parent : child).withField(emittedField(c, roleOf));
         }
         parent.withField(plan.getSpec().output.childName, Schema.FieldType.array(Schema.FieldType.element(child.build())));
         return parent.withType(outputType).build();
+    }
+
+    /** A pass-through input field with its source contract as lineage options (the schema twin of the manifest's {@code fields} entry). */
+    static Schema.Field passThroughField(final FeaturePlan plan, final Schema.Field f, final Map<String, String> roleOf) {
+        final Schema.Field field = f.copy();
+        final Map<String, String> options = field.getOptions();
+        options.put("feature.scope", "input");
+        final SourceContract.FieldContract contract = plan.getInputFields().get(f.getName());
+        if (contract != null) {
+            if (contract.getKind() != null) options.put("feature.kind", contract.getKind());
+            options.put("feature.derivedFrom", contract.getKind() == null ? "" : contract.getKind());
+            if (contract.getSourceName() != null && !contract.getSourceName().isEmpty()) options.put("feature.sources", contract.getSourceName());
+            if (contract.getAvailableAt() != null) options.put("feature.availableAt", contract.getAvailableAt().describe());
+            options.put("feature.evidence", contract.isDeclared() ? "declared" : "measured");
+        }
+        final String role = roleOf.get(f.getName());
+        if (role != null) options.put("feature.role", role);
+        return field;
+    }
+
+    static Schema.Field emittedField(final OutputColumn c, final Map<String, String> roleOf) {
+        final Schema.Field field = c.toField();
+        final String role = roleOf.get(c.getOutputName());
+        if (role != null) field.getOptions().put("feature.role", role);
+        return field;
     }
 
     // ------------------------------------------------------------------------------------------

@@ -621,6 +621,8 @@ public class FeaturePlan implements Serializable {
                 final JsonObject o = new JsonObject();
                 o.addProperty("name", f.getName());
                 o.addProperty("type", f.getFieldType().getType().name());
+                // scope input: the same selector vocabulary as the columns (a consumer excludes pass-through inputs by scope / kind)
+                o.addProperty("scope", "input");
                 final SourceContract.FieldContract contract = inputFields.get(f.getName());
                 if (contract != null) {
                     if (contract.getSourceName() != null && !contract.getSourceName().isEmpty()) o.addProperty("source", contract.getSourceName());

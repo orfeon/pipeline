@@ -124,10 +124,13 @@ parent/child form is not accepted (unnest upstream).
 when they are not set — the data contract declared once on the feature side is reused here.
 
 **Lineage selectors.** `candidates.include` / `exclude` accept, next to name globs (`f_*`, `odds*`), the
-lineage selectors of the feature transform's `output.exclude`: `derivedFrom:<field>`, `scope:<row|context|sequence|population>`,
+lineage selectors of the feature transform's `output.exclude`: `derivedFrom:<kind>` (a source field's `kind`, e.g.
+`market` / `outcome`, propagated to every column derived from it), `scope:<input|row|context|sequence|population>`,
 `block:<name>`, `evidence:<declared|measured>`. Lineage is read from the input schema when the feature transform is
-the direct upstream (its column options travel with the schema), or from `candidates.manifest` when the table
-comes back through a sink / source. Using a selector without any lineage available is an assembly error.
+the direct upstream (its field options travel with the schema — the pass-through input fields carry `scope: input`
+and their `kind` as `derivedFrom`, so `derivedFrom:market` or `scope:input` drops a passed-through market column
+as well as the columns derived from it), or from `candidates.manifest` when the table comes back through a sink /
+source. Using a selector without any lineage available is an assembly error.
 
 ## Transform module common parameters
 

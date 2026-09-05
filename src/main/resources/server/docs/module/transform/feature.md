@@ -446,16 +446,19 @@ output:
   role naming a baseline that is not emitted is reported (`output.roles.baseline.notEmitted`): baselines
   are intermediate columns today, so derive the value as a feature (`shareOfTotal`) and name that column.
 - **include** is the projection: only the listed columns (canonical or output names; a `<name>_isnull`
-  entry keeps its base column) are emitted, plus the pass-through fields. Names matching no column are a
+  entry keeps its base column) are emitted, plus the pass-through fields and the role columns. Names matching no column are a
   warning (`output.include.unknown`) — the list may come from another plan version. An empty list is an error
   (`output.include.empty`): the table would carry no feature column (a screening step that passed nothing). `include` and
   `exclude` are not combined: when `include` is declared, `exclude` is ignored (`output.include.exclude`).
   A URI is read at assembly and its content hash recorded, so a file that changes later is still traceable.
+  A column a role names (a baseline's `emit` copy, a label derived as a column) is emitted whether or not
+  the list contains it — a pass list never names role columns, they were never candidates — and the plan
+  report says which were kept (`output.include.role`).
 - **manifest** writes `manifest.json` at assembly (a dry run writes it too): `planHash`, **`outputHash`**
   (plan hash + emitted names + roles + include content — the identity of the output table, since a
   projection does not change the plan hash), `roles` (with the resolved column / keys), `include` (source,
-  hash, listed and unknown names), `fields` (pass-through input fields with source / kind / availability
-  and their role), `columns` (every emitted column: type, `categorical`, scope, block, operator,
+  hash, listed and unknown names), `fields` (pass-through input fields with `scope: input`, source / kind /
+  availability / evidence and their role), `columns` (every emitted column: type, `categorical`, scope, block, operator,
   availableAt / computeAt / status, placement, lineage — `derivedFrom`, `sources`, `evidence`, inputs),
   `artifacts` (fitted blocks → artifact path) and the full `plan` report. A batch run also writes
   `manifest.run.json` next to it at finalize with what only execution knows: the output row count and the
@@ -463,6 +466,14 @@ output:
 
 `include` and `manifest` are outside the plan hash (artifacts stay valid across projections);
 `roles` and the projection are inside `outputHash`.
+
+The output schema carries the same lineage as field options, so a direct downstream (the `screen`
+transform, a `select`) can read it without the manifest: every emitted column its `feature.scope` /
+`feature.block` / `feature.derivedFrom` / `feature.evidence` / …, every pass-through input field
+`feature.scope = input`, `feature.kind`, `feature.derivedFrom` (= its kind), `feature.sources`,
+`feature.availableAt`, `feature.evidence`, and a role's field or column `feature.role`. A consumer's
+`derivedFrom:market` or `scope:input` selector therefore drops a passed-through market input the same
+way it drops a column derived from one.
 
 ### observedAt audit (declaration vs. data)
 

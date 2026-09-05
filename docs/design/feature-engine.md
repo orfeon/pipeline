@@ -109,7 +109,12 @@ durations into the algebraic `AvailableAt`:
   relative to the availability and is not added to the pre-event sentinel.
 - The derived availability and the origin source are stored in `Schema.Field.withOptions(...)` of the
   output schema (`feature.*` options) — the existing schema mechanism is the lineage's persistence; the
-  `_` prefix lint (spec §6.4) is applied by the compiler when generating output names.
+  `_` prefix lint (spec §6.4) is applied by the compiler when generating output names. Pass-through
+  input fields get the same treatment from their source contract (`FeatureStages.passThroughField`:
+  `feature.scope = input`, `feature.kind`, `feature.derivedFrom` = the kind, `feature.sources`,
+  `feature.availableAt`, `feature.evidence`), and a role's field / column carries `feature.role`, so a
+  downstream lineage selector (`derivedFrom:market`, `scope:input`) can exclude an input column
+  without the manifest.
 
 ---
 
@@ -427,7 +432,9 @@ replay (§4.3), not Beam state.
 **Output contract and audit.** `output.roles` / `include` / `manifest` (DSL spec §7) are compile-layer
 facts: roles are validated against input fields / contexts / entities / baselines, `include` is applied
 in `finalizeColumns` as the projection (it replaces `exclude`; a URI is resolved by
-`FeaturePlanService.resolve` before compile and its content hash kept), and `FeaturePlan.toManifest`
+`FeaturePlanService.resolve` before compile and its content hash kept; the columns that roles resolve
+to — `roleColumnsByCanonical`, the compile-time twin of `FeaturePlan.getRoleColumns` — are kept whether
+or not the list names them, reported as `output.include.role`), and `FeaturePlan.toManifest`
 builds the manifest the transform writes at assembly. `include`, `includeSource`, `includeHash` and
 `manifest` are stripped from the plan hash (`withoutArtifact`), and `FeaturePlan.getOutputHash` =
 plan hash + emitted names + roles + include hash identifies the output table. The observedAt audit

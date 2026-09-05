@@ -2131,7 +2131,10 @@ public final class FeaturePlanCompiler {
      * replaces {@code exclude}: a column is emitted iff its canonical or output name is listed (an
      * {@code <name>_isnull} entry keeps its base column); names that match nothing are a warning (the list may
      * come from another plan version). Columns already intermediate (violations, hidden levels, baselines)
-     * stay so.
+     * stay so. A column an {@code output.roles} entry names (a baseline's emitted copy, a label derived as a
+     * column) is part of the data contract, not of the feature set: it stays emitted whether or not the
+     * list names it — a pass list never contains role columns (they were never candidates), and dropping
+     * them would leave the consumer's manifest with a role that resolves to nothing.
      */
     private void applyInclude() {
         if (spec.output.include == null) return;
@@ -2146,7 +2149,9 @@ public final class FeaturePlanCompiler {
                     + "; remove output.include to emit every column, or list the columns to keep");
             return;
         }
+        final Map<String, String> roleByCanonical = roleColumnsByCanonical();
         final Set<String> matched = new LinkedHashSet<>();
+        final List<String> keptRoles = new ArrayList<>();
         for (final OutputColumn c : columns) {
             if (c.intermediate || c.fieldType == null) continue;
             final String outputName = (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
@@ -2157,7 +2162,16 @@ public final class FeaturePlanCompiler {
                     included = true;
                 }
             }
-            if (!included) c.intermediate = true;
+            if (included) continue;
+            final String role = roleByCanonical.get(c.canonicalName);
+            if (role != null) {
+                keptRoles.add(outputName + " (" + role + ")");
+                continue;
+            }
+            c.intermediate = true;
+        }
+        if (!keptRoles.isEmpty()) {
+            diagnostics.info("output.include.role", "output.include", "role columns are emitted although output.include does not list them (roles are the data contract, not features): " + keptRoles);
         }
         final List<String> unknown = new ArrayList<>();
         for (final String name : listed) if (!matched.contains(name)) unknown.add(name);
@@ -2165,6 +2179,29 @@ public final class FeaturePlanCompiler {
             diagnostics.warning("output.include.unknown", "output.include", "include names no column of this plan: " + unknown
                     + (spec.output.includeSource != null ? " (from " + spec.output.includeSource + ")" : ""));
         }
+    }
+
+    /**
+     * The output columns that {@code output.roles} name, canonical name → role (input-field roles pass through
+     * outside the column set; a baseline role resolves to its {@code baselines[].emit} copy). The same rule as
+     * {@link FeaturePlan#getRoleColumns}, applied before the projection decides what is intermediate.
+     */
+    private Map<String, String> roleColumnsByCanonical() {
+        final Map<String, String> roles = new LinkedHashMap<>();
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+            final String name = e.getValue();
+            if (inputFields.containsKey(name)) continue;
+            String canonical = "baseline".equals(e.getKey()) ? baselineEmits.get(name) : null;
+            if (canonical == null) {
+                // outputName is assigned after the projection: match the name the column will be emitted under
+                for (final OutputColumn c : columns) {
+                    final String outputName = (c.anonymous ? "" : spec.output.prefix) + c.canonicalName;
+                    if (c.canonicalName.equals(name) || outputName.equals(name)) { canonical = c.canonicalName; break; }
+                }
+            }
+            if (canonical != null) roles.putIfAbsent(canonical, e.getKey());
+        }
+        return roles;
     }
 
     /** output.exclude: name globs ({@code block.*}, {@code name}) and lineage selectors ({@code derivedFrom:market}). */

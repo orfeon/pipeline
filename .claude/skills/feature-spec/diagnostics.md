@@ -66,6 +66,7 @@ not expand because another block failed).
 | `output.include.empty` | error | `include` is an empty list (a screening step that passed nothing, or a broken file): remove `include` to emit every column, or list the columns to keep |
 | `output.include.unknown` | warning | listed names match no column of this plan (the list may come from another plan version) |
 | `output.include.exclude` | info | both declared: `include` is the projection, `exclude` is ignored |
+| `output.include.role` | info | columns that `roles` name (a baseline's `emit` copy, a label derived as a column) are emitted although the list does not name them: a pass list never contains role columns, and the consumer's manifest needs them |
 | `audit.observedAt` | error | `count \| fail \| off` |
 
 ## Feature blocks (all scopes)

@@ -57,11 +57,14 @@ candidate columns. The `output.groupBy` parent / child form is not accepted (unn
 **Candidates** are the numeric input fields (`int32` / `int64` / `float32` / `float64` / `bool`) matching
 `candidates.include` (globs, default `*`) minus `candidates.exclude`, minus every role field, minus the
 label expression's variables, minus the shuffle reference and the conditioning columns' role fields.
-`include` / `exclude` also accept the feature transform's lineage selectors — `derivedFrom:<field>`,
-`scope:<row|context|sequence|population>`, `block:<name>`, `evidence:<declared|measured>` — resolved
+`include` / `exclude` also accept the feature transform's lineage selectors — `derivedFrom:<kind>` (the
+origin kind a source field declares, propagated to every derived column), `scope:<input|row|context|sequence|population>`,
+`block:<name>`, `evidence:<declared|measured>` — resolved
 against the lineage the feature transform attached to its output schema (`feature.*` field options, when
-it is the direct upstream) or against its manifest (`candidates.manifest`, when the table came back through
-a sink). A selector with no lineage available is an assembly error.
+it is the direct upstream; its pass-through input fields carry `scope: input` and their kind, so a
+passed-through market column is excluded by the same selector as the columns derived from it) or against
+its manifest (`candidates.manifest`, when the table came back through a sink). A selector with no lineage
+available is an assembly error.
 
 **Defaults from the feature manifest.** When `candidates.manifest` is given, its `roles` fill `group` /
 `label` / `baseline` / `weight` and its `timeField` fills `time.field` unless set; its `planHash` /
