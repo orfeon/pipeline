@@ -41,6 +41,14 @@ public final class ScreenReport {
     public record Result(List<Map<String, Object>> records, Map<String, Object> summary) {}
 
     /**
+     * Relative floor of Σ x̃² for the row families, whose centring is a difference of moment sums
+     * (c3 − c4² / c5): below this ratio of c3 the difference holds fewer than four significant digits, so a
+     * window-constant column — or one whose spread is below 1e-6 of its magnitude — is degenerate. The grouped
+     * family needs no floor: its centring is exact per unit ({@link GroupScorer#pivot}).
+     */
+    static final double ROW_DEGENERATE_REL = 1e-12;
+
+    /**
      * Score-test statistics from one accumulator slot array.
      *
      * @param nUnits the number of scored units (groups, or rows when independent): {@code est_gain = chi2 / (2 nUnits)}
@@ -57,6 +65,7 @@ public final class ScreenReport {
             if (!(c5 > 0)) return Stats.degenerate(nObs);
             final double xMean = c4 / c5;
             final double sxx = c3 - c4 * c4 / c5;
+            if (sxx <= ROW_DEGENERATE_REL * c3) return Stats.degenerate(nObs);
             final double rMean = c2 / c5;
             if (spec.isGaussian()) {
                 // identity link: S = Σ x̃ r / σ², H = Σ x̃² / σ² with σ² the residual (offset) / label (prior) variance
@@ -224,7 +233,9 @@ public final class ScreenReport {
                 Stats used = st;
                 if (conditioned) {
                     final double[] vec = partials.get(key);
-                    final Partial partial = vec == null
+                    // a column the marginal test cannot score has no partial either: its sums are the same
+                    // rounding noise, and the effective test must not pass what is reported degenerate
+                    final Partial partial = vec == null || st.degenerate
                             ? new Partial(Stats.degenerate(st.nObs), Double.NaN)
                             : partial(vec, fit, nUnits, st.nObs, sigma2, gammas.get(key));
                     final Stats pst = partial.stats;
@@ -337,6 +348,7 @@ public final class ScreenReport {
         final double gain = fit == null ? Double.NaN : conditioned && spec.isGaussian() ? fit.gainPerUnit() / sigma2 : fit.gainPerUnit();
         summary.put("conditioningGain", Double.isNaN(gain) ? null : gain);
         summary.put("conditioningL2", spec.hasConditioning() ? spec.conditioningL2 : null);
+        summary.put("conditioningMissing", spec.hasConditioning() ? spec.conditioningMissing : null);
         summary.put("notes", notes);
         return new Result(records, summary);
     }
@@ -483,6 +495,7 @@ public final class ScreenReport {
                 .withField("conditioningConverged", Schema.FieldType.BOOLEAN)
                 .withField("conditioningGain", Schema.FieldType.FLOAT64)
                 .withField("conditioningL2", Schema.FieldType.FLOAT64)
+                .withField("conditioningMissing", Schema.FieldType.STRING)
                 .withField("notes", Schema.FieldType.array(Schema.FieldType.STRING))
                 .build();
     }
@@ -501,7 +514,7 @@ public final class ScreenReport {
         parts.add("placebo=noise:" + spec.noise + (spec.hasShuffle() ? " shuffle:" + spec.shuffleN + "(" + spec.shuffleField + ")" : "") + " q" + spec.quantile + " seed=" + spec.seed);
         if (spec.periodsBucket != null) parts.add("periods=" + spec.periodsField + "/" + spec.periodsBucket);
         if (spec.leakZ != null) parts.add("leakZ=" + spec.leakZ);
-        if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " (" + spec.conditioningMaxIter + " + 2 passes)");
+        if (spec.hasConditioning()) parts.add("conditioning=" + spec.conditioningFields.size() + " " + spec.conditioningFields + " l2=" + spec.conditioningL2 + " maxIter=" + spec.conditioningMaxIter + " missing=" + spec.conditioningMissing + " (" + spec.conditioningMaxIter + " + 2 passes)");
         if (!spec.notes.isEmpty()) parts.add("notes=" + spec.notes);
         return "screen " + String.join(" ", parts);
     }

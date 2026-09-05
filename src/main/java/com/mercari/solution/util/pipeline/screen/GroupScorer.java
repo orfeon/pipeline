@@ -225,15 +225,18 @@ public final class GroupScorer implements Serializable {
 
     /**
      * Grouped multinomial (conditional logit) contribution: x centred by the p-weighted mean over the observed
-     * rows (missing → 0), S = Σ x̃ (ỹ − p), H = Σ p x̃² − (Σ p x̃)², both scaled by the unit weight.
+     * rows (a missing row contributes nothing), S = Σ x̃ (ỹ − p), H = Σ p x̃² − (Σ p x̃)², both scaled by the
+     * unit weight. The values are shifted by the unit's {@link #pivot} first, so a column constant within the
+     * unit gives H = 0 exactly rather than the rounding residue of centring large values.
      */
     static void groupedContribution(final double[] v, final double[] y, final double[] p, final double weight, final double[] out) {
         final int n = v.length;
+        final double pivot = pivot(v);
         double pm = 0, psum = 0;
         int nObs = 0;
         for (int i = 0; i < n; i++) {
             if (ScreenMath.isFinite(v[i])) {
-                pm += p[i] * v[i];
+                pm += p[i] * (v[i] - pivot);
                 psum += p[i];
                 nObs++;
             }
@@ -241,7 +244,8 @@ public final class GroupScorer implements Serializable {
         final double mean = psum > 0 ? pm / psum : 0d;
         double s = 0, h = 0, px = 0;
         for (int i = 0; i < n; i++) {
-            final double xt = ScreenMath.isFinite(v[i]) ? v[i] - mean : 0d;
+            if (!ScreenMath.isFinite(v[i])) continue;
+            final double xt = v[i] - pivot - mean;
             s += xt * (y[i] - p[i]);
             h += p[i] * xt * xt;
             px += p[i] * xt;
@@ -250,6 +254,18 @@ public final class GroupScorer implements Serializable {
         out[ScoreAccumulator.S] = weight * s;
         out[ScoreAccumulator.H] = weight * (h - px * px);
         out[ScoreAccumulator.N_OBS] = nObs;
+    }
+
+    /**
+     * The shift applied before a column is centred within a unit: its first finite value (0 when none). The
+     * grouped statistic is invariant to a constant shift within the unit, and {@code v − pivot} is exact for
+     * values within a factor of two of each other (Sterbenz), so the centring works on the column's spread
+     * rather than its magnitude: a within-unit constant gives exactly zero, a large-valued column with a small
+     * spread keeps every digit of that spread. Shared by the marginal test and {@link ConditioningScorer#partial}.
+     */
+    static double pivot(final double[] v) {
+        for (final double x : v) if (ScreenMath.isFinite(x)) return x;
+        return 0d;
     }
 
     /**

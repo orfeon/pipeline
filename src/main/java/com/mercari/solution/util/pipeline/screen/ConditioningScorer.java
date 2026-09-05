@@ -23,6 +23,8 @@ public final class ConditioningScorer implements Serializable {
     private final int offset;
     private final int kF;
     private final boolean intercept;
+    /** conditioning.missing: groupMean — a missing value is filled per unit (see {@link #design}) */
+    private final boolean groupMeanFill;
     /** number of fitted coefficients (conditioning columns + intercept for the binomial family) */
     public final int k;
 
@@ -35,6 +37,7 @@ public final class ConditioningScorer implements Serializable {
         this.spec = spec;
         this.kF = spec.conditioningFields.size();
         this.intercept = !spec.isGroupedMultinomial();
+        this.groupMeanFill = ScreenSpec.MISSING_GROUP_MEAN.equals(spec.conditioningMissing);
         this.k = kF + (intercept ? 1 : 0);
         this.offset = offset;
     }
@@ -94,16 +97,37 @@ public final class ConditioningScorer implements Serializable {
         return new double[][]{mean, std};
     }
 
-    /** The standardised design F̃ of the unit (n × k): (x − mean) / std, missing → 0, intercept column last. */
+    /**
+     * The standardised design F̃ of the unit (n × k): (x − mean) / std, intercept column last. A missing value is
+     * the window mean (0 after standardising; {@code conditioning.missing: mean}) or, for the grouped family under
+     * {@code groupMean}, the unit's baseline-weighted mean of its observed values: under the baseline p that fill
+     * is the value at which the missing row contributes nothing to the unit's p-centred design — the rule the
+     * candidate columns follow ({@link GroupScorer#groupedContribution}) — so the first Newton pass (θ = 0) is
+     * exact; the later passes centre by the fitted p̂, where the fill stays the closest fixed value but is no
+     * longer exactly neutral. A unit with no observed value falls back to the window mean.
+     */
     public double[][] design(final GroupScorer.Unit unit, final double[] moments) {
         final double[][] scale = scaling(moments, kF);
         final int n = unit.size();
         final double[][] f = new double[n][k];
+        final double[] fill = new double[kF];
+        if (groupMeanFill) {
+            for (int j = 0; j < kF; j++) {
+                double pm = 0, psum = 0;
+                for (int i = 0; i < n; i++) {
+                    final double v = unit.rows.get(i).x[offset + j];
+                    if (!ScreenMath.isFinite(v)) continue;
+                    pm += unit.p[i] * v;
+                    psum += unit.p[i];
+                }
+                if (psum > 0) fill[j] = (pm / psum - scale[0][j]) / scale[1][j];
+            }
+        }
         for (int i = 0; i < n; i++) {
             final double[] x = unit.rows.get(i).x;
             for (int j = 0; j < kF; j++) {
                 final double v = x[offset + j];
-                f[i][j] = ScreenMath.isFinite(v) ? (v - scale[0][j]) / scale[1][j] : 0d;
+                f[i][j] = ScreenMath.isFinite(v) ? (v - scale[0][j]) / scale[1][j] : fill[j];
             }
             if (intercept) f[i][kF] = 1d;
         }
@@ -242,10 +266,12 @@ public final class ConditioningScorer implements Serializable {
                 final double[] v = GroupScorer.transform(spec.transforms.get(t), cols[c]);
                 final double[] acc = into.computeIfAbsent(spec.key(c, t), key -> new double[partialLength()]);
                 if (spec.isGroupedMultinomial()) {
+                    // the same pivot shift as the marginal test: a within-unit constant gives b = 0 exactly
+                    final double pivot = GroupScorer.pivot(v);
                     double pm = 0, psum = 0;
                     for (int i = 0; i < n; i++) {
                         if (ScreenMath.isFinite(v[i])) {
-                            pm += p[i] * v[i];
+                            pm += p[i] * (v[i] - pivot);
                             psum += p[i];
                         }
                     }
@@ -253,7 +279,7 @@ public final class ConditioningScorer implements Serializable {
                     double s = 0, b = 0, px = 0;
                     final double[] a = new double[k];
                     for (int i = 0; i < n; i++) {
-                        final double xt = ScreenMath.isFinite(v[i]) ? v[i] - mean : 0d;
+                        final double xt = ScreenMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
                         s += xt * (unit.y[i] - p[i]);
                         b += p[i] * xt * xt;
                         px += p[i] * xt;

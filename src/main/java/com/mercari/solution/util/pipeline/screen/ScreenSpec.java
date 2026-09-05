@@ -48,6 +48,11 @@ public final class ScreenSpec implements Serializable {
         };
     }
 
+    /** conditioning.missing: the window mean of the column (standardised: 0) */
+    public static final String MISSING_MEAN = "mean";
+    /** conditioning.missing: the unit's baseline-weighted mean of its observed values (grouped family only) */
+    public static final String MISSING_GROUP_MEAN = "groupMean";
+    public static final List<String> MISSINGS = List.of(MISSING_MEAN, MISSING_GROUP_MEAN);
     public static final String TRANSFORM_RAW = "raw";
     public static final String TRANSFORM_RANK = "rank";
     public static final String TRANSFORM_ABSDEV = "absdev";
@@ -96,6 +101,8 @@ public final class ScreenSpec implements Serializable {
     public double conditioningL2 = 1e-4;
     public int conditioningMaxIter = 10;
     public double conditioningTol = 1e-8;
+    /** conditioning.missing: how a missing conditioning value enters F̃ ({@link #MISSING_MEAN} / {@link #MISSING_GROUP_MEAN}) */
+    public String conditioningMissing = MISSING_MEAN;
 
     /** output.selection: URI / path of the pass-list file (null = not written) */
     public String selectionUri;
@@ -361,6 +368,15 @@ public final class ScreenSpec implements Serializable {
                 if (maxIter != null) s.conditioningMaxIter = maxIter;
                 final Double tol = number(o, "tol");
                 if (tol != null) s.conditioningTol = tol;
+                final String missing = string(o, "missing");
+                if (missing != null) {
+                    s.conditioningMissing = missing;
+                    if (!MISSINGS.contains(missing)) {
+                        errors.add("unknown conditioning.missing '" + missing + "' (available: " + MISSINGS + ")");
+                    } else if (MISSING_GROUP_MEAN.equals(missing) && FAMILIES.contains(s.family) && !s.isGroupedMultinomial()) {
+                        errors.add("conditioning.missing " + MISSING_GROUP_MEAN + " needs family " + FAMILY_GROUPED_MULTINOMIAL + " (the fill is the unit's baseline-weighted mean); the row families use " + MISSING_MEAN);
+                    }
+                }
                 if (s.conditioningL2 < 0) errors.add("conditioning.l2 must be >= 0");
                 if (s.conditioningMaxIter < 1 || s.conditioningMaxIter > 100) errors.add("conditioning.maxIter must be in [1, 100] (every iteration is one pass over the data)");
                 if (s.conditioningTol <= 0) errors.add("conditioning.tol must be > 0");
@@ -368,7 +384,7 @@ public final class ScreenSpec implements Serializable {
                 s.conditioningPatterns = strings(p, "conditioning", errors);
                 if (s.conditioningPatterns.isEmpty()) errors.add("conditioning must list at least one field (names or globs of the conditioning columns)");
             } else {
-                errors.add("conditioning must be an object {fields, l2, maxIter, tol} or a list of field names");
+                errors.add("conditioning must be an object {fields, l2, maxIter, tol, missing} or a list of field names");
             }
         }
         final JsonElement output = p.get("output");
@@ -411,7 +427,12 @@ public final class ScreenSpec implements Serializable {
         public String planHash;
         public String outputHash;
 
-        public record Entry(String scope, String block, Set<String> derivedFrom, String evidence) implements Serializable {}
+        /** {@code kind} is the source field's origin tag (pass-through inputs only; a derived column carries its kinds in {@code derivedFrom}). */
+        public record Entry(String scope, String block, Set<String> derivedFrom, String evidence, String kind) implements Serializable {
+            public Entry(final String scope, final String block, final Set<String> derivedFrom, final String evidence) {
+                this(scope, block, derivedFrom, evidence, null);
+            }
+        }
 
         /**
          * Lineage from the feature transform's output schema (the direct upstream): every field with
@@ -424,7 +445,7 @@ public final class ScreenSpec implements Serializable {
             for (final Schema.Field f : schema.getFields()) {
                 final Map<String, String> o = f.getOptions();
                 if (o == null || !o.containsKey("feature.scope")) continue;
-                l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), split(o.get("feature.derivedFrom")), o.get("feature.evidence")));
+                l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), split(o.get("feature.derivedFrom")), o.get("feature.evidence"), o.get("feature.kind")));
                 final String role = o.get("feature.role");
                 if (role != null) {
                     l.roles.putIfAbsent(role, f.getName());
@@ -478,7 +499,7 @@ public final class ScreenSpec implements Serializable {
                         derived.add(string(f, "kind"));
                     }
                     final String scope = string(f, "scope");
-                    l.columns.put(name, new Entry(scope == null ? "input" : scope, null, derived, string(f, "evidence")));
+                    l.columns.put(name, new Entry(scope == null ? "input" : scope, null, derived, string(f, "evidence"), string(f, "kind")));
                 }
             }
             if (m.has("columns") && m.get("columns").isJsonArray()) {
@@ -516,7 +537,7 @@ public final class ScreenSpec implements Serializable {
     /**
      * Applies role defaults, validates the fields against the input schema and chooses the candidate columns:
      * numeric input fields matching {@code candidates.include}, minus {@code candidates.exclude} (name globs and
-     * lineage selectors {@code derivedFrom:} / {@code scope:} / {@code block:} / {@code evidence:}), minus every
+     * lineage selectors {@code derivedFrom:} / {@code scope:} / {@code block:} / {@code evidence:} / {@code kind:}), minus every
      * role field. Throws {@link IllegalArgumentException} listing every error.
      */
     public ScreenSpec resolve(final Schema inputSchema, final Lineage lineage) {
@@ -614,7 +635,7 @@ public final class ScreenSpec implements Serializable {
         if (!excludedByLineage.isEmpty()) notes.add("excluded by lineage: " + excludedByLineage);
         final boolean usesSelectors = candidateExclude.stream().anyMatch(s -> s.indexOf(':') > 0) || !includeSelectors.isEmpty();
         if (usesSelectors && l.columns.isEmpty()) {
-            errors.add("candidates use lineage selectors (derivedFrom: / scope: / block: / evidence:) but no lineage is available: "
+            errors.add("candidates use lineage selectors (derivedFrom: / scope: / block: / evidence: / kind:) but no lineage is available: "
                     + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");
         }
         if (candidates.isEmpty()) errors.add("no candidate column: candidates.include " + candidateInclude + " matched no numeric input field (after exclusions)");
@@ -651,6 +672,7 @@ public final class ScreenSpec implements Serializable {
             case "evidence" -> value.equals(entry.evidence());
             case "scope" -> value.equals(entry.scope());
             case "block" -> value.equals(entry.block());
+            case "kind" -> value.equals(entry.kind());
             default -> false;
         };
     }

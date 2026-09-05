@@ -59,7 +59,8 @@ candidate columns. The `output.groupBy` parent / child form is not accepted (unn
 label expression's variables, minus the shuffle reference and the conditioning columns' role fields.
 `include` / `exclude` also accept the feature transform's lineage selectors — `derivedFrom:<kind>` (the
 origin kind a source field declares, propagated to every derived column), `scope:<input|row|context|sequence|population>`,
-`block:<name>`, `evidence:<declared|measured>` — resolved
+`block:<name>`, `evidence:<declared|measured>` — plus, screen-only, `kind:<kind>` (the origin tag of a
+pass-through input field itself; a derived column carries its kinds in `derivedFrom` only) — resolved
 against the lineage the feature transform attached to its output schema (`feature.*` field options, when
 it is the direct upstream; its pass-through input fields carry `scope: input` and their kind, so a
 passed-through market column is excluded by the same selector as the columns derived from it) or against
@@ -123,9 +124,17 @@ importance-sampled rows; a precision-weight reading is an extension position (§
 
 ### 3.5 Degenerate columns
 
-A column with H ≤ 0, fewer than two observed rows, a constant within every group, or (gaussian) no residual
+A column with fewer than two observed rows, a constant within every group, or (gaussian) no residual
 variance is *degenerate*: `est_gain = 0`, `z = 0`, `beta` null, `degenerate = true`. Degenerate placebo
-columns enter the placebo quantile as 0.
+columns enter the placebo quantile as 0. Under conditioning a degenerate column has no partial test either
+(§8): its partial fields are the degenerate values and it never passes. The constant test is exact for the
+grouped family: the unit's values are shifted by its first observed value before the p-weighted centring
+(the statistic is shift-invariant within the group, and the shifted values are exact for the spreads a
+double can carry), so a within-group constant gives H = 0 whatever its magnitude and a large-valued column
+with a small spread keeps every digit of that spread. The row families centre by a difference of moment
+sums (Σ w v x² − (Σ w v x)² / Σ w v), which loses the digits of the magnitude: below Σ x̃² = 1e-12 × Σ w v x²
+the statistic has fewer than four significant digits and the column is degenerate — a window-constant
+column, or one whose spread is below 1e-6 of its magnitude; centre such a column upstream.
 
 ## 4. Baseline forms
 
@@ -194,7 +203,11 @@ conditioned on). The transform then measures what each candidate adds *beyond F*
 
 ### 8.1 The conditioning model
 
-η = offset + F̃·θ with F̃ = F standardised (missing → the mean) — the conditional logit within the group for
+η = offset + F̃·θ with F̃ = F standardised (a missing value → the window mean, or under `conditioning.missing:
+groupMean`, grouped family only, the unit's baseline-weighted mean of its observed values — under the baseline p
+the fill at which the missing row contributes nothing to the unit's p-centred design, the rule the candidate
+columns follow in §3.2, so the first Newton pass is exact; the later passes centre by the fitted p̂, where the
+fill is no longer exactly neutral; a unit with no observed value falls back to the window mean) — the conditional logit within the group for
 the grouped family; for the row families a GLM with an intercept column (a calibration shift beyond the
 baseline, the prior rate without one): logistic for `binomial`, least squares for `gaussian` (σ² = 1 in the
 fit, the residual variance enters afterwards), log-linear for `poisson`. θ maximises the L2-penalised
