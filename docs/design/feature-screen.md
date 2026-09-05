@@ -136,6 +136,19 @@ log, outputs `MCollectionTuple.of(records).and("summary", ...)`.
   fit is least squares at σ² = 1 (one Newton step); the partial test and `conditioningGain` divide by the residual
   variance at the fit (`SIGMA_KEY` sums from the partial pass), and an exact fit (σ² = 0) falls back to the
   marginal test with a note.
+- **Hardening after the four PRs** (review follow-ups): the `MatrixOps` decompositions (`solve`, `solveGram`,
+  `inverse`, `firstRightSingularVector`) reject non-finite input (ojalgo's SVD never terminates on NaN — the
+  screen guards its own inputs, the shared solver now guards every caller; the plain products keep propagating
+  NaN); the report orthogonalises every column with one multi-right-hand-side `solveGram`
+  (`ScreenReport.gammas`: one Cholesky of the fit's Gram matrix instead of one per column x transform, a column
+  whose sums overflowed stays out of the batch and is reported degenerate); the
+  Newton passes read a projection of the units (`ProjectDoFn`: label, baseline, weight, F — `ConditioningScorer`
+  takes the F offset, 0 for projected rows) so `maxIter` passes never re-read the candidate columns; the
+  prepare step accumulates the run counts per bundle and window (one element per bundle on the bookkeeping
+  key, not one per row) and ships the row identity as a 128-bit murmur3 hash instead of the whole record;
+  `ScreenMath` delegates its randomness, quantile and coercions to `FeatureValues` / `OrderStatistics`, so the
+  screen accepts exactly the time formats the feature transform accepts; the feature transform rejects an
+  empty `output.include` (`output.include.empty`) instead of emitting a table without feature columns.
 - Field names follow the proposal (`est_gain`, `n_groups`, `period_z`, `leakSuspect` …) with additions that
   cost nothing now and keep later extensions schema-compatible: `df` (block tests), `pValue` / `qValue`,
   `degenerate`, `family`, and the summary's `passedColumns` (the selection list of PR 4).

@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -145,7 +146,7 @@ public final class GroupScorer implements Serializable {
         }
         int next = nCandidates;
         if (spec.noise > 0) {
-            final SplittableRandom rng = ScreenMath.seededRandom(spec.seed, unit.key + SEP + "noise");
+            final SplittableRandom rng = FeatureValues.seededRandom(spec.seed, unit.key + SEP + "noise");
             for (int i = 0; i < n; i++) {
                 for (int j = 0; j < spec.noise; j++) cols[next + j][i] = rng.nextGaussian();
             }
@@ -155,7 +156,7 @@ public final class GroupScorer implements Serializable {
             final double[] ref = new double[n];
             for (int i = 0; i < n; i++) ref[i] = unit.rows.get(i).x[shuffleRef];
             for (int j = 0; j < spec.shuffleN; j++) {
-                final SplittableRandom rng = ScreenMath.seededRandom(spec.seed, unit.key + SEP + "shuffle" + j);
+                final SplittableRandom rng = FeatureValues.seededRandom(spec.seed, unit.key + SEP + "shuffle" + j);
                 final int[] perm = new int[n];
                 for (int i = 0; i < n; i++) perm[i] = i;
                 for (int i = n - 1; i > 0; i--) {

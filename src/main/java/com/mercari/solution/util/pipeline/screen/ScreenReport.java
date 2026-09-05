@@ -87,14 +87,53 @@ public final class ScreenReport {
      * H⊥ = b − 2γ'a + γ'Gγ, r²_F = 1 − H⊥ / b. A column fully explained by F (H⊥ ≈ 0) is degenerate with
      * r²_F = 1. {@code nUnits} is the bookkeeping unit count of the marginal test (the gain's denominator);
      * {@code sigma2} is the gaussian family's residual variance at the fitted model (1 for the other families).
+     * <p>
+     * {@code gammas} computes γ for every key at once: one Cholesky factorisation of the fit's Gram matrix serves
+     * every column x transform (a multi-right-hand-side solve); {@code partial} then applies one column's γ.
      */
-    public static Partial partial(final double[] vec, final FitState fit, final double nUnits, final double l2, final long nObs, final double sigma2) {
+    static Map<Integer, double[]> gammas(final Map<Integer, double[]> partials, final FitState fit, final double l2) {
+        final List<Integer> keys = new ArrayList<>();
+        for (final Map.Entry<Integer, double[]> e : partials.entrySet()) {
+            // the sigma sums are not a column; a column whose sums overflowed stays out of the batched solve
+            // (no gamma = degenerate, as the per-column solve reported it) instead of failing every column
+            if (e.getKey() != ConditioningScorer.SIGMA_KEY && solvable(e.getValue(), fit.k)) keys.add(e.getKey());
+        }
+        final Map<Integer, double[]> out = new HashMap<>();
+        if (keys.isEmpty()) return out;
+        final double[][] rhs = new double[fit.k][keys.size()];
+        for (int c = 0; c < keys.size(); c++) {
+            final double[] vec = partials.get(keys.get(c));
+            for (int i = 0; i < fit.k; i++) rhs[i][c] = vec[2 + i];
+        }
+        final double[][] solution = MatrixOps.solveGram(fit.bestG, rhs, l2 * fit.nUnits);
+        for (int c = 0; c < keys.size(); c++) {
+            final double[] gamma = new double[fit.k];
+            for (int i = 0; i < fit.k; i++) gamma[i] = solution[i][c];
+            out.put(keys.get(c), gamma);
+        }
+        return out;
+    }
+
+    /** Whether a column's sums {@code [s, b, a]} can be orthogonalised: a positive H and finite a. */
+    private static boolean solvable(final double[] vec, final int k) {
+        if (!(vec[1] > 0)) return false;
+        for (int i = 2; i < 2 + k; i++) {
+            if (!Double.isFinite(vec[i])) return false;
+        }
+        return true;
+    }
+
+    /**
+     * The partial test given the column's orthogonalisation coefficients from {@link #gammas}, the one degeneracy
+     * gate: a column without γ (no information or non-finite sums, or a fit without an accepted point / residual
+     * variance, for which the caller computes no γ at all) is degenerate.
+     */
+    static Partial partial(final double[] vec, final FitState fit, final double nUnits, final long nObs, final double sigma2, final double[] gamma) {
         final int k = fit.k;
         final double s = vec[0];
         final double b = vec[1];
-        if (!(b > 0) || !fit.hasBest || !(sigma2 > 0)) return new Partial(Stats.degenerate(nObs), Double.NaN);
+        if (gamma == null) return new Partial(Stats.degenerate(nObs), Double.NaN);
         final double[] a = Arrays.copyOfRange(vec, 2, 2 + k);
-        final double[] gamma = MatrixOps.solveGram(fit.bestG, a, l2 * fit.nUnits);
         final double sPerp = s - MatrixOps.dot(gamma, fit.bestGrad);
         double gGg = 0;
         for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) gGg += gamma[i] * fit.bestG[i][j] * gamma[j];
@@ -128,6 +167,7 @@ public final class ScreenReport {
         }
         // an exact fit (no residual) leaves nothing to divide the partial statistics by: the marginal test decides
         final boolean conditioned = fitted && sigma2 > 0;
+        final Map<Integer, double[]> gammas = conditioned ? gammas(partials, fit, spec.conditioningL2) : Map.of();
         final List<String> notes = new ArrayList<>(spec.notes);
         if (spec.hasConditioning() && !fitted) {
             notes.add("conditioning: the fit accepted no point (no scorable unit); partial statistics are null and passed / threshold / qValue follow the marginal test");
@@ -186,7 +226,7 @@ public final class ScreenReport {
                     final double[] vec = partials.get(key);
                     final Partial partial = vec == null
                             ? new Partial(Stats.degenerate(st.nObs), Double.NaN)
-                            : partial(vec, fit, nUnits, spec.conditioningL2, st.nObs, sigma2);
+                            : partial(vec, fit, nUnits, st.nObs, sigma2, gammas.get(key));
                     final Stats pst = partial.stats;
                     r.put("r2_F", Double.isNaN(partial.r2) ? null : partial.r2);
                     r.put("partial_S", pst.s);

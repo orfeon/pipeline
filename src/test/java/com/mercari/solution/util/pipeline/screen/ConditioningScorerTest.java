@@ -142,7 +142,8 @@ public class ConditioningScorerTest {
         final double[] vec = partials.get(s.key(0, 0));
         // the sums at p̂: a = F̃'Wx = b / std when x = F (F̃ = F / std, std² = 6 / 9)
         Assertions.assertEquals(vec[1] / Math.sqrt(6d / 9), vec[2], 1e-9);
-        final ScreenReport.Partial partial = ScreenReport.partial(vec, state, 3, 0d, 9, 1d);
+        final Map<Integer, double[]> gammas = ScreenReport.gammas(partials, state, 0d);
+        final ScreenReport.Partial partial = ScreenReport.partial(vec, state, 3, 9, 1d, gammas.get(s.key(0, 0)));
         Assertions.assertEquals(1d, partial.r2(), 1e-9);
         Assertions.assertTrue(partial.stats().degenerate());
         Assertions.assertEquals(0d, partial.stats().estGain());

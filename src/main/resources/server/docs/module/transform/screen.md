@@ -150,7 +150,7 @@ comes back through a sink / source. Using a selector without any lineage availab
 | baseline | optional | String or Object | Field name (the family's default form), or `{field, form}`: `prob` / `logProb` / `inverseShare` (groupedMultinomial, binomial), `value` (gaussian), `rate` / `logRate` (poisson). |
 | time | optional | String or Object | Field name, or `{field, to, from}` with ISO-8601 instants. Rows after `to` / before `from` are not screened. |
 | weight | optional | String or Object | Weight field (`{field}` accepted). |
-| rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time). Default: every field value. |
+| rowId | optional | Array<String\> | Fields that identify a row (the placebo noise seed and the tie-break of rows sharing a time; the unit key for independent rows). Default: every field value. The identity travels as a 128-bit hash. |
 | candidates | optional | Object or Array | `{include: [globs / selectors], exclude: [globs / selectors], manifest: <uri>}`, or a list of include globs. Default include `["*"]`. |
 | transforms | optional | Array<String\> | Any of `raw`, `rank`, `absdev`. Default: all three with `group`, `raw` without. |
 | periods | optional | Object or String | `{field, bucket}` or a bucket name; bucket `year` / `quarter` / `month` / `week` / `day` (UTC). `field` defaults to `time.field`. |
@@ -367,7 +367,8 @@ transforms:
   screened them.
 - `threshold` / `thresholdTheoretical` are null when no unit was scored (no `NaN` in the file).
 - An empty `columns` (nothing passed) is still written and logged as a warning: a feature run reading it as
-  `output.include` keeps no feature column, so check `nPassed` before closing the loop.
+  `output.include` fails at assembly (`output.include.empty`, the table would carry no feature column), so check
+  `nPassed` before closing the loop.
 - The file is written once per run from the finalize step (global window only); a failed write fails the step.
   Keeping a ledger of runs is a matter of versioned paths (`${args.version}`) or an `action/storage` copy.
 

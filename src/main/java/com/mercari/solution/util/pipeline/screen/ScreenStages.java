@@ -1,8 +1,10 @@
 package com.mercari.solution.util.pipeline.screen;
 
+import com.google.common.hash.Hashing;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.mercari.solution.module.Logging;
+import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
@@ -40,6 +42,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -130,8 +133,13 @@ public final class ScreenStages {
                     .apply("ConditioningInit_State", ParDo.of(new InitDoFn(spec, momentsView)).withSideInputs(momentsView))
                     .setCoder(SerializableCoder.of(FitState.class))
                     .apply("ConditioningInit_View", View.asSingleton());
+            // the fit passes read a projection of the units (label, baseline, weight, F): maxIter passes over the
+            // conditioning columns only, not over every candidate column
+            final PCollection<KV<String, Iterable<ScreenRow>>> fitUnits = units
+                    .apply("ConditioningProject", ParDo.of(new ProjectDoFn(spec)))
+                    .setCoder(unitCoder);
             for (int it = 1; it <= spec.conditioningMaxIter; it++) {
-                final PCollection<VectorAccumulator> evaluation = units
+                final PCollection<VectorAccumulator> evaluation = fitUnits
                         .apply("ConditioningFit" + it, ParDo.of(new FitPassDoFn(spec, momentsView, state)).withSideInputs(momentsView, state))
                         .setCoder(VectorAccumulator.CODER)
                         .apply("ConditioningFit" + it + "_Combine", Combine.globally(new VectorAccumulator.Fn()));
@@ -174,6 +182,8 @@ public final class ScreenStages {
         private final List<String> columns;
         private transient ExpressionUtil.Expression labelExpression;
         private transient Map<String, Double> expressionValues;
+        /** bundle-local run counts per window: one bookkeeping element per bundle instead of one per row */
+        private transient Map<BoundedWindow, ScoreAccumulator> books;
 
         PrepareDoFn(final ScreenSpec spec, final List<Logging> loggings, final boolean failFast,
                     final TupleTag<KV<String, ScreenRow>> rowTag, final TupleTag<KV<Integer, ScoreAccumulator>> bookTag, final TupleTag<BadRecord> failureTag) {
@@ -194,8 +204,20 @@ public final class ScreenStages {
             }
         }
 
+        @StartBundle
+        public void startBundle() {
+            books = new HashMap<>();
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            for (final Map.Entry<BoundedWindow, ScoreAccumulator> e : books.entrySet()) {
+                c.output(bookTag, KV.of(ScoreAccumulator.BOOKKEEPING_KEY, e.getValue()), e.getKey().maxTimestamp(), e.getKey());
+            }
+        }
+
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final MElement input = c.element();
             if (input == null) return;
             try {
@@ -206,7 +228,7 @@ public final class ScreenStages {
 
                 final long time;
                 if (spec.timeField != null) {
-                    final Long millis = ScreenMath.toEpochMillis(values.get(spec.timeField), spec.timeFieldType);
+                    final Long millis = FeatureValues.toEpochMillis(values.get(spec.timeField), spec.timeFieldType);
                     if (millis == null) throw new IllegalArgumentException("time.field '" + spec.timeField + "' is null or not a timestamp");
                     time = millis;
                 } else {
@@ -216,56 +238,65 @@ public final class ScreenStages {
                 }
                 if ((spec.timeToMillis != null && time > spec.timeToMillis) || (spec.timeFromMillis != null && time < spec.timeFromMillis)) {
                     book[ScoreAccumulator.ROWS_TIME_FILTERED] = 1;
-                    c.output(bookTag, KV.of(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator().add(null, book)));
+                    count(window, book);
                     return;
                 }
 
                 final Double label = label(values);
                 final String group = spec.group == null ? null : text(values.get(spec.group));
-                final Double weight = spec.weightField == null ? 1d : ScreenMath.toDouble(values.get(spec.weightField));
+                final Double weight = spec.weightField == null ? 1d : FeatureValues.toDouble(values.get(spec.weightField));
                 final boolean invalid = label == null || !Double.isFinite(label)
                         || (spec.group != null && group == null)
                         || (spec.isPoisson() && label < 0)
                         || weight == null || !Double.isFinite(weight) || weight < 0;
                 if (invalid) {
                     book[ScoreAccumulator.ROWS_INVALID] = 1;
-                    c.output(bookTag, KV.of(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator().add(null, book)));
+                    count(window, book);
                     Logging.log(LOG, logs, "invalid", input);
                     return;
                 }
-                final Double baseline = spec.hasBaseline() ? ScreenMath.toDouble(values.get(spec.baselineField)) : null;
+                final Double baseline = spec.hasBaseline() ? FeatureValues.toDouble(values.get(spec.baselineField)) : null;
                 final double[] x = new double[columns.size()];
                 for (int i = 0; i < x.length; i++) {
-                    final Double v = ScreenMath.toDouble(values.get(columns.get(i)));
+                    final Double v = FeatureValues.toDouble(values.get(columns.get(i)));
                     x[i] = v == null ? Double.NaN : v;
                 }
                 String period = null;
                 if (spec.periodsBucket != null) {
                     final Long periodMillis = spec.periodsField.equals(spec.timeField)
                             ? time
-                            : ScreenMath.toEpochMillis(values.get(spec.periodsField), spec.periodsFieldType);
+                            : FeatureValues.toEpochMillis(values.get(spec.periodsField), spec.periodsFieldType);
                     if (periodMillis != null) period = ScreenMath.periodBucket(periodMillis, spec.periodsBucket);
                 }
                 final String identity = identity(values);
                 final ScreenRow row = new ScreenRow(group, identity, time, period, label, baseline == null ? Double.NaN : baseline, weight, x);
                 c.output(rowTag, KV.of(group == null ? identity : group, row));
-                c.output(bookTag, KV.of(ScoreAccumulator.BOOKKEEPING_KEY, new ScoreAccumulator().add(null, book)));
+                count(window, book);
             } catch (final Throwable e) {
                 c.output(failureTag, Module.processError("Failed to prepare screen input", input, e, failFast));
             }
         }
 
+        /** Adds a row's run counts to the bundle's bookkeeping of its window (a row that failed is not counted). */
+        private void count(final BoundedWindow window, final double[] book) {
+            books.computeIfAbsent(window, w -> new ScoreAccumulator()).add(null, book);
+        }
+
         private Double label(final Map<String, Object> values) {
-            if (labelExpression == null) return ScreenMath.toDouble(values.get(spec.labelField));
+            if (labelExpression == null) return FeatureValues.toDouble(values.get(spec.labelField));
             expressionValues.clear();
             for (final String v : labelExpression.getVariableNames()) {
-                final Double d = ScreenMath.toDouble(values.get(v));
+                final Double d = FeatureValues.toDouble(values.get(v));
                 expressionValues.put(v, d == null ? Double.NaN : d);
             }
             return labelExpression.evaluate(expressionValues);
         }
 
-        /** Deterministic row identity: the declared rowId fields, else every field value in name order. */
+        /**
+         * Deterministic row identity: a 128-bit hash of the declared rowId fields, else of every field value in
+         * name order (the sort tie-break, the noise seed and, for independent rows, the unit key — a short token
+         * instead of the whole record through the shuffle).
+         */
         private String identity(final Map<String, Object> values) {
             final StringBuilder sb = new StringBuilder();
             if (!spec.rowId.isEmpty()) {
@@ -275,7 +306,7 @@ public final class ScreenStages {
                     sb.append(e.getKey()).append('=').append(text(e.getValue())).append(SEP);
                 }
             }
-            return sb.toString();
+            return Hashing.murmur3_128().hashString(sb, StandardCharsets.UTF_8).toString();
         }
 
         private static String text(final Object value) {
@@ -392,7 +423,25 @@ public final class ScreenStages {
         }
     }
 
-    /** One Newton pass: evaluates every scored unit at the state's proposal (nothing once converged). */
+    /** Projects a unit to what the Newton passes read: label, baseline, weight and the conditioning columns. */
+    static class ProjectDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, KV<String, Iterable<ScreenRow>>> {
+        private final ScreenSpec spec;
+
+        ProjectDoFn(final ScreenSpec spec) {
+            this.spec = spec;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final List<ScreenRow> projected = new ArrayList<>();
+            for (final ScreenRow r : c.element().getValue()) {
+                projected.add(r.conditioningOnly(spec));
+            }
+            c.output(KV.of(c.element().getKey(), projected));
+        }
+    }
+
+    /** One Newton pass over the projected units: evaluates every scored unit at the state's proposal (nothing once converged). */
     static class FitPassDoFn extends DoFn<KV<String, Iterable<ScreenRow>>, VectorAccumulator> {
         private final ScreenSpec spec;
         private final PCollectionView<VectorAccumulator> momentsView;
@@ -410,7 +459,7 @@ public final class ScreenStages {
         @Setup
         public void setup() {
             groups = new GroupScorer(spec);
-            scorer = new ConditioningScorer(spec);
+            scorer = new ConditioningScorer(spec, 0);   // projected rows: F starts at 0
         }
 
         @StartBundle
@@ -592,7 +641,7 @@ public final class ScreenStages {
                 ResourceUtil.writeString(spec.selectionUri, SELECTION_GSON.toJson(ScreenReport.selection(spec, result)));
                 final int nColumns = ((List<?>) result.summary().get("passedColumns")).size();
                 if (nColumns == 0) {
-                    LOG.warn("screen selection written to {} with no column: a feature run reading it as output.include keeps no feature column", spec.selectionUri);
+                    LOG.warn("screen selection written to {} with no column: a feature run reading it as output.include fails at assembly (output.include.empty)", spec.selectionUri);
                 } else {
                     LOG.info("screen selection written to {}: {} columns", spec.selectionUri, nColumns);
                 }

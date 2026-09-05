@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
+import java.util.Arrays;
 
 /**
  * One prepared sample: the unit key, a deterministic identity (noise seed and sort tie-break), event time,
@@ -43,6 +44,18 @@ public final class ScreenRow implements Serializable {
         this.baseline = baseline;
         this.weight = weight;
         this.x = x;
+    }
+
+    /**
+     * The row as the conditioning fit reads it: the conditioning columns alone, at offset 0 (a
+     * {@link ConditioningScorer} built with offset 0). The identity stays: it is the sort tie-break of the
+     * unit's rows, and the evaluation sums them in that order (a floating-point sum is order-dependent, and
+     * the GroupByKey iteration order is not stable across runs). The period is not read by the fit.
+     */
+    ScreenRow conditioningOnly(final ScreenSpec spec) {
+        final int off = spec.conditioningOffset();
+        return new ScreenRow(group, identity, time, null, label, baseline, weight,
+                Arrays.copyOfRange(x, off, off + spec.conditioningFields.size()));
     }
 
     public String getGroup() {

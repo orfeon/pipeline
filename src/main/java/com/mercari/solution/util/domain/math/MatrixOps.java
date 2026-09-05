@@ -86,12 +86,17 @@ public final class MatrixOps {
 
     /** Multi-RHS {@link #solve(double[][], double[])}: one decomposition solves every column of {@code b}. */
     public static double[][] solve(final double[][] a, final double[][] b) {
-        checkMatrix("solve", a);
+        checkDecomposable("solve", a);
         checkMatrix("solve", b);
         if (a.length != b.length) {
             throw new IllegalArgumentException("solve requires matrix rows == rhs rows,"
                     + " but got " + a.length + " and " + b.length);
         }
+        return svdSolve(a, b);
+    }
+
+    /** {@link #solve(double[][], double[][])} after the shape and finiteness checks (called by solve and the solveGram fallback). */
+    private static double[][] svdSolve(final double[][] a, final double[][] b) {
         final R064Store matrix = R064Store.FACTORY.rows(a);
         final R064Store rhs = R064Store.FACTORY.rows(b);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
@@ -108,7 +113,7 @@ public final class MatrixOps {
      * matrix).
      */
     public static double[] firstRightSingularVector(final double[][] m) {
-        checkMatrix("firstRightSingularVector", m);
+        checkDecomposable("firstRightSingularVector", m);
         final R064Store matrix = R064Store.FACTORY.rows(m);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
         if (!svd.decompose(matrix)) {
@@ -125,7 +130,7 @@ public final class MatrixOps {
 
     /** Moore–Penrose pseudo-inverse via SVD (exact inverse when non-singular). */
     public static double[][] inverse(final double[][] a) {
-        checkMatrix("inverse", a);
+        checkDecomposable("inverse", a);
         final R064Store matrix = R064Store.FACTORY.rows(a);
         final SingularValue<Double> svd = SingularValue.R064.make(matrix);
         if (!svd.decompose(matrix)) {
@@ -199,15 +204,15 @@ public final class MatrixOps {
 
     /** Multi-RHS {@link #solveGram(double[][], double[], double)}: {@code xty} is {@code n×k}. */
     public static double[][] solveGram(final double[][] xtx, final double[][] xty, final double ridge) {
-        checkMatrix("solveGram", xtx);
+        checkDecomposable("solveGram", xtx);
         checkMatrix("solveGram", xty);
         if (xtx.length != xtx[0].length || xtx.length != xty.length) {
             throw new IllegalArgumentException("solveGram requires a square matrix matching the"
                     + " rhs rows, but got " + xtx.length + "x" + xtx[0].length
                     + " and " + xty.length + " rows");
         }
-        if (ridge < 0) {
-            throw new IllegalArgumentException("solveGram ridge must be >= 0, but was " + ridge);
+        if (!Double.isFinite(ridge) || ridge < 0) {
+            throw new IllegalArgumentException("solveGram ridge must be a finite number >= 0, but was " + ridge);
         }
         final double[][] regularized;
         if (ridge > 0) {
@@ -216,6 +221,8 @@ public final class MatrixOps {
                 regularized[i] = xtx[i].clone();
                 regularized[i][i] += ridge;
             }
+            // a huge ridge overflows the diagonal: the fallback must never see a non-finite matrix
+            checkFinite("solveGram", regularized);
         } else {
             regularized = xtx;
         }
@@ -225,7 +232,7 @@ public final class MatrixOps {
         if (cholesky.decompose(matrix) && cholesky.isSolvable()) {
             return toArray(cholesky.getSolution(rhs));
         }
-        return solve(regularized, xty);
+        return svdSolve(regularized, xty);
     }
 
     /** Coerces a numeric collection/array value to {@code double[]} ({@code null} in → {@code null} out). */
@@ -370,6 +377,29 @@ public final class MatrixOps {
     private static void checkMatrix(final String op, final double[][] matrix) {
         if (matrix.length == 0 || matrix[0].length == 0) {
             throw new IllegalArgumentException(op + " requires a non-empty matrix");
+        }
+    }
+
+    /**
+     * ojalgo's SVD does not terminate on NaN / infinite entries (the solveGram fallback would hang the worker):
+     * the decompositions reject a non-finite matrix up front, where the caller can still say which sums went
+     * wrong. Only the decomposed matrix is guarded: a right-hand side is substituted, never iterated, so a NaN
+     * there propagates into the solution like the plain products ({@link #multiply}, {@link #mahalanobis}) and
+     * the scalar ops do.
+     */
+    private static void checkDecomposable(final String op, final double[][] matrix) {
+        checkMatrix(op, matrix);
+        checkFinite(op, matrix);
+    }
+
+    private static void checkFinite(final String op, final double[][] matrix) {
+        for (int i = 0; i < matrix.length; i++) {
+            final double[] row = matrix[i];
+            for (int j = 0; j < row.length; j++) {
+                if (!Double.isFinite(row[j])) {
+                    throw new IllegalArgumentException(op + " requires finite values, but found " + row[j] + " at [" + i + "][" + j + "]");
+                }
+            }
         }
     }
 }
