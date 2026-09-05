@@ -152,31 +152,58 @@ public class FeaturePlan implements Serializable {
         if ("off".equals(spec.audit.observedAt)) return List.of();
         return observedAtAudits.stream().filter(ObservedAtAudit::present).toList();
     }
-    /** Emitted columns that a role names (never features for the consumer). */
+    /**
+     * Role → the output column or pass-through field it names (never features for the consumer). Columns carry
+     * the resolution the compiler stamped ({@link OutputColumn#getRole}); an input-field role is the field itself.
+     * A group / entity role naming a context / entity has no entry (its keys are in the manifest).
+     */
     public Map<String, String> getRoleColumns() {
         final Map<String, String> roles = new java.util.LinkedHashMap<>();
         for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
-            final String name = e.getValue();
-            String resolved = inputFields.containsKey(name) ? name : null;
-            if (resolved == null && "baseline".equals(e.getKey())) {
-                // a baseline name resolves to its emitted copy (baselines[].emit)
-                for (final FeatureSpec.BaselineDef b : spec.baselines) if (b.name().equals(name) && b.emit() != null) resolved = b.emit();
-            }
-            if (resolved != null && !inputFields.containsKey(resolved)) {
-                final String emitted = resolved;
-                resolved = null;
-                for (final OutputColumn c : columns) {
-                    if (!c.intermediate && c.canonicalName.equals(emitted)) { resolved = c.outputName; break; }
-                }
-            }
-            if (resolved == null) {
-                for (final OutputColumn c : columns) {
-                    if (!c.intermediate && (c.canonicalName.equals(name) || c.outputName.equals(name))) { resolved = c.outputName; break; }
-                }
-            }
-            if (resolved != null) roles.put(e.getKey(), resolved);
+            if (inputFields.containsKey(e.getValue())) roles.put(e.getKey(), e.getValue());
+        }
+        for (final OutputColumn c : columns) {
+            if (!c.intermediate && c.role != null) roles.putIfAbsent(c.role, c.outputName);
         }
         return roles;
+    }
+
+    /** The role an input field carries ({@code output.roles} naming the field), null for a plain pass-through. */
+    public String roleOfInput(final String field) {
+        if (!inputFields.containsKey(field)) return null;
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) if (e.getValue().equals(field)) return e.getKey();
+        return null;
+    }
+
+    /**
+     * Lineage of a pass-through input field as {@code feature.*} options — the counterpart of
+     * {@link OutputColumn#toOptions} for the columns, and the one source of the output schema's field options
+     * ({@code FeatureStages.createOutputSchema}) and the manifest's {@code fields} entries ({@link #toManifest}):
+     * {@code scope = input}, the source contract ({@code kind}, {@code sources}, {@code availableAt},
+     * {@code evidence}), {@code derivedFrom} = the kind plus whatever lineage the field already carried (an
+     * upstream feature transform's column), and the role naming the field. Any other {@code feature.*} option the
+     * field arrived with describes the upstream column, not this table, and is not part of the result.
+     */
+    public Map<String, String> passThroughOptions(final Schema.Field field) {
+        final Map<String, String> options = new java.util.LinkedHashMap<>();
+        options.put("feature.scope", "input");
+        final Set<String> derivedFrom = new java.util.LinkedHashSet<>();
+        final String upstream = field.getOptions() == null ? null : field.getOptions().get("feature.derivedFrom");
+        if (upstream != null && !upstream.isEmpty()) for (final String s : upstream.split(",")) derivedFrom.add(s.trim());
+        final SourceContract.FieldContract contract = inputFields.get(field.getName());
+        if (contract != null) {
+            if (contract.getKind() != null) {
+                options.put("feature.kind", contract.getKind());
+                derivedFrom.add(contract.getKind());
+            }
+            if (contract.getSourceName() != null && !contract.getSourceName().isEmpty()) options.put("feature.sources", contract.getSourceName());
+            if (contract.getAvailableAt() != null) options.put("feature.availableAt", contract.getAvailableAt().describe());
+            options.put("feature.evidence", contract.isDeclared() ? "declared" : "measured");
+        }
+        if (!derivedFrom.isEmpty()) options.put("feature.derivedFrom", String.join(",", derivedFrom));
+        final String role = roleOfInput(field.getName());
+        if (role != null) options.put("feature.role", role);
+        return options;
     }
 
     public OutputColumn getColumn(final String canonicalName) {
@@ -614,24 +641,24 @@ public class FeaturePlan implements Serializable {
             output.addProperty("childName", spec.output.childName);
         }
         manifest.add("output", output);
-        final Map<String, String> roleColumns = getRoleColumns();
         final JsonArray fields = new JsonArray();
         if (passThroughFields != null) {
             for (final Schema.Field f : passThroughFields) {
                 final JsonObject o = new JsonObject();
                 o.addProperty("name", f.getName());
                 o.addProperty("type", f.getFieldType().getType().name());
-                // scope input: the same selector vocabulary as the columns (a consumer excludes pass-through inputs by scope / kind)
-                o.addProperty("scope", "input");
-                final SourceContract.FieldContract contract = inputFields.get(f.getName());
-                if (contract != null) {
-                    if (contract.getSourceName() != null && !contract.getSourceName().isEmpty()) o.addProperty("source", contract.getSourceName());
-                    if (contract.getKind() != null) o.addProperty("kind", contract.getKind());
-                    if (contract.getAvailableAt() != null) o.addProperty("availableAt", contract.getAvailableAt().describe());
-                    o.addProperty("evidence", contract.isDeclared() ? "declared" : "measured");
-                }
-                final String role = roleOf(roleColumns, f.getName());
-                if (role != null) o.addProperty("role", role);
+                // the same facts as the output schema's field options (scope input: the selector vocabulary of the
+                // columns, so a consumer excludes pass-through inputs by scope / kind / derivedFrom)
+                final Map<String, String> options = passThroughOptions(f);
+                o.addProperty("scope", options.get("feature.scope"));
+                if (options.containsKey("feature.sources")) o.addProperty("source", options.get("feature.sources"));
+                if (options.containsKey("feature.kind")) o.addProperty("kind", options.get("feature.kind"));
+                final JsonArray derivedFrom = new JsonArray();
+                if (options.containsKey("feature.derivedFrom")) for (final String d : options.get("feature.derivedFrom").split(",")) derivedFrom.add(d);
+                o.add("derivedFrom", derivedFrom);
+                if (options.containsKey("feature.availableAt")) o.addProperty("availableAt", options.get("feature.availableAt"));
+                if (options.containsKey("feature.evidence")) o.addProperty("evidence", options.get("feature.evidence"));
+                if (options.containsKey("feature.role")) o.addProperty("role", options.get("feature.role"));
                 fields.add(o);
             }
         }
@@ -668,8 +695,7 @@ public class FeaturePlan implements Serializable {
             lineage.add("inputs", inputs);
             o.add("lineage", lineage);
             if (c.validFor != null) o.addProperty("validFor", c.validFor.toString());
-            final String role = roleOf(roleColumns, c.outputName);
-            if (role != null) o.addProperty("role", role);
+            if (c.role != null) o.addProperty("role", c.role);
             columnArray.add(o);
         }
         manifest.add("columns", columnArray);
@@ -694,13 +720,6 @@ public class FeaturePlan implements Serializable {
         manifest.add("externals", externals);
         manifest.add("plan", toJson());
         return manifest;
-    }
-
-    private static String roleOf(final Map<String, String> roleColumns, final String column) {
-        for (final Map.Entry<String, String> e : roleColumns.entrySet()) {
-            if (e.getValue().equals(column)) return e.getKey();
-        }
-        return null;
     }
 
 }

@@ -63,10 +63,12 @@ origin kind a source field declares, propagated to every derived column), `scope
 against the lineage the feature transform attached to its output schema (`feature.*` field options, when
 it is the direct upstream; its pass-through input fields carry `scope: input` and their kind, so a
 passed-through market column is excluded by the same selector as the columns derived from it) or against
-its manifest (`candidates.manifest`, when the table came back through a sink). A selector with no lineage
-available is an assembly error.
+its manifest (`candidates.manifest`, when the table came back through a sink; its `fields` entries give the
+pass-through inputs the same lineage). A selector with no lineage available is an assembly error.
 
-**Defaults from the feature manifest.** When `candidates.manifest` is given, its `roles` fill `group` /
+**Defaults from the feature transform.** The roles the feature transform declared fill `group` /
+`label` / `baseline` / `weight` and `time.field` when they are not set — from the `feature.role` field
+options of the direct upstream's schema, or from the manifest's `roles`. When `candidates.manifest` is given, its `roles` fill `group` /
 `label` / `baseline` / `weight` and its `timeField` fills `time.field` unless set; its `planHash` /
 `outputHash` are carried into the pass list (§9.3). The data contract is declared once, on the feature side.
 

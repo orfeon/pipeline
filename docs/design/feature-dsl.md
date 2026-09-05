@@ -1228,12 +1228,15 @@ screening step's pass list; it replaces `exclude` when declared, unknown names a
 projection never removes a role column: a pass list holds candidates, and a role column (a baseline's
 emitted copy, a label derived as a column) was never one, so it stays emitted and the report says so
 (`output.include.role`) — otherwise the closed loop screen → include would leave the next table's
-manifest with a `baseline` role that resolves to nothing. `output.manifest` writes the contract at
+manifest with a `baseline` role that resolves to nothing. `exclude` follows the same rule
+(`output.exclude.role`: a market baseline's emitted copy survives `derivedFrom:market`), and a column kept
+only as a role gets no `_isnull` indicator — the flag would be a feature column the projection never
+admitted. `output.manifest` writes the contract at
 assembly: roles, every emitted column with lineage,
 availability, status and placement, the pass-through fields with their contract (`scope: input`, kind,
-source, evidence, role — and the same facts travel as `feature.*` options of the output schema, so a
-direct consumer's `derivedFrom:<kind>` / `scope:input` selectors see a passed-through input the way they
-see a derived column), the plan hash and an
+`derivedFrom`, source, evidence, role — the same facts travel as `feature.*` options of the output schema,
+so a consumer's `derivedFrom:<kind>` / `scope:input` selectors see a passed-through input the way they
+see a derived column, from the schema and from the manifest alike), the plan hash and an
 **output hash** (plan hash + projection + roles + include content). `include` / `manifest` are outside
 the plan hash — a projection does not change what is fitted, so fit artifacts stay valid — which is why
 the output table carries a hash of its own. A batch run appends `manifest.run.json` with the row count

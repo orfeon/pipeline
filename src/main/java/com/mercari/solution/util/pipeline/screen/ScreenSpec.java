@@ -413,18 +413,31 @@ public final class ScreenSpec implements Serializable {
 
         public record Entry(String scope, String block, Set<String> derivedFrom, String evidence) implements Serializable {}
 
+        /**
+         * Lineage from the feature transform's output schema (the direct upstream): every field with
+         * {@code feature.scope} — emitted columns and pass-through inputs alike — and the roles the fields carry
+         * ({@code feature.role}; a {@code time} role is also the time field default).
+         */
         public static Lineage fromSchema(final Schema schema) {
             final Lineage l = new Lineage();
             if (schema == null) return l;
             for (final Schema.Field f : schema.getFields()) {
                 final Map<String, String> o = f.getOptions();
                 if (o == null || !o.containsKey("feature.scope")) continue;
-                final Set<String> derived = new LinkedHashSet<>();
-                final String d = o.get("feature.derivedFrom");
-                if (d != null && !d.isEmpty()) for (final String s : d.split(",")) derived.add(s.trim());
-                l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), derived, o.get("feature.evidence")));
+                l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), split(o.get("feature.derivedFrom")), o.get("feature.evidence")));
+                final String role = o.get("feature.role");
+                if (role != null) {
+                    l.roles.putIfAbsent(role, f.getName());
+                    if ("time".equals(role) && l.timeField == null) l.timeField = f.getName();
+                }
             }
             return l;
+        }
+
+        private static Set<String> split(final String csv) {
+            final Set<String> values = new LinkedHashSet<>();
+            if (csv != null && !csv.isEmpty()) for (final String s : csv.split(",")) values.add(s.trim());
+            return values;
         }
 
         /** Reads a feature transform manifest (see {@code FeaturePlan.toManifest}). */
@@ -449,6 +462,23 @@ public final class ScreenSpec implements Serializable {
                         if (keys.size() == 1) column = keys.get(0).getAsString();
                     }
                     if (column != null) l.roles.put(e.getKey(), column);
+                }
+            }
+            // the pass-through input fields: scope input, derivedFrom = their kind (older manifests carry kind only)
+            if (m.has("fields") && m.get("fields").isJsonArray()) {
+                for (final JsonElement e : m.getAsJsonArray("fields")) {
+                    if (!e.isJsonObject()) continue;
+                    final JsonObject f = e.getAsJsonObject();
+                    final String name = string(f, "name");
+                    if (name == null) continue;
+                    final Set<String> derived = new LinkedHashSet<>();
+                    if (f.has("derivedFrom") && f.get("derivedFrom").isJsonArray()) {
+                        for (final JsonElement d : f.getAsJsonArray("derivedFrom")) derived.add(d.getAsString());
+                    } else if (string(f, "kind") != null) {
+                        derived.add(string(f, "kind"));
+                    }
+                    final String scope = string(f, "scope");
+                    l.columns.put(name, new Entry(scope == null ? "input" : scope, null, derived, string(f, "evidence")));
                 }
             }
             if (m.has("columns") && m.get("columns").isJsonArray()) {
@@ -494,25 +524,25 @@ public final class ScreenSpec implements Serializable {
         final Lineage l = lineage == null ? new Lineage() : lineage;
         if (group == null && l.roles.containsKey("group")) {
             group = l.roles.get("group");
-            notes.add("group defaulted to manifest role: " + group);
+            notes.add("group defaulted to the feature transform's role: " + group);
             if (!transformsExplicit) transforms = new ArrayList<>(TRANSFORMS);
         }
         if (labelField == null && labelExpr == null && l.roles.containsKey("label")) {
             labelField = l.roles.get("label");
-            notes.add("label defaulted to manifest role: " + labelField);
+            notes.add("label defaulted to the feature transform's role: " + labelField);
         }
         if (baselineField == null && l.roles.containsKey("baseline")) {
             baselineField = l.roles.get("baseline");
             if (baselineForm == null) baselineForm = formsFor(family).get(0);
-            notes.add("baseline defaulted to manifest role: " + baselineField);
+            notes.add("baseline defaulted to the feature transform's role: " + baselineField);
         }
         if (weightField == null && l.roles.containsKey("weight")) {
             weightField = l.roles.get("weight");
-            notes.add("weight defaulted to manifest role: " + weightField);
+            notes.add("weight defaulted to the feature transform's role: " + weightField);
         }
         if (timeField == null && l.timeField != null) {
             timeField = l.timeField;
-            notes.add("time.field defaulted to manifest timeField: " + timeField);
+            notes.add("time.field defaulted to the feature transform's time field: " + timeField);
         }
         manifestPlanHash = l.planHash;
         manifestOutputHash = l.outputHash;

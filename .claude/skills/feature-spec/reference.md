@@ -36,9 +36,11 @@ and review a spec quickly.
 `scope:<scope>`, `block:<name>`. `output.include` accepts canonical or output names (a `<name>_isnull`
 entry keeps its base column); a URI may point to a JSON array, `{columns | fields | passed | include: [...]}`
 (objects with `name` allowed) or one name per line. Role columns (a baseline's `emit` copy, a label
-derived as a column) stay emitted whether or not the list names them (`output.include.role`). The output
-schema carries the lineage as `feature.*` field options — pass-through inputs as `scope: input` with
-their `kind` / source / evidence, and `feature.role` on a role's field or column. `output.manifest` writes `manifest.json` at
+derived as a column) stay emitted whether or not the list names them (`output.include.role`) or an
+`exclude` pattern matches them (`output.exclude.role`); a column kept only as a role gets no `_isnull`
+indicator. The output schema carries the lineage as `feature.*` field options — pass-through inputs as
+`scope: input` with their `kind` / source / evidence, and `feature.role` on a role's field or column — and
+a `screen` directly downstream reads both the selectors and the role defaults from it. `output.manifest` writes `manifest.json` at
 assembly (`planHash`, `outputHash`, `roles`, `include`, `fields`, `columns` with lineage, `artifacts`,
 `plan`) and, in batch, `manifest.run.json` at finalize (`rows`, `observedAtAudit.<field>` with `rows` /
 `nullValue` / `missing` / `late` / `afterPredictAt` / `measured` / `leadSecondsDeciles`).
