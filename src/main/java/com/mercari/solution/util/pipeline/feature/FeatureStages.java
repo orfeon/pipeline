@@ -1114,10 +1114,14 @@ public final class FeatureStages {
     static class ExtractCellsDoFn extends DoFn<MElement, KV<String, Double>> {
         private final JointSpec spec;
         private final List<String> cellKeys;
+        /** The leaf level's key fields: a row without them has no estimate, so it has no cell either. */
+        private final List<String> leafKeys;
 
         ExtractCellsDoFn(final JointSpec spec) {
             this.spec = spec;
             this.cellKeys = JointFit.cellKeysOf(spec.levels());
+            final List<JointFit.Level> effects = JointFit.effectLevelsOf(spec.levels());
+            this.leafKeys = effects.isEmpty() ? List.of() : effects.get(0).keys();
         }
 
         @ProcessElement
@@ -1132,8 +1136,10 @@ public final class FeatureStages {
                 if (b == null || b.isNaN()) return;
                 y -= b;
             }
-            final String cell = FeatureValues.key(row, cellKeys);
-            if (cell == null) return;
+            // the leaf key must be present (as at apply time); a null coarser key leaves the row in the cells of the
+            // levels it has and out of that level's contexts — the same per-level rule as the other estimators
+            if (FeatureValues.key(row, leafKeys) == null) return;
+            final String cell = FeatureValues.keyWithNulls(row, cellKeys);
             if (spec.forward() != null) {
                 final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
                 if (millis == null) return;

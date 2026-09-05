@@ -1707,17 +1707,20 @@ public final class FeaturePlanCompiler {
         } else {
             for (int i = 0; i < lattices.size(); i++) for (int j = 0; j < resolvedTargets.size(); j++) pairs.add(new int[]{i, j});
         }
-        // the global level is shared by every keySet: register it first so it forms a single stage
+        // the global level is shared by every keySet: register it first so it is the first keyed stage (a static /
+        // joint fit places its columns in the block's fit stage regardless of order)
         for (final int[] pair : pairs) {
             final Lattice lattice = lattices.get(pair[0]);
             final ResolvedTarget target = resolvedTargets.get(pair[1]);
-            if (lattice.levels.get(lattice.levels.size() - 1).isEmpty() && lattice.shrinkage.estimator != Shrinkage.Estimator.joint) {
+            if (!isStatic && lattice.levels.get(lattice.levels.size() - 1).isEmpty()) {
+                final boolean distribution = target.stats.contains("distribution") && lattice.shrinkage.enabled
+                        && lattice.shrinkage.resolveFamily("distribution") != null;
                 for (final Window window : windowsOf(lattice.keySet)) {
                     // a shrunk distribution needs the per-category shares of the level, the scalar statistics its sum
-                    if (target.stats.stream().anyMatch(s -> !"distribution".equals(s)) || !lattice.shrinkage.enabled) {
+                    if (target.stats.stream().anyMatch(s -> !"distribution".equals(s)) || !distribution) {
                         levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, false);
                     }
-                    if (target.stats.contains("distribution") && lattice.shrinkage.enabled && !isStatic) {
+                    if (distribution) {
                         levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, true);
                     }
                 }
@@ -1739,14 +1742,26 @@ public final class FeaturePlanCompiler {
                     if (s == null || (s.requiresTarget() && target.reference == null)) continue;
                     names.put("stat", stat);
                     final String canonical = render(naming, names);
+                    if (isStatic && "distribution".equals(stat)) {
+                        // a static fit keeps (n, Σy, Σy²) per leaf: the per-key value distribution exists in the expanding replay only
+                        diagnostics.error("encoding.stat.static", loc, "stat distribution is not available in fit.mode " + mode.token() + " (expanding only)");
+                        continue;
+                    }
                     // the family the statistic shrinks under (§5.1.1): declared or derived; null = not a shrunk statistic
                     Shrinkage.Family family = null;
                     if (lattice.shrinkage.enabled && Shrinkage.familyFor(stat) != null) {
                         family = lattice.shrinkage.resolveFamily(stat);
-                        if (!checkFamily(lattice.shrinkage, family, stat, lattice.additiveAt >= 0, def)) continue;
+                        if (family == null) {
+                            // a distribution on logit / log: no Gaussian approximation of the Dirichlet-Multinomial, so it is emitted unshrunk
+                            if (hintedBlocks.add(def.name + "#familyScale#" + stat)) {
+                                diagnostics.warning("encoding.shrinkage.family.scale", loc, "stat distribution is not shrunk on scale " + lattice.shrinkage.scale
+                                        + " (dirichletMultinomial needs scale identity); the raw per-key distribution is emitted");
+                            }
+                        } else if (!checkFamily(lattice.shrinkage, family, stat, lattice.additiveAt >= 0, def)) {
+                            continue;
+                        }
                     }
-                    // a distribution shrinks (Dirichlet-Multinomial) in the expanding replay only: a static fit keeps (n, Σy, Σy²)
-                    final boolean shrunk = family != null && (!"distribution".equals(stat) || !isStatic);
+                    final boolean shrunk = family != null;
                     if (isStatic && !shrunk && !"share".equals(stat)) {
                         // static: every statistic is derived from the fitted leaf sufficient statistics
                         if (!s.sufficient()) {
@@ -1894,7 +1909,10 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("stat", stat);
         c.coordinates.put("levels", levels);
         c.coordinates.put("scale", shrinkage.scale.name());
-        c.coordinates.put("weights", shrinkage.weights);
+        // a shrunk distribution has no scalar target to estimate variance components from: its levels shrink with
+        // priorWeight, so the column declares fixed weights and never reads the stage's λ estimates (which its hidden
+        // n columns may share with a scalar statistic of the same target)
+        c.coordinates.put("weights", "distribution".equals(stat) ? "fixed" : shrinkage.weights);
         c.coordinates.put("priorWeight", Double.toString(shrinkage.priorWeight));
         c.coordinates.put("leaveNodeOut", Boolean.toString(shrinkage.leaveNodeOut));
         c.coordinates.put("estimator", chain.stream().anyMatch(Shrinkage.Level::isAdditive) ? "sequential" : "backoff");
@@ -1954,9 +1972,11 @@ public final class FeaturePlanCompiler {
 
     /**
      * §5.1.1 / §5.5 family checks for one shrunk statistic: the family must shrink the statistic's sufficient
-     * statistics, conjugate closed forms need the identity scale (logit / log use the Gaussian approximation,
-     * rule 7), and a distribution shrinks along chain lattices only (per-category pseudo-counts have no
-     * additive decomposition and no scalar cell mean for the joint solve).
+     * statistics, a <i>declared</i> conjugate closed form needs the identity scale (a derived family already
+     * falls back to the Gaussian approximation of rule 7 on logit / log, see {@link Shrinkage#resolveFamily}),
+     * and a distribution shrinks along chain lattices only (per-category pseudo-counts have no additive
+     * decomposition). A joint fit never sees a distribution: it is a fit-stage estimator and the statistic is
+     * expanding-only ({@code encoding.stat.static}).
      */
     private boolean checkFamily(final Shrinkage shrinkage, final Shrinkage.Family family, final String stat, final boolean additive, final FeatureDef def) {
         final String loc = def.location();
@@ -1967,9 +1987,9 @@ public final class FeaturePlanCompiler {
             }
             return false;
         }
-        if (family.isConjugate() && shrinkage.scale != Shrinkage.Scale.identity) {
+        if (shrinkage.family != null && family.isConjugate() && shrinkage.scale != Shrinkage.Scale.identity) {
             if (hintedBlocks.add(def.name + "#familyScale")) {
-                diagnostics.error("encoding.shrinkage.family.scale", loc, "family " + family + " (a conjugate closed form) requires scale identity; on logit / log declare family gaussian (Gaussian shrinkage of the transformed statistics, §5.5 rule 7)");
+                diagnostics.error("encoding.shrinkage.family.scale", loc, "family " + family + " (a conjugate closed form) requires scale identity; on logit / log declare family gaussian or leave it derived (Gaussian shrinkage of the transformed statistics, §5.5 rule 7)");
             }
             return false;
         }
@@ -1977,12 +1997,6 @@ public final class FeaturePlanCompiler {
             if (additive) {
                 if (hintedBlocks.add(def.name + "#familyLattice")) {
                     diagnostics.error("encoding.shrinkage.family.lattice", loc, "a shrunk distribution (dirichletMultinomial) supports chain lattices only; 'additive' / cross has no per-category decomposition");
-                }
-                return false;
-            }
-            if (shrinkage.estimator == Shrinkage.Estimator.joint) {
-                if (hintedBlocks.add(def.name + "#familyJoint")) {
-                    diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: joint fits a scalar statistic (mean / rate); stat distribution shrinks with backoff");
                 }
                 return false;
             }

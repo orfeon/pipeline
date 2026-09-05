@@ -319,8 +319,10 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   resolves to the hierarchical convention). No hidden level columns are registered for a joint lattice — the
   `joint` columns (`kind` composed / deviation / effectiveN) are filled by lookup of the row's context keys
   (unseen context → effect 0, null leaf key → null). `fold` tags each cell part with `foldOf(unit)` and
-  solves the totals minus each fold; `forward` keys the cells by block and solves the cumulative table per
-  block (window = the trailing `windowBlocks`); both re-fit every run, the artifact
+  solves the totals minus each fold; `forward` keys the cells by block and solves once per window change
+  point (every observed block, plus `block + windowBlocks` where a block leaves the window) over the blocks in
+  `(U − windowBlocks, U]`, so the floor entry of a row's usable block `U` is exactly the encoding path's
+  window (`minBlocks` counts observed blocks, not change points); both re-fit every run, the artifact
   (`<id>.joint.avro` + manifest with μ, λ, contexts, iterations) holds the whole-input solution.
 - Rejected at construction: a fit target / offset / input produced by the same fit stage (it would
   read null — the compiler's strict-dependency rule keeps them apart, and the engine double-checks),
@@ -494,17 +496,27 @@ entries; fine keys with many blocks are the sizing limit (a CoGroupByKey path is
 statistics-carrying levels (an `additive` entry expands to the main-effect key lists) become the effect
 levels of one mixed model `t(y) = μ + Σ e_level + ε` solved as ridge / BLUP over the aggregated cells
 (§4.5, `JointFit`); it needs the whole cell table, so `expanding` rejects it (`encoding.shrinkage.estimator`).
-`deviations` are the per-level effects, `effectiveN` the leaf's `n + λ`. The `family` declaration is a
+`deviations` are the per-level effects, `effectiveN` the leaf's `n + λ`. λ stays a row pseudo-count on every
+scale: a context's ridge is `λ · v̄` with `v̄ = Σw / Σn` its mean delta-method weight, so its shrink weight is
+`n / (n + λ)` like the other estimators (a plain ridge on the identity scale). Cells are keyed with
+`FeatureValues.keyWithNulls`: the leaf key must be present, a null coarser key gives the cell no indicator on
+that level (`ctx = −1`) but keeps it in the intercept and the other levels — the per-level rule of the
+encoding path, and what `JointFit.effect` does at apply time. The `family` declaration is a
 check plus one new statistic rather than new arithmetic: with pseudo-count `m = λ` the posterior mean of every
 conjugate family on the identity scale is the existing recursion, and the one-way moment estimator of λ is
 Kleinman's Beta-Binomial moment estimator (`ShrinkageTest` asserts the identity), so `gaussian` /
 `betaBinomial` / `gammaPoisson` produce identical `mean` / `rate` columns and differ only in the lineage;
-conjugate families require `scale: identity` (`encoding.shrinkage.family.scale`, rule 7 keeps transformed
-scales Gaussian). `dirichletMultinomial` is the `distribution` statistic shrunk along a chain lattice:
+a *declared* conjugate family requires `scale: identity` (`encoding.shrinkage.family.scale`), while a derived one
+falls back to gaussian on logit / log (`Shrinkage.resolveFamily`, rule 7 keeps transformed scales Gaussian; a
+derived `distribution` there is emitted unshrunk with a warning). `dirichletMultinomial` is the `distribution`
+statistic shrunk along a chain lattice:
 hidden `__n` + `__dist` (per-category shares) columns per level, `Shrinkage.composeDistribution` =
 `(counts + λ · p(parent)) / (n + λ)` with leave-node-out over the union of categories, a map-valued
-composed column; expanding only (the stat is not sufficient), `priorWeight` as λ (no scalar target for
-the moment estimator), no `deviations`.
+composed column; expanding only (the stat is not sufficient), `priorWeight` as λ — the compose column is
+stamped `weights: fixed` so it never reads the stage's λ map, which its shared hidden `__n` columns would
+otherwise resolve to a sibling scalar statistic's estimate — and no `deviations`. Fit manifests write an
+infinite λ (a fully shrunk level) as the string `"Infinity"` (`FitArtifact.lambdaJson`): Gson's lenient
+writer would emit a bare token that strict JSON readers reject.
 
 **Fits.** Static: per-level sufficient statistics from the whole input (global window), lookup per
 row, `fitStat` for count / mean / rate / std, artifact write / load, `refit`; the hidden columns'

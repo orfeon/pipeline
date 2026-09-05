@@ -194,7 +194,8 @@ their own outcome, so use it for serving / offline analysis, not for training. W
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
 hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
 produces a new directory. The manifest also records the `varianceComponents` pseudo-counts (`lambdas`,
-per level) derived from the persisted statistics, so a run's shrinkage can be audited. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
+per level; a fully shrunk level's infinite λ appears as the string `"Infinity"`) derived from the persisted
+statistics, so a run's shrinkage can be audited. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
 for the current plan hash already exists it is loaded at worker setup instead of re-fitting (`refit: true`
 forces a new fit) — this is the serving path: the same config, run on request data, applies the fitted
 statistics without any history. Streaming runs require an existing artifact. Paths use the Beam
@@ -350,12 +351,17 @@ indicator basis of every level's contexts, `t(y) = μ + Σ e_level + ε`): confo
 without an order-dependent bias, and `deviations` are the orthogonalised per-level effects (`dev0` = the
 leaf, then each coarser level, on the transform scale) while `effectiveN` is the leaf's `n + λ`. The solve
 needs the whole cell table, so `joint` requires `fit.mode: static | fold | forward` (one solve; one per fold
-on the other folds' cells; one per time block on the cumulative cells) and is rejected under `expanding`.
-The cells are aggregated in parallel and solved on one worker (block Gauss–Seidel until convergence); λ per
-level is the same moment estimator as `varianceComponents` (over the level's contexts) or `priorWeight`
-under `fixed`, and a level whose between-context variance truncates to zero is fixed at 0. The artifact
-is `<block>__<keys>__<window>__<target>.joint.avro` per keySet × target, holding the whole-input solution;
-`share` and unshrunk stats of a joint block still use the per-level statistics.
+on the other folds' cells; under `forward` one per block window — a row reads the solution over exactly the
+blocks `(usable − windowBlocks, usable]`, like the per-level statistics, and gets null when nothing lies in
+its window) and is rejected under `expanding`. The cells are aggregated in parallel and solved on one worker
+(block Gauss–Seidel until convergence); λ per level is the same moment estimator as `varianceComponents`
+(over the level's contexts) or `priorWeight` under `fixed`, a pseudo-count in rows on every scale (on
+`logit` / `log` the ridge is rescaled by the context's mean delta-method weight, so a leaf with `n` rows
+keeps weight `n / (n + λ)` as under the other estimators), and a level whose between-context variance
+truncates to zero is fixed at 0. A row whose leaf key is null has no estimate; a null key on a coarser
+level leaves the row in the intercept and the levels it has (no effect for that level, as at apply time).
+The artifact is `<block>__<keys>__<window>__<target>.joint.avro` per keySet × target, holding the
+whole-input solution; `share` and unshrunk stats of a joint block still use the per-level statistics.
 
 **Families.** Shrinkage adds pseudo sufficient statistics inherited from the parent, so on the identity
 scale the Gaussian, Beta-Binomial (`rate` of a 0/1 target) and Gamma-Poisson (`mean` of a count target)
@@ -363,9 +369,11 @@ posterior means coincide — `parent + n / (n + λ) · (ȳ − parent)` — and 
 also the Beta-Binomial (Kleinman) moment estimator, so `family` changes neither the value nor λ of a
 scalar statistic; it is derived from the stat (`mean` → gaussian, `rate` → betaBinomial, `distribution` →
 dirichletMultinomial) and recorded in the lineage, and an explicit family must fit the stat
-(`encoding.shrinkage.family.stat`). A conjugate family (anything but gaussian) requires `scale: identity`;
-on `logit` / `log` declare `family: gaussian` (Gaussian shrinkage of the transformed statistics with a
-delta-method weight, the spec's rule 7). `distribution` under shrinkage is the Dirichlet-Multinomial case:
+(`encoding.shrinkage.family.stat`). The conjugate closed forms need `scale: identity`: on `logit` / `log`
+the derived family of `mean` / `rate` is gaussian (Gaussian shrinkage of the transformed statistics with a
+delta-method weight, the spec's rule 7 — the lineage records `gaussian`), a *declared* conjugate family
+there is an error (`encoding.shrinkage.family.scale`), and a `distribution` is emitted unshrunk with a
+warning of the same code. `distribution` under shrinkage is the Dirichlet-Multinomial case:
 each level's per-category counts shrink toward the (leave-node-out) parent distribution,
 `p(level) = (counts + λ · p(parent)) / (n + λ)`, and the composed column is a map of probabilities over the
 categories seen at any level — chain lattices only (`encoding.shrinkage.family.lattice`), `backoff` only,

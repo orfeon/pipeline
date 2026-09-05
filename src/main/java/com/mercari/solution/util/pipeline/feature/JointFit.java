@@ -43,9 +43,9 @@ import java.util.*;
  * re-scan of the rows — on one worker.
  *
  * <p>Variants: {@code fold} solves once per fold on the totals minus the fold's cells (out-of-fold
- * effects); {@code forward} solves once per time block on the cumulative cells up to that block (minus the
- * blocks beyond the window). The artifact holds the whole-input solution only ({@code <id>.joint.avro}),
- * like the encoding-level statistics.
+ * effects); {@code forward} solves once per window change point on the cells of the blocks a usable block
+ * reads ({@code (U − W, U]}, the encoding path's window). The artifact holds the whole-input solution only
+ * ({@code <id>.joint.avro}), like the encoding-level statistics.
  */
 public final class JointFit implements Serializable {
 
@@ -86,29 +86,37 @@ public final class JointFit implements Serializable {
     }
 
     public final List<Level> levels;
-    public final List<String> cellKeys;
+    /** The effect levels (non-global) in lattice order. */
+    public final List<Level> effectLevels;
     public final Shrinkage.Scale scale;
     public final Solution total;
     /** fit.mode fold: the out-of-fold solution per fold, or null. */
     public final Solution[] folds;
-    /** fit.mode forward: the cumulative solution per block index, or null. */
+    /**
+     * fit.mode forward: the windowed solution per window change point (every observed block, and — under a
+     * window — every block index at which an observed block leaves the window), or null. The floor entry of a
+     * row's usable block is the solution over exactly the blocks that block's window covers.
+     */
     public final TreeMap<Long, Solution> blocks;
+    /** fit.mode forward: the block indices that carried data (minBlocks counts these, not the change points). */
+    public final TreeSet<Long> observedBlocks;
 
-    JointFit(final List<Level> levels, final List<String> cellKeys, final Shrinkage.Scale scale, final Solution total,
-             final Solution[] folds, final TreeMap<Long, Solution> blocks) {
+    JointFit(final List<Level> levels, final Shrinkage.Scale scale, final Solution total,
+             final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks) {
         this.levels = levels;
-        this.cellKeys = cellKeys;
+        this.effectLevels = effectLevelsOf(levels);
         this.scale = scale;
         this.total = total;
         this.folds = folds;
         this.blocks = blocks;
+        this.observedBlocks = observedBlocks;
     }
 
-    /** The effect levels (non-global) in lattice order. */
-    public List<Level> effectLevels() {
+    /** The effect levels (non-global) of a lattice in lattice order. */
+    static List<Level> effectLevelsOf(final List<Level> levels) {
         final List<Level> out = new ArrayList<>();
         for (final Level l : levels) if (!l.isGlobal()) out.add(l);
-        return out;
+        return List.copyOf(out);
     }
 
     /** The key fields of every level, in first-appearance order: the cell of the lattice. */
@@ -173,28 +181,37 @@ public final class JointFit implements Serializable {
             }
         }
         TreeMap<Long, Solution> blockSolutions = null;
+        TreeSet<Long> observed = null;
         if (forward) {
+            observed = new TreeSet<>(blockParts.keySet());
             blockSolutions = new TreeMap<>();
-            final Map<String, Cell> cumulative = new HashMap<>();
-            final List<Long> order = new ArrayList<>(blockParts.keySet());
-            int oldest = 0; // index of the oldest block still inside the window
-            for (int i = 0; i < order.size(); i++) {
-                final long block = order.get(i);
-                for (final Map.Entry<String, Cell> e : blockParts.get(block).entrySet()) merge(cumulative, e.getKey(), e.getValue());
+            // the cells a usable block U reads are those of the blocks in (U − W, U] (W = 0: every block ≤ U), the
+            // same window the encoding path applies per row; that set changes only when a block enters (at its
+            // own index) or leaves (at index + W), so one solve per change point serves every U by floor lookup
+            final TreeSet<Long> changePoints = new TreeSet<>(observed);
+            if (windowBlocks > 0) for (final long block : observed) changePoints.add(block + windowBlocks);
+            final Map<String, Cell> window = new HashMap<>();
+            final List<Long> order = new ArrayList<>(observed);
+            int added = 0, oldest = 0; // blocks merged so far / the oldest block still inside the window
+            for (final long at : changePoints) {
+                while (added < order.size() && order.get(added) <= at) {
+                    for (final Map.Entry<String, Cell> e : blockParts.get(order.get(added)).entrySet()) merge(window, e.getKey(), e.getValue());
+                    added++;
+                }
                 if (windowBlocks > 0) {
-                    while (order.get(oldest) <= block - windowBlocks) {
+                    while (oldest < added && order.get(oldest) <= at - windowBlocks) {
                         for (final Map.Entry<String, Cell> e : blockParts.get(order.get(oldest)).entrySet()) {
-                            final Cell rest = subtract(cumulative.get(e.getKey()), e.getValue());
-                            if (rest == null) cumulative.remove(e.getKey());
-                            else cumulative.put(e.getKey(), rest);
+                            final Cell rest = subtract(window.get(e.getKey()), e.getValue());
+                            if (rest == null) window.remove(e.getKey());
+                            else window.put(e.getKey(), rest);
                         }
                         oldest++;
                     }
                 }
-                blockSolutions.put(block, solve(levels, cellKeys, cumulative.values(), scale, weights, priorWeight));
+                blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, weights, priorWeight));
             }
         }
-        return new JointFit(levels, cellKeys, scale, totalSolution, foldSolutions, blockSolutions);
+        return new JointFit(levels, scale, totalSolution, foldSolutions, blockSolutions, observed);
     }
 
     private static void merge(final Map<String, Cell> into, final String key, final Cell part) {
@@ -225,16 +242,21 @@ public final class JointFit implements Serializable {
     /**
      * One ridge / BLUP solve over the given cells (block Gauss–Seidel until the largest effect change is
      * below {@code 1e-10 · (1 + max |z|)} or {@link #MAX_ITERATIONS}).
+     *
+     * <p>λ is a pseudo-count in rows, as for the other estimators: a context's ridge is {@code λ · v̄} with
+     * {@code v̄ = Σw / Σn} its mean variance factor, so its shrink weight is {@code Σw / (Σw + λ v̄) = n / (n + λ)}
+     * for cells of equal weight, and the identity scale ({@code v = 1}) is the plain ridge. A cell whose key
+     * is null on a level (see {@link FeatureValues#keyWithNulls}) carries no indicator for that level: it
+     * still informs the intercept and the levels whose keys it has.
      */
     public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
                                  final Shrinkage.Scale scale, final String weights, final double priorWeight) {
         final Solution solution = new Solution();
-        final List<Level> effectLevels = new ArrayList<>();
-        for (final Level l : levels) if (!l.isGlobal()) effectLevels.add(l);
+        final List<Level> effectLevels = effectLevelsOf(levels);
         final int L = effectLevels.size();
         solution.lambdas = new double[L];
         solution.effects = new ArrayList<>();
-        for (int l = 0; l < L; l++) solution.effects.add(new TreeMap<>());
+        for (int l = 0; l < L; l++) solution.effects.add(new HashMap<>());
         final List<Cell> cells = new ArrayList<>();
         for (final Cell c : input) if (c.n() > 0) cells.add(c);
         if (cells.isEmpty()) return solution;
@@ -251,7 +273,7 @@ public final class JointFit implements Serializable {
             rows += c.n();
         }
         solution.rows = rows;
-        // contexts of every level: the projection of the cell onto the level's key fields
+        // contexts of every level: the projection of the cell onto the level's key fields (−1 = a null key: no indicator)
         final int[][] ctx = new int[L][m];
         final List<List<String>> contextKeys = new ArrayList<>();
         final List<List<String>> components = new ArrayList<>(m);
@@ -259,11 +281,20 @@ public final class JointFit implements Serializable {
         for (int l = 0; l < L; l++) {
             final int[] positions = new int[effectLevels.get(l).keys().size()];
             for (int p = 0; p < positions.length; p++) positions[p] = cellKeys.indexOf(effectLevels.get(l).keys().get(p));
-            final Map<String, Integer> dictionary = new TreeMap<>();
+            final Map<String, Integer> dictionary = new HashMap<>();
             final List<String> keysInOrder = new ArrayList<>();
             for (int i = 0; i < m; i++) {
                 final List<String> parts = new ArrayList<>(positions.length);
-                for (final int p : positions) parts.add(components.get(i).get(p));
+                boolean present = true;
+                for (final int p : positions) {
+                    final String part = components.get(i).get(p);
+                    if (part == null) present = false;
+                    parts.add(part);
+                }
+                if (!present) {
+                    ctx[l][i] = -1;
+                    continue;
+                }
                 final String key = FeatureValues.keyOf(parts);
                 Integer index = dictionary.get(key);
                 if (index == null) {
@@ -275,41 +306,49 @@ public final class JointFit implements Serializable {
             }
             contextKeys.add(keysInOrder);
         }
-        // pseudo-counts per level (moments over the level's contexts), and the leaf n per context
-        final boolean[] fixedAtZero = new boolean[L];
+        // per level and context: rows, weight and the sufficient statistics (pseudo-counts by moments, the leaf n)
+        final double[][] nsum = new double[L][], wsum = new double[L][];
         for (int l = 0; l < L; l++) {
             final int K = contextKeys.get(l).size();
-            final double[] n = new double[K], sum = new double[K], sumSq = new double[K];
+            nsum[l] = new double[K];
+            wsum[l] = new double[K];
+            final double[] sum = new double[K], sumSq = new double[K];
             for (int i = 0; i < m; i++) {
-                n[ctx[l][i]] += cells.get(i).n();
-                sum[ctx[l][i]] += cells.get(i).sum();
-                sumSq[ctx[l][i]] += cells.get(i).sumSq();
+                final int k = ctx[l][i];
+                if (k < 0) continue;
+                nsum[l][k] += cells.get(i).n();
+                wsum[l][k] += w[i];
+                sum[k] += cells.get(i).sum();
+                sumSq[k] += cells.get(i).sumSq();
             }
-            if (l == 0) for (int k = 0; k < K; k++) solution.leafN.put(contextKeys.get(0).get(k), n[k]);
+            if (l == 0) for (int k = 0; k < K; k++) solution.leafN.put(contextKeys.get(0).get(k), nsum[0][k]);
             double lambda = priorWeight;
             if ("varianceComponents".equals(weights)) {
                 double totalN = 0, totalSum = 0, totalSumSq = 0, sumSqOverN = 0, sumNSq = 0;
                 for (int k = 0; k < K; k++) {
-                    totalN += n[k];
+                    totalN += nsum[l][k];
                     totalSum += sum[k];
                     totalSumSq += sumSq[k];
-                    sumSqOverN += sum[k] * sum[k] / n[k];
-                    sumNSq += n[k] * n[k];
+                    sumSqOverN += sum[k] * sum[k] / nsum[l][k];
+                    sumNSq += nsum[l][k] * nsum[l][k];
                 }
                 final Double estimated = Shrinkage.lambdaFromMoments(K, totalN, totalSum, totalSumSq, sumSqOverN, sumNSq);
                 if (estimated != null) lambda = estimated;
             }
-            if (Double.isInfinite(lambda)) fixedAtZero[l] = true;
             solution.lambdas[l] = lambda;
         }
         // block Gauss–Seidel: intercept, then every level's contexts, on the weighted transformed cell means
         final double[] eta = new double[m];
-        final double[][] e = new double[L][];
-        final double[][] wsum = new double[L][];
+        final double[][] e = new double[L][], ridge = new double[L][], numerator = new double[L][], delta = new double[L][];
         for (int l = 0; l < L; l++) {
-            e[l] = new double[contextKeys.get(l).size()];
-            wsum[l] = new double[contextKeys.get(l).size()];
-            for (int i = 0; i < m; i++) wsum[l][ctx[l][i]] += w[i];
+            final int K = contextKeys.get(l).size();
+            e[l] = new double[K];
+            numerator[l] = new double[K];
+            delta[l] = new double[K];
+            ridge[l] = new double[K];
+            // the row pseudo-count λ in the units of the context's weights: λ · v̄ (v̄ = 1 on the identity scale)
+            final double lambda = Math.max(solution.lambdas[l], 1e-9);
+            for (int k = 0; k < K; k++) ridge[l][k] = lambda * (wsum[l][k] / nsum[l][k]);
         }
         double totalW = 0, mu = 0;
         for (int i = 0; i < m; i++) {
@@ -335,18 +374,17 @@ public final class JointFit implements Serializable {
             // converges to the solution its sweep order selects — sweeping the coarser levels first attributes
             // shared signal to them, the hierarchical (ANOVA) convention of the lattice
             for (int l = L - 1; l >= 0; l--) {
-                if (fixedAtZero[l]) continue;
-                final double lambda = Math.max(solution.lambdas[l], 1e-9);
-                final double[] numerator = new double[e[l].length];
-                for (int i = 0; i < m; i++) numerator[ctx[l][i]] += w[i] * (z[i] - eta[i] + e[l][ctx[l][i]]);
-                final double[] delta = new double[e[l].length];
+                if (Double.isInfinite(solution.lambdas[l])) continue; // fixed at 0
+                final int[] c = ctx[l];
+                Arrays.fill(numerator[l], 0);
+                for (int i = 0; i < m; i++) if (c[i] >= 0) numerator[l][c[i]] += w[i] * (z[i] - eta[i] + e[l][c[i]]);
                 for (int k = 0; k < e[l].length; k++) {
-                    final double updated = numerator[k] / (wsum[l][k] + lambda);
-                    delta[k] = updated - e[l][k];
+                    final double updated = numerator[l][k] / (wsum[l][k] + ridge[l][k]);
+                    delta[l][k] = updated - e[l][k];
                     e[l][k] = updated;
-                    maxDelta = Math.max(maxDelta, Math.abs(delta[k]));
+                    maxDelta = Math.max(maxDelta, Math.abs(delta[l][k]));
                 }
-                for (int i = 0; i < m; i++) eta[i] += delta[ctx[l][i]];
+                for (int i = 0; i < m; i++) if (c[i] >= 0) eta[i] += delta[l][c[i]];
             }
         }
         solution.mu = mu;
@@ -364,17 +402,18 @@ public final class JointFit implements Serializable {
     // ------------------------------------------------------------------------------------------
 
     /**
-     * The solution a row reads: its fold's ({@code fold} non-null and fitted per fold), the block floor of
-     * its usable block ({@code usableBlock} non-null and fitted per block; null when fewer than
-     * {@code minBlocks} solved blocks precede it), else the whole-input solution.
+     * The solution a row reads: its fold's ({@code fold} non-null and fitted per fold), the one whose window
+     * its usable block falls in ({@code usableBlock} non-null and fitted per block; null when fewer than
+     * {@code minBlocks} observed blocks precede it or nothing lies inside its window), else the whole-input
+     * solution.
      */
     public Solution solutionFor(final Integer fold, final Long usableBlock, final int minBlocks) {
         if (folds != null && fold != null && fold >= 0 && fold < folds.length) return folds[fold];
         if (blocks != null) {
             if (usableBlock == null) return null;
             final Map.Entry<Long, Solution> floor = blocks.floorEntry(usableBlock);
-            if (floor == null || blocks.headMap(usableBlock, true).size() < minBlocks) return null;
-            return floor.getValue();
+            if (floor == null || observedBlocks.headSet(usableBlock, true).size() < minBlocks) return null;
+            return floor.getValue().isEmpty() ? null : floor.getValue();
         }
         return total;
     }
@@ -382,7 +421,6 @@ public final class JointFit implements Serializable {
     /** The composed estimate on the original scale; null without a leaf key or a solution. */
     public Double estimate(final Solution s, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
-        final List<Level> effectLevels = effectLevels();
         if (!effectLevels.isEmpty() && FeatureValues.key(row, effectLevels.get(0).keys()) == null) return null;
         double eta = s.mu;
         for (int l = 0; l < effectLevels.size(); l++) {
@@ -395,7 +433,7 @@ public final class JointFit implements Serializable {
     /** The effect of one level for the row (transform scale): 0 for an unseen context, null without a key. */
     public Double effect(final Solution s, final int level, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
-        final String key = FeatureValues.key(row, effectLevels().get(level).keys());
+        final String key = FeatureValues.key(row, effectLevels.get(level).keys());
         if (key == null) return null;
         return s.effects.get(level).getOrDefault(key, 0d);
     }
@@ -403,7 +441,6 @@ public final class JointFit implements Serializable {
     /** Effective sample size of the leaf: its n plus the leaf pseudo-count (the whole fit when fully shrunk). */
     public Double effectiveN(final Solution s, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
-        final List<Level> effectLevels = effectLevels();
         if (effectLevels.isEmpty()) return s.rows;
         final String key = FeatureValues.key(row, effectLevels.get(0).keys());
         if (key == null) return null;
@@ -462,7 +499,7 @@ public final class JointFit implements Serializable {
     public static void write(final String artifactUri, final String planHash, final String id, final JointFit fit) {
         final String path = artifactPath(artifactUri, planHash, id);
         final Solution s = fit.total;
-        final List<Level> effectLevels = fit.effectLevels();
+        final List<Level> effectLevels = fit.effectLevels;
         try {
             final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             long entries = 0;
@@ -473,7 +510,7 @@ public final class JointFit implements Serializable {
                 for (int l = 0; l < effectLevels.size(); l++) {
                     final String token = effectLevels.get(l).token();
                     writer.append(record("lambda", token, "", s.lambdas[l]));
-                    for (final Map.Entry<String, Double> e : s.effects.get(l).entrySet()) {
+                    for (final Map.Entry<String, Double> e : new TreeMap<>(s.effects.get(l)).entrySet()) {
                         writer.append(record("effect", token, e.getKey(), e.getValue()));
                         entries++;
                     }
@@ -496,7 +533,7 @@ public final class JointFit implements Serializable {
             final JsonObject lambdas = new JsonObject();
             final JsonObject contexts = new JsonObject();
             for (int l = 0; l < effectLevels.size(); l++) {
-                lambdas.addProperty(effectLevels.get(l).token(), s.lambdas[l]);
+                lambdas.add(effectLevels.get(l).token(), FitArtifact.lambdaJson(s.lambdas[l]));
                 contexts.addProperty(effectLevels.get(l).token(), s.effects.get(l).size());
             }
             manifest.add("lambdas", lambdas);
@@ -525,8 +562,7 @@ public final class JointFit implements Serializable {
     public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels, final Shrinkage.Scale scale) {
         final String path = artifactPath(artifactUri, planHash, id);
         final Solution s = new Solution();
-        final List<Level> effectLevels = new ArrayList<>();
-        for (final Level l : levels) if (!l.isGlobal()) effectLevels.add(l);
+        final List<Level> effectLevels = effectLevelsOf(levels);
         final Map<String, Integer> levelIndex = new HashMap<>();
         for (int l = 0; l < effectLevels.size(); l++) levelIndex.put(effectLevels.get(l).token(), l);
         s.lambdas = new double[effectLevels.size()];
@@ -553,7 +589,7 @@ public final class JointFit implements Serializable {
             throw new RuntimeException("Failed to read joint fit artifact: " + path, e);
         }
         LOG.info("loaded joint fit artifact {}", path);
-        return new JointFit(levels, cellKeysOf(levels), scale, s, null, null);
+        return new JointFit(levels, scale, s, null, null, null);
     }
 
 }

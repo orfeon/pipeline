@@ -5,6 +5,7 @@ import com.mercari.solution.util.ExpressionUtil;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -129,13 +130,34 @@ public final class FeatureValues {
         return sb.toString();
     }
 
-    /** Decodes a {@link #key} back into its components (the length prefix makes the split exact). */
+    /**
+     * Like {@link #key} but a null component is encoded (length {@code -1}) instead of nulling the whole key, so
+     * a row takes part in every projection of the key whose fields are present; {@link #keyComponents} decodes
+     * it back to {@code null}. The joint fit's cell key: a row with a null coarse-level key still belongs to the
+     * cells of the levels it has.
+     */
+    static String keyWithNulls(final Map<String, Object> row, final List<String> keys) {
+        final StringBuilder sb = new StringBuilder();
+        for (final String k : keys) {
+            final Object v = row.get(k);
+            if (v == null) sb.append("-1:").append('\u0001');
+            else appendKeyComponent(sb, v);
+        }
+        return sb.toString();
+    }
+
+    /** Decodes a {@link #key} (or {@link #keyWithNulls}) back into its components (the length prefix makes the split exact). */
     static List<String> keyComponents(final String key) {
-        final List<String> components = new java.util.ArrayList<>();
+        final List<String> components = new ArrayList<>();
         int i = 0;
         while (i < key.length()) {
             final int colon = key.indexOf(':', i);
             final int length = Integer.parseInt(key.substring(i, colon));
+            if (length < 0) {
+                components.add(null);
+                i = colon + 2; // the terminator only
+                continue;
+            }
             components.add(key.substring(colon + 1, colon + 1 + length));
             i = colon + 1 + length + 1; // the component and its terminator
         }

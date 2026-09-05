@@ -111,8 +111,16 @@ public final class Shrinkage implements Serializable {
     }
 
     /** The declared family, else the statistic's default. */
+    /**
+     * The declared family, else the statistic's default — on logit / log the Gaussian approximation of §5.5 rule 7
+     * (the conjugate closed forms need the identity scale), and null for a distribution there (no Gaussian
+     * counterpart: the statistic is emitted unshrunk).
+     */
     public Family resolveFamily(final String stat) {
-        return family != null ? family : familyFor(stat);
+        if (family != null) return family;
+        final Family derived = familyFor(stat);
+        if (derived == null || !derived.isConjugate() || scale == Scale.identity) return derived;
+        return derived == Family.dirichletMultinomial ? null : Family.gaussian;
     }
 
     /**

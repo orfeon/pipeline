@@ -219,9 +219,6 @@ public final class VarianceComponents {
             if (keys == null || keys.isEmpty()) continue; // the global level is the root: no shrinkage weight
             final String field = hidden.getCoordinates().get("field");
             if (field == null) continue;
-            // a shrunk distribution has no scalar target: its levels keep the declared priorWeight
-            final OutputColumn shares = allColumns.get(level.sumColumn());
-            if (shares != null && "distribution".equals(shares.getCoordinates().get("stat"))) continue;
             final String offset = hidden.getCoordinates().containsKey("offset") ? "__baseline_" + hidden.getCoordinates().get("offset") : null;
             specs.put(level.nColumn(), new LevelSpec(level.nColumn(), List.of(keys.split(",")), field, offset));
         }

@@ -67,6 +67,15 @@ public final class FitArtifact {
         return ResourceUtil.exists(statsPath(artifactUri, planHash, block));
     }
 
+    /**
+     * A pseudo-count for the manifest: JSON has no ±Infinity / NaN, so a fully shrunk level (λ = +∞ from the moment
+     * estimator) is written as the string {@code "Infinity"} — Gson's lenient writer would otherwise emit a bare
+     * token that strict readers reject.
+     */
+    static com.google.gson.JsonElement lambdaJson(final double lambda) {
+        return Double.isFinite(lambda) ? new com.google.gson.JsonPrimitive(lambda) : new com.google.gson.JsonPrimitive(Double.toString(lambda));
+    }
+
     /** The manifest header every fit artifact writes: what plan / block it belongs to and when it was fitted. */
     public static JsonObject manifest(final String planHash, final String block) {
         final JsonObject manifest = new JsonObject();
@@ -122,7 +131,7 @@ public final class FitArtifact {
             // what a run shrank with; absent for a level with too few keys
             final JsonObject lambdas = new JsonObject();
             for (final Map.Entry<String, Double> e : VarianceComponents.lambdasInMemory(stats).entrySet()) {
-                lambdas.addProperty(e.getKey(), e.getValue());
+                lambdas.add(e.getKey(), lambdaJson(e.getValue()));
             }
             manifest.add("lambdas", lambdas);
             if (extra != null) for (final Map.Entry<String, com.google.gson.JsonElement> e : extra.entrySet()) manifest.add(e.getKey(), e.getValue());

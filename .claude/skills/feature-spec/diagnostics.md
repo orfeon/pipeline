@@ -166,13 +166,13 @@ not expand because another block failed).
 | `encoding.stat.static` | error | `quantile` / `distribution` are expanding-only; use `fit.mode: expanding` or another stat |
 | `encoding.nested` | error | nested targets (`field.ref`) not implemented |
 | `encoding.offset` / `encoding.offset.computeAt` / `encoding.offset.scale` | error | offset must name a baseline; offset blocks compute at `predictAt`; offset with logit / log scale not implemented |
-| `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`) and a scalar stat (`mean` / `rate`, not `distribution`) |
+| `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`; a `distribution` there is `encoding.stat.static`) |
 | `encoding.shrinkage.joint` | info | what the joint solve fits: the levels, λ rule and scale of the lattice (one ridge / BLUP system per keySet × target on one worker) |
 | `encoding.shrinkage.weights` | error / info | `fixed \| varianceComponents` (`heldOut` not implemented); as info: variance components are estimated from the whole batch |
 | `encoding.shrinkage.priorWeight` / `.scale` / `.output` | error / warning | numeric ≥ 0 / identity-logit-log / composed-deviations-effectiveN; as warning: `deviations` are not defined for a shrunk `distribution` (none emitted) |
 | `encoding.shrinkage.family` | error | `gaussian \| betaBinomial \| gammaPoisson \| dirichletMultinomial` (default derived from the stat) |
 | `encoding.shrinkage.family.stat` | error | the declared family does not shrink that stat (gaussian / betaBinomial / gammaPoisson: `mean` / `rate`; dirichletMultinomial: `distribution`) |
-| `encoding.shrinkage.family.scale` | error | a conjugate family needs `scale: identity`; on logit / log declare `family: gaussian` |
+| `encoding.shrinkage.family.scale` | error / warning | a *declared* conjugate family needs `scale: identity` (on logit / log declare `family: gaussian` or leave it derived: `mean` / `rate` then shrink gaussian); as warning: a `distribution` on logit / log is emitted unshrunk |
 | `encoding.shrinkage.family.lattice` | error | a shrunk `distribution` supports chain lattices only (no `additive` / `cross`) |
 | `encoding.shrinkage.weights.distribution` | warning | `varianceComponents` is not estimated for a shrunk `distribution`; its levels use `priorWeight` |
 | `encoding.shrinkage.parentStatistic` | warning | `type` not implemented, `token` used |

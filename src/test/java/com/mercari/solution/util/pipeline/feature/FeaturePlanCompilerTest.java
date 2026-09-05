@@ -831,10 +831,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("month", column(forward, "enc__seller_id_category__e1__mean").getCoordinates().get("blockBucket"));
         final FeaturePlan expanding = compile(SOURCES, withEncoding(joint.replace("        fit: {mode: static, artifact: \"gs://bucket/features\"}\n", "")));
         Assertions.assertTrue(hasCode(expanding, "encoding.shrinkage.estimator"), expanding::describe);
-        // a distribution has no scalar cell mean to solve on
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(joint
-                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {field: condition_grade, stats: [distribution]}")
-                .replace("scale: logit, ", ""))), "encoding.shrinkage.estimator"));
+        // a distribution never reaches the joint solve: the statistic is expanding-only, one diagnostic says so
+        final FeaturePlan jointDistribution = compile(SOURCES, withEncoding(joint
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {field: condition_grade, stats: [distribution]}")));
+        Assertions.assertTrue(hasCode(jointDistribution, "encoding.stat.static"), jointDistribution::describe);
+        Assertions.assertTrue(jointDistribution.getDiagnostics().getMessages().stream().filter(m -> m.level() == Diagnostics.Level.error).allMatch(m -> "encoding.stat.static".equals(m.code())),
+                "no second, contradicting diagnostic (the old 'use backoff' hint led to this same error): " + jointDistribution.describe());
     }
 
     @Test
@@ -860,6 +862,11 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: gaussian, scale: logit}"))).getDiagnostics().hasErrors());
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: dirichletMultinomial}"))), "encoding.shrinkage.family.stat"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: poisson}"))), "encoding.shrinkage.family"));
+        // a derived family on logit / log is the Gaussian approximation (rule 7), not an error: rate + logit compiled before families existed
+        final FeaturePlan derivedLogit = compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, scale: logit}")));
+        Assertions.assertFalse(derivedLogit.getDiagnostics().hasErrors(), derivedLogit::describe);
+        Assertions.assertEquals("gaussian", column(derivedLogit, "enc__seller_id__e1__rate").getCoordinates().get("family"));
+        Assertions.assertEquals("compose", column(derivedLogit, "enc__seller_id__e1__rate").getOperator());
 
         // distribution: Dirichlet-Multinomial shrinkage along the chain, a map-valued composed column over hidden per-level shares
         final String distribution = base.replace("- {expr: \"sold >= 1\", stats: [mean, rate]}", "- {field: condition_grade, stats: [distribution]}");
@@ -886,6 +893,22 @@ public class FeaturePlanCompilerTest {
         // without shrinkage the statistic stays the raw per-key distribution of the population stage
         final FeaturePlan raw = compile(SOURCES, withEncoding(distribution.replace("        shrinkage: {priorWeight: 2}\n", "")));
         Assertions.assertEquals("encoding", column(raw, "enc__seller_id__condition_grade__distribution").getOperator());
+        // on logit / log a derived distribution has no Gaussian counterpart: emitted unshrunk with a warning, no hidden shares
+        final FeaturePlan logitDist = compile(SOURCES, withEncoding(distribution.replace("{priorWeight: 2}", "{priorWeight: 2, scale: logit}")));
+        Assertions.assertFalse(logitDist.getDiagnostics().hasErrors(), logitDist::describe);
+        Assertions.assertTrue(hasCode(logitDist, "encoding.shrinkage.family.scale"), logitDist::describe);
+        Assertions.assertEquals("encoding", column(logitDist, "enc__seller_id__condition_grade__distribution").getOperator());
+        Assertions.assertNull(logitDist.getColumn("enc__global__condition_grade__dist"), logitDist::describe);
+        // next to a scalar statistic of the same target the distribution keeps priorWeight: its compose column declares
+        // fixed weights, so it never resolves the scalar's variance-components λ through the shared hidden n columns
+        final FeaturePlan mixed = compile(SOURCES, withEncoding(base
+                .replace("- {expr: \"sold >= 1\", stats: [mean, rate]}", "- {field: condition_grade, stats: [mean, distribution]}")
+                .replace("{priorWeight: 2}", "{priorWeight: 2, weights: varianceComponents}")));
+        Assertions.assertFalse(mixed.getDiagnostics().hasErrors(), mixed::describe);
+        Assertions.assertEquals("varianceComponents", column(mixed, "enc__seller_id__condition_grade__mean").getCoordinates().get("weights"));
+        Assertions.assertEquals("fixed", column(mixed, "enc__seller_id__condition_grade__distribution").getCoordinates().get("weights"));
+        Assertions.assertEquals(column(mixed, "enc__seller_id__condition_grade__mean").getInputs().stream().filter(i -> i.endsWith("__n")).toList(),
+                column(mixed, "enc__seller_id__condition_grade__distribution").getInputs().stream().filter(i -> i.endsWith("__n")).toList(), "the levels share their n columns");
     }
 
     @Test
