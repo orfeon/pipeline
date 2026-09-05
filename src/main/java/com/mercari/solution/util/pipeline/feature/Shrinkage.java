@@ -23,11 +23,40 @@ import java.util.Map;
  * {@code additive} entry, the parent being {@code est(root) + Σ main-effect deviations} (sequential
  * estimator). {@code t} is the declared scale (identity / logit / log); the composed value is returned on
  * the original scale, deviations on the transform scale.
+ *
+ * <p><b>Conjugate families</b> (§5.1.1, §5.5 {@code family}). Shrinkage is "add pseudo sufficient statistics
+ * inherited from the parent": with pseudo-count {@code m = λ} the posterior mean of every conjugate family is
+ * {@code (Σy + m · parent) / (n + m) = parent + n / (n + m) · (ȳ − parent)}, i.e. the recursion above on the
+ * identity scale — the Gaussian, Beta-Binomial (rate of a 0/1 target) and Gamma-Poisson (mean of a count
+ * target) point estimates coincide, and the one-way method-of-moments pseudo-count of
+ * {@link #lambdaFromMoments} is also Kleinman's Beta-Binomial moment estimator, so the family changes
+ * neither the estimate nor λ for scalar statistics. What it adds is (a) the {@code distribution} statistic
+ * under the Dirichlet-Multinomial family — per-category pseudo-counts, {@link #composeDistribution} — and
+ * (b) the declaration check that conjugate closed forms are not combined with a logit / log scale (rule 7:
+ * transformed scales use the Gaussian approximation).
  */
 public final class Shrinkage implements Serializable {
 
-    public enum Estimator { backoff, sequential }
+    public enum Estimator { backoff, sequential, joint }
     public enum Scale { identity, logit, log }
+
+    /** Conjugate family of the shrinkage (§5.1.1): derived from the statistic unless declared. */
+    public enum Family {
+        gaussian, betaBinomial, gammaPoisson, dirichletMultinomial;
+
+        /** Conjugate closed form (pseudo sufficient statistics): everything but the Gaussian approximation. */
+        public boolean isConjugate() {
+            return this != gaussian;
+        }
+
+        /** Whether the family's sufficient statistics are those of the statistic (§5.1.1 table). */
+        public boolean accepts(final String stat) {
+            return switch (this) {
+                case dirichletMultinomial -> "distribution".equals(stat);
+                default -> "mean".equals(stat) || "rate".equals(stat);
+            };
+        }
+    }
 
     /** Default pseudo-count for fixed weights when none is declared. */
     public static final double DEFAULT_PRIOR_WEIGHT = 20d;
@@ -42,9 +71,11 @@ public final class Shrinkage implements Serializable {
     public final Scale scale;
     public final boolean leaveNodeOut;
     public final List<String> outputs;
+    /** Declared family; null = derive from the statistic ({@link #familyFor}). */
+    public final Family family;
 
     private Shrinkage(final boolean enabled, final Estimator estimator, final String weights, final double priorWeight,
-                      final Scale scale, final boolean leaveNodeOut, final List<String> outputs) {
+                      final Scale scale, final boolean leaveNodeOut, final List<String> outputs, final Family family) {
         this.enabled = enabled;
         this.estimator = estimator;
         this.weights = weights;
@@ -52,15 +83,36 @@ public final class Shrinkage implements Serializable {
         this.scale = scale;
         this.leaveNodeOut = leaveNodeOut;
         this.outputs = outputs;
+        this.family = family;
     }
 
     /** Runtime instance rebuilt from a composed column's coordinates. */
     public static Shrinkage of(final Scale scale, final double priorWeight, final boolean leaveNodeOut) {
-        return new Shrinkage(true, null, "fixed", priorWeight, scale, leaveNodeOut, List.of("composed"));
+        return of(scale, priorWeight, leaveNodeOut, null);
+    }
+
+    /** Runtime instance rebuilt from a composed column's coordinates ({@code family} coordinate included). */
+    public static Shrinkage of(final Scale scale, final double priorWeight, final boolean leaveNodeOut, final Family family) {
+        return new Shrinkage(true, null, "fixed", priorWeight, scale, leaveNodeOut, List.of("composed"), family);
     }
 
     public static Shrinkage disabled() {
-        return new Shrinkage(false, null, "fixed", DEFAULT_PRIOR_WEIGHT, Scale.identity, true, List.of("composed"));
+        return new Shrinkage(false, null, "fixed", DEFAULT_PRIOR_WEIGHT, Scale.identity, true, List.of("composed"), null);
+    }
+
+    /** The family a statistic shrinks under by default (§5.1.1 table); null = the statistic is not shrunk. */
+    public static Family familyFor(final String stat) {
+        return switch (stat) {
+            case "mean" -> Family.gaussian;
+            case "rate" -> Family.betaBinomial;
+            case "distribution" -> Family.dirichletMultinomial;
+            default -> null;
+        };
+    }
+
+    /** The declared family, else the statistic's default. */
+    public Family resolveFamily(final String stat) {
+        return family != null ? family : familyFor(stat);
     }
 
     /**
@@ -78,6 +130,7 @@ public final class Shrinkage implements Serializable {
         Scale scale = Scale.identity;
         boolean leaveNodeOut = true;
         List<String> outputs = List.of("composed");
+        Family family = null;
         if (legacySmoothing != null) {
             final String type = Json.string(legacySmoothing, "type");
             if (type != null && !"bayesian".equals(type)) {
@@ -96,7 +149,7 @@ public final class Shrinkage implements Serializable {
                 switch (est) {
                     case "backoff" -> estimator = Estimator.backoff;
                     case "sequential" -> estimator = Estimator.sequential;
-                    case "joint" -> diagnostics.error("encoding.shrinkage.estimator", location, "estimator: joint is not implemented yet (sequential is available)");
+                    case "joint" -> estimator = Estimator.joint;
                     default -> diagnostics.error("encoding.shrinkage.estimator", location, "estimator must be backoff | sequential | joint: " + est);
                 }
             }
@@ -143,11 +196,16 @@ public final class Shrinkage implements Serializable {
                 }
                 outputs = out;
             }
-            if (Json.string(o, "family") != null) {
-                diagnostics.warning("encoding.shrinkage.family", location, "family is v1 and ignored (gaussian pseudo-counts are used)");
+            final String f = Json.string(o, "family");
+            if (f != null) {
+                try {
+                    family = Family.valueOf(f);
+                } catch (final IllegalArgumentException e) {
+                    diagnostics.error("encoding.shrinkage.family", location, "family must be gaussian | betaBinomial | gammaPoisson | dirichletMultinomial: " + f);
+                }
             }
         }
-        return new Shrinkage(true, estimator, weights, priorWeight, scale, leaveNodeOut, outputs);
+        return new Shrinkage(true, estimator, weights, priorWeight, scale, leaveNodeOut, outputs, family);
     }
 
     public boolean emits(final String output) {
@@ -181,10 +239,27 @@ public final class Shrinkage implements Serializable {
         return leaves;
     }
 
-    /** Result of one composition: value on the original scale plus the per-level deviations (transform scale). */
-    public record Composition(Double value, Double[] deviations, Double effectiveN) {}
+    /**
+     * Result of one composition: value on the original scale plus the per-level deviations (transform scale);
+     * {@code distribution} is the composed probability per category for the Dirichlet-Multinomial family
+     * (then {@code value} and {@code deviations} are null).
+     */
+    public record Composition(Double value, Double[] deviations, Double effectiveN, Map<String, Double> distribution) {
+        public Composition(final Double value, final Double[] deviations, final Double effectiveN) {
+            this(value, deviations, effectiveN, null);
+        }
+    }
 
     double transform(final double m) {
+        return transform(scale, m);
+    }
+
+    double inverse(final double t) {
+        return inverse(scale, t);
+    }
+
+    /** The shrinkage scale: identity, logit (clamped to [1e-6, 1 − 1e-6]) or log (floored at 1e-12). */
+    static double transform(final Scale scale, final double m) {
         return switch (scale) {
             case identity -> m;
             case logit -> {
@@ -195,7 +270,7 @@ public final class Shrinkage implements Serializable {
         };
     }
 
-    double inverse(final double t) {
+    static double inverse(final Scale scale, final double t) {
         return switch (scale) {
             case identity -> t;
             case logit -> 1 / (1 + Math.exp(-t));
@@ -283,6 +358,84 @@ public final class Shrinkage implements Serializable {
         // effective sample size: own n plus the prior mass actually backed by the parent (§5.5 rule 6)
         effectiveN[0] = n + (lambda == 0 ? 0 : Double.isInfinite(lambda) ? effectiveN[0] : lambda * Math.min(1, effectiveN[0] / lambda));
         return parent + dev;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Dirichlet-Multinomial: the distribution statistic shrunk along a chain lattice
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Composes a shrunk category distribution (§5.1.1: per-category pseudo-counts). Every level carries its
+     * hidden {@code n} and a {@code distribution} column (category → share of the level's rows); the
+     * top-down pass is {@code p(level) = (counts(level) + λ · p(parent)) / (n(level) + λ)} over the union of
+     * the categories seen at any level, with leave-node-out subtracting the leaf's counts from every ancestor.
+     * Additive entries are not defined for distributions (rejected at compile time). Returns a null
+     * distribution when no level has data.
+     *
+     * @param lambdas per-level pseudo-counts keyed by the level's {@code n} column, as in {@link #compose}
+     */
+    public Composition composeDistribution(final Map<String, Object> row, final List<Level> levels, final Map<String, Double> lambdas) {
+        final Level leaf = levels.get(0);
+        final double leafN = n(row, leaf.nColumn());
+        final Map<String, Double> leafCounts = counts(row, leaf, leafN);
+        final double[] effectiveN = new double[1];
+        final Map<String, Double> p = estimateDistribution(row, levels, 0, leafN, leafCounts, effectiveN, lambdas);
+        return new Composition(null, null, p == null ? null : effectiveN[0], p);
+    }
+
+    /** Category counts of a level = its share per category × its n (the hidden distribution column holds shares). */
+    private static Map<String, Double> counts(final Map<String, Object> row, final Level level, final double n) {
+        final Map<String, Double> counts = new java.util.TreeMap<>();
+        final Object value = row.get(level.sumColumn());
+        if (!(value instanceof Map<?, ?> shares) || n <= 0) return counts;
+        for (final Map.Entry<?, ?> e : shares.entrySet()) {
+            final Double share = FeatureValues.toDouble(e.getValue());
+            if (share != null) counts.put(e.getKey().toString(), share * n);
+        }
+        return counts;
+    }
+
+    private Map<String, Double> estimateDistribution(final Map<String, Object> row, final List<Level> levels, final int index,
+                                                     final double looN, final Map<String, Double> looCounts,
+                                                     final double[] effectiveN, final Map<String, Double> lambdas) {
+        final Level level = levels.get(index);
+        double n = n(row, level.nColumn());
+        final Map<String, Double> counts = counts(row, level, n);
+        if (index > 0 && leaveNodeOut) {
+            n -= looN;
+            for (final Map.Entry<String, Double> e : looCounts.entrySet()) counts.merge(e.getKey(), -e.getValue(), Double::sum);
+        }
+        Map<String, Double> own = null;
+        if (n > 0) {
+            own = new java.util.TreeMap<>();
+            for (final Map.Entry<String, Double> e : counts.entrySet()) {
+                if (e.getValue() > 1e-9) own.put(e.getKey(), e.getValue() / n);
+            }
+        }
+        if (index == levels.size() - 1) {
+            effectiveN[0] = n;
+            return own;
+        }
+        final Map<String, Double> parent = estimateDistribution(row, levels, index + 1, looN, looCounts, effectiveN, lambdas);
+        if (own == null) return parent;
+        if (parent == null) {
+            effectiveN[0] = n;
+            return own;
+        }
+        final double lambda = lambda(level, lambdas);
+        final double w = lambda == 0 ? 1 : Double.isInfinite(lambda) ? 0 : n / (n + lambda);
+        final Map<String, Double> composed = new java.util.TreeMap<>();
+        for (final String category : union(own.keySet(), parent.keySet())) {
+            composed.put(category, w * own.getOrDefault(category, 0d) + (1 - w) * parent.getOrDefault(category, 0d));
+        }
+        effectiveN[0] = n + (lambda == 0 ? 0 : Double.isInfinite(lambda) ? effectiveN[0] : lambda * Math.min(1, effectiveN[0] / lambda));
+        return composed;
+    }
+
+    private static java.util.Set<String> union(final java.util.Set<String> a, final java.util.Set<String> b) {
+        final java.util.Set<String> u = new java.util.TreeSet<>(a);
+        u.addAll(b);
+        return u;
     }
 
     /**

@@ -1669,11 +1669,15 @@ public final class FeaturePlanCompiler {
                         || (parseJsonObject(ks.shrinkageJson) != null && parseJsonObject(ks.shrinkageJson).has("scale"));
                 if (!scaleDeclared) diagnostics.error("encoding.hierarchy.scale", loc, "a lattice with 'additive' requires shrinkage.scale (identity | logit | log)");
                 if (shrinkage.estimator == Shrinkage.Estimator.backoff) {
-                    diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: backoff is not valid for an overlapping lattice (additive / cross); use sequential");
+                    diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: backoff is not valid for an overlapping lattice (additive / cross); use sequential or joint");
                 }
                 if (additiveAt != levels.size() - 1) {
                     diagnostics.error("encoding.hierarchy.additive", loc, "'additive' must be the last entry before the global level");
                 }
+            }
+            if (shrinkage.estimator == Shrinkage.Estimator.joint && !isStatic) {
+                // the joint solve needs the whole cell table of the lattice: a fit-stage estimator, not a row-local replay
+                diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: joint fits every level of the lattice simultaneously over the fitted input and requires fit.mode static | fold | forward (expanding is row-local: use sequential or backoff)");
             }
             if (mode == FitMode.fold && groupBy == null) {
                 for (final String key : ks.keys) {
@@ -1707,9 +1711,15 @@ public final class FeaturePlanCompiler {
         for (final int[] pair : pairs) {
             final Lattice lattice = lattices.get(pair[0]);
             final ResolvedTarget target = resolvedTargets.get(pair[1]);
-            if (lattice.levels.get(lattice.levels.size() - 1).isEmpty()) {
+            if (lattice.levels.get(lattice.levels.size() - 1).isEmpty() && lattice.shrinkage.estimator != Shrinkage.Estimator.joint) {
                 for (final Window window : windowsOf(lattice.keySet)) {
-                    levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec);
+                    // a shrunk distribution needs the per-category shares of the level, the scalar statistics its sum
+                    if (target.stats.stream().anyMatch(s -> !"distribution".equals(s)) || !lattice.shrinkage.enabled) {
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, false);
+                    }
+                    if (target.stats.contains("distribution") && lattice.shrinkage.enabled && !isStatic) {
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, true);
+                    }
                 }
             }
         }
@@ -1729,7 +1739,14 @@ public final class FeaturePlanCompiler {
                     if (s == null || (s.requiresTarget() && target.reference == null)) continue;
                     names.put("stat", stat);
                     final String canonical = render(naming, names);
-                    final boolean shrunk = lattice.shrinkage.enabled && List.of("mean", "rate").contains(stat);
+                    // the family the statistic shrinks under (§5.1.1): declared or derived; null = not a shrunk statistic
+                    Shrinkage.Family family = null;
+                    if (lattice.shrinkage.enabled && Shrinkage.familyFor(stat) != null) {
+                        family = lattice.shrinkage.resolveFamily(stat);
+                        if (!checkFamily(lattice.shrinkage, family, stat, lattice.additiveAt >= 0, def)) continue;
+                    }
+                    // a distribution shrinks (Dirichlet-Multinomial) in the expanding replay only: a static fit keeps (n, Σy, Σy²)
+                    final boolean shrunk = family != null && (!"distribution".equals(stat) || !isStatic);
                     if (isStatic && !shrunk && !"share".equals(stat)) {
                         // static: every statistic is derived from the fitted leaf sufficient statistics
                         if (!s.sufficient()) {
@@ -1737,7 +1754,7 @@ public final class FeaturePlanCompiler {
                             diagnostics.error("encoding.stat.static", loc, "stat " + stat + " is not available in fit.mode " + mode.token() + " (expanding only)");
                             continue;
                         }
-                        final Shrinkage.Level leaf = levelStats(def, ks.keys, null, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec);
+                        final Shrinkage.Level leaf = levelStats(def, ks.keys, null, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, false);
                         final OutputColumn c = newColumn(def.name, Scope.row, "fitStat", canonical, s.output(), computeAt);
                         c.fitted = true;
                         c.coordinates.put("keys", String.join(",", ks.keys));
@@ -1760,7 +1777,14 @@ public final class FeaturePlanCompiler {
                         produced++;
                         continue;
                     }
+                    if (lattice.shrinkage.estimator == Shrinkage.Estimator.joint && !"share".equals(stat)) {
+                        // joint: no hidden level statistics — the fit stage solves the lattice and fills the columns by lookup
+                        produced += expandJoint(def, ks, lattice.levels, singleKeySets, window, target.name, target.reference, stat, family,
+                                lattice.shrinkage, offsetColumn, computeAt, mode, fitSpec, naming, names);
+                        continue;
+                    }
                     // lattice: hidden statistics per level, composed in a row column
+                    final boolean distribution = "distribution".equals(stat);
                     final List<Shrinkage.Level> levels = new ArrayList<>();
                     for (final List<String> levelKeys : lattice.levels) {
                         if (levelKeys.size() == 1 && Shrinkage.ADDITIVE.equals(levelKeys.get(0))) {
@@ -1769,13 +1793,13 @@ public final class FeaturePlanCompiler {
                                 final KeySet main = singleKeySets.get(key);
                                 if (main == null) continue;
                                 final List<Shrinkage.Level> chain = new ArrayList<>();
-                                chain.add(levelStats(def, main.keys, window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec));
-                                chain.add(levelStats(def, List.of(), window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec));
+                                chain.add(levelStats(def, main.keys, window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, distribution));
+                                chain.add(levelStats(def, List.of(), window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, distribution));
                                 mains.add(chain);
                             }
                             levels.add(new Shrinkage.Level(Shrinkage.ADDITIVE, null, null, mains));
                         } else {
-                            levels.add(levelStats(def, levelKeys, window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec));
+                            levels.add(levelStats(def, levelKeys, window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, distribution));
                         }
                     }
                     if ("share".equals(stat)) {
@@ -1793,12 +1817,18 @@ public final class FeaturePlanCompiler {
                     final Shrinkage shrinkage = lattice.shrinkage;
                     final String encoded = Shrinkage.encodeLevels(levels);
                     if (shrinkage.emits("composed")) {
-                        final OutputColumn c = newColumn(def.name, Scope.row, "compose", canonical, Schema.FieldType.FLOAT64, computeAt);
+                        final OutputColumn c = newColumn(def.name, Scope.row, "compose", canonical,
+                                distribution ? Schema.FieldType.map(Schema.FieldType.FLOAT64) : Schema.FieldType.FLOAT64, computeAt);
                         composeCoordinates(c, ks, target, stat, encoded, shrinkage, levels);
+                        c.coordinates.put("family", family.name());
                         finishComposed(c, def);
                         produced++;
                     }
-                    if (shrinkage.emits("deviations")) {
+                    if (shrinkage.emits("deviations") && distribution) {
+                        if (hintedBlocks.add(def.name + "#distributionDeviations")) {
+                            diagnostics.warning("encoding.shrinkage.output", loc, "deviations are not defined for a shrunk distribution (per-category pseudo-counts); none emitted for stat distribution");
+                        }
+                    } else if (shrinkage.emits("deviations")) {
                         for (int i = 0; i < levels.size() - 1; i++) {
                             names.put("stat", "dev" + i);
                             final OutputColumn c = newColumn(def.name, Scope.row, "deviation", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
@@ -1813,6 +1843,7 @@ public final class FeaturePlanCompiler {
                         names.put("stat", stat + "__neff");
                         final OutputColumn c = newColumn(def.name, Scope.row, "effectiveN", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
                         composeCoordinates(c, ks, target, stat, encoded, shrinkage, levels);
+                        c.coordinates.put("family", family.name());
                         finishComposed(c, def);
                         produced++;
                     }
@@ -1888,34 +1919,152 @@ public final class FeaturePlanCompiler {
     }
 
     /**
-     * Hidden sufficient statistics ({@code n}, {@code sum}) of one lattice level for a (window, target),
-     * registered once per block and shared by every keySet whose lattice contains the level.
+     * Hidden sufficient statistics ({@code n}, {@code sum} — or the per-category {@code dist} shares of a shrunk
+     * distribution) of one lattice level for a (window, target), registered once per block and shared by every
+     * keySet whose lattice contains the level.
      */
     private Shrinkage.Level levelStats(final FeatureDef def, final List<String> levelKeys, final Window window,
                                        final String targetName, final String targetReference, final String offsetColumn,
-                                       final AvailableAt computeAt, final FitMode mode, final FeatureSpec.FitSpec fitSpec) {
+                                       final AvailableAt computeAt, final FitMode mode, final FeatureSpec.FitSpec fitSpec,
+                                       final boolean distribution) {
         final String token = levelKeys.isEmpty() ? Shrinkage.GLOBAL : String.join("_", levelKeys);
         final String base = render("{block}__{keys}__{window}__{target}", Map.of(
                 "block", def.name, "keys", token, "window", window == null ? "" : window.token(), "target", targetName));
         final String nName = base + "__n";
-        final String sumName = base + "__sum";
+        final String valueName = base + (distribution ? "__dist" : "__sum");
         final boolean isStatic = mode.isLookup();
-        if (!columnsByCanonical.containsKey(nName)) {
-            // static / fold fits also keep Σy² so std can be derived from the artifact
-            for (final String stat : isStatic ? new String[]{"count", "sum", "sumsq"} : new String[]{"count", "sum"}) {
-                final String name = switch (stat) { case "count" -> nName; case "sum" -> sumName; default -> base + "__sumsq"; };
-                if (!"count".equals(stat) && targetReference == null) continue;
-                final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name, Schema.FieldType.FLOAT64, computeAt);
-                c.intermediate = true;
-                c.anonymous = true;
-                final KeySet level = new KeySet();
-                level.keys = levelKeys;
-                level.windows = window == null ? new ArrayList<>() : List.of(window);
-                populationColumn(c, level, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
-                register(c);
+        // static / fold fits also keep Σy² so std can be derived from the artifact
+        final String[] stats = distribution ? new String[]{"count", "distribution"} : isStatic ? new String[]{"count", "sum", "sumsq"} : new String[]{"count", "sum"};
+        for (final String stat : stats) {
+            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; default -> base + "__sumsq"; };
+            if (!"count".equals(stat) && targetReference == null) continue;
+            if (columnsByCanonical.containsKey(name)) continue;
+            final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name,
+                    "distribution".equals(stat) ? Schema.FieldType.map(Schema.FieldType.FLOAT64) : Schema.FieldType.FLOAT64, computeAt);
+            c.intermediate = true;
+            c.anonymous = true;
+            final KeySet level = new KeySet();
+            level.keys = levelKeys;
+            level.windows = window == null ? new ArrayList<>() : List.of(window);
+            populationColumn(c, level, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
+            register(c);
+        }
+        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, null);
+    }
+
+    /**
+     * §5.1.1 / §5.5 family checks for one shrunk statistic: the family must shrink the statistic's sufficient
+     * statistics, conjugate closed forms need the identity scale (logit / log use the Gaussian approximation,
+     * rule 7), and a distribution shrinks along chain lattices only (per-category pseudo-counts have no
+     * additive decomposition and no scalar cell mean for the joint solve).
+     */
+    private boolean checkFamily(final Shrinkage shrinkage, final Shrinkage.Family family, final String stat, final boolean additive, final FeatureDef def) {
+        final String loc = def.location();
+        if (!family.accepts(stat)) {
+            if (hintedBlocks.add(def.name + "#family#" + stat)) {
+                diagnostics.error("encoding.shrinkage.family.stat", loc, "family " + family + " does not shrink stat " + stat
+                        + " (gaussian | betaBinomial | gammaPoisson: mean / rate; dirichletMultinomial: distribution)");
+            }
+            return false;
+        }
+        if (family.isConjugate() && shrinkage.scale != Shrinkage.Scale.identity) {
+            if (hintedBlocks.add(def.name + "#familyScale")) {
+                diagnostics.error("encoding.shrinkage.family.scale", loc, "family " + family + " (a conjugate closed form) requires scale identity; on logit / log declare family gaussian (Gaussian shrinkage of the transformed statistics, §5.5 rule 7)");
+            }
+            return false;
+        }
+        if ("distribution".equals(stat)) {
+            if (additive) {
+                if (hintedBlocks.add(def.name + "#familyLattice")) {
+                    diagnostics.error("encoding.shrinkage.family.lattice", loc, "a shrunk distribution (dirichletMultinomial) supports chain lattices only; 'additive' / cross has no per-category decomposition");
+                }
+                return false;
+            }
+            if (shrinkage.estimator == Shrinkage.Estimator.joint) {
+                if (hintedBlocks.add(def.name + "#familyJoint")) {
+                    diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: joint fits a scalar statistic (mean / rate); stat distribution shrinks with backoff");
+                }
+                return false;
+            }
+            if ("varianceComponents".equals(shrinkage.weights) && hintedBlocks.add(def.name + "#familyWeights")) {
+                diagnostics.warning("encoding.shrinkage.weights.distribution", loc, "weights: varianceComponents is not estimated for a distribution (no scalar target); its levels shrink with priorWeight " + shrinkage.priorWeight);
             }
         }
-        return new Shrinkage.Level(token, nName, targetReference == null ? nName : sumName, null);
+        return true;
+    }
+
+    /**
+     * {@code estimator: joint} (§5.5 rule 1): one {@code joint} column per output kind, filled in the block's fit
+     * stage from a {@link JointFit} solved over the lattice cells. The lattice's statistics-carrying levels
+     * ({@code additive} → the main-effect key lists) become the effect levels, the global level the intercept;
+     * every key field of every level is a self input (the fit projects the cell onto each level).
+     */
+    private int expandJoint(final FeatureDef def, final KeySet ks, final List<List<String>> latticeLevels, final Map<String, KeySet> singleKeySets,
+                            final Window window, final String targetName, final String targetReference, final String stat,
+                            final Shrinkage.Family family, final Shrinkage shrinkage, final String offsetColumn, final AvailableAt computeAt,
+                            final FitMode mode, final FeatureSpec.FitSpec fitSpec, final String naming, final Map<String, String> names) {
+        final String loc = def.location();
+        final List<JointFit.Level> levels = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (final List<String> levelKeys : latticeLevels) {
+            final List<List<String>> expanded = new ArrayList<>();
+            if (levelKeys.size() == 1 && Shrinkage.ADDITIVE.equals(levelKeys.get(0))) {
+                for (final String key : ks.keys) if (singleKeySets.containsKey(key)) expanded.add(List.of(key));
+            } else {
+                expanded.add(levelKeys);
+            }
+            for (final List<String> keys : expanded) {
+                final String token = keys.isEmpty() ? Shrinkage.GLOBAL : String.join("_", keys);
+                if (seen.add(token)) levels.add(new JointFit.Level(token, keys));
+            }
+        }
+        if (levels.isEmpty() || !levels.get(levels.size() - 1).keys().isEmpty()) levels.add(new JointFit.Level(Shrinkage.GLOBAL, List.of()));
+        final String id = render("{block}__{keys}__{window}__{target}", Map.of(
+                "block", def.name, "keys", String.join("_", ks.keys), "window", window == null ? "" : window.token(), "target", targetName));
+        if (hintedBlocks.add(def.name + "#joint#" + id)) {
+            final List<String> tokens = new ArrayList<>();
+            for (final JointFit.Level l : levels) tokens.add(l.token());
+            diagnostics.info("encoding.shrinkage.joint", loc, "estimator joint fits the levels " + tokens + " of keySet " + ks.keys
+                    + " simultaneously (ridge / BLUP over the lattice cells, solved on one worker; λ per level "
+                    + ("varianceComponents".equals(shrinkage.weights) ? "by the moment estimator over the level's contexts" : "= priorWeight " + shrinkage.priorWeight)
+                    + "; scale " + shrinkage.scale + ")");
+        }
+        final List<OutputColumn> cols = new ArrayList<>();
+        if (shrinkage.emits("composed")) {
+            final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("kind", "composed");
+            cols.add(c);
+        }
+        if (shrinkage.emits("deviations")) {
+            for (int i = 0; i < levels.size() - 1; i++) {
+                names.put("stat", "dev" + i);
+                final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
+                c.coordinates.put("kind", "deviation");
+                c.coordinates.put("level", Integer.toString(i));
+                c.coordinates.put("levelKeys", levels.get(i).token());
+                cols.add(c);
+            }
+        }
+        if (shrinkage.emits("effectiveN")) {
+            names.put("stat", stat + "__neff");
+            final OutputColumn c = newColumn(def.name, Scope.population, "joint", render(naming, names), Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("kind", "effectiveN");
+            cols.add(c);
+        }
+        for (final OutputColumn c : cols) {
+            populationColumn(c, ks, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
+            c.coordinates.put("joint", id);
+            c.coordinates.put("jointLevels", JointFit.encodeLevels(levels));
+            c.coordinates.put("estimator", "joint");
+            c.coordinates.put("family", family.name());
+            c.coordinates.put("scale", shrinkage.scale.name());
+            c.coordinates.put("weights", shrinkage.weights);
+            c.coordinates.put("priorWeight", Double.toString(shrinkage.priorWeight));
+            c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+            for (final JointFit.Level l : levels) for (final String key : l.keys()) addSelfInput(c, key);
+            register(c);
+        }
+        return cols.size();
     }
 
     /** Common setup of a population column reading the keySet's own past contributions. */

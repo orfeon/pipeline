@@ -303,11 +303,25 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   entity's keys or the row identity), and apply subtracts the row's own fold from the totals (n ≤ 0 →
   "no statistics"). λ comes from the totals.
 - **Static-fit blocks** (`StaticFitBlock<M>`: `FmSpec` for factorization, `DiscretizeSpec` for
-  discretize): rebuilt from the output columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
+  discretize, `JointSpec` for `estimator: joint`): rebuilt from the output columns' coordinates;
+  `fit(fitInput)` = extract → `Combine.globally`
   (gather on one worker; the gather has a default accumulator so an empty input still fits) → fit DoFn
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
   `apply(model, values)` fills the block's columns. Adding a population type = one model class + one
   `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`).
+- **Joint estimator** (`JointSpec` → `JointFit`, spec §5.5 rule 1): one model per keySet × window × target of
+  an encoding block with `estimator: joint`. The extract emits `(cell, y)` with the cell = the cross of every
+  level's key fields (`FeatureValues.key`, decodable by `keyComponents`), `Combine.perKey` aggregates
+  (n, Σy, Σy²), the gather brings the cells to one worker and `JointFit.solve` runs block Gauss–Seidel on the
+  ridge / BLUP normal equations over the indicator basis of every level (weights `n · v(ȳ)` with the
+  delta-method factor of the scale; λ per level from `Shrinkage.lambdaFromMoments` over the level's contexts
+  or `priorWeight`; a level with τ² ≤ 0 fixed at 0; levels swept coarse → fine so a rank-deficient system
+  resolves to the hierarchical convention). No hidden level columns are registered for a joint lattice — the
+  `joint` columns (`kind` composed / deviation / effectiveN) are filled by lookup of the row's context keys
+  (unseen context → effect 0, null leaf key → null). `fold` tags each cell part with `foldOf(unit)` and
+  solves the totals minus each fold; `forward` keys the cells by block and solves the cumulative table per
+  block (window = the trailing `windowBlocks`); both re-fit every run, the artifact
+  (`<id>.joint.avro` + manifest with μ, λ, contexts, iterations) holds the whole-input solution.
 - Rejected at construction: a fit target / offset / input produced by the same fit stage (it would
   read null — the compiler's strict-dependency rule keeps them apart, and the engine double-checks),
   and a fit without an existing artifact in streaming.
@@ -319,8 +333,9 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
 - **Format**: Avro for the encoding levels (`FitArtifact`: level / key / n / sum / sumSq +
   `<block>.manifest.json` with λ), `<block>.fm.avro` for factorization (latent vectors stored as
   big-endian `bytes` — Avro on this classpath round-trips `array<double>` at float precision),
-  `<block>.bins.json` for discretize. Reads and writes go through `ResourceUtil` (`gs://`, `s3://` and
-  local paths with one code path).
+  `<block>.bins.json` for discretize, `<block>__<keys>__<window>__<target>.joint.avro` (kind / level / key /
+  value records: μ, per-level λ, effects, leaf n) for the joint estimator. Reads and writes go through
+  `ResourceUtil` (`gs://`, `s3://` and local paths with one code path).
 - **Content addressing**: the artifact root is `{artifactUri}/{planHash}/`, where `planHash` =
   SHA-256 (first 16 hex digits) of the canonical (key-sorted) sources document + parameters **minus
   `engine` and every `fit.artifact`** (`FeaturePlanCompiler.hash` / `withoutArtifact`): re-fitting or
@@ -413,7 +428,9 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 `weights: varianceComponents`, `output: deviations | effectiveN`, `type: factorization` (fm / fwfm,
 ALS, `pair` / `embedding` / `sum` outputs, r-matrix lineage), `type: discretize` (`method: quantile`),
 the `quantile` stats, `output.groupBy`, hot-key audit queries, `--dryRun` and the server exposure of
-`validate --expand`. Everything else is parsed and rejected with a diagnostic (§9.2 "deferred").
+`validate --expand`, `estimator: joint` (static / fold / forward), the conjugate families (`family`,
+with the Dirichlet-Multinomial shrinkage of `distribution`). Everything else is parsed and rejected with a
+diagnostic (§9.2 "deferred").
 
 ### 9.2 Implementation status and decisions
 
@@ -473,6 +490,22 @@ derived once per DoFn instance from the side input and swapped into the row eval
 holds the totals (`forwardTotals`) and its manifest `lambdasByBlock`. The side-input map is keys × blocks
 entries; fine keys with many blocks are the sizing limit (a CoGroupByKey path is the fallback if it bites).
 
+**Joint estimator and conjugate families.** `estimator: joint` is a fit-stage estimator: the lattice's
+statistics-carrying levels (an `additive` entry expands to the main-effect key lists) become the effect
+levels of one mixed model `t(y) = μ + Σ e_level + ε` solved as ridge / BLUP over the aggregated cells
+(§4.5, `JointFit`); it needs the whole cell table, so `expanding` rejects it (`encoding.shrinkage.estimator`).
+`deviations` are the per-level effects, `effectiveN` the leaf's `n + λ`. The `family` declaration is a
+check plus one new statistic rather than new arithmetic: with pseudo-count `m = λ` the posterior mean of every
+conjugate family on the identity scale is the existing recursion, and the one-way moment estimator of λ is
+Kleinman's Beta-Binomial moment estimator (`ShrinkageTest` asserts the identity), so `gaussian` /
+`betaBinomial` / `gammaPoisson` produce identical `mean` / `rate` columns and differ only in the lineage;
+conjugate families require `scale: identity` (`encoding.shrinkage.family.scale`, rule 7 keeps transformed
+scales Gaussian). `dirichletMultinomial` is the `distribution` statistic shrunk along a chain lattice:
+hidden `__n` + `__dist` (per-category shares) columns per level, `Shrinkage.composeDistribution` =
+`(counts + λ · p(parent)) / (n + λ)` with leave-node-out over the union of categories, a map-valued
+composed column; expanding only (the stat is not sufficient), `priorWeight` as λ (no scalar target for
+the moment estimator), no `deviations`.
+
 **Fits.** Static: per-level sufficient statistics from the whole input (global window), lookup per
 row, `fitStat` for count / mean / rate / std, artifact write / load, `refit`; the hidden columns'
 availability is the fit boundary (`computeAt`), and an info diagnostic states that training rows contain
@@ -511,8 +544,9 @@ inner-class name and enum-typed setter — and fixed in the same arc); `engine.s
 (§9.5) and the prism image is the local / Cloud Run subset tier (in-memory, no spill, container memory
 roughly linear in the input).
 
-**Deferred (parsed, rejected with a diagnostic)**: `estimator: joint`, conjugate families,
-`weights: heldOut`, logit / log scale with `offset`; `structure: sequence`; nested encoding targets;
+**Deferred (parsed, rejected with a diagnostic)**: `weights: heldOut`, logit / log scale with `offset`,
+`estimator: joint` under `fit.mode: expanding` (row-local replay cannot hold the cell table), a variance-components
+λ for a shrunk `distribution`; `structure: sequence`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
 consumption is not modelled); `quantileTransform` / `svd` / `spectralEmbedding` / `transitionStats`;
 factorization `variant: bayesian` and `fit.cadence / window / warmStart`; the run-time availability

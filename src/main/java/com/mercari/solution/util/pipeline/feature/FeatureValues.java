@@ -122,6 +122,26 @@ public final class FeatureValues {
         sb.append(s.length()).append(':').append(s).append('\u0001');
     }
 
+    /** The key of already-textual components (the inverse of {@link #keyComponents}). */
+    static String keyOf(final List<String> components) {
+        final StringBuilder sb = new StringBuilder();
+        for (final String c : components) appendKeyComponent(sb, c);
+        return sb.toString();
+    }
+
+    /** Decodes a {@link #key} back into its components (the length prefix makes the split exact). */
+    static List<String> keyComponents(final String key) {
+        final List<String> components = new java.util.ArrayList<>();
+        int i = 0;
+        while (i < key.length()) {
+            final int colon = key.indexOf(':', i);
+            final int length = Integer.parseInt(key.substring(i, colon));
+            components.add(key.substring(colon + 1, colon + 1 + length));
+            i = colon + 1 + length + 1; // the component and its terminator
+        }
+        return components;
+    }
+
     /**
      * Like {@link #key} but a null component becomes a token instead of nulling the whole key, so the key is
      * a deterministic function of the row (a row id must survive a retry; rows genuinely colliding on it
