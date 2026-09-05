@@ -203,7 +203,8 @@ public final class VarianceComponents {
     public static List<LevelSpec> specsOf(final List<OutputColumn> stageColumns, final Map<String, OutputColumn> allColumns) {
         final Map<String, LevelSpec> specs = new LinkedHashMap<>();
         for (final OutputColumn c : stageColumns) {
-            if (!"varianceComponents".equals(c.getCoordinates().get("weights"))) continue;
+            // joint columns estimate their pseudo-counts inside the fit's solve (no hidden levels to combine here)
+            if (!"varianceComponents".equals(c.getCoordinates().get("weights")) || !c.getCoordinates().containsKey("levels")) continue;
             collect(Shrinkage.parseLevels(c.getCoordinates().get("levels")), allColumns, specs);
         }
         return new ArrayList<>(specs.values());
