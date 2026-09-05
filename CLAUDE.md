@@ -242,7 +242,7 @@ self-contained (parameters, examples) — the agent reads one file per module.
 - `docs/design/` — design documents (each opens with a `Status:` line; the code cites them by section
   number): [schema-redesign.md](docs/design/schema-redesign.md), [cloud-auth.md](docs/design/cloud-auth.md),
   [feature-dsl.md](docs/design/feature-dsl.md), [feature-engine.md](docs/design/feature-engine.md),
-  [feature-screen.md](docs/design/feature-screen.md) (the `screen` transform).
+  [screen-dsl.md](docs/design/screen-dsl.md) / [screen-engine.md](docs/design/screen-engine.md) (the `screen` transform).
   New design documents go here, not in `docs/developer/`.
 - `docs/images/` — images referenced by the root README.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).
