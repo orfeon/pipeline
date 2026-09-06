@@ -165,6 +165,7 @@ not expand because another block failed).
 | `encoding.stat` | error | unknown stat (available: count, share, mean, rate, std, distribution, quantile, quantile<NN>, q<NN>) |
 | `encoding.stat.target` | error | the stat needs a target `field` / `expr` |
 | `encoding.stat.static` | error | `quantile` / `distribution` are expanding-only; use `fit.mode: expanding` or another stat |
+| `encoding.target.values` | error | `targets[].values` lists the categories of a `distribution` to emit as flat FLOAT64 columns (`<column>_<value>`, like `countByValue`); the target declares no `distribution` stat |
 | `encoding.nested` | error | nested targets (`field.ref`) not implemented |
 | `encoding.offset` / `encoding.offset.computeAt` / `encoding.offset.scale` | error | offset must name a baseline; offset blocks compute at `predictAt`; offset with logit / log scale not implemented |
 | `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`; a `distribution` there is `encoding.stat.static`) |

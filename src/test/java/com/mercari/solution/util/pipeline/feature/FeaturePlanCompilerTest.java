@@ -910,6 +910,21 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(Schema.Type.map, shares.getFieldType().getType());
         Assertions.assertNull(dist.getColumn("enc__seller_id__condition_grade__sum"), dist::describe);
         Assertions.assertNull(dist.getColumn("enc__seller_id__condition_grade__dev0"), "deviations are undefined for a distribution");
+        // values: the map column becomes an intermediate and one FLOAT64 share column per listed category reads it
+        final FeaturePlan flat = compile(SOURCES, withEncoding(distribution.replace("stats: [distribution]}", "stats: [distribution], values: [good, fair]}")));
+        Assertions.assertFalse(flat.getDiagnostics().hasErrors(), flat::describe);
+        Assertions.assertTrue(column(flat, "enc__seller_id__condition_grade__distribution").isIntermediate(), flat::describe);
+        final OutputColumn good = column(flat, "enc__seller_id__condition_grade__distribution_good");
+        Assertions.assertEquals("mapValue", good.getOperator());
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), good.getFieldType().getType());
+        Assertions.assertEquals("good", good.getCoordinates().get("value"));
+        Assertions.assertEquals(List.of("enc__seller_id__condition_grade__distribution"), List.copyOf(good.getInputs()));
+        Assertions.assertTrue(good.isFitted());
+        Assertions.assertEquals(composed.getStatus(), good.getStatus());
+        Assertions.assertNotNull(column(flat, "enc__seller_id__condition_grade__distribution_fair"));
+        Assertions.assertTrue(flat.getEmittedColumns().stream().noneMatch(c -> c.getCanonicalName().equals("enc__seller_id__condition_grade__distribution")), flat::describe);
+        // values on a target without a distribution stat is an error
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(base.replace("stats: [mean, rate]}", "stats: [mean, rate], values: [good]}"))), "encoding.target.values"));
         Assertions.assertTrue(hasCode(dist, "encoding.shrinkage.output"), dist::describe);
         column(dist, "enc__seller_id__condition_grade__distribution__neff");
         Assertions.assertTrue(FeatureStages.engineConstraints(dist, false).isEmpty(), FeatureStages.engineConstraints(dist, false)::toString);

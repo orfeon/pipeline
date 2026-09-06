@@ -1263,6 +1263,55 @@ public class FeatureTransformTest {
     }
 
     /**
+     * targets[].values: the shrunk distribution is emitted as one FLOAT64 column per listed category (the values of
+     * {@link #testDistributionShrinkage}'s map), the map column itself is not emitted; the unshrunk distribution
+     * (no shrinkage block) expands the same way, a listed category with no mass reading 0.
+     */
+    @Test
+    public void testDistributionValues() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("- {stats: [count]}\n", "")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {field: condition_grade, stats: [distribution], values: [good, fair]}\n          shrinkage: {priorWeight: 1, output: [composed, effectiveN]}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        final String column = "f_enc__seller_id__condition_grade__distribution";
+        Assertions.assertNull(schema.getField(column), "the map column is replaced by the per-value columns");
+        Assertions.assertEquals(Schema.Type.float64, schema.getField(column + "_good").getFieldType().getType());
+        Assertions.assertEquals("mapValue", schema.getField(column + "_good").getOptions().get("feature.operator"));
+        Assertions.assertNotNull(schema.getField(column + "__neff"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue(column + "_good"));
+            Assertions.assertEquals(0.5, byKey.get("B/s1").getAsDouble(column + "_good"), 1e-9);
+            Assertions.assertEquals(0.5, byKey.get("B/s1").getAsDouble(column + "_fair"), 1e-9);
+            Assertions.assertEquals(2.0 / 3.0, byKey.get("C/s1").getAsDouble(column + "_good"), 1e-9);
+            Assertions.assertEquals(1.0 / 3.0, byKey.get("C/s1").getAsDouble(column + "_fair"), 1e-9);
+            Assertions.assertEquals(2.0, byKey.get("B/s1").getAsDouble(column + "__neff"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+
+        // unshrunk: the raw per-key shares; C/s1's own history is {good, good} → good 1, fair 0 (listed, no mass)
+        final String raw = FEATURE_CONFIG
+                .replace("- {stats: [count]}\n", "")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {field: condition_grade, stats: [distribution], values: [good, fair]}");
+        final TestPipeline second = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> rawOutputs = MPipeline.apply(second, Config.load(SOURCE_CONFIG + raw));
+        Assertions.assertNull(rawOutputs.get("features").getSchema().getField(column));
+        PAssert.that(rawOutputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue(column + "_good"));
+            Assertions.assertEquals(1.0, byKey.get("C/s1").getAsDouble(column + "_good"), 1e-9);
+            Assertions.assertEquals(0.0, byKey.get("C/s1").getAsDouble(column + "_fair"), 1e-9);
+            return null;
+        });
+        second.run();
+    }
+
+    /**
      * Dirichlet-Multinomial: the seller's condition_grade distribution shrunk toward the (leave-node-out) global one
      * with λ = 1. condition_grade is a pre-event attribute, so the strictly-past rows have no near-edge shift.
      */

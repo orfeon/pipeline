@@ -162,6 +162,19 @@ public class RowEvaluator implements Serializable {
                 final Shrinkage.Composition composition = composition(c, row);
                 yield isDistribution(c) ? composition.distribution() : composition.value();
             }
+            case "mapValue" -> {
+                // one category's share of a distribution map (targets[].values); keys may be CharSequence after a coder round trip
+                final Object m = row.get(inputs.get(0));
+                if (!(m instanceof Map<?, ?> map)) yield null;
+                final String value = c.coordinates.get("value");
+                Object v = map.get(value);
+                if (v == null) {
+                    for (final Map.Entry<?, ?> e : map.entrySet()) {
+                        if (e.getKey() != null && value.equals(e.getKey().toString())) { v = e.getValue(); break; }
+                    }
+                }
+                yield v == null ? Double.valueOf(0d) : FeatureValues.toDouble(v);
+            }
             case "deviation" -> composition(c, row).deviations()[Integer.parseInt(c.coordinates.get("level"))];
             case "effectiveN" -> composition(c, row).effectiveN();
             default -> throw new IllegalStateException("unsupported row operator: " + c.operator);
