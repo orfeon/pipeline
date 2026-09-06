@@ -110,6 +110,8 @@ public class FeatureSpec implements Serializable {
         public List<String> stats = new ArrayList<>();
         /** Target name override (replaces the field name or the anonymous e{n}). */
         public String as;
+        /** stat distribution: emit one FLOAT64 column per listed category instead of the map column. */
+        public List<String> values = new ArrayList<>();
     }
 
     public static class FeatureDef implements Serializable {
@@ -584,6 +586,7 @@ public class FeatureSpec implements Serializable {
             target.expr = Json.string(t, "expr");
             target.stats = Json.strings(t, "stats");
             target.as = Json.string(t, "as");
+            target.values = Json.strings(t, "values");
             def.targets.add(target);
         }
         final String combine = Json.string(o, "combine");

@@ -1706,7 +1706,7 @@ public final class FeaturePlanCompiler {
         }
 
         // targets: resolve / desugar
-        record ResolvedTarget(String name, String reference, List<String> stats) {}
+        record ResolvedTarget(String name, String reference, List<String> stats, List<String> values) {}
         final List<ResolvedTarget> resolvedTargets = new ArrayList<>();
         int targetIndex = 0;
         for (final Target t : def.targets) {
@@ -1738,7 +1738,11 @@ public final class FeaturePlanCompiler {
                     diagnostics.hint("encoding.target.preEvent", loc, "target '" + name + "' is known before the event; expanding fit is not essential for leak safety here");
                 }
             }
-            resolvedTargets.add(new ResolvedTarget(name, reference, stats));
+            if (!t.values.isEmpty() && !stats.contains("distribution")) {
+                // values expands the distribution map into one column per category (like countByValue); no other stat is a map
+                diagnostics.error("encoding.target.values", loc, "target '" + name + "' declares values " + t.values + " but no stat distribution; values lists the categories of a distribution to emit as columns");
+            }
+            resolvedTargets.add(new ResolvedTarget(name, reference, stats, t.values));
         }
 
         // keySets: shrinkage config and generalization lattice (§5.3.1)
@@ -1924,6 +1928,7 @@ public final class FeaturePlanCompiler {
                         final OutputColumn c = newColumn(def.name, Scope.population, "encoding", canonical, s.output(), computeAt);
                         populationColumn(c, ks, window, target.reference, stat, offsetColumn, mode, def, fitSpec);
                         register(c);
+                        if ("distribution".equals(stat)) expandDistributionValues(def, target.values, c, computeAt);
                         produced++;
                         continue;
                     }
@@ -1972,6 +1977,7 @@ public final class FeaturePlanCompiler {
                         composeCoordinates(c, ks, target, stat, encoded, shrinkage, levels);
                         c.coordinates.put("family", family.name());
                         finishComposed(c, def);
+                        if (distribution) expandDistributionValues(def, target.values, c, computeAt);
                         produced++;
                     }
                     if (shrinkage.emits("deviations") && distribution) {
@@ -2059,6 +2065,24 @@ public final class FeaturePlanCompiler {
         for (final Shrinkage.Level l : Shrinkage.leaves(List.of(level))) {
             addSelfInput(c, l.nColumn());
             addSelfInput(c, l.sumColumn());
+        }
+    }
+
+    /**
+     * {@code targets[].values} on stat {@code distribution}: the map column becomes an intermediate and one FLOAT64
+     * column per listed category reads its share from it ({@code <map column>_<value>}, 0 when the category has no
+     * mass, null when the map is null), like {@code countByValue} with {@code values} — a sink such as BigQuery
+     * and a model consume flat numeric columns, not a map.
+     */
+    private void expandDistributionValues(final FeatureDef def, final List<String> values, final OutputColumn map, final AvailableAt computeAt) {
+        if (values.isEmpty() || !columnsByCanonical.containsKey(map.canonicalName)) return;
+        map.intermediate = true;
+        for (final String value : values) {
+            final OutputColumn c = newColumn(def.name, Scope.row, "mapValue", map.canonicalName + "_" + value, Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("value", value);
+            c.fitted = map.fitted;
+            addSelfInput(c, map.canonicalName);
+            finishRow(c, def);
         }
     }
 

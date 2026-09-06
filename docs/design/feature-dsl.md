@@ -856,6 +856,7 @@ basis. (A per-column "known at prediction time" annotation is subsumed by the so
     - {stats: [count, share]}                # frequency (no target)
     - {field: sold, stats: [mean]}
     - {expr: "final_price > start_price", stats: [mean]}
+    - {field: condition_grade, stats: [distribution], values: [good, fair]}   # one FLOAT64 share column per listed category instead of the map
   combine: product                # product | zip
   emitConfidence: true            # a companion confidence column per output (opt-in, §5.5 rule 6)
   shrinkage:                      # §5.5; block default, overridable per keySet. The legacy smoothing block stays as sugar

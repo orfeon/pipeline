@@ -179,7 +179,13 @@ distribution is not the interpolated quantile); `distribution` shrinks along the
 declares `shrinkage` (Dirichlet-Multinomial per-category pseudo-counts, see *Shrinkage*). All three need
 the key's value distribution, so they are available in the expanding fit only — `fit.mode: static` /
 `fold` / `forward` keep (n, Σy, Σy²) per key and reject them. A NaN target (or baseline) value counts as
-missing for every numeric encoding stat, like null.
+missing for every numeric encoding stat, like null. `distribution` is a map column by default; with
+`values: [...]` on the target (`- {field: condition_grade, stats: [distribution], values: [good, fair]}`)
+it is emitted as one FLOAT64 column per listed category instead (`<column>_<value>`: the category's share,
+0 when it has no mass, null when the key has no history) — the same rule as `countByValue`, for a sink
+such as BigQuery or a model that takes flat numeric columns. Categories are matched by their string form
+(an INT64 category `1` is `values: [1]`); unlisted categories are not emitted, and `values` on a target
+without `distribution` is an error (`encoding.target.values`).
 
 ### Static fits and artifacts (fit.mode static)
 
@@ -451,7 +457,8 @@ numeric (Lucene expression syntax), predicates and window filters use the SQL-li
   (`<block>__<keys>__<as>__<stat>`).
 - `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
   numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
-  `values` when the output goes to a sink such as BigQuery or straight into a model.
+  `values` when the output goes to a sink such as BigQuery or straight into a model. An encoding target's
+  `distribution` stat follows the same rule (`targets[].values`, see *Encoding stats*).
 - Window `filter` and op `predicate` texts are parsed at compile time. A column whose name is a keyword of
   the condition grammar (`rank`, `order`, ...) is quoted automatically with backticks (reported as
   `predicate.quoted` / `filter.quoted`); you can also write `` `rank` <= 3 `` yourself. A condition that

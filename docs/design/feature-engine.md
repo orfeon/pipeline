@@ -192,7 +192,9 @@ convention). Therefore:
   Compiled expressions are not Serializable → transient + `@Setup` rebuild (framework convention).
 - `datetime` (with cyclical sin / cos), `bin` (manual edges), `cross`, `indicator`, `equals`,
   `residual` are implemented in `RowEvaluator`; the lattice readers (`share`, `fitStat`, `compose`,
-  `deviation`, `effectiveN`) are row operators too.
+  `deviation`, `effectiveN`) are row operators too, as is `mapValue` — one listed category's share read
+  from a `distribution` map column that `targets[].values` turned into an intermediate (the flat
+  per-category FLOAT64 columns a sink or a model consumes, the `countByValue` / `values` rule).
 - The spec's "expression AST shared with an optimisation transform" has no counterpart here; the
   shared component is `ExpressionUtil` (+ `Filter` for predicates and window filters, which are parsed and
   reserved-word-quoted at compile time by `conditionText`).
