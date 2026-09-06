@@ -495,12 +495,24 @@ parallel-vs-linear equality test covers both.
 **Forward fits.** `fit.mode: forward` (spec §4.4 fit metadata): `ForwardBlocks` (fixed-size blocks from the
 epoch or UTC calendar buckets; `usableBlock(event, predictOffset, lag) = indexOf(event + predictOffset −
 lag) − 1`), `VarianceComponents.forwardSeries` (extract → `Combine.perKey` per (level, key, block) → GBK per
-(level, key) → sorted prefix `ForwardBlocks.Series`) as a `View.asMap`, and `FitApplyDoFn.forwardStats`
-(floor lookup of the row's usable block, `windowBlocks` prefix difference, `minBlocks`). The λ per block
-(`VarianceComponents.lambdasByBlock`: moments over the keys' cumulative statistics up to each block) is
-derived once per DoFn instance from the side input and swapped into the row evaluator per row; the artifact
-holds the totals (`forwardTotals`) and its manifest `lambdasByBlock`. The side-input map is keys × blocks
-entries; fine keys with many blocks are the sizing limit (a CoGroupByKey path is the fallback if it bites).
+(level, key) → sorted prefix `ForwardBlocks.Series`) as a `View.asList` that `FitApplyDoFn` indexes once per
+DoFn instance into an in-memory map, and `FitApplyDoFn.forwardStats` (floor lookup of the row's usable block,
+`windowBlocks` prefix difference, `minBlocks`). The λ per block (moments over the keys' cumulative
+statistics up to each block) is computed in the pipeline — `VarianceComponents.lambdasByBlockView`: one
+`Combine.perKey` per level whose accumulator is the level-wide moments as a step function over the keys'
+blocks (`BlockMomentsFn`, merges union the blocks), gathered into a levels × blocks list side input — and
+swapped into the row evaluator per row; the forward artifacts' totals (`<block>.avro`) and their manifest
+`lambdasByBlock` come from the same PCollections through the shared `writeArtifacts` path (entries grouped
+under their block, one write per block, an empty marker so an empty input still writes). Only a lattice
+column with hidden `levels` requests the λ estimate (`RowEvaluator.needsVarianceComponents`); a joint
+column declares the same weights but resolves its pseudo-counts inside the solve.
+
+Why no map side input on this path: on a portable runner (Dataflow Runner v2, prism) a `View.asMap` is
+served through the state API — `get` is one fetch per (row, level) and iterating the entries is one fetch
+per entry — so the per-row probes of a multi-level forward block and the artifact writer's scan stalled a
+production run for tens of minutes with no output (consumer feedback on PR #117). The list view is one
+sequential read per DoFn instance; the whole forward series of a stage must fit a worker's memory (a
+series holds four arrays over the blocks a key touches), which the artifact writer already assumed.
 
 **Joint estimator and conjugate families.** `estimator: joint` is a fit-stage estimator: the lattice's
 statistics-carrying levels (an `additive` entry expands to the main-effect key lists) become the effect

@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -69,8 +70,14 @@ public class ElementToAvroConverter {
         return schemaFields.endRecord();
     }
 
+    /**
+     * BigQuery file-load format function: the writer schema is derived from the destination table (a TableSchema,
+     * where a map is a repeated {@code {key, value}} record), not from the element. An AVRO element passes through
+     * as is, so its record is re-mapped onto the writer schema where the two differ
+     * ({@link AvroSchemaUtil#toWriterSchema}); otherwise the datum writer rejects a map value against the array.
+     */
     public static GenericRecord convert(final AvroWriteRequest<MElement> writeRequest) {
-        return convert(writeRequest.getSchema(), writeRequest.getElement());
+        return AvroSchemaUtil.toWriterSchema(writeRequest.getSchema(), convert(writeRequest.getSchema(), writeRequest.getElement()));
     }
 
     public static GenericRecord convert(final Schema schema, final MElement element) {
@@ -259,11 +266,29 @@ public class ElementToAvroConverter {
                 yield results;
             }
             case RECORD -> convert(fieldSchema, (Map<String,Object>) value);
-            case ARRAY -> ((List<Object>) value).stream()
-                    .map(v -> convertValue(name, fieldSchema.getElementType(), v))
-                    .toList();
+            case ARRAY -> {
+                // a map value against an array of {key, value} records (a map in a BigQuery TableSchema-derived schema)
+                final List<Object> values = value instanceof Map<?, ?> map && AvroSchemaUtil.isKeyValueRecord(AvroSchemaUtil.unnestUnion(fieldSchema.getElementType()))
+                        ? keyValueEntries(map)
+                        : (List<Object>) value;
+                yield values.stream()
+                        .map(v -> convertValue(name, fieldSchema.getElementType(), v))
+                        .toList();
+            }
             default -> throw new IllegalArgumentException("Not supported schema: " + fieldSchema + " for value: " + value + ", class: " + value.getClass().getName());
         };
+    }
+
+    /** A map as the {@code {key, value}} entry records of a BigQuery-shaped array (null-tolerant values). */
+    private static List<Object> keyValueEntries(final Map<?, ?> map) {
+        final List<Object> entries = new ArrayList<>(map.size());
+        for (final Map.Entry<?, ?> e : map.entrySet()) {
+            final Map<String, Object> entry = new HashMap<>();
+            entry.put("key", e.getKey() == null ? "" : e.getKey().toString());
+            entry.put("value", e.getValue());
+            entries.add(entry);
+        }
+        return entries;
     }
 
 }

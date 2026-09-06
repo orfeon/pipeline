@@ -68,6 +68,7 @@ not expand because another block failed).
 | `output.include.exclude` | info | both declared: `include` is the projection, `exclude` is ignored |
 | `output.include.role` | info | columns that `roles` name (a baseline's `emit` copy, a label derived as a column) are emitted although the list does not name them: a pass list never contains role columns, and the consumer's manifest needs them (a column kept only as a role gets no `_isnull` indicator) |
 | `output.exclude.role` | info | the same for `exclude`: a role column matching an exclude pattern (`derivedFrom:market` on a market baseline's `emit` copy) stays emitted — roles are the data contract, not features |
+| `output.exclude.unmatched` | warning | an `exclude` pattern selects no emitted column. Patterns are `<block>.*`, an exact canonical column name, a block name, or a `derivedFrom:` / `evidence:` / `scope:` / `block:` selector — never a glob or regex (`dm.*__distribution` matches nothing; write `dm.*` or the full column name) |
 | `audit.observedAt` | error | `count \| fail \| off` |
 
 ## Feature blocks (all scopes)

@@ -2368,11 +2368,16 @@ public final class FeaturePlanCompiler {
         final Set<String> keptByRole = applyInclude();
         final List<OutputColumn> indicators = new ArrayList<>();
         final List<String> excludedRoles = new ArrayList<>();
+        final Set<String> matchedExcludes = new HashSet<>();
         for (final OutputColumn c : columns) {
-            if (!c.intermediate && spec.output.include == null && isExcluded(c)) {
-                // a role column is the data contract, not a feature: no projection removes it (see applyInclude)
-                if (c.role == null) c.intermediate = true;
-                else { keptByRole.add(c.canonicalName); excludedRoles.add(outputNameOf(c) + " (" + c.role + ")"); }
+            if (!c.intermediate && spec.output.include == null) {
+                final List<String> matched = matchingExcludes(c);
+                matchedExcludes.addAll(matched);
+                if (!matched.isEmpty()) {
+                    // a role column is the data contract, not a feature: no projection removes it (see applyInclude)
+                    if (c.role == null) c.intermediate = true;
+                    else { keptByRole.add(c.canonicalName); excludedRoles.add(outputNameOf(c) + " (" + c.role + ")"); }
+                }
             }
             final String loc = "features." + c.block;
             boolean lint = false;
@@ -2445,6 +2450,15 @@ public final class FeaturePlanCompiler {
         for (final OutputColumn i : indicators) columnsByCanonical.put(i.canonicalName, i);
         if (!excludedRoles.isEmpty()) {
             diagnostics.info("output.exclude.role", "output.exclude", "role columns are emitted although output.exclude matches them (roles are the data contract, not features): " + excludedRoles);
+        }
+        if (spec.output.include == null) {
+            // a pattern that selects nothing is almost always a misspelling or a glob / regex the syntax does not have
+            for (final String pattern : spec.output.exclude) {
+                if (!matchedExcludes.contains(pattern)) {
+                    diagnostics.warning("output.exclude.unmatched", "output.exclude", "exclude pattern '" + pattern
+                            + "' matches no emitted column; a pattern is " + EXCLUDE_PATTERN_FORMS);
+                }
+            }
         }
 
         final Set<String> names = new HashSet<>();
@@ -2543,30 +2557,37 @@ public final class FeaturePlanCompiler {
     }
 
     /** output.exclude: name globs ({@code block.*}, {@code name}) and lineage selectors ({@code derivedFrom:market}). */
-    private boolean isExcluded(final OutputColumn c) {
+    /** What an {@code output.exclude} pattern can be — the message of {@code output.exclude.unmatched}. */
+    static final String EXCLUDE_PATTERN_FORMS = "<block>.* (the whole block) | a column's canonical name | a block name"
+            + " | derivedFrom:<kind> | evidence:declared | scope:<scope> | block:<name>; patterns are neither globs nor regular expressions";
+
+    /**
+     * Every {@code output.exclude} pattern that selects the column (all of them, so an unmatched pattern can be
+     * reported): {@code block.*}, an exact canonical name, a block name, or a lineage selector.
+     */
+    private List<String> matchingExcludes(final OutputColumn c) {
+        final List<String> matched = new ArrayList<>();
         for (final String pattern : spec.output.exclude) {
             final int colon = pattern.indexOf(':');
+            final boolean match;
             if (colon > 0) {
                 final String selector = pattern.substring(0, colon);
                 final String value = pattern.substring(colon + 1);
-                final boolean match = switch (selector) {
+                match = switch (selector) {
                     case "derivedFrom" -> c.derivedFrom.contains(value);
                     case "evidence" -> "declared".equals(value) && c.declaredEvidence;
                     case "scope" -> c.scope.name().equals(value);
                     case "block" -> c.block.equals(value);
                     default -> false;
                 };
-                if (match) return true;
-                continue;
+            } else if (pattern.endsWith(".*")) {
+                match = c.block.equals(pattern.substring(0, pattern.length() - 2));
+            } else {
+                match = pattern.equals(c.canonicalName) || pattern.equals(c.block);
             }
-            if (pattern.endsWith(".*")) {
-                final String block = pattern.substring(0, pattern.length() - 2);
-                if (c.block.equals(block)) return true;
-            } else if (pattern.equals(c.canonicalName) || pattern.equals(c.block)) {
-                return true;
-            }
+            if (match) matched.add(pattern);
         }
-        return false;
+        return matched;
     }
 
     private Schema buildSchema() {

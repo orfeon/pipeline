@@ -330,6 +330,27 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(column(plan, "vs_market").isIntermediate());
         Assertions.assertTrue(column(plan, "composition_condition_grade_entropy").isIntermediate());
         Assertions.assertFalse(column(plan, "relative_start_price_rank").isIntermediate());
+        Assertions.assertFalse(hasCode(plan, "output.exclude.unmatched"), plan::describe);
+    }
+
+    /** A pattern that selects nothing (a glob / regex the syntax does not have, a misspelling) is reported, per pattern. */
+    @Test
+    public void testExcludeUnmatchedPattern() {
+        final String spec = SPEC.replace("prefix: f_",
+                "prefix: f_\n  exclude: [\"composition.*_entropy\", \"derivedFrom:market\", \"vs_market\", \"nosuchblock.*\", \"composition.*\"]");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<String> unmatched = plan.getDiagnostics().getMessages().stream()
+                .filter(d -> "output.exclude.unmatched".equals(d.code())).map(Diagnostics.Message::message).toList();
+        Assertions.assertEquals(2, unmatched.size(), plan::describe);
+        Assertions.assertTrue(unmatched.get(0).contains("'composition.*_entropy'"), unmatched::toString);
+        Assertions.assertTrue(unmatched.get(1).contains("'nosuchblock.*'"), unmatched::toString);
+        // the second pattern to match a column is still credited (no early exit): composition.* is not reported
+        Assertions.assertTrue(column(plan, "composition_condition_grade_entropy").isIntermediate());
+        // exclude is ignored (and not lint-checked) when include is declared
+        final FeaturePlan included = compile(SOURCES, spec.replace("  exclude:", "  include: [price_per_unit]\n  exclude:"));
+        Assertions.assertFalse(hasCode(included, "output.exclude.unmatched"), included::describe);
+        Assertions.assertTrue(hasCode(included, "output.include.exclude"), included::describe);
     }
 
     @Test
@@ -828,6 +849,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(compile(SOURCES, withEncoding(joint.replace("mode: static", "mode: fold, folds: 3, groupBy: seller"))).getDiagnostics().hasErrors());
         final FeaturePlan forward = compile(SOURCES, withEncoding(joint.replace("mode: static", "mode: forward, blocks: {bucket: month}")));
         Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        // a joint column declares weights: varianceComponents but estimates its pseudo-counts inside the solve: the
+        // fit stage's row evaluator must not request the λ estimate (under forward, that was a scan of the series)
+        final List<OutputColumn> fitColumns = forward.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit)
+                .flatMap(s -> s.columnNames().stream()).map(forward::getColumn).toList();
+        Assertions.assertTrue(fitColumns.stream().anyMatch(c -> "varianceComponents".equals(c.getCoordinates().get("weights"))), forward::describe);
+        Assertions.assertFalse(new RowEvaluator(fitColumns).needsVarianceComponents(), forward::describe);
         Assertions.assertEquals("month", column(forward, "enc__seller_id_category__e1__mean").getCoordinates().get("blockBucket"));
         final FeaturePlan expanding = compile(SOURCES, withEncoding(joint.replace("        fit: {mode: static, artifact: \"gs://bucket/features\"}\n", "")));
         Assertions.assertTrue(hasCode(expanding, "encoding.shrinkage.estimator"), expanding::describe);
