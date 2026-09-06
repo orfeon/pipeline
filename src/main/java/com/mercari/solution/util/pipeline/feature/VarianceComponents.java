@@ -175,8 +175,7 @@ public final class VarianceComponents {
                 .apply(label + "_PerLevel", ParDo.of(new DoFn<KV<String, ForwardBlocks.Series>, KV<String, ForwardBlocks.Series>>() {
                     @ProcessElement
                     public void processElement(final ProcessContext c) {
-                        final String entry = c.element().getKey();
-                        c.output(KV.of(entry.substring(0, entry.indexOf(SEPARATOR)), c.element().getValue()));
+                        c.output(KV.of(FitArtifact.levelOf(c.element().getKey()), c.element().getValue()));
                     }
                 }))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(ForwardBlocks.Series.class)))
