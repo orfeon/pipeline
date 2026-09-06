@@ -343,7 +343,9 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   `<block>.manifest.json` with λ), `<block>.fm.avro` for factorization (latent vectors stored as
   big-endian `bytes` — Avro on this classpath round-trips `array<double>` at float precision),
   `<block>.bins.json` for discretize, `<block>.quantiles.json` for quantileTransform (knots, and the
-  probability `clip` of a normal score — an artifact without it reads the default 1e-6),
+  probability `clip` of a normal score, recorded for the record — the clip is apply-time, so the loading
+  config's `clip` replaces the artifact's (`QuantileTransformSpec.readArtifact` → `withClip`), which keeps a
+  pinned `fit.artifact.id` or a pre-clip artifact honest),
   `<block>.svd.json` for svd (mean / scale / components / variances — JSON keeps double precision, and the
   matrix is rank × d), `<block>__<keys>__<window>__<target>.joint.avro` (kind / level / key /
   value records: μ, per-level λ, effects, leaf n) for the joint estimator. Reads and writes go through

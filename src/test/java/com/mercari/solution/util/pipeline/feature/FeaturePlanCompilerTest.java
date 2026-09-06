@@ -1158,7 +1158,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNotEquals(plan.getHash(), clipped.getHash(), "clip changes the fitted transform, so the artifact directory");
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("distribution: normal", "distribution: normal\n        clip: 0.5"))), "quantileTransform.clip"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("distribution: normal", "distribution: normal\n        clip: 0"))), "quantileTransform.clip"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("distribution: normal", "distribution: normal\n        clip: tiny"))), "quantileTransform.clip"), "not a number is a diagnostic, not a crash");
+        final FeaturePlan notANumber = compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("distribution: normal", "distribution: normal\n        clip: tiny")));
+        Assertions.assertTrue(hasCode(notANumber, "clip.invalid"), "not a number is a diagnostic, not a crash");
+        Assertions.assertTrue(notANumber.describe().contains("tiny"), "the diagnostic names the rejected text");
         // clip with uniform is a warning and leaves no coordinate
         final FeaturePlan uniformClip = compile(SOURCES, withEncoding(QUANTILE_TRANSFORM_BLOCK.replace("distribution: normal", "distribution: uniform\n        clip: 0.001")));
         Assertions.assertFalse(uniformClip.getDiagnostics().hasErrors(), uniformClip::describe);
@@ -1199,6 +1201,19 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(sources.replace("array<float64>", "array<array<float64>>"), spec), "sources.fields.type"));
         Assertions.assertTrue(hasCode(compile(sources.replace("array<float64>", "array<vector>"), spec), "sources.fields.type"));
         Assertions.assertFalse(compile(sources.replace("array<float64>", "\"Array< double >\""), spec).getDiagnostics().hasErrors());
+        Assertions.assertTrue(hasCode(compile(sources.replace("array<float64>", "array<struct>"), spec), "sources.fields.type"), "a non-primitive element is not a vector");
+        // the manifest / report spell the type as the contract does, so it round-trips
+        Assertions.assertEquals("array<float64>", FeaturePlan.typeName(plan.getInputFields().get("embedding").getType()));
+        Assertions.assertEquals("float64", FeaturePlan.typeName(Schema.FieldType.FLOAT64));
+        // against an input schema the array-ness of the contract type is checked: a shape mismatch reads null for every row
+        final JsonObject sourcesJson = Config.convertConfigJson(sources, Config.Format.yaml);
+        final JsonObject specJson = Config.convertConfigJson(spec, Config.Format.yaml);
+        final List<Schema.Field> scalar = new java.util.ArrayList<>(inputFields(true));
+        scalar.add(Schema.Field.of("embedding", Schema.FieldType.FLOAT64));
+        Assertions.assertTrue(hasCode(FeaturePlanCompiler.compile(sourcesJson, specJson, scalar), "lineage.type.mismatch"));
+        final List<Schema.Field> repeated = new java.util.ArrayList<>(inputFields(true));
+        repeated.add(Schema.Field.of("embedding", Schema.FieldType.array(Schema.FieldType.FLOAT64)));
+        Assertions.assertFalse(hasCode(FeaturePlanCompiler.compile(sourcesJson, specJson, repeated), "lineage.type.mismatch"));
     }
 
     private static final String SVD_BLOCK = """

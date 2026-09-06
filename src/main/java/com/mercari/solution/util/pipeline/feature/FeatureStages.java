@@ -1028,7 +1028,11 @@ public final class FeatureStages {
 
         @Override
         public QuantileTransform readArtifact(final String planHash) {
-            return QuantileTransform.read(artifactUri, planHash, block);
+            final QuantileTransform q = QuantileTransform.read(artifactUri, planHash, block);
+            if (q.clip != clip) {
+                LOG.info("quantileTransform {}: the artifact was written with clip {}; applying the config's clip {}", block, q.clip, clip);
+            }
+            return q.withClip(clip);
         }
 
         @Override

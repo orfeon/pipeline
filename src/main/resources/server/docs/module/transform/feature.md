@@ -344,8 +344,10 @@ bins, n, distribution, clip for `normal`).
 `±4.75` whatever n, and the first / last quantile interval is interpolated in *value*, not rank, so the extreme
 rows become outliers of a downstream linear combination (`expr`) or `svd`. `clip: 0.001` caps the score at
 `±3.09` (`0.01` → `±2.33`) and leaves every position inside `[clip, 1 − clip]` unchanged; it changes the
-fitted transform, so the plan hash and the artifact directory. With `distribution: uniform` it is ignored
-with a warning.
+fitted transform, so the plan hash and the artifact directory. The clip is applied by the config that runs, not
+by the artifact: a serving config that pins an artifact (`fit.artifact.id`) or loads one fitted before `clip`
+existed still clamps at its own `clip`. With `distribution: uniform` it has no effect on the output but still
+participates in the plan hash — the warning `quantileTransform.clip` asks you to remove it.
 
 ### SVD / PCA (population, type: svd)
 

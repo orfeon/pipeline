@@ -47,10 +47,6 @@ public final class QuantileTransform implements Serializable {
     /** Probability clamp of the normal score: p is clamped to [clip, 1 − clip] before the probit (0 < clip < 0.5). */
     public final double clip;
 
-    QuantileTransform(final double[] knots, final long n, final String distribution) {
-        this(knots, n, distribution, DEFAULT_CLIP);
-    }
-
     QuantileTransform(final double[] knots, final long n, final String distribution, final double clip) {
         this.knots = knots;
         this.n = n;
@@ -86,9 +82,18 @@ public final class QuantileTransform implements Serializable {
         return n == 0;
     }
 
+    /**
+     * The same knots with another probability clamp. The clamp is an apply-time parameter (the knots are the fit), so a
+     * loaded artifact takes the clip of the config that applies it — also one pinned by {@code fit.artifact.id} or
+     * fitted before the clip existed.
+     */
+    public QuantileTransform withClip(final double clip) {
+        return clip == this.clip ? this : new QuantileTransform(knots, n, distribution, clip);
+    }
+
     /** The empirical CDF position of a value (or its normal score); null for missing values and an empty fit. */
     public Double transform(final Double v) {
-        if (v == null || v.isNaN() || n == 0) return null;
+        if (v == null || v.isNaN() || isEmpty()) return null;
         final double p = position(v);
         return NORMAL.equals(distribution) ? probit(Math.min(1 - clip, Math.max(clip, p))) : p;
     }

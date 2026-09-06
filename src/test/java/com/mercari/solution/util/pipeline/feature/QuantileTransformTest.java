@@ -54,6 +54,11 @@ public class QuantileTransformTest {
         Assertions.assertNull(QuantileTransform.fit(values, values.length, 5, QuantileTransform.UNIFORM, 0.01).toJson().get("clip"));
         json.remove("clip");
         Assertions.assertEquals(QuantileTransform.DEFAULT_CLIP, QuantileTransform.fromJson(json).clip);
+        // the clip is apply-time: a loaded artifact takes the config's clip (a pinned or pre-clip artifact included)
+        final QuantileTransform reclipped = QuantileTransform.fromJson(json).withClip(0.01);
+        Assertions.assertEquals(0.01, reclipped.clip);
+        Assertions.assertEquals(-2.326348, reclipped.transform(50.0), 1e-5);
+        Assertions.assertSame(clipped, clipped.withClip(0.01), "the same clip keeps the instance");
         // an empty fit is flagged
         Assertions.assertTrue(QuantileTransform.fit(values, 0, 5, QuantileTransform.NORMAL).isEmpty());
         Assertions.assertFalse(clipped.isEmpty());

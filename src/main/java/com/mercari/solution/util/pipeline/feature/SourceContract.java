@@ -229,8 +229,7 @@ public class SourceContract implements Serializable {
             try {
                 field.type = parseType(field.typeName);
             } catch (final IllegalArgumentException e) {
-                diagnostics.error("sources.fields.type", loc, "unsupported field type: " + field.typeName
-                        + " (a scalar type name such as float64 / string / timestamp, or array<element type>)");
+                diagnostics.error("sources.fields.type", loc, "unsupported field type: " + field.typeName + " (" + e.getMessage() + ")");
             }
         }
         field.description = Json.string(json, "description");
@@ -302,16 +301,32 @@ public class SourceContract implements Serializable {
     /**
      * A contract field type: a scalar type name accepted by {@link Schema.Type#of} ({@code float64}, {@code string},
      * {@code timestamp}, ...) or {@code array<element type>} (e.g. {@code array<float64>} — the vector input of
-     * {@code type: svd}; nested arrays are not accepted). Throws {@link IllegalArgumentException} otherwise.
+     * {@code type: svd}; the element must be a scalar type, so nested arrays / records / maps are not accepted). Throws
+     * {@link IllegalArgumentException} with a user-facing reason otherwise.
      */
     static Schema.FieldType parseType(final String typeName) {
         final String t = typeName.trim();
-        if (t.toLowerCase().startsWith("array<") && t.endsWith(">")) {
-            final String element = t.substring("array<".length(), t.length() - 1).trim();
-            if (element.toLowerCase().startsWith("array")) throw new IllegalArgumentException("nested array type: " + typeName);
-            return Schema.FieldType.array(Schema.FieldType.type(Schema.Type.of(element)));
+        if (t.regionMatches(true, 0, "array<", 0, "array<".length()) && t.endsWith(">")) {
+            final String element = t.substring("array<".length(), t.length() - 1);
+            final Schema.Type elementType = scalarType(element);
+            if (CONTAINER_TYPES.contains(elementType)) {
+                throw new IllegalArgumentException("the array element must be a scalar type such as float64 / int64 / string, not " + element.trim());
+            }
+            return Schema.FieldType.array(Schema.FieldType.type(elementType));
         }
-        return Schema.FieldType.type(Schema.Type.of(t));
+        // every scalar the schema system names (decimal / enum included): FieldType.type rejects the container types itself
+        return Schema.FieldType.type(scalarType(t));
+    }
+
+    /** Types that need a nested definition and so cannot be an array element of a contract field. */
+    private static final java.util.Set<Schema.Type> CONTAINER_TYPES = java.util.Set.of(Schema.Type.array, Schema.Type.element, Schema.Type.map, Schema.Type.matrix);
+
+    private static Schema.Type scalarType(final String name) {
+        try {
+            return Schema.Type.of(name);
+        } catch (final IllegalArgumentException e) {
+            throw new IllegalArgumentException("a scalar type name such as float64 / string / timestamp, or array<element type>, is expected");
+        }
     }
 
     /** Minimal Gson helpers shared by the compile layer. */
