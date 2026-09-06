@@ -167,7 +167,7 @@ parameters:
 | a key's category distribution as flat columns (for BigQuery / a model) | `population`, `type: encoding` with `stats: [distribution], values: [a, b, c]` on the target | one FLOAT64 share column per listed category (`<column>_<value>`) replaces the map column; unlisted categories are dropped |
 | low-rank interaction scores for sparse crosses | `population`, `type: factorization` | always static; whole training set on one worker |
 | learned bin edges (to key an encoding) | `population`, `type: discretize` (`method: quantile`) | always static; bins `-1` missing, `0` below, `1..B`, `B+1` above |
-| rank normalisation of a skewed value (uniform or normal score) | `population`, `type: quantileTransform` (`bins`, `distribution`) | always static; out of range clamps to 0 / 1 |
+| rank normalisation of a skewed value (uniform or normal score) | `population`, `type: quantileTransform` (`bins`, `distribution`, `clip`) | always static; out of range clamps to 0 / 1; `clip: 0.001` when the normal score feeds an expr / svd |
 | decorrelated low-rank summary of several numeric features (e.g. a lag window) | `population`, `type: svd` (`inputs`, `rank`) | always static; fitted from sufficient statistics only |
 
 Difference to the previous row of the entity: `lag` the past value, then subtract in a row `expr` —

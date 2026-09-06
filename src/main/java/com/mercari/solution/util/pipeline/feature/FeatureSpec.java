@@ -168,6 +168,8 @@ public class FeatureSpec implements Serializable {
         public String method;
         public Integer bins;
         public Integer minSamplesPerBin;
+        /** quantileTransform: probability clamp of the normal score (null = the default 1e-6). */
+        public Double clip;
         public String target;
         // svd
         public Integer rank;
@@ -608,6 +610,7 @@ public class FeatureSpec implements Serializable {
         def.latentDim = Json.integer(o, "latentDim");
         def.method = Json.string(o, "method");
         def.bins = Json.integer(o, "bins");
+        def.clip = doubleOf(o, "clip", diagnostics, loc);
         def.minSamplesPerBin = Json.integer(o, "minSamplesPerBin");
         def.target = Json.string(o, "target");
         def.rank = Json.integer(o, "rank");
@@ -738,6 +741,22 @@ public class FeatureSpec implements Serializable {
             }
         }
         return op;
+    }
+
+    /** A numeric parameter as a Double: null when absent or not a number (reported as {@code <key>.invalid}, like {@link #longOf}). */
+    private static Double doubleOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
+        if (!o.has(key) || o.get(key).isJsonNull()) return null;
+        final JsonElement e = o.get(key);
+        if (e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber()) return e.getAsDouble();
+        if (e.isJsonPrimitive()) {
+            try {
+                return Double.parseDouble(e.getAsString().trim());
+            } catch (final NumberFormatException ignored) {
+                // reported below
+            }
+        }
+        diagnostics.error(key + ".invalid", loc, key + " must be a number: " + e);
+        return null;
     }
 
     private static Long longOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {

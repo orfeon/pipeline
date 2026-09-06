@@ -173,7 +173,7 @@ only from the latter time on (§6.1).
 
 | item | required | meaning |
 |---|---|---|
-| `name` / `type` | yes | physical name and type (mapped onto the engine's type system, Avro-compatible) |
+| `name` / `type` | yes | physical name and type (mapped onto the engine's type system, Avro-compatible): a scalar type name, or `array<element type>` for a vector field (`array<float64>`, the input of `type: svd`; nested arrays are not accepted) |
 | `description` | recommended | for humans and for tooling that builds a search space from the catalog (§8) |
 | `availableAt` | — | when the value is known in the world (§2.3); defaults to the table's `availability` |
 | `ingestionLag` | — | upper bound on the delay before the value appears in the input relation (§2.6); defaults to the table's (then `PT0S`) |

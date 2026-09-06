@@ -91,6 +91,7 @@ sources:
 
 | field attribute   | description |
 |-------------------|-------------|
+| `type`            | A scalar type name (`float64`, `int64`, `string`, `timestamp`, `date`, ...) or `array<element type>` (e.g. `array<float64>` — the vector input of `type: svd`; nested arrays are not accepted). No feature op produces an array, so an array field always comes from the input. |
 | `availableAt`     | `atEventTime` (pre-event), `event_time ± <duration>`, `after(event)` (= event_time + settlementLag), `atRowCreation`. Defaults to the table `availability`. |
 | `ingestionLag`    | Upper bound of the delay until the value is present in the input relation. The checks use `availableAt + ingestionLag`. |
 | `observedAtField` | Field holding the time the value was actually observed. **Required** for pre-event claims (`event_time - δ`, `atRowCreation`) unless `evidence: declared` is stated explicitly. |
@@ -324,18 +325,29 @@ coarse (4–8): the cardinality multiplies.
     input: start_price                 # numeric field or feature
     bins: 100                          # quantile intervals of the fitted CDF (default 100)
     distribution: uniform              # uniform (default): F(v) in [0, 1] | normal: the normal score Φ⁻¹(F(v))
+    # clip: 0.001                      # normal only: clamp F(v) to [clip, 1 − clip] before Φ⁻¹ (default 1e-6)
     fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
 ```
 
 Rank-based normalisation: the whole input's distribution is summarised by `bins + 1` knots (the type-7
 quantiles at `0, 1/B, …, 1`) and a value maps to its position in it, interpolated linearly between knots —
 monotone, scale-free and robust to outliers, and the same map at training and serving time. A value below
-the fitted minimum reads 0, above the maximum 1 (`normal`: clamped at `±Φ⁻¹(1 − 1e-6)`, never infinite); a
+the fitted minimum reads 0, above the maximum 1 (`normal`: clamped at `±Φ⁻¹(1 − clip)`, never infinite); a
 value equal to a run of tied knots (a mass point, also one sitting at the minimum or the maximum — a
 zero-inflated count's zeros) reads the middle of the run's probability range; missing (null / NaN) reads
 null. Like discretize the values are gathered on one worker for the fit
-(8 bytes per row) and an input without a single value still fits (n = 0: every value reads null). The
-artifact is `<planHash>/<block>.quantiles.json` (knots, bins, n, distribution).
+(8 bytes per row) and an input without a single value still fits (n = 0: every value reads null — a serving
+run that loads such an artifact logs a warning). The artifact is `<planHash>/<block>.quantiles.json` (knots,
+bins, n, distribution, clip for `normal`).
+
+`clip` (normal only, `0 < clip < 0.5`, default `1e-6`): with the default the fitted minimum and maximum read
+`±4.75` whatever n, and the first / last quantile interval is interpolated in *value*, not rank, so the extreme
+rows become outliers of a downstream linear combination (`expr`) or `svd`. `clip: 0.001` caps the score at
+`±3.09` (`0.01` → `±2.33`) and leaves every position inside `[clip, 1 − clip]` unchanged; it changes the
+fitted transform, so the plan hash and the artifact directory. The clip is applied by the config that runs, not
+by the artifact: a serving config that pins an artifact (`fit.artifact.id`) or loads one fitted before `clip`
+existed still clamps at its own `clip`. With `distribution: uniform` it has no effect on the output but still
+participates in the plan hash — the warning `quantileTransform.clip` asks you to remove it.
 
 ### SVD / PCA (population, type: svd)
 
@@ -344,7 +356,7 @@ artifact is `<planHash>/<block>.quantiles.json` (knots, bins, n, distribution).
     scope: population
     type: svd
     inputs: [recent_n5_start_price_lag1, recent_n5_start_price_lag2, recent_n5_start_price_lag3]   # the vector
-    # input: embedding                 # or one array<numeric> field / feature
+    # input: embedding                 # or one input field declared `type: array<float64>` in the sources contract
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
     standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
@@ -361,10 +373,13 @@ re-fit reproduces the scores). A vector with a missing component (null / NaN) ta
 reads null scores. An array input must have one length: vectors of another length are skipped (and read
 null) and the run logs a warning — the fitted length is whichever the fit saw first, so normalise the array
 length upstream; when `rank` exceeds an array's length the fit caps the components at the length, the
-surplus score columns read null and a warning names the cap (for `inputs` the compiler rejects the rank). A
-fit with fewer than two vectors has no components and reads null everywhere. The artifact is `<planHash>/<block>.svd.json` (mean, scale,
-components, per-component variances, total variance, n) — the explained-variance ratio is `variances[k] /
-totalVariance`.
+surplus score columns read null and a warning names the cap (for `inputs` the compiler rejects the rank). An
+array input is always an input field (declared `type: array<float64>` — or another numeric element type —
+in the sources contract and listed in `lineage`): no row / context / sequence op produces an array, so a
+vector assembled from features uses `inputs`. A fit with fewer than two vectors has no components and reads
+null everywhere (a serving run that loads such an artifact logs a warning). The artifact is
+`<planHash>/<block>.svd.json` (mean, scale, components, per-component variances, total variance, n) — the
+explained-variance ratio is `variances[k] / totalVariance`.
 
 ### Shrinkage and key lattices (population)
 

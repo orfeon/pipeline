@@ -58,6 +58,11 @@ public final class Svd implements Serializable {
         return components.length;
     }
 
+    /** Whether the fit had no components (fewer than two vectors): every vector maps to null scores. */
+    public boolean isEmpty() {
+        return components.length == 0;
+    }
+
     /**
      * Sufficient statistics of the vectors: count, per-dimension sums and the flattened d × d sum of products,
      * both taken relative to an anchor ({@code shift}, the first accepted vector) so that the covariance is not
@@ -320,7 +325,11 @@ public final class Svd implements Serializable {
     public static Svd read(final String artifactUri, final String planHash, final String block) {
         final String path = artifactPath(artifactUri, planHash, block);
         final Svd svd = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        LOG.info("loaded svd artifact {} (dimension {}, rank {}, n={})", path, svd.dimension, svd.rank(), svd.n);
+        if (svd.isEmpty()) {
+            LOG.warn("loaded svd artifact {} with no components (n={}): the score columns of block '{}' read null for every row; re-fit it on an input with at least two complete vectors (fit.artifact.refit: true)", path, svd.n, block);
+        } else {
+            LOG.info("loaded svd artifact {} (dimension {}, rank {}, n={})", path, svd.dimension, svd.rank(), svd.n);
+        }
         return svd;
     }
 

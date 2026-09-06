@@ -1143,6 +1143,62 @@ public class FeatureTransformTest {
         Assertions.assertTrue(v0 > v1);
     }
 
+    /**
+     * The same svd over an array field declared as {@code array<float64>} in the sources contract (the input schema
+     * declares it {@code mode: repeated}): the vector [start_price, current_bid_t10] per row gives the scores of
+     * {@link #testSvd()} — the array path and the {@code inputs} path are the same fit.
+     */
+    @Test
+    public void testSvdArrayInput() throws java.io.IOException {
+        final String[][] rows = {
+                {"current_bid_t10: 120.0,", "[100.0, 120.0]"}, {"current_bid_t10: 55.0, ", "[50.0, 55.0]"}, {"current_bid_t10: 210.0,", "[200.0, 210.0]"},
+                {"current_bid_t10: 90.0, ", "[80.0, 90.0]"}, {"current_bid_t10: 70.0, ", "[60.0, 70.0]"}, {"current_bid_t10: 130.0,", "[120.0, 130.0]"}};
+        // the text blocks strip their closing delimiter's 12 spaces: schema fields run at 8 spaces, contract fields at 14
+        String source = SOURCE_CONFIG.replace("        - {name: current_bid_t10, type: float64}\n",
+                "        - {name: current_bid_t10, type: float64}\n        - {name: price_vec, type: float64, mode: repeated}\n");
+        Assertions.assertTrue(source.contains("price_vec"), "the schema field line must match the text block's runtime indentation");
+        for (final String[] row : rows) {
+            Assertions.assertTrue(source.contains(row[0]), row[0]);
+            source = source.replace(row[0], row[0] + " price_vec: " + row[1] + ",");
+        }
+        final String blocks = """
+                    - name: price_pc
+                      scope: population
+                      type: svd
+                      inputs: [start_price, current_bid_t10]
+                      rank: 2
+                    - name: vec_pc
+                      scope: population
+                      type: svd
+                      input: price_vec
+                      rank: 2
+                """;
+        final String config = FEATURE_CONFIG
+                .replace("              - {name: current_bid_t10, type: float64, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n",
+                        "              - {name: current_bid_t10, type: float64, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n"
+                                + "              - {name: price_vec, type: array<float64>, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n")
+                .replace("- {fields: [current_bid_t10], from: price_snapshots}", "- {fields: [current_bid_t10, price_vec], from: price_snapshots}")
+                .replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        Assertions.assertTrue(config.contains("array<float64>") && config.contains("current_bid_t10, price_vec]"), "the contract lines must match the text block's runtime indentation");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(source + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals(Schema.Type.array, output.getSchema().getField("price_vec").getFieldType().getType(), "the array input passes through");
+        Assertions.assertNotNull(output.getSchema().getField("f_vec_pc_1"));
+        Assertions.assertTrue(output.getSchema().getField("f_vec_pc_0").getOptions().get("feature.derivedFrom").contains("market"));
+        PAssert.that(output.getCollection()).satisfies(rows_ -> {
+            int count = 0;
+            for (final MElement row : rows_) {
+                count++;
+                for (int k = 0; k < 2; k++) {
+                    Assertions.assertEquals(row.getAsDouble("f_price_pc_" + k), row.getAsDouble("f_vec_pc_" + k), 1e-9, row.getAsString("session_id") + "/" + k);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     // ------------------------------------------------------------------------------------------
     // estimator: joint / conjugate families
     // ------------------------------------------------------------------------------------------

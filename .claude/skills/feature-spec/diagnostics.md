@@ -17,7 +17,8 @@ not expand because another block failed).
 | `sources.availability` | error | the table-level `availability` expression does not parse (see the expression table in reference.md) |
 | `sources.snapshotOf` | error | `snapshotOf` needs `source` and `at`, or `at` does not parse |
 | `sources.snapshotOf.appendOnly` | warning | `snapshotOf` on an `appendOnly` source does nothing (first value = final value) — remove it or change `mutability` |
-| `sources.fields.name` / `sources.fields.type` | error | required; unsupported type names are rejected |
+| `sources.fields.name` / `sources.fields.type` | error | required; a scalar type name (`float64`, `int64`, `string`, `timestamp`, `date`, ...) or `array<element type>` (e.g. `array<float64>`, the `svd` vector input; the element must be a scalar type, so nested arrays are rejected); other type names are rejected |
+| `lineage.type.mismatch` | error | a field is declared `array<...>` in the sources contract but the input schema field is a scalar (or the reverse): the engine would read null for every row — fix the contract type or the upstream schema (`mode: repeated`) |
 | `sources.fields.duplicate` | error | duplicate field in one source |
 | `sources.fields.availableAt` | error | the field's `availableAt` does not parse |
 | `sources.fields.observedAtField` | error | a pre-event relative claim (`event_time - δ`, `atRowCreation`) has no `observedAtField`: add the observation-time column, or declare `evidence: declared` explicitly |
@@ -197,7 +198,9 @@ not expand because another block failed).
 | `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `window` / `warmStart` not implemented |
 | `discretize.input` / `.bins` / `.minSamplesPerBin` / `.method` / `.target` | error / warning | numeric input; bins ≥ 2; minSamplesPerBin ≥ 1; only `quantile`; `target` is ignored by `quantile` |
 | `quantileTransform.input` / `.bins` / `.distribution` | error | numeric input; bins ≥ 2; `uniform \| normal` |
-| `svd.input` / `.rank` / `.maxFeatures` | error | two or more numeric `inputs`, or one array<numeric> `input` (then `rank` is required); 1 ≤ rank ≤ vector length; rank columns count towards `maxFeatures` |
+| `quantileTransform.clip` | error / warning | error: `clip` must be a probability in `(0, 0.5)` (default `1e-6`); warning: `clip` with `distribution: uniform` has no effect on the output but still changes the plan hash — remove it or switch to `normal` |
+| `clip.invalid` | error | `clip` is not a number |
+| `svd.input` / `.rank` / `.maxFeatures` | error | two or more numeric `inputs`, or one `input` field declared `type: array<float64>` (or another numeric element type) in the sources contract — no feature op produces an array (then `rank` is required); 1 ≤ rank ≤ vector length; rank columns count towards `maxFeatures` |
 | `svd.rank` | info | array input: the rank cannot be checked against the array length at compile time — a shorter array caps the components at its length (run-time warning), the surplus score columns read null |
 
 ## Engine errors at assembly (after a clean compile)

@@ -138,7 +138,11 @@ public final class Discretization implements Serializable {
     public static Discretization read(final String artifactUri, final String planHash, final String block) {
         final String path = artifactPath(artifactUri, planHash, block);
         final Discretization d = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        LOG.info("loaded discretization artifact {} ({} bins)", path, d.bins());
+        if (d.n == 0) {
+            LOG.warn("loaded discretization artifact {} fitted on no value (n=0): column '{}' reads bin 1 for every row that has a value (missing values still read -1); re-fit it on an input that has values (fit.artifact.refit: true)", path, block);
+        } else {
+            LOG.info("loaded discretization artifact {} ({} bins, n={})", path, d.bins(), d.n);
+        }
         return d;
     }
 

@@ -20,6 +20,15 @@ import java.util.Set;
  */
 public class FeaturePlan implements Serializable {
 
+    /**
+     * The type of a field as the sources contract spells it: a scalar type name, or {@code array<element>} for an array
+     * (so a manifest / report type round-trips into {@code sources.fields.type}); null for an unknown type.
+     */
+    static String typeName(final Schema.FieldType type) {
+        if (type == null) return null;
+        return type.getType() == Schema.Type.array ? "array<" + typeName(type.getArrayValueType()) + ">" : type.getType().name();
+    }
+
     public enum StageKind { row, context, sequence, population, fit, groupBy }
 
     /**
@@ -515,7 +524,7 @@ public class FeaturePlan implements Serializable {
             final JsonObject o = new JsonObject();
             o.addProperty("name", c.outputName);
             o.addProperty("canonical", c.canonicalName);
-            o.addProperty("type", c.fieldType == null ? null : c.fieldType.getType().name());
+            o.addProperty("type", typeName(c.fieldType));
             o.addProperty("intermediate", c.intermediate);
             final JsonArray inputs = new JsonArray();
             c.inputs.forEach(inputs::add);
@@ -646,7 +655,7 @@ public class FeaturePlan implements Serializable {
             for (final Schema.Field f : passThroughFields) {
                 final JsonObject o = new JsonObject();
                 o.addProperty("name", f.getName());
-                o.addProperty("type", f.getFieldType().getType().name());
+                o.addProperty("type", typeName(f.getFieldType()));
                 // the same facts as the output schema's field options (scope input: the selector vocabulary of the
                 // columns, so a consumer excludes pass-through inputs by scope / kind / derivedFrom)
                 final Map<String, String> options = passThroughOptions(f);
@@ -668,7 +677,7 @@ public class FeaturePlan implements Serializable {
             final JsonObject o = new JsonObject();
             o.addProperty("name", c.outputName);
             o.addProperty("canonical", c.canonicalName);
-            o.addProperty("type", c.fieldType == null ? null : c.fieldType.getType().name());
+            o.addProperty("type", typeName(c.fieldType));
             // categorical for the consumer (a model's categorical feature list): text / enum / flags and crosses; counts and bin ids are ordinal
             o.addProperty("categorical", c.fieldType != null && (switch (c.fieldType.getType()) {
                 case string, enumeration, bool -> true;

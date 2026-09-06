@@ -22,7 +22,10 @@ import java.util.Map;
  * the same map at training and serving time (the knots are the artifact).
  *
  * <p>Out-of-range behaviour: a value below the fitted minimum maps to 0, above the maximum to 1 (a normal score
- * is clamped at {@code ±Φ⁻¹(1 − 1e-6)}); a value equal to a run of tied knots (a mass point of the distribution,
+ * is clamped at {@code ±Φ⁻¹(1 − clip)}, {@code clip} = 1e-6 by default so the transform never returns ±∞; a larger
+ * {@code clip} such as 0.001 caps the score of the extreme rows at ±3.09 — the fitted minimum / maximum otherwise
+ * read ±4.75 whatever n, which turns them into outliers of a downstream linear combination or svd); a value equal
+ * to a run of tied knots (a mass point of the distribution,
  * also when the run sits at the minimum or the maximum) maps to the middle of the run's probability range, so
  * ties do not depend on the search direction. Missing (null / NaN) maps to null. A fit that saw no value (n = 0)
  * maps everything to null and is still written as an artifact.
@@ -34,18 +37,21 @@ public final class QuantileTransform implements Serializable {
     public static final int DEFAULT_BINS = 100;
     public static final String UNIFORM = "uniform";
     public static final String NORMAL = "normal";
-    /** Probability clamp of the normal score (the transform never returns ±∞). */
-    static final double NORMAL_EPSILON = 1e-6;
+    /** Default probability clamp of the normal score (the transform never returns ±∞). */
+    public static final double DEFAULT_CLIP = 1e-6;
 
     /** Nondecreasing knots: the quantiles at i / bins, i = 0..bins (length bins + 1); empty when n = 0. */
     public final double[] knots;
     public final long n;
     public final String distribution;
+    /** Probability clamp of the normal score: p is clamped to [clip, 1 − clip] before the probit (0 < clip < 0.5). */
+    public final double clip;
 
-    QuantileTransform(final double[] knots, final long n, final String distribution) {
+    QuantileTransform(final double[] knots, final long n, final String distribution, final double clip) {
         this.knots = knots;
         this.n = n;
         this.distribution = distribution;
+        this.clip = clip;
     }
 
     /** Number of intervals between knots (B). */
@@ -55,22 +61,41 @@ public final class QuantileTransform implements Serializable {
 
     /** Fits the knots on the first {@code count} values (the input is not modified: Beam forbids mutating DoFn inputs). */
     public static QuantileTransform fit(final double[] input, final int count, final int bins, final String distribution) {
+        return fit(input, count, bins, distribution, DEFAULT_CLIP);
+    }
+
+    /** {@link #fit(double[], int, int, String)} with the probability clamp of the normal score. */
+    public static QuantileTransform fit(final double[] input, final int count, final int bins, final String distribution, final double clip) {
         if (count == 0) {
             LOG.warn("quantileTransform: no non-null values to fit; every value maps to null");
-            return new QuantileTransform(new double[0], 0, distribution);
+            return new QuantileTransform(new double[0], 0, distribution, clip);
         }
         final double[] values = Arrays.copyOf(input, count);
         Arrays.sort(values);
         final double[] knots = new double[bins + 1];
         for (int i = 0; i <= bins; i++) knots[i] = OrderStatistics.quantile((double) i / bins, values, count);
-        return new QuantileTransform(knots, count, distribution);
+        return new QuantileTransform(knots, count, distribution, clip);
+    }
+
+    /** Whether the fit saw no value: every value maps to null (a serving config loading such an artifact reads null everywhere). */
+    public boolean isEmpty() {
+        return n == 0;
+    }
+
+    /**
+     * The same knots with another probability clamp. The clamp is an apply-time parameter (the knots are the fit), so a
+     * loaded artifact takes the clip of the config that applies it — also one pinned by {@code fit.artifact.id} or
+     * fitted before the clip existed.
+     */
+    public QuantileTransform withClip(final double clip) {
+        return clip == this.clip ? this : new QuantileTransform(knots, n, distribution, clip);
     }
 
     /** The empirical CDF position of a value (or its normal score); null for missing values and an empty fit. */
     public Double transform(final Double v) {
-        if (v == null || v.isNaN() || n == 0) return null;
+        if (v == null || v.isNaN() || isEmpty()) return null;
         final double p = position(v);
-        return NORMAL.equals(distribution) ? probit(Math.min(1 - NORMAL_EPSILON, Math.max(NORMAL_EPSILON, p))) : p;
+        return NORMAL.equals(distribution) ? probit(Math.min(1 - clip, Math.max(clip, p))) : p;
     }
 
     /**
@@ -124,6 +149,7 @@ public final class QuantileTransform implements Serializable {
         json.addProperty("bins", bins());
         json.addProperty("n", n);
         json.addProperty("distribution", distribution);
+        if (NORMAL.equals(distribution)) json.addProperty("clip", clip);
         return json;
     }
 
@@ -134,7 +160,9 @@ public final class QuantileTransform implements Serializable {
         final JsonElement n = json.get("n");
         if (n == null || !n.isJsonPrimitive()) throw new IllegalStateException("quantile transform artifact lacks 'n': " + json);
         final JsonElement distribution = json.get("distribution");
-        return new QuantileTransform(knots, n.getAsLong(), distribution == null ? UNIFORM : distribution.getAsString());
+        final JsonElement clip = json.get("clip");
+        return new QuantileTransform(knots, n.getAsLong(), distribution == null ? UNIFORM : distribution.getAsString(),
+                clip == null || !clip.isJsonPrimitive() ? DEFAULT_CLIP : clip.getAsDouble());
     }
 
     public static void write(final String artifactUri, final String planHash, final String block, final QuantileTransform q) {
@@ -148,7 +176,11 @@ public final class QuantileTransform implements Serializable {
     public static QuantileTransform read(final String artifactUri, final String planHash, final String block) {
         final String path = artifactPath(artifactUri, planHash, block);
         final QuantileTransform q = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        LOG.info("loaded quantile transform artifact {} ({} knots, n={})", path, q.knots.length, q.n);
+        if (q.isEmpty()) {
+            LOG.warn("loaded quantile transform artifact {} fitted on no value (n=0): column '{}' reads null for every row; re-fit it on an input that has values (fit.artifact.refit: true)", path, block);
+        } else {
+            LOG.info("loaded quantile transform artifact {} ({} knots, n={})", path, q.knots.length, q.n);
+        }
         return q;
     }
 
