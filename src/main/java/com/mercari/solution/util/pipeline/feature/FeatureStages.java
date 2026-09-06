@@ -1014,7 +1014,7 @@ public final class FeatureStages {
     // --- quantileTransform ---------------------------------------------------------------------------
 
     /** One quantileTransform block of a fit stage, rebuilt from its output column's coordinates. */
-    record QuantileTransformSpec(String block, String column, String field, int bins, String distribution,
+    record QuantileTransformSpec(String block, String column, String field, int bins, String distribution, double clip,
                                  String artifactUri, boolean refit) implements StaticFitBlock<QuantileTransform> {
         @Override
         public String artifactPath(final String planHash) {
@@ -1061,7 +1061,9 @@ public final class FeatureStages {
             final Map<String, String> k = c.getCoordinates();
             specs.add(new QuantileTransformSpec(c.getBlock(), c.getCanonicalName(), k.get("field"),
                     Integer.parseInt(k.getOrDefault("bins", Integer.toString(QuantileTransform.DEFAULT_BINS))),
-                    k.getOrDefault("distribution", QuantileTransform.UNIFORM), k.get("artifactUri"), "true".equals(k.get("refit"))));
+                    k.getOrDefault("distribution", QuantileTransform.UNIFORM),
+                    Double.parseDouble(k.getOrDefault("clip", Double.toString(QuantileTransform.DEFAULT_CLIP))),
+                    k.get("artifactUri"), "true".equals(k.get("refit"))));
         }
         return specs;
     }
@@ -1079,7 +1081,7 @@ public final class FeatureStages {
         public void processElement(final ProcessContext c) {
             final Doubles values = c.element();
             LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", spec.block(), spec.bins(), values.size);
-            final QuantileTransform q = QuantileTransform.fit(values.values, values.size, spec.bins(), spec.distribution());
+            final QuantileTransform q = QuantileTransform.fit(values.values, values.size, spec.bins(), spec.distribution(), spec.clip());
             if (spec.artifactUri() != null) QuantileTransform.write(spec.artifactUri(), planHash, spec.block(), q);
             c.output(q);
         }

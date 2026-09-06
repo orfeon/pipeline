@@ -62,7 +62,7 @@ sources:
     keys: [...]
     fields:
       - name: <field>                      # required
-        type: string | int32 | int64 | float32 | float64 | bool | timestamp | date | ... # required
+        type: string | int32 | int64 | float32 | float64 | bool | timestamp | date | array<float64> | ... # required (array<elem>: the svd vector input)
         description: "..."
         kind: attribute | market | outcome | <free tag>
         availableAt: atEventTime | "event_time ± <duration>" | after(event) | atRowCreation
@@ -207,14 +207,18 @@ Typically the key of a following encoding.
 
 ### `type: quantileTransform` (always static)
 
-`input` (numeric), `bins` (default 100), `distribution: uniform | normal`, `fit: {artifact}`. Output
-float64 `<name>`: the value's position in the fitted distribution (0..1, interpolated between the quantile
-knots; ties read the middle of their range, also a tied run at the minimum or maximum such as a zero-inflated
-count's zeros; out of range clamps to 0 / 1) or its normal score. Missing → null.
+`input` (numeric), `bins` (default 100), `distribution: uniform | normal`, `clip` (normal only, default
+`1e-6`: F(v) is clamped to `[clip, 1 − clip]` before Φ⁻¹), `fit: {artifact}`. Output float64 `<name>`: the
+value's position in the fitted distribution (0..1, interpolated between the quantile knots; ties read the
+middle of their range, also a tied run at the minimum or maximum such as a zero-inflated count's zeros; out
+of range clamps to 0 / 1) or its normal score. Missing → null. With the default clip the fitted minimum /
+maximum read ±4.75 whatever n; set `clip: 0.001` (±3.09) when the score feeds an `expr` or an `svd`, so the
+extreme rows do not become outliers. `clip` changes the plan hash (the artifact directory).
 
 ### `type: svd` (always static)
 
-`inputs: [numeric fields]` (the vector) or `input: <array<numeric> field>` (then `rank` is required), `rank`
+`inputs: [numeric fields]` (the vector) or `input: <array field>` (an input field declared
+`type: array<float64>` in the sources contract — no feature op produces an array; then `rank` is required), `rank`
 (default min(d, 8)), `center` (default true), `standardize` (default false), `fit: {artifact}`. Output
 float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained variance. A vector with a missing
 component → null scores. An array input must have one length (other lengths are skipped, read null and are

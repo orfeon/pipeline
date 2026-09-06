@@ -168,6 +168,8 @@ public class FeatureSpec implements Serializable {
         public String method;
         public Integer bins;
         public Integer minSamplesPerBin;
+        /** quantileTransform: probability clamp of the normal score (null = the default 1e-6). */
+        public Double clip;
         public String target;
         // svd
         public Integer rank;
@@ -608,6 +610,7 @@ public class FeatureSpec implements Serializable {
         def.latentDim = Json.integer(o, "latentDim");
         def.method = Json.string(o, "method");
         def.bins = Json.integer(o, "bins");
+        def.clip = doubleOrNaN(Json.string(o, "clip")); // NaN fails the compiler's range check with quantileTransform.clip
         def.minSamplesPerBin = Json.integer(o, "minSamplesPerBin");
         def.target = Json.string(o, "target");
         def.rank = Json.integer(o, "rank");
@@ -738,6 +741,16 @@ public class FeatureSpec implements Serializable {
             }
         }
         return op;
+    }
+
+    /** A numeric parameter as a Double: null when absent, NaN when not a number (so the compiler's range check reports it). */
+    private static Double doubleOrNaN(final String text) {
+        if (text == null) return null;
+        try {
+            return Double.parseDouble(text.trim());
+        } catch (final NumberFormatException e) {
+            return Double.NaN;
+        }
     }
 
     private static Long longOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {

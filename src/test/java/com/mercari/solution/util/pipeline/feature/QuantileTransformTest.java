@@ -32,6 +32,34 @@ public class QuantileTransformTest {
     }
 
     @Test
+    public void testNormalClipBoundsTheExtremeRows() {
+        final double[] values = {200, 50, 120, 80, 60, 100};
+        // default clip 1e-6: the fitted minimum / maximum read ±Φ⁻¹(1 − 1e−6) = ±4.7534 whatever n
+        final QuantileTransform q = QuantileTransform.fit(values, values.length, 5, QuantileTransform.NORMAL);
+        Assertions.assertEquals(QuantileTransform.DEFAULT_CLIP, q.clip);
+        Assertions.assertEquals(-4.753424, q.transform(50.0), 1e-5);
+        Assertions.assertEquals(4.753424, q.transform(200.0), 1e-5);
+        Assertions.assertEquals(0.0, q.transform(90.0), 1e-12, "the median is unaffected by the clip");
+        // clip 0.01: p is clamped to [0.01, 0.99] before the probit, so the extremes read ±2.3263 and the interior is unchanged
+        final QuantileTransform clipped = QuantileTransform.fit(values, values.length, 5, QuantileTransform.NORMAL, 0.01);
+        Assertions.assertEquals(-2.326348, clipped.transform(50.0), 1e-5);
+        Assertions.assertEquals(2.326348, clipped.transform(200.0), 1e-5);
+        Assertions.assertEquals(-2.326348, clipped.transform(-1e9), 1e-5, "below the minimum clamps to the same bound");
+        Assertions.assertEquals(q.transform(90.0), clipped.transform(90.0), 1e-12);
+        Assertions.assertEquals(q.transform(60.0), clipped.transform(60.0), 1e-12, "p = 0.2 is inside the clip");
+        // the clip rides in the artifact (normal only); an artifact without it reads the default
+        final com.google.gson.JsonObject json = clipped.toJson();
+        Assertions.assertEquals(0.01, json.get("clip").getAsDouble());
+        Assertions.assertEquals(0.01, QuantileTransform.fromJson(json).clip);
+        Assertions.assertNull(QuantileTransform.fit(values, values.length, 5, QuantileTransform.UNIFORM, 0.01).toJson().get("clip"));
+        json.remove("clip");
+        Assertions.assertEquals(QuantileTransform.DEFAULT_CLIP, QuantileTransform.fromJson(json).clip);
+        // an empty fit is flagged
+        Assertions.assertTrue(QuantileTransform.fit(values, 0, 5, QuantileTransform.NORMAL).isEmpty());
+        Assertions.assertFalse(clipped.isEmpty());
+    }
+
+    @Test
     public void testTiedKnotsMapToTheMiddleOfTheirRange() {
         // a mass point at 1 covers 60 % of the distribution: knots 0, 1, 1, 1, 2 (bins 4)
         final double[] values = {0, 1, 1, 1, 2, 1, 1, 0, 2, 1};

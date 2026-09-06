@@ -110,7 +110,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   estimator, see the class javadoc), `JointFit` (`estimator: joint`: cell table → ridge / BLUP by block
   Gauss–Seidel swept coarse → fine, fold / forward variants, `<id>.joint.avro`),
   `Discretization` (quantile edges + `<block>.bins.json`), `QuantileTransform` (CDF knots
-  + probit, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → Jacobi eigendecomposition, `<block>.svd.json`), `Factorization`
+  + probit with the `clip` probability clamp, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → Jacobi eigendecomposition, `<block>.svd.json`), `Factorization`
   (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding
   levels), `Durations` (ISO-8601 + calendar periods + column tokens; **kept separate** from

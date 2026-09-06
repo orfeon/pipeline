@@ -1328,6 +1328,14 @@ public final class FeaturePlanCompiler {
         if (!List.of(QuantileTransform.UNIFORM, QuantileTransform.NORMAL).contains(distribution)) {
             diagnostics.error("quantileTransform.distribution", loc, "distribution must be uniform | normal: " + distribution);
         }
+        final double clip = def.clip == null ? QuantileTransform.DEFAULT_CLIP : def.clip;
+        if (def.clip != null) {
+            if (!(clip > 0 && clip < 0.5)) {
+                diagnostics.error("quantileTransform.clip", loc, "clip must be a probability in (0, 0.5): " + def.clip);
+            } else if (!QuantileTransform.NORMAL.equals(distribution)) {
+                diagnostics.warning("quantileTransform.clip", loc, "clip only applies to distribution: normal (the uniform position is not clamped); ignored");
+            }
+        }
         final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "quantileTransform", "the quantiles are fitted", "quantile knots fitted on the whole input");
         diagnostics.info("fit.mode.static", loc, "quantileTransform fits " + bins + " quantile intervals on the whole input" + artifactPhrase(fitSpec)
                 + (isOutcomeLike(ref) ? "; the input is outcome-like, so training rows' own outcomes shape the knots (static-fit caveat)" : ""));
@@ -1338,6 +1346,7 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("field", canonicalOf(input));
         c.coordinates.put("bins", Integer.toString(bins));
         c.coordinates.put("distribution", distribution);
+        if (def.clip != null && QuantileTransform.NORMAL.equals(distribution)) c.coordinates.put("clip", Double.toString(clip));
         if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
         if (fitSpec.refit) c.coordinates.put("refit", "true");
         addSelfInput(c, input);

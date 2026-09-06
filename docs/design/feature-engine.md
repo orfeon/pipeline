@@ -342,7 +342,8 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
 - **Format**: Avro for the encoding levels (`FitArtifact`: level / key / n / sum / sumSq +
   `<block>.manifest.json` with λ), `<block>.fm.avro` for factorization (latent vectors stored as
   big-endian `bytes` — Avro on this classpath round-trips `array<double>` at float precision),
-  `<block>.bins.json` for discretize, `<block>.quantiles.json` for quantileTransform (knots),
+  `<block>.bins.json` for discretize, `<block>.quantiles.json` for quantileTransform (knots, and the
+  probability `clip` of a normal score — an artifact without it reads the default 1e-6),
   `<block>.svd.json` for svd (mean / scale / components / variances — JSON keeps double precision, and the
   matrix is rank × d), `<block>__<keys>__<window>__<target>.joint.avro` (kind / level / key /
   value records: μ, per-level λ, effects, leaf n) for the joint estimator. Reads and writes go through
@@ -585,11 +586,21 @@ roughly linear in the input).
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
 sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
-array field); factorization `variant: bayesian` and `fit.cadence / window / warmStart`; the run-time availability
+array field); factorization `variant: bayesian` and `fit.cadence / window / warmStart`; `fit.mode: forward` for
+quantileTransform / svd (both are static-only today, so the fit sees the test period too — no label leak, but a
+drifting field is placed in a distribution it could not have been placed in at the time; svd's moments are
+block-additive and would follow `VarianceComponents.forwardSeries` directly, quantileTransform needs the
+per-block value sets merged as a prefix on one worker); the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
 sequence / population stages as fold-in merge targets (composite sorter key, §9.4.3); the prefix-scan
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries
 (spec §7 — whether sources should carry physical table references is undecided); `fit.minHistory`.
+
+**Fit-stage fan-out (performance, not correctness)**: every static-fit block is its own
+`Extract → Combine.globally → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expands
+into ~34 Dataflow steps and the stage time grows with the block count (a consumer measured 13 → 20 min on 148k
+rows against the previous config). The fix is one keyed gather per block kind and stage (`KV<block, value>` →
+`Combine.perKey` → the models as one `View.asMap`), keeping the `StaticFitBlock` contract; not done yet.
 
 ### 9.3 S1: the keyed stages' own external sort (`KeyedSpillSorter`)
 

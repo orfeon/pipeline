@@ -227,9 +227,10 @@ public class SourceContract implements Serializable {
             diagnostics.error("sources.fields.type", loc, "field.type is required");
         } else {
             try {
-                field.type = Schema.FieldType.type(Schema.Type.of(field.typeName));
+                field.type = parseType(field.typeName);
             } catch (final IllegalArgumentException e) {
-                diagnostics.error("sources.fields.type", loc, "unsupported field type: " + field.typeName);
+                diagnostics.error("sources.fields.type", loc, "unsupported field type: " + field.typeName
+                        + " (a scalar type name such as float64 / string / timestamp, or array<element type>)");
             }
         }
         field.description = Json.string(json, "description");
@@ -296,6 +297,21 @@ public class SourceContract implements Serializable {
             field.effectiveAvailableAt = field.availableAt.plus(field.ingestionLag);
         }
         return field;
+    }
+
+    /**
+     * A contract field type: a scalar type name accepted by {@link Schema.Type#of} ({@code float64}, {@code string},
+     * {@code timestamp}, ...) or {@code array<element type>} (e.g. {@code array<float64>} — the vector input of
+     * {@code type: svd}; nested arrays are not accepted). Throws {@link IllegalArgumentException} otherwise.
+     */
+    static Schema.FieldType parseType(final String typeName) {
+        final String t = typeName.trim();
+        if (t.toLowerCase().startsWith("array<") && t.endsWith(">")) {
+            final String element = t.substring("array<".length(), t.length() - 1).trim();
+            if (element.toLowerCase().startsWith("array")) throw new IllegalArgumentException("nested array type: " + typeName);
+            return Schema.FieldType.array(Schema.FieldType.type(Schema.Type.of(element)));
+        }
+        return Schema.FieldType.type(Schema.Type.of(t));
     }
 
     /** Minimal Gson helpers shared by the compile layer. */
