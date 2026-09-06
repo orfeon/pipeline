@@ -849,6 +849,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(compile(SOURCES, withEncoding(joint.replace("mode: static", "mode: fold, folds: 3, groupBy: seller"))).getDiagnostics().hasErrors());
         final FeaturePlan forward = compile(SOURCES, withEncoding(joint.replace("mode: static", "mode: forward, blocks: {bucket: month}")));
         Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        // a joint column declares weights: varianceComponents but estimates its pseudo-counts inside the solve: the
+        // fit stage's row evaluator must not request the λ estimate (under forward, that was a scan of the series)
+        final List<OutputColumn> fitColumns = forward.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit)
+                .flatMap(s -> s.columnNames().stream()).map(forward::getColumn).toList();
+        Assertions.assertTrue(fitColumns.stream().anyMatch(c -> "varianceComponents".equals(c.getCoordinates().get("weights"))), forward::describe);
+        Assertions.assertFalse(new RowEvaluator(fitColumns).needsVarianceComponents(), forward::describe);
         Assertions.assertEquals("month", column(forward, "enc__seller_id_category__e1__mean").getCoordinates().get("blockBucket"));
         final FeaturePlan expanding = compile(SOURCES, withEncoding(joint.replace("        fit: {mode: static, artifact: \"gs://bucket/features\"}\n", "")));
         Assertions.assertTrue(hasCode(expanding, "encoding.shrinkage.estimator"), expanding::describe);

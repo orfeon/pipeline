@@ -45,9 +45,13 @@ public class RowEvaluator implements Serializable {
         return lambdas == null ? Map.of() : lambdas;
     }
 
-    /** Whether any composed column of this evaluator needs variance-components pseudo-counts. */
+    /**
+     * Whether any composed column of this evaluator reads variance-components pseudo-counts from the stage's λ
+     * estimate: a lattice column (hidden {@code levels}). A joint column also declares the weights, but its
+     * pseudo-counts are estimated inside the fit's solve and never read here.
+     */
     public boolean needsVarianceComponents() {
-        return columns.stream().anyMatch(c -> "varianceComponents".equals(c.coordinates.get("weights")));
+        return columns.stream().anyMatch(c -> "varianceComponents".equals(c.coordinates.get("weights")) && c.coordinates.containsKey("levels"));
     }
 
     private Map<String, Double> lambdasFor(final OutputColumn c) {

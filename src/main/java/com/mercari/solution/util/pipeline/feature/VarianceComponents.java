@@ -146,6 +146,122 @@ public final class VarianceComponents {
         return lambdas;
     }
 
+    /** The λ per block of one forward level, as {@link #lambdasByBlockView} computes it in the pipeline. */
+    public static class LevelLambdas implements Serializable {
+        final String level;
+        final TreeMap<Long, Double> byBlock;
+
+        LevelLambdas(final String level, final TreeMap<Long, Double> byBlock) {
+            this.level = level;
+            this.byBlock = byBlock;
+        }
+    }
+
+    /** The map {@link #lambdasByBlock(Map)} builds, assembled from the pipeline's per-level results. */
+    public static Map<String, TreeMap<Long, Double>> lambdasByBlock(final Iterable<LevelLambdas> levels) {
+        final Map<String, TreeMap<Long, Double>> lambdas = new HashMap<>();
+        for (final LevelLambdas l : levels) lambdas.put(l.level, l.byBlock);
+        return lambdas;
+    }
+
+    /**
+     * fit.mode forward: the λ per (level, block) of {@link #lambdasByBlock(Map)} computed inside the pipeline — one
+     * Combine per level over the series ({@link BlockMomentsFn}: the level-wide moments at every block, kept as a
+     * step function over the keys' blocks) — gathered into one small side input (levels × blocks). No DoFn scans
+     * the series to derive λ (a scan of a map side input is one state fetch per entry on a portable runner).
+     */
+    public static PCollectionView<List<LevelLambdas>> lambdasByBlockView(final PCollection<KV<String, ForwardBlocks.Series>> series, final String label) {
+        return series
+                .apply(label + "_PerLevel", ParDo.of(new DoFn<KV<String, ForwardBlocks.Series>, KV<String, ForwardBlocks.Series>>() {
+                    @ProcessElement
+                    public void processElement(final ProcessContext c) {
+                        c.output(KV.of(FitArtifact.levelOf(c.element().getKey()), c.element().getValue()));
+                    }
+                }))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(ForwardBlocks.Series.class)))
+                .apply(label + "_BlockMoments", Combine.perKey(new BlockMomentsFn()))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(BlockMoments.class)))
+                .apply(label + "_Lambda", ParDo.of(new DoFn<KV<String, BlockMoments>, LevelLambdas>() {
+                    @ProcessElement
+                    public void processElement(final ProcessContext c) {
+                        final TreeMap<Long, Double> perBlock = new TreeMap<>();
+                        for (final Map.Entry<Long, Moments> e : c.element().getValue().byBlock.entrySet()) {
+                            final Moments m = e.getValue();
+                            final Double lambda = Shrinkage.lambdaFromMoments(m.keys, m.n, m.sum, m.sumSq, m.sumSqOverN, m.sumNSq);
+                            if (lambda != null) perBlock.put(e.getKey(), lambda);
+                        }
+                        LOG.info("varianceComponents {} (forward): lambda estimated at {} of {} blocks",
+                                c.element().getKey(), perBlock.size(), c.element().getValue().byBlock.size());
+                        c.output(new LevelLambdas(c.element().getKey(), perBlock));
+                    }
+                }))
+                .setCoder(SerializableCoder.of(LevelLambdas.class))
+                .apply(label + "_View", View.asList());
+    }
+
+    /**
+     * Level-wide moments over the keys' cumulative statistics, at every block the level's keys touch: a step function
+     * over blocks (the value at block {@code b} is the entry at the last block ≤ {@code b}; nothing before the first).
+     */
+    public static class BlockMoments implements Serializable {
+        TreeMap<Long, Moments> byBlock = new TreeMap<>();
+    }
+
+    /** One key's contribution: its prefix statistics at each of its own blocks (the same step a merge unions). */
+    static TreeMap<Long, Moments> blockMoments(final ForwardBlocks.Series series) {
+        final MomentsFn fn = new MomentsFn();
+        final TreeMap<Long, Moments> step = new TreeMap<>();
+        for (int i = 0; i < series.size(); i++) {
+            final KeyStats stats = series.statsBetween(-1, i);
+            if (stats != null) step.put(series.blockAt(i), fn.addInput(new Moments(), stats));
+        }
+        return step;
+    }
+
+    /** Sum of two step functions: the union of their blocks, each block adding the two values in force there. */
+    static TreeMap<Long, Moments> mergeBlockMoments(final TreeMap<Long, Moments> a, final TreeMap<Long, Moments> b) {
+        if (a.isEmpty()) return b;
+        if (b.isEmpty()) return a;
+        final TreeSet<Long> blocks = new TreeSet<>(a.keySet());
+        blocks.addAll(b.keySet());
+        final MomentsFn fn = new MomentsFn();
+        final TreeMap<Long, Moments> out = new TreeMap<>();
+        for (final long block : blocks) {
+            final List<Moments> parts = new ArrayList<>(2);
+            final Map.Entry<Long, Moments> fa = a.floorEntry(block), fb = b.floorEntry(block);
+            if (fa != null) parts.add(fa.getValue());
+            if (fb != null) parts.add(fb.getValue());
+            out.put(block, fn.mergeAccumulators(parts));
+        }
+        return out;
+    }
+
+    static class BlockMomentsFn extends Combine.CombineFn<ForwardBlocks.Series, BlockMoments, BlockMoments> {
+        @Override
+        public BlockMoments createAccumulator() { return new BlockMoments(); }
+
+        @Override
+        public BlockMoments addInput(final BlockMoments acc, final ForwardBlocks.Series series) {
+            acc.byBlock = mergeBlockMoments(acc.byBlock, blockMoments(series));
+            return acc;
+        }
+
+        @Override
+        public BlockMoments mergeAccumulators(final Iterable<BlockMoments> accs) {
+            final BlockMoments out = new BlockMoments();
+            for (final BlockMoments a : accs) out.byBlock = mergeBlockMoments(out.byBlock, a.byBlock);
+            return out;
+        }
+
+        @Override
+        public BlockMoments extractOutput(final BlockMoments acc) { return acc; }
+
+        @Override
+        public Coder<BlockMoments> getAccumulatorCoder(final CoderRegistry registry, final Coder<ForwardBlocks.Series> inputCoder) {
+            return SerializableCoder.of(BlockMoments.class);
+        }
+    }
+
     static class ForwardExtractDoFn extends DoFn<MElement, KV<String, Double>> {
         private final List<ForwardSpec> specs;
 

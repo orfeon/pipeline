@@ -1353,6 +1353,49 @@ public class FeatureTransformTest {
         Assertions.assertTrue(manifest.contains("lambdasByBlock"), manifest);
     }
 
+    /** Rows collected by {@link #testForwardFitVarianceComponents} (the assertion needs the manifest written by the same run). */
+    private static final Map<String, Map<String, Object>> FORWARD_VC_ROWS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * fit.mode forward with variance-components weights: the λ of the row's usable block comes from the per-level
+     * Combine ({@code lambdasByBlockView}) — the same values the artifact manifest records — so
+     * {@code effectiveN = n + λ(block)} (or {@code n + priorWeight} where the block has no estimate).
+     */
+    @Test
+    public void testForwardFitVarianceComponents() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = forwardConfig(dir, "").replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {weights: varianceComponents, priorWeight: 1, output: [composed, effectiveN]}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        FORWARD_VC_ROWS.clear();
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) FORWARD_VC_ROWS.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row.asPrimitiveMap());
+            return null;
+        });
+        pipeline.run();
+        Assertions.assertEquals(6, FORWARD_VC_ROWS.size());
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject manifest = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(new java.io.File(files[0], "enc.manifest.json").toPath())).getAsJsonObject();
+        final com.google.gson.JsonObject byBlock = manifest.getAsJsonObject("lambdasByBlock").getAsJsonObject("enc__seller_id__e2__n");
+        Assertions.assertNotNull(byBlock, manifest::toString);
+        // D (Feb 1) reads the sold level up to block 2872 (A, B, C of s1: n = 3) with the λ in force at that block
+        final java.util.TreeMap<Long, Double> lambdas = new java.util.TreeMap<>();
+        for (final Map.Entry<String, com.google.gson.JsonElement> e : byBlock.entrySet()) lambdas.put(Long.parseLong(e.getKey()), e.getValue().getAsDouble());
+        final Map.Entry<Long, Double> inForce = lambdas.floorEntry(2872L);
+        Assertions.assertNotNull(inForce, lambdas::toString);
+        // the seller means at that block are closer than the within-seller noise: τ² truncates to 0, λ = ∞ (full
+        // shrinkage); priorWeight 1 would have given (2 + 0.5) / 4 instead of the leave-node-out parent mean
+        Assertions.assertTrue(Double.isInfinite(inForce.getValue()), lambdas::toString);
+        final Map<String, Object> d = FORWARD_VC_ROWS.get("D/s1");
+        Assertions.assertEquals(0.5, ((Number) d.get("f_enc__seller_id__e2__mean")).doubleValue(), 1e-9, d::toString);
+        // effectiveN under full shrinkage = own n (3) + the parent's effective n (s2 at A and C: 2)
+        Assertions.assertEquals(5.0, ((Number) d.get("f_enc__seller_id__e2__mean__neff")).doubleValue(), 1e-9, d::toString);
+        // A reads nothing (no usable block): no estimate at all
+        Assertions.assertNull(FORWARD_VC_ROWS.get("A/s1").get("f_enc__seller_id__e2__mean"));
+    }
+
     @Test
     public void testForwardFitMinBlocks() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
