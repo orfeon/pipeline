@@ -12,6 +12,7 @@ import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.DoubleCoder;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
@@ -674,41 +675,48 @@ public final class FeatureStages {
         PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView = null;
         PCollectionView<Map<String, Double>> lambdasView = null;
         final List<PCollectionView<?>> sideInputs = new ArrayList<>();
+        // a lattice column with variance-components weights reads λ from the stage's estimate; a joint column
+        // estimates its pseudo-counts inside the fit's solve and never reads them here
+        final boolean needsLambdas = evaluator.row.needsVarianceComponents();
         if (!fitted.isEmpty()) {
             final List<VarianceComponents.LevelSpec> specs = new ArrayList<>();
             for (final FitLevel level : fitted) specs.add(level.spec());
             final PCollection<KV<String, VarianceComponents.KeyStats>> perKey = VarianceComponents.perKeyStats(fitInput, specs, label + "_Fit");
             statsView = perKey.apply(label + "_StatsView", View.asMap());
             sideInputs.add(statsView);
-            if (evaluator.row.needsVarianceComponents()) {
+            if (needsLambdas) {
                 lambdasView = VarianceComponents.lambdasFromKeyStats(perKey, label + "_Vc");
                 sideInputs.add(lambdasView);
             }
-            for (final Map.Entry<String, String> e : writeBlocks.entrySet()) {
-                final List<String> blockLevels = new ArrayList<>();
-                for (final FitLevel level : fitted) if (level.block().equals(e.getKey())) blockLevels.add(level.id());
-                input.getPipeline()
-                        .apply(label + "_Write_" + e.getKey() + "_Trigger", Create.of(e.getKey()))
-                        .apply(label + "_Write_" + e.getKey(), ParDo
-                                .of(new WriteArtifactDoFn(e.getValue(), planHash, e.getKey(), blockLevels, statsView, null))
-                                .withSideInputs(statsView));
-            }
+            if (!writeBlocks.isEmpty()) writeArtifacts(perKey, writeBlocks, fitted, planHash, null, label + "_WriteStatic");
         }
-        // fit.mode forward: cumulative per-block statistics per (level, key) — a parallel Combine, no time-ordered replay
-        PCollectionView<Map<String, ForwardBlocks.Series>> seriesView = null;
+        // fit.mode forward: cumulative per-block statistics per (level, key) — a parallel Combine, no time-ordered replay.
+        // The series travel as a list side input read once per DoFn instance (see FitApplyDoFn), λ per (level, block)
+        // and the artifacts' totals are derived from the series PCollection: nothing scans or probes a map side input
+        // entry by entry, which is one state fetch per entry on a portable runner (Dataflow Runner v2, prism)
+        PCollectionView<List<KV<String, ForwardBlocks.Series>>> seriesView = null;
+        PCollectionView<List<VarianceComponents.LevelLambdas>> forwardLambdasView = null;
         if (!forward.isEmpty()) {
             final List<VarianceComponents.ForwardSpec> specs = new ArrayList<>();
             for (final FitLevel level : forward) specs.add(level.forwardSpec());
-            seriesView = VarianceComponents.forwardSeries(fitInput, specs, label + "_Forward").apply(label + "_ForwardView", View.asMap());
+            final PCollection<KV<String, ForwardBlocks.Series>> series = VarianceComponents.forwardSeries(fitInput, specs, label + "_Forward");
+            seriesView = series.apply(label + "_ForwardView", View.asList());
             sideInputs.add(seriesView);
-            for (final Map.Entry<String, String> e : writeForwardBlocks.entrySet()) {
-                final List<String> blockLevels = new ArrayList<>();
-                for (final FitLevel level : forward) if (level.block().equals(e.getKey())) blockLevels.add(level.id());
-                input.getPipeline()
-                        .apply(label + "_Write_" + e.getKey() + "_Trigger", Create.of(e.getKey()))
-                        .apply(label + "_Write_" + e.getKey(), ParDo
-                                .of(new WriteArtifactDoFn(e.getValue(), planHash, e.getKey(), blockLevels, null, seriesView))
-                                .withSideInputs(seriesView));
+            if (needsLambdas || !writeForwardBlocks.isEmpty()) {
+                forwardLambdasView = VarianceComponents.lambdasByBlockView(series, label + "_ForwardVc");
+            }
+            if (needsLambdas) sideInputs.add(forwardLambdasView);
+            if (!writeForwardBlocks.isEmpty()) {
+                final PCollection<KV<String, VarianceComponents.KeyStats>> totals = series
+                        .apply(label + "_ForwardTotals", ParDo.of(new DoFn<KV<String, ForwardBlocks.Series>, KV<String, VarianceComponents.KeyStats>>() {
+                            @ProcessElement
+                            public void processElement(final ProcessContext c) {
+                                final VarianceComponents.KeyStats t = c.element().getValue().totals();
+                                if (t != null) c.output(KV.of(c.element().getKey(), t));
+                            }
+                        }))
+                        .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(VarianceComponents.KeyStats.class)));
+                writeArtifacts(totals, writeForwardBlocks, forward, planHash, forwardLambdasView, label + "_WriteForward");
             }
         }
         // static-fit blocks (see staticFitBlocks): fitted on one worker over the whole input, or loaded
@@ -749,7 +757,7 @@ public final class FeatureStages {
         }
 
         return input.apply(label, ParDo
-                .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, seriesView, predictOffsetMillis, loadBlocks, planHash,
+                .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, seriesView, needsLambdas ? forwardLambdasView : null, predictOffsetMillis, loadBlocks, planHash,
                         blocks, blockViews, blockLoad, loggings, failFast, failureTag))
                 .withSideInputs(sideInputs)
                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
@@ -1283,7 +1291,7 @@ public final class FeatureStages {
                     .apply(prefix + "_Cells", ParDo.of(new ExtractCellsDoFn(this)))
                     .setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()))
                     .apply(prefix + "_PerCell", Combine.perKey(new VarianceComponents.KeyStatsFn()))
-                    .setCoder(KvCoder.of(StringUtf8Coder.of(), org.apache.beam.sdk.coders.SerializableCoder.of(VarianceComponents.KeyStats.class)))
+                    .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(VarianceComponents.KeyStats.class)))
                     .apply(prefix + "_Entries", ParDo.of(new DoFn<KV<String, VarianceComponents.KeyStats>, JointFit.Cell>() {
                         @ProcessElement
                         public void processElement(final ProcessContext c) {
@@ -1517,52 +1525,85 @@ public final class FeatureStages {
 
     // --- apply -------------------------------------------------------------------------------------
 
-    static class WriteArtifactDoFn extends DoFn<String, Void> {
-        private final String uri;
-        private final String planHash;
-        private final String block;
-        private final List<String> levels;
-        private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
-        /** fit.mode forward: the totals come from the series, and the manifest records λ per block */
-        private final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView;
+    /**
+     * Writes one artifact per block from the fitted per-key statistics: the entries of a block's levels are grouped
+     * under the block (plus an empty marker per block, so an empty input still writes its artifact) and written by
+     * one DoFn call. The statistics arrive as a gathered PCollection, never by scanning the stage's map side input
+     * (one state fetch per entry on a portable runner).
+     *
+     * @param lambdasView fit.mode forward: the λ per (level, block) recorded in the manifest, or null
+     */
+    private static void writeArtifacts(final PCollection<KV<String, VarianceComponents.KeyStats>> stats, final Map<String, String> uris,
+                                       final List<FitLevel> levels, final String planHash,
+                                       final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView, final String label) {
+        final Map<String, String> blockOfLevel = new HashMap<>();
+        final Map<String, List<String>> levelsOfBlock = new LinkedHashMap<>();
+        for (final FitLevel level : levels) {
+            if (!uris.containsKey(level.block())) continue;
+            blockOfLevel.put(level.id(), level.block());
+            levelsOfBlock.computeIfAbsent(level.block(), b -> new ArrayList<>()).add(level.id());
+        }
+        final Coder<KV<String, KV<String, VarianceComponents.KeyStats>>> coder = KvCoder.of(StringUtf8Coder.of(),
+                KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(VarianceComponents.KeyStats.class)));
+        final PCollection<KV<String, KV<String, VarianceComponents.KeyStats>>> entries = stats
+                .apply(label + "_Select", ParDo.of(new DoFn<KV<String, VarianceComponents.KeyStats>, KV<String, KV<String, VarianceComponents.KeyStats>>>() {
+                    @ProcessElement
+                    public void processElement(final ProcessContext c) {
+                        // per-fold tags (fit.mode fold) belong to no level and stay out of the artifact
+                        final String block = blockOfLevel.get(FitArtifact.levelOf(c.element().getKey()));
+                        if (block != null) c.output(KV.of(block, c.element()));
+                    }
+                }))
+                .setCoder(coder);
+        final List<KV<String, KV<String, VarianceComponents.KeyStats>>> markers = new ArrayList<>();
+        for (final String block : uris.keySet()) markers.add(KV.of(block, KV.of("", new VarianceComponents.KeyStats())));
+        final PCollection<KV<String, KV<String, VarianceComponents.KeyStats>>> marker = stats.getPipeline()
+                .apply(label + "_Marker", Create.of(markers).withCoder(coder));
+        PCollectionList.of(entries).and(marker)
+                .apply(label + "_Flatten", Flatten.pCollections())
+                .apply(label + "_Group", GroupByKey.create())
+                .apply(label, ParDo
+                        .of(new WriteArtifactDoFn(uris, levelsOfBlock, planHash, lambdasView))
+                        .withSideInputs(lambdasView == null ? List.of() : List.of(lambdasView)));
+    }
 
-        WriteArtifactDoFn(final String uri, final String planHash, final String block, final List<String> levels,
-                          final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
-                          final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView) {
-            this.uri = uri;
-            this.planHash = planHash;
-            this.block = block;
+    /** One element per block: the entries of its levels ({@link #writeArtifacts}); the empty key is the marker. */
+    static class WriteArtifactDoFn extends DoFn<KV<String, Iterable<KV<String, VarianceComponents.KeyStats>>>, Void> {
+        private final Map<String, String> uris;
+        private final Map<String, List<String>> levels;
+        private final String planHash;
+        /** fit.mode forward: the manifest records λ per block of the block's levels */
+        private final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView;
+
+        WriteArtifactDoFn(final Map<String, String> uris, final Map<String, List<String>> levels, final String planHash,
+                          final PCollectionView<List<VarianceComponents.LevelLambdas>> lambdasView) {
+            this.uris = uris;
             this.levels = levels;
-            this.statsView = statsView;
-            this.seriesView = seriesView;
+            this.planHash = planHash;
+            this.lambdasView = lambdasView;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
+            final String block = c.element().getKey();
+            final List<String> blockLevels = levels.getOrDefault(block, List.of());
             final Map<String, VarianceComponents.KeyStats> blockStats = new HashMap<>();
+            for (final KV<String, VarianceComponents.KeyStats> e : c.element().getValue()) {
+                if (!e.getKey().isEmpty()) blockStats.put(e.getKey(), e.getValue());
+            }
             com.google.gson.JsonObject extra = null;
-            if (seriesView != null) {
-                final Map<String, ForwardBlocks.Series> all = c.sideInput(seriesView);
-                final Map<String, ForwardBlocks.Series> mine = new HashMap<>();
-                for (final Map.Entry<String, ForwardBlocks.Series> e : all.entrySet()) {
-                    if (levels.contains(FitArtifact.levelOf(e.getKey()))) mine.put(e.getKey(), e.getValue());
-                }
-                blockStats.putAll(VarianceComponents.forwardTotals(mine));
+            if (lambdasView != null) {
                 extra = new com.google.gson.JsonObject();
                 final com.google.gson.JsonObject byBlock = new com.google.gson.JsonObject();
-                for (final Map.Entry<String, TreeMap<Long, Double>> e : VarianceComponents.lambdasByBlock(mine).entrySet()) {
+                for (final VarianceComponents.LevelLambdas l : c.sideInput(lambdasView)) {
+                    if (!blockLevels.contains(l.level)) continue;
                     final com.google.gson.JsonObject perBlock = new com.google.gson.JsonObject();
-                    for (final Map.Entry<Long, Double> b : e.getValue().entrySet()) perBlock.addProperty(Long.toString(b.getKey()), b.getValue());
-                    byBlock.add(e.getKey(), perBlock);
+                    for (final Map.Entry<Long, Double> b : l.byBlock.entrySet()) perBlock.addProperty(Long.toString(b.getKey()), b.getValue());
+                    byBlock.add(l.level, perBlock);
                 }
                 extra.add("lambdasByBlock", byBlock);
-            } else {
-                final Map<String, VarianceComponents.KeyStats> all = c.sideInput(statsView);
-                for (final Map.Entry<String, VarianceComponents.KeyStats> e : all.entrySet()) {
-                    if (levels.contains(FitArtifact.levelOf(e.getKey()))) blockStats.put(e.getKey(), e.getValue());
-                }
             }
-            FitArtifact.write(uri, planHash, block, blockStats, levels, extra);
+            FitArtifact.write(uris.get(block), planHash, block, blockStats, blockLevels, extra);
         }
     }
 
@@ -1573,8 +1614,10 @@ public final class FeatureStages {
 
         private final List<FitLevel> levels;
         private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
-        /** fit.mode forward: cumulative per-block statistics per (level, key) */
-        private final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView;
+        /** fit.mode forward: cumulative per-block statistics per (level, key), read once per instance into {@link #forwardSeries} */
+        private final PCollectionView<List<KV<String, ForwardBlocks.Series>>> seriesView;
+        /** fit.mode forward: λ per level per block (present when a lattice column of the stage reads variance components) */
+        private final PCollectionView<List<VarianceComponents.LevelLambdas>> forwardLambdasView;
         private final long predictOffsetMillis;
         private final Map<String, String> loadBlocks;
         private final String planHash;
@@ -1584,13 +1627,19 @@ public final class FeatureStages {
         private transient Map<String, VarianceComponents.KeyStats> loaded;
         private transient Map<String, Double> loadedLambdas;
         private transient Map<String, Object> loadedModels;
-        /** fit.mode forward: λ per level per block, derived once from the series side input (immutable in a batch run) */
+        /**
+         * fit.mode forward: the series by entry and λ per level per block, each read once per DoFn instance from its
+         * list side input (immutable in a batch run). A per-row lookup into a map side input would be one state
+         * fetch per (row, level) on a portable runner; the in-memory index makes it a hash lookup.
+         */
+        private transient Map<String, ForwardBlocks.Series> forwardSeries;
         private transient Map<String, TreeMap<Long, Double>> forwardLambdas;
 
         FitApplyDoFn(final StageEvaluator evaluator, final List<FitLevel> levels,
                      final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
                      final PCollectionView<Map<String, Double>> lambdas,
-                     final PCollectionView<Map<String, ForwardBlocks.Series>> seriesView, final long predictOffsetMillis,
+                     final PCollectionView<List<KV<String, ForwardBlocks.Series>>> seriesView,
+                     final PCollectionView<List<VarianceComponents.LevelLambdas>> forwardLambdasView, final long predictOffsetMillis,
                      final Map<String, String> loadBlocks, final String planHash,
                      final List<StaticFitBlock<?>> blocks, final Map<String, PCollectionView<?>> blockViews, final Set<String> blockLoad,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
@@ -1598,6 +1647,7 @@ public final class FeatureStages {
             this.levels = levels;
             this.statsView = statsView;
             this.seriesView = seriesView;
+            this.forwardLambdasView = forwardLambdasView;
             this.predictOffsetMillis = predictOffsetMillis;
             this.loadBlocks = loadBlocks;
             this.planHash = planHash;
@@ -1669,10 +1719,16 @@ public final class FeatureStages {
             try {
                 prepare(c);
                 final Map<String, VarianceComponents.KeyStats> fitted = statsView == null ? Map.of() : c.sideInput(statsView);
-                final Map<String, ForwardBlocks.Series> series = seriesView == null ? Map.of() : c.sideInput(seriesView);
-                if (seriesView != null && forwardLambdas == null && evaluator.row.needsVarianceComponents()) {
-                    forwardLambdas = VarianceComponents.lambdasByBlock(series);
+                if (seriesView != null && forwardSeries == null) {
+                    final Map<String, ForwardBlocks.Series> index = new HashMap<>();
+                    for (final KV<String, ForwardBlocks.Series> e : c.sideInput(seriesView)) index.put(e.getKey(), e.getValue());
+                    forwardSeries = index;
+                    LOG.info("feature fit: forward series indexed ({} entries)", index.size());
                 }
+                if (forwardLambdasView != null && forwardLambdas == null) {
+                    forwardLambdas = VarianceComponents.lambdasByBlock(c.sideInput(forwardLambdasView));
+                }
+                final Map<String, ForwardBlocks.Series> series = forwardSeries == null ? Map.of() : forwardSeries;
                 final Map<String, Object> values = input.asPrimitiveMap();
                 Map<String, Double> rowLambdas = null;
                 for (final FitLevel level : levels) {
