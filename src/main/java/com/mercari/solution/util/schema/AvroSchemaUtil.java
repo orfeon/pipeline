@@ -38,6 +38,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -503,6 +504,112 @@ public class AvroSchemaUtil {
     /**
      * Extract child Avro schema from nullable union Avro {@link Schema}.
      *
+     * Re-maps a record onto a writer schema that differs from the record's own, so that a value whose Java class the
+     * writer schema cannot resolve is converted instead of rejected by the datum writer: a map value (an Avro map
+     * field of the record) is written as an array of {@code {key, value}} records — what a BigQuery
+     * TableSchema-derived Avro schema declares for a map — recursively through records, arrays, maps and unions.
+     * Values the writer schema already accepts pass through unchanged; a record whose schema is the writer schema
+     * is returned as is.
+     */
+    public static GenericRecord toWriterSchema(final Schema writer, final GenericRecord record) {
+        if (record == null || record.getSchema() == writer || !needsWriterRemap(writer, record.getSchema())) {
+            return record;
+        }
+        final GenericRecordBuilder builder = new GenericRecordBuilder(writer);
+        for (final Schema.Field field : writer.getFields()) {
+            final Object value = record.hasField(field.name()) ? record.get(field.name()) : null;
+            builder.set(field, toWriterValue(field.schema(), value));
+        }
+        return builder.build();
+    }
+
+    private static Object toWriterValue(final Schema schema, final Object value) {
+        if (value == null) {
+            return null;
+        }
+        return switch (schema.getType()) {
+            case UNION -> toWriterValue(unnestUnion(schema), value);
+            case RECORD -> value instanceof GenericRecord record ? toWriterSchema(schema, record) : value;
+            case ARRAY -> {
+                final Schema elementSchema = unnestUnion(schema.getElementType());
+                if (value instanceof Map<?, ?> map && isKeyValueRecord(elementSchema)) {
+                    final List<Object> entries = new ArrayList<>(map.size());
+                    for (final Map.Entry<?, ?> e : map.entrySet()) {
+                        final GenericRecordBuilder entry = new GenericRecordBuilder(elementSchema);
+                        entry.set("key", e.getKey() == null ? "" : e.getKey().toString());
+                        entry.set("value", toWriterValue(elementSchema.getField("value").schema(), e.getValue()));
+                        entries.add(entry.build());
+                    }
+                    yield entries;
+                }
+                if (value instanceof Collection<?> values) {
+                    final List<Object> out = new ArrayList<>(values.size());
+                    for (final Object v : values) {
+                        out.add(toWriterValue(schema.getElementType(), v));
+                    }
+                    yield out;
+                }
+                yield value;
+            }
+            case MAP -> {
+                if (!(value instanceof Map<?, ?> map)) {
+                    yield value;
+                }
+                final Map<Object, Object> out = new HashMap<>();
+                for (final Map.Entry<?, ?> e : map.entrySet()) {
+                    out.put(e.getKey(), toWriterValue(schema.getValueType(), e.getValue()));
+                }
+                yield out;
+            }
+            default -> value;
+        };
+    }
+
+    /** Per (writer, record schema): whether any map of the record faces a key/value array of the writer. */
+    private static final Map<Schema, Map<Schema, Boolean>> WRITER_REMAP = new ConcurrentHashMap<>();
+
+    /**
+     * Whether a record of {@code source} needs {@link #toWriterSchema} against {@code writer}: somewhere a map field
+     * of the source faces an array of {@code {key, value}} records. Decided once per schema pair (equality-keyed:
+     * a writer is created per destination and bundle, the record schema per coder) so the per-row cost of the
+     * common no-map case is two hash lookups.
+     */
+    static boolean needsWriterRemap(final Schema writer, final Schema source) {
+        return WRITER_REMAP
+                .computeIfAbsent(writer, w -> new ConcurrentHashMap<>())
+                .computeIfAbsent(source, s -> mapFacesKeyValueArray(writer, s));
+    }
+
+    private static boolean mapFacesKeyValueArray(final Schema writer, final Schema source) {
+        final Schema w = unnestUnion(writer), s = unnestUnion(source);
+        return switch (w.getType()) {
+            case RECORD -> {
+                if (!Schema.Type.RECORD.equals(s.getType())) yield false;
+                for (final Schema.Field field : w.getFields()) {
+                    final Schema.Field sourceField = s.getField(field.name());
+                    if (sourceField != null && mapFacesKeyValueArray(field.schema(), sourceField.schema())) yield true;
+                }
+                yield false;
+            }
+            case ARRAY -> switch (s.getType()) {
+                case MAP -> isKeyValueRecord(unnestUnion(w.getElementType()));
+                case ARRAY -> mapFacesKeyValueArray(w.getElementType(), s.getElementType());
+                default -> false;
+            };
+            case MAP -> Schema.Type.MAP.equals(s.getType()) && mapFacesKeyValueArray(w.getValueType(), s.getValueType());
+            default -> false;
+        };
+    }
+
+    /** A record of exactly {@code key} and {@code value}: the shape a map takes in a BigQuery TableSchema. */
+    public static boolean isKeyValueRecord(final Schema schema) {
+        return Schema.Type.RECORD.equals(schema.getType())
+                && schema.getFields().size() == 2
+                && schema.getField("key") != null
+                && schema.getField("value") != null;
+    }
+
+    /**
      * @param schema Avro Schema object.
      * @return Child Avro schema or input schema if not union schema.
      */
