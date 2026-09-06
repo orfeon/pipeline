@@ -321,8 +321,8 @@ public final class FeatureStages {
 
     /**
      * Every static-fit block among the columns, rebuilt from their coordinates — the single registry of the
-     * static-fit population types (factorization, discretize, quantileTransform, svd): a new type is added here
-     * and nowhere else.
+     * static-fit population types (factorization, discretize, quantileTransform, svd) and the joint estimator
+     * models of an encoding block: a new type is added here and nowhere else.
      */
     static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
         final List<StaticFitBlock<?>> blocks = new ArrayList<>();
@@ -330,6 +330,7 @@ public final class FeatureStages {
         blocks.addAll(discretizeSpecs(columns));
         blocks.addAll(quantileTransformSpecs(columns));
         blocks.addAll(svdSpecs(columns));
+        blocks.addAll(jointSpecs(columns));
         return blocks;
     }
 
@@ -1231,6 +1232,186 @@ public final class FeatureStages {
                     spec.block(), svd.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
             if (spec.artifactUri() != null) Svd.write(spec.artifactUri(), planHash, spec.block(), svd);
             c.output(svd);
+        }
+    }
+
+    // --- joint (estimator: joint) -----------------------------------------------------------------
+
+    /**
+     * One joint-estimator model of a fit stage — a keySet × window × target of an encoding block — rebuilt
+     * from its {@code joint} columns' coordinates: the lattice levels, the target (minus offset), the scale
+     * and pseudo-count rule, and the fold / forward variant it is fitted under. The cells (the cross of every
+     * level's key fields) are aggregated per key in parallel and solved on one worker ({@link JointFit}).
+     */
+    record JointSpec(String id, List<JointFit.Level> levels, String field, String offsetColumn, Shrinkage.Scale scale,
+                     String weights, double priorWeight, List<String> foldKeys, int folds, Forward forward, long predictOffsetMillis,
+                     String artifactUri, boolean refit, List<OutputColumn> columns) implements StaticFitBlock<JointFit> {
+        @Override
+        public String block() {
+            return id;
+        }
+
+        @Override
+        public String artifactPath(final String planHash) {
+            return JointFit.artifactPath(artifactUri, planHash, id);
+        }
+
+        /** fold / forward solutions are always re-fitted: the artifact holds the whole-input solution only. */
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return foldKeys == null && forward == null && JointFit.exists(artifactUri, planHash, id);
+        }
+
+        @Override
+        public JointFit readArtifact(final String planHash) {
+            return JointFit.read(artifactUri, planHash, id, levels, scale);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            final List<String> inputs = new ArrayList<>(JointFit.cellKeysOf(levels));
+            inputs.add(field);
+            if (offsetColumn != null) inputs.add(offsetColumn);
+            return inputs;
+        }
+
+        /** Per-cell sufficient statistics in parallel, gathered on one worker for the solve. */
+        @Override
+        public PCollectionView<List<JointFit>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            final String prefix = label + "_Joint_" + id;
+            return fitInput
+                    .apply(prefix + "_Cells", ParDo.of(new ExtractCellsDoFn(this)))
+                    .setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()))
+                    .apply(prefix + "_PerCell", Combine.perKey(new VarianceComponents.KeyStatsFn()))
+                    .setCoder(KvCoder.of(StringUtf8Coder.of(), org.apache.beam.sdk.coders.SerializableCoder.of(VarianceComponents.KeyStats.class)))
+                    .apply(prefix + "_Entries", ParDo.of(new DoFn<KV<String, VarianceComponents.KeyStats>, JointFit.Cell>() {
+                        @ProcessElement
+                        public void processElement(final ProcessContext c) {
+                            final VarianceComponents.KeyStats s = c.element().getValue();
+                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq));
+                        }
+                    }))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(JointFit.Cell.class))
+                    .apply(prefix + "_Gather", Combine.globally(new GatherFn<JointFit.Cell>()).withoutDefaults())
+                    .apply(prefix + "_Fit", ParDo.of(new FitJointDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(JointFit.class))
+                    .apply(prefix + "_View", View.asList());
+        }
+
+        @Override
+        public void apply(final JointFit model, final Map<String, Object> values) {
+            JointFit.Solution solution = null;
+            if (model != null) {
+                Integer fold = null;
+                Long usable = null;
+                if (foldKeys != null) {
+                    final String unit = FeatureValues.key(values, foldKeys);
+                    fold = unit == null ? null : VarianceComponents.foldOf(unit, folds);
+                }
+                if (forward != null) {
+                    final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
+                    usable = eventMillis == null ? null : forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
+                }
+                solution = model.solutionFor(fold, usable, forward == null ? 1 : forward.minBlocks());
+            }
+            for (final OutputColumn col : columns) {
+                Object v = null;
+                if (solution != null) {
+                    v = switch (col.getCoordinates().get("kind")) {
+                        case "deviation" -> model.effect(solution, Integer.parseInt(col.getCoordinates().get("level")), values);
+                        case "effectiveN" -> model.effectiveN(solution, values);
+                        default -> model.estimate(solution, values);
+                    };
+                }
+                values.put(col.getCanonicalName(), v);
+            }
+        }
+    }
+
+    static List<JointSpec> jointSpecs(final List<OutputColumn> stageColumns) {
+        final Map<String, List<OutputColumn>> groups = new LinkedHashMap<>();
+        for (final OutputColumn c : stageColumns) {
+            if ("joint".equals(c.getOperator())) groups.computeIfAbsent(c.getCoordinates().get("joint"), j -> new ArrayList<>()).add(c);
+        }
+        final List<JointSpec> specs = new ArrayList<>();
+        for (final Map.Entry<String, List<OutputColumn>> e : groups.entrySet()) {
+            final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final String foldKeys = k.get("foldKeys");
+            specs.add(new JointSpec(e.getKey(), JointFit.parseLevels(k.get("jointLevels")), k.get("field"),
+                    k.containsKey("offset") ? "__baseline_" + k.get("offset") : null,
+                    Shrinkage.Scale.valueOf(k.get("scale")), k.get("weights"), Double.parseDouble(k.get("priorWeight")),
+                    foldKeys != null ? List.of(foldKeys.split(",")) : null,
+                    foldKeys != null ? Integer.parseInt(k.get("folds")) : 0,
+                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
+                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
+        }
+        return specs;
+    }
+
+    /** One (cell, y) per row — plus the fold-tagged part under fold, or keyed by the row's block under forward. */
+    static class ExtractCellsDoFn extends DoFn<MElement, KV<String, Double>> {
+        private final JointSpec spec;
+        private final List<String> cellKeys;
+        /** The leaf level's key fields: a row without them has no estimate, so it has no cell either. */
+        private final List<String> leafKeys;
+
+        ExtractCellsDoFn(final JointSpec spec) {
+            this.spec = spec;
+            this.cellKeys = JointFit.cellKeysOf(spec.levels());
+            final List<JointFit.Level> effects = JointFit.effectLevelsOf(spec.levels());
+            this.leafKeys = effects.isEmpty() ? List.of() : effects.get(0).keys();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Map<String, Object> row = element.asPrimitiveMap();
+            Double y = FeatureValues.toDouble(row.get(spec.field()));
+            if (y == null || y.isNaN()) return;
+            if (spec.offsetColumn() != null) {
+                final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
+                if (b == null || b.isNaN()) return;
+                y -= b;
+            }
+            // the leaf key must be present (as at apply time); a null coarser key leaves the row in the cells of the
+            // levels it has and out of that level's contexts — the same per-level rule as the other estimators
+            if (FeatureValues.key(row, leafKeys) == null) return;
+            final String cell = FeatureValues.keyWithNulls(row, cellKeys);
+            if (spec.forward() != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
+                if (millis == null) return;
+                c.output(KV.of(JointFit.blockEntry(cell, spec.forward().blocks().indexOf(millis)), y));
+                return;
+            }
+            c.output(KV.of(cell, y));
+            if (spec.foldKeys() != null) {
+                final String unit = FeatureValues.key(row, spec.foldKeys());
+                if (unit != null) c.output(KV.of(JointFit.foldEntry(VarianceComponents.foldOf(unit, spec.folds()), cell), y));
+            }
+        }
+    }
+
+    static class FitJointDoFn extends DoFn<ArrayList<JointFit.Cell>, JointFit> {
+        private final JointSpec spec;
+        private final String planHash;
+
+        FitJointDoFn(final JointSpec spec, final String planHash) {
+            this.spec = spec;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final ArrayList<JointFit.Cell> entries = c.element();
+            LOG.info("joint {}: solving {} on {} aggregation entries", spec.id(), JointFit.encodeLevels(spec.levels()), entries.size());
+            final JointFit model = JointFit.fit(spec.levels(), spec.scale(), spec.weights(), spec.priorWeight(), entries,
+                    spec.foldKeys() == null ? 0 : spec.folds(), spec.forward() != null, spec.forward() == null ? 0 : spec.forward().windowBlocks());
+            // fold / forward re-fit every run but write the whole-input solution once (refit: true overwrites)
+            if (spec.artifactUri() != null && (spec.refit() || !JointFit.exists(spec.artifactUri(), planHash, spec.id()))) {
+                JointFit.write(spec.artifactUri(), planHash, spec.id(), model);
+            }
+            c.output(model);
         }
     }
 

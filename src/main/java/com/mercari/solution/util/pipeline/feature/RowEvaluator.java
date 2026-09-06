@@ -70,7 +70,8 @@ public class RowEvaluator implements Serializable {
                     shrinkages.put(c.canonicalName, Shrinkage.of(
                             Shrinkage.Scale.valueOf(c.coordinates.get("scale")),
                             Double.parseDouble(c.coordinates.get("priorWeight")),
-                            Boolean.parseBoolean(c.coordinates.get("leaveNodeOut"))));
+                            Boolean.parseBoolean(c.coordinates.get("leaveNodeOut")),
+                            c.coordinates.containsKey("family") ? Shrinkage.Family.valueOf(c.coordinates.get("family")) : null));
                 }
             }
         }
@@ -153,14 +154,25 @@ public class RowEvaluator implements Serializable {
                     default -> throw new IllegalStateException("unsupported static stat: " + c.coordinates.get("stat"));
                 };
             }
-            case "compose" -> shrinkages.get(c.canonicalName).compose(row, lattices.get(c.canonicalName), lambdasFor(c)).value();
-            case "deviation" -> {
-                final Shrinkage.Composition composition = shrinkages.get(c.canonicalName).compose(row, lattices.get(c.canonicalName), lambdasFor(c));
-                yield composition.deviations()[Integer.parseInt(c.coordinates.get("level"))];
+            case "compose" -> {
+                final Shrinkage.Composition composition = composition(c, row);
+                yield isDistribution(c) ? composition.distribution() : composition.value();
             }
-            case "effectiveN" -> shrinkages.get(c.canonicalName).compose(row, lattices.get(c.canonicalName), lambdasFor(c)).effectiveN();
+            case "deviation" -> composition(c, row).deviations()[Integer.parseInt(c.coordinates.get("level"))];
+            case "effectiveN" -> composition(c, row).effectiveN();
             default -> throw new IllegalStateException("unsupported row operator: " + c.operator);
         };
+    }
+
+    /** A Dirichlet-Multinomial column composes a category distribution instead of a scalar. */
+    private static boolean isDistribution(final OutputColumn c) {
+        return Shrinkage.Family.dirichletMultinomial.name().equals(c.coordinates.get("family"));
+    }
+
+    private Shrinkage.Composition composition(final OutputColumn c, final Map<String, Object> row) {
+        final Shrinkage shrinkage = shrinkages.get(c.canonicalName);
+        final List<Shrinkage.Level> levels = lattices.get(c.canonicalName);
+        return isDistribution(c) ? shrinkage.composeDistribution(row, levels, lambdasFor(c)) : shrinkage.compose(row, levels, lambdasFor(c));
     }
 
     private static Object datetime(final OutputColumn c, final Object value) {

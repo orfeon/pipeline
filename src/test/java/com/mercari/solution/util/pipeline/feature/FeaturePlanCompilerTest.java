@@ -772,6 +772,146 @@ public class FeaturePlanCompilerTest {
     }
 
     @Test
+    public void testJointEstimatorCompilesToFitStageColumns() {
+        final String joint = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    fit: {mode: static, artifact: "gs://bucket/features"}
+                    keySets:
+                      - {keys: [seller_id]}
+                      - {keys: [category]}
+                      - keys: [seller_id, category]
+                        structure: cross
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {scale: logit, estimator: joint, weights: varianceComponents, output: [composed, deviations, effectiveN]}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(joint));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "encoding.shrinkage.joint"), plan::describe);
+        final OutputColumn cell = column(plan, "enc__seller_id_category__e1__mean");
+        Assertions.assertEquals("joint", cell.getOperator());
+        Assertions.assertEquals(FeatureSpec.Scope.population, cell.getScope());
+        Assertions.assertTrue(cell.isFitted());
+        Assertions.assertEquals("static", cell.getCoordinates().get("fit"));
+        Assertions.assertEquals("joint", cell.getCoordinates().get("estimator"));
+        Assertions.assertEquals("composed", cell.getCoordinates().get("kind"));
+        Assertions.assertEquals("gaussian", cell.getCoordinates().get("family"));
+        Assertions.assertEquals("logit", cell.getCoordinates().get("scale"));
+        Assertions.assertEquals("enc__seller_id_category__e1", cell.getCoordinates().get("joint"));
+        // additive → the main-effect key lists; the global level is the intercept
+        Assertions.assertEquals("seller_id_category=seller_id,category;seller_id=seller_id;category=category;global=", cell.getCoordinates().get("jointLevels"));
+        Assertions.assertTrue(cell.getInputs().containsAll(List.of("seller_id", "category")), cell.getInputs()::toString);
+        Assertions.assertTrue(cell.getPastInputs().stream().anyMatch(p -> p.startsWith("enc__e")), cell.getPastInputs()::toString); // the desugared target expression
+        Assertions.assertEquals("gs://bucket/features", cell.getCoordinates().get("artifactUri"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, cell.getStatus());
+        // deviations = one per effect level, effectiveN = the leaf's posterior pseudo-count
+        Assertions.assertEquals("seller_id_category", column(plan, "enc__seller_id_category__e1__dev0").getCoordinates().get("levelKeys"));
+        Assertions.assertEquals("category", column(plan, "enc__seller_id_category__e1__dev2").getCoordinates().get("levelKeys"));
+        Assertions.assertNull(plan.getColumn("enc__seller_id_category__e1__dev3"));
+        Assertions.assertEquals("effectiveN", column(plan, "enc__seller_id_category__e1__mean__neff").getCoordinates().get("kind"));
+        // the chain keySets of the block are joint too (a one-level ridge), and no hidden level statistics are registered
+        Assertions.assertEquals("joint", column(plan, "enc__seller_id__e1__mean").getOperator());
+        Assertions.assertEquals("seller_id=seller_id;global=", column(plan, "enc__seller_id__e1__mean").getCoordinates().get("jointLevels"));
+        Assertions.assertNull(plan.getColumn("enc__seller_id__e1__n"), plan::describe);
+        Assertions.assertNull(plan.getColumn("enc__global__e1__n"), plan::describe);
+        // one fit stage holds every joint column and reads the target from an earlier stage
+        final List<FeaturePlan.Stage> fits = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).toList();
+        Assertions.assertEquals(1, fits.size(), plan::describe);
+        Assertions.assertTrue(fits.get(0).columnNames().containsAll(List.of("enc__seller_id_category__e1__mean", "enc__seller_id__e1__mean", "enc__category__e1__mean")), plan::describe);
+        Assertions.assertTrue(FeatureStages.engineConstraints(plan, false).isEmpty());
+        Assertions.assertFalse(FeatureStages.artifactPaths(plan).isEmpty());
+        Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("enc__seller_id_category__e1").endsWith("enc__seller_id_category__e1.joint.avro"));
+
+        // fold and forward are accepted; expanding is not (the joint solve needs the whole cell table)
+        Assertions.assertFalse(compile(SOURCES, withEncoding(joint.replace("mode: static", "mode: fold, folds: 3, groupBy: seller"))).getDiagnostics().hasErrors());
+        final FeaturePlan forward = compile(SOURCES, withEncoding(joint.replace("mode: static", "mode: forward, blocks: {bucket: month}")));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertEquals("month", column(forward, "enc__seller_id_category__e1__mean").getCoordinates().get("blockBucket"));
+        final FeaturePlan expanding = compile(SOURCES, withEncoding(joint.replace("        fit: {mode: static, artifact: \"gs://bucket/features\"}\n", "")));
+        Assertions.assertTrue(hasCode(expanding, "encoding.shrinkage.estimator"), expanding::describe);
+        // a distribution never reaches the joint solve: the statistic is expanding-only, one diagnostic says so
+        final FeaturePlan jointDistribution = compile(SOURCES, withEncoding(joint
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}", "- {field: condition_grade, stats: [distribution]}")));
+        Assertions.assertTrue(hasCode(jointDistribution, "encoding.stat.static"), jointDistribution::describe);
+        Assertions.assertTrue(jointDistribution.getDiagnostics().getMessages().stream().filter(m -> m.level() == Diagnostics.Level.error).allMatch(m -> "encoding.stat.static".equals(m.code())),
+                "no second, contradicting diagnostic (the old 'use backoff' hint led to this same error): " + jointDistribution.describe());
+    }
+
+    @Test
+    public void testShrinkageFamilies() {
+        final String base = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean, rate]}
+                    shrinkage: {priorWeight: 2}
+            """;
+        // derived: mean → gaussian, rate → betaBinomial; identical arithmetic, recorded in the coordinates
+        final FeaturePlan derived = compile(SOURCES, withEncoding(base));
+        Assertions.assertFalse(derived.getDiagnostics().hasErrors(), derived::describe);
+        Assertions.assertEquals("gaussian", column(derived, "enc__seller_id__e1__mean").getCoordinates().get("family"));
+        Assertions.assertEquals("betaBinomial", column(derived, "enc__seller_id__e1__rate").getCoordinates().get("family"));
+        // declared conjugate families need the identity scale; gaussian on logit is the approximation of rule 7
+        Assertions.assertEquals("gammaPoisson", column(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: gammaPoisson}"))), "enc__seller_id__e1__mean").getCoordinates().get("family"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: betaBinomial, scale: logit}"))), "encoding.shrinkage.family.scale"));
+        Assertions.assertFalse(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: gaussian, scale: logit}"))).getDiagnostics().hasErrors());
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: dirichletMultinomial}"))), "encoding.shrinkage.family.stat"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, family: poisson}"))), "encoding.shrinkage.family"));
+        // a derived family on logit / log is the Gaussian approximation (rule 7), not an error: rate + logit compiled before families existed
+        final FeaturePlan derivedLogit = compile(SOURCES, withEncoding(base.replace("{priorWeight: 2}", "{priorWeight: 2, scale: logit}")));
+        Assertions.assertFalse(derivedLogit.getDiagnostics().hasErrors(), derivedLogit::describe);
+        Assertions.assertEquals("gaussian", column(derivedLogit, "enc__seller_id__e1__rate").getCoordinates().get("family"));
+        Assertions.assertEquals("compose", column(derivedLogit, "enc__seller_id__e1__rate").getOperator());
+
+        // distribution: Dirichlet-Multinomial shrinkage along the chain, a map-valued composed column over hidden per-level shares
+        final String distribution = base.replace("- {expr: \"sold >= 1\", stats: [mean, rate]}", "- {field: condition_grade, stats: [distribution]}");
+        final FeaturePlan dist = compile(SOURCES, withEncoding(distribution.replace("{priorWeight: 2}", "{priorWeight: 2, output: [composed, deviations, effectiveN]}")));
+        Assertions.assertFalse(dist.getDiagnostics().hasErrors(), dist::describe);
+        final OutputColumn composed = column(dist, "enc__seller_id__condition_grade__distribution");
+        Assertions.assertEquals("compose", composed.getOperator());
+        Assertions.assertEquals(Schema.Type.map, composed.getFieldType().getType());
+        Assertions.assertEquals("dirichletMultinomial", composed.getCoordinates().get("family"));
+        Assertions.assertTrue(composed.getInputs().containsAll(List.of("enc__seller_id__condition_grade__n", "enc__seller_id__condition_grade__dist", "enc__global__condition_grade__dist")), composed.getInputs()::toString);
+        final OutputColumn shares = column(dist, "enc__seller_id__condition_grade__dist");
+        Assertions.assertTrue(shares.isIntermediate());
+        Assertions.assertEquals("distribution", shares.getCoordinates().get("stat"));
+        Assertions.assertEquals(Schema.Type.map, shares.getFieldType().getType());
+        Assertions.assertNull(dist.getColumn("enc__seller_id__condition_grade__sum"), dist::describe);
+        Assertions.assertNull(dist.getColumn("enc__seller_id__condition_grade__dev0"), "deviations are undefined for a distribution");
+        Assertions.assertTrue(hasCode(dist, "encoding.shrinkage.output"), dist::describe);
+        column(dist, "enc__seller_id__condition_grade__distribution__neff");
+        Assertions.assertTrue(FeatureStages.engineConstraints(dist, false).isEmpty(), FeatureStages.engineConstraints(dist, false)::toString);
+        // no additive / cross lattice, no variance-components λ (warning), and expanding only
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(distribution.replace("          - keys: [seller_id]\n", "          - {keys: [seller_id]}\n          - {keys: [category]}\n          - {keys: [seller_id, category], structure: cross}\n").replace("{priorWeight: 2}", "{priorWeight: 2, scale: identity}"))), "encoding.shrinkage.family.lattice"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(distribution.replace("{priorWeight: 2}", "{priorWeight: 2, weights: varianceComponents}"))), "encoding.shrinkage.weights.distribution"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(distribution.replace("        keySets:", "        fit: {mode: static}\n        keySets:"))), "encoding.stat.static"));
+        // without shrinkage the statistic stays the raw per-key distribution of the population stage
+        final FeaturePlan raw = compile(SOURCES, withEncoding(distribution.replace("        shrinkage: {priorWeight: 2}\n", "")));
+        Assertions.assertEquals("encoding", column(raw, "enc__seller_id__condition_grade__distribution").getOperator());
+        // on logit / log a derived distribution has no Gaussian counterpart: emitted unshrunk with a warning, no hidden shares
+        final FeaturePlan logitDist = compile(SOURCES, withEncoding(distribution.replace("{priorWeight: 2}", "{priorWeight: 2, scale: logit}")));
+        Assertions.assertFalse(logitDist.getDiagnostics().hasErrors(), logitDist::describe);
+        Assertions.assertTrue(hasCode(logitDist, "encoding.shrinkage.family.scale"), logitDist::describe);
+        Assertions.assertEquals("encoding", column(logitDist, "enc__seller_id__condition_grade__distribution").getOperator());
+        Assertions.assertNull(logitDist.getColumn("enc__global__condition_grade__dist"), logitDist::describe);
+        // next to a scalar statistic of the same target the distribution keeps priorWeight: its compose column declares
+        // fixed weights, so it never resolves the scalar's variance-components λ through the shared hidden n columns
+        final FeaturePlan mixed = compile(SOURCES, withEncoding(base
+                .replace("- {expr: \"sold >= 1\", stats: [mean, rate]}", "- {field: condition_grade, stats: [mean, distribution]}")
+                .replace("{priorWeight: 2}", "{priorWeight: 2, weights: varianceComponents}")));
+        Assertions.assertFalse(mixed.getDiagnostics().hasErrors(), mixed::describe);
+        Assertions.assertEquals("varianceComponents", column(mixed, "enc__seller_id__condition_grade__mean").getCoordinates().get("weights"));
+        Assertions.assertEquals("fixed", column(mixed, "enc__seller_id__condition_grade__distribution").getCoordinates().get("weights"));
+        Assertions.assertEquals(column(mixed, "enc__seller_id__condition_grade__mean").getInputs().stream().filter(i -> i.endsWith("__n")).toList(),
+                column(mixed, "enc__seller_id__condition_grade__distribution").getInputs().stream().filter(i -> i.endsWith("__n")).toList(), "the levels share their n columns");
+    }
+
+    @Test
     public void testLegacySmoothingIsShrinkageSugar() {
         final String legacy = """
                   - name: enc
