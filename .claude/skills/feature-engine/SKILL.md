@@ -1,6 +1,6 @@
 ---
 name: feature-engine
-description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, and the backlog quantileTransform / svd / structure sequence / nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
+description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, quantileTransform, svd, and the backlog spectralEmbedding / transitionStats / structure sequence / nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
 ---
 
 # Feature transform engine
@@ -73,8 +73,9 @@ reads what the compile layer wrote into each column's `coordinates`.
 - `OutputColumn` — one expanded column. `canonicalName` (what other blocks reference) vs
   `outputName` (`_` for intermediates + `output.prefix` + canonical); `block` / `scope` / `operator`
   / `fieldType`; **`coordinates` (a `Map<String,String>`) is the whole contract with the engine** —
-  the evaluators rebuild their plans from it (`SequenceEvaluator.plan`, `fmSpecs`,
-  `discretizeSpecs`, `fitLevels`) and it is exported as `feature.coord.*` schema options;
+  the evaluators rebuild their plans from it (`SequenceEvaluator.plan`, the static-fit specs enumerated by
+  `staticFitBlocks` — `fmSpecs` / `discretizeSpecs` / `quantileTransformSpecs` / `svdSpecs` / `jointSpecs` — and
+  `fitLevels`) and it is exported as `feature.coord.*` schema options;
   `inputs` (read from the row itself) vs `pastInputs` (read from past rows — what the keyed stage
   projects into the history); `availableAt` / `computeAt` / `status` (`staticSafe` /
   `windowShift` / `runtimeFilter` / `violation`) / `windowShift`; `intermediate` (not emitted),
@@ -108,7 +109,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   `composeDistribution` for a shrunk `distribution`; scalar families share the arithmetic and the λ
   estimator, see the class javadoc), `JointFit` (`estimator: joint`: cell table → ridge / BLUP by block
   Gauss–Seidel swept coarse → fine, fold / forward variants, `<id>.joint.avro`),
-  `Discretization` (quantile edges + `<block>.bins.json`), `Factorization`
+  `Discretization` (quantile edges + `<block>.bins.json`), `QuantileTransform` (CDF knots
+  + probit, `<block>.quantiles.json`), `Svd` (`Moments` (n, Σx, Σxxᵀ) → Jacobi eigendecomposition, `<block>.svd.json`), `Factorization`
   (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding
   levels), `Durations` (ISO-8601 + calendar periods + column tokens; **kept separate** from
@@ -181,10 +183,11 @@ reads what the compile layer wrote into each column's `coordinates`.
      (`NULL_KEY`) bypass evaluation (keyed columns null).
    - `fit` → `applyFit`: encoding levels (`fitLevels` → `VarianceComponents.perKeyStats` over the
      stage input re-windowed into `GlobalWindows` → `View.asMap`; artifact load / write per block
-     via `FitArtifact`), plus `StaticFitBlock`s (`FmSpec`, `DiscretizeSpec`, `JointSpec` — one per
-     keySet × window × target with `estimator: joint`, cells aggregated per key then solved on one
-     worker by `JointFit`: `fit(fitInput)` → one side-input model, or `readArtifact` at `@Setup`;
-     fold / forward joint models always re-fit) → `FitApplyDoFn` fills the hidden columns
+     via `FitArtifact`), plus `StaticFitBlock`s (`FmSpec`, `DiscretizeSpec`, `QuantileTransformSpec`,
+     `SvdSpec`, `JointSpec` — one per keySet × window × target with `estimator: joint`, cells
+     aggregated per key then solved on one worker by `JointFit`: `fit(fitInput)` → one side-input
+     model, or `readArtifact` at `@Setup`; fold / forward joint models always re-fit) → `FitApplyDoFn`
+     fills the hidden columns
      and applies the blocks, then evaluates the stage's row columns. Rejects at construction: a fit
      input produced by the same stage (would read null), and a fit without artifact in streaming.
 3. Wave fan-out (batch only): `RowId_Pin` (`Reshuffle`) before the first fan-out when ids are
@@ -331,7 +334,8 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
 - discretize `tree` / `optimal` (`discretize.method`): supervised, consumes a target — the spec ties
   the fit rule to the encoding keyed on the bins (two-stage target consumption) which the compiler
   does not model.
-- `quantileTransform` / `svd` / `spectralEmbedding` / `transitionStats` (`population.unsupported`):
+- `spectralEmbedding` / `transitionStats` (`population.unsupported`; they need the per-entity value
+  sequence before the fit):
   follow the static-fit block recipe in [add-operator.md](add-operator.md).
 - factorization `variant: bayesian`, `fit.cadence / window / warmStart` (fit boundaries).
 - `runtimeFilter` columns (`atRowCreation`, `event_date THH:MM`): per-row availability filtering.

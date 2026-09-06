@@ -26,7 +26,7 @@ launch and monitoring).
    outcome).
 2. A **feature spec** states intent: features in four scopes — `row` (the row itself), `context` (rows
    co-occurring in one event), `sequence` (the entity's strictly-past rows), `population` (learned:
-   encodings, factorization, discretize).
+   encodings, factorization, discretize, quantileTransform, svd).
 3. The compiler derives **when every output column is available** and rejects, at assembly, any
    emitted column that would need information after `predictAt`. History windows are shifted back by
    the outcome's settlement + ingestion lag automatically. Leak safety is a type check, not a review.
@@ -166,6 +166,8 @@ parameters:
 | per-key counts / shares (frequency encoding), std, quantiles of a value | `population`, `type: encoding` with `stats: [count, share]` / `std` / `quantile`, `q25` | quantiles / distribution are expanding-only |
 | low-rank interaction scores for sparse crosses | `population`, `type: factorization` | always static; whole training set on one worker |
 | learned bin edges (to key an encoding) | `population`, `type: discretize` (`method: quantile`) | always static; bins `-1` missing, `0` below, `1..B`, `B+1` above |
+| rank normalisation of a skewed value (uniform or normal score) | `population`, `type: quantileTransform` (`bins`, `distribution`) | always static; out of range clamps to 0 / 1 |
+| decorrelated low-rank summary of several numeric features (e.g. a lag window) | `population`, `type: svd` (`inputs`, `rank`) | always static; fitted from sufficient statistics only |
 
 Difference to the previous row of the entity: `lag` the past value, then subtract in a row `expr` —
 sequence ops never see the current row.

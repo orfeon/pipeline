@@ -162,11 +162,16 @@ public class FeatureSpec implements Serializable {
         public Integer epochs;
         public Double reg;
         public Long seed;
-        // discretize
+        // discretize / quantileTransform ({@code bins}, {@code distribution} shared with noise)
         public String method;
         public Integer bins;
         public Integer minSamplesPerBin;
         public String target;
+        // svd
+        public Integer rank;
+        /** null = the type's default (svd: centre). */
+        public Boolean center;
+        public boolean standardize;
 
         public String location() {
             return "features." + name;
@@ -602,6 +607,9 @@ public class FeatureSpec implements Serializable {
         def.bins = Json.integer(o, "bins");
         def.minSamplesPerBin = Json.integer(o, "minSamplesPerBin");
         def.target = Json.string(o, "target");
+        def.rank = Json.integer(o, "rank");
+        def.center = o.has("center") && !o.get("center").isJsonNull() ? Json.bool(o, "center", true) : null;
+        def.standardize = Json.bool(o, "standardize", false);
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");
             def.taskTarget = Json.string(task, "target") != null ? Json.string(task, "target") : Json.string(task, "field");
