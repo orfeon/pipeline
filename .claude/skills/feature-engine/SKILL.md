@@ -147,7 +147,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   quantiles; `isSupported(stat)` is what `engineConstraints` checks; NaN counts as missing.
 - `VarianceComponents` — per-level (n, Σy, Σy²) per key as a Beam `Combine`, λ = σ²/τ² by the method
   of moments (side input `Map<levelNColumn, λ>`), fold-tagged entries for `fit.mode: fold`,
-  `lambdasInMemory` for loaded artifacts; `forwardSeries` / `forwardTotals` / `lambdasByBlock` for
+  `lambdasInMemory` for loaded artifacts; `forwardSeries` (a `View.asList` the apply DoFn indexes once
+  per instance) / `lambdasByBlockView` (λ per (level, block) as one `Combine.perKey` per level —
+  `BlockMomentsFn`, the level-wide moments as a step function over blocks — gathered into a small list
+  view; `lambdasByBlock(Map)` is the in-memory reference the test compares it with) for
   `fit.mode: forward` (`ForwardBlocks` = block arithmetic + the cumulative `Series`; coordinates
   `blockBucket` | `blockSizeMillis`, `minBlocks`, `forwardLagMillis` (target availability delay), `windowBlocks`,
   `blockField` / `blockFieldType` written by `FeaturePlanCompiler.forwardCoordinates`; the engine side is
@@ -170,7 +173,7 @@ reads what the compile layer wrote into each column's `coordinates`.
 2. Stage loop — linear (`engine.parallelWaves: false`, or streaming, or no wave with ≥ 2 stages) or
    the **wave loop** over `plan.getEngineWaves()`. `Wiring.applyStage` is the single place a stage
    becomes transforms, named `Stage{n}_{kind}` (+ `_Key`, `_Group`, `_Vc`, `_Fit`, `_StatsView`,
-   `_Bins_<block>_*`, `_Write_<block>`):
+   `_Bins_<block>_*`, `_WriteStatic` / `_WriteForward` + `_Select` / `_Marker` / `_Group`):
    - `row` → `RowStageDoFn`.
    - `context` → `KeyDoFn` → `GroupByKey` → `ContextStageDoFn` (group in memory; also the
      fan-in merge point, `fanInBranches > 0` → `coalesce`).
@@ -182,8 +185,10 @@ reads what the compile layer wrote into each column's `coordinates`.
      `outputWithTimestamp` (needs `getAllowedTimestampSkew` = max). Rows with a null key
      (`NULL_KEY`) bypass evaluation (keyed columns null).
    - `fit` → `applyFit`: encoding levels (`fitLevels` → `VarianceComponents.perKeyStats` over the
-     stage input re-windowed into `GlobalWindows` → `View.asMap`; artifact load / write per block
-     via `FitArtifact`), plus `StaticFitBlock`s (`FmSpec`, `DiscretizeSpec`, `QuantileTransformSpec`,
+     stage input re-windowed into `GlobalWindows` → `View.asMap`; artifact load via `FitArtifact`,
+     artifact write through `writeArtifacts` = the entries grouped under their block + an empty marker →
+     one `WriteArtifactDoFn` call per block — never a scan of a map side input, which is one state fetch
+     per entry on a portable runner), plus `StaticFitBlock`s (`FmSpec`, `DiscretizeSpec`, `QuantileTransformSpec`,
      `SvdSpec`, `JointSpec` — one per keySet × window × target with `estimator: joint`, cells
      aggregated per key then solved on one worker by `JointFit`: `fit(fitInput)` → one side-input
      model, or `readArtifact` at `@Setup`; fold / forward joint models always re-fit) → `FitApplyDoFn`
