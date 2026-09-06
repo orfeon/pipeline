@@ -171,11 +171,13 @@ features:
 
 Encoding stats: `count` (rows), `share` (leaf count / global count), `mean` / `rate` (shrinkable), `std`,
 `distribution` (map of value shares), and `quantile` — the median — or `quantile<NN>` / `q<NN>` for the NN-th
-percentile (0..100), linearly interpolated between the past values (R type 7 / numpy default). `std`,
-`distribution` and the quantiles are read from the key's own past values (no shrinkage: a quantile of an
-interpolated distribution is not the interpolated quantile), so they are available in the expanding fit
-only — `fit.mode: static` / `fold` keep (n, Σy, Σy²) per key and reject them. A NaN target (or baseline)
-value counts as missing for every numeric encoding stat, like null.
+percentile (0..100), linearly interpolated between the past values (R type 7 / numpy default). `std`
+and the quantiles are read from the key's own past values (no shrinkage: a quantile of an interpolated
+distribution is not the interpolated quantile); `distribution` shrinks along the lattice when the block
+declares `shrinkage` (Dirichlet-Multinomial per-category pseudo-counts, see *Shrinkage*). All three need
+the key's value distribution, so they are available in the expanding fit only — `fit.mode: static` /
+`fold` / `forward` keep (n, Σy, Σy²) per key and reject them. A NaN target (or baseline) value counts as
+missing for every numeric encoding stat, like null.
 
 ### Static fits and artifacts (fit.mode static)
 
@@ -192,7 +194,8 @@ their own outcome, so use it for serving / offline analysis, not for training. W
 fitted statistics are written to `<uri>/<planHash>/<block>.avro` (+ `<block>.manifest.json`); the plan
 hash covers the spec and the sources contract (everything except `fit.artifact` itself), so any change
 produces a new directory. The manifest also records the `varianceComponents` pseudo-counts (`lambdas`,
-per level) derived from the persisted statistics, so a run's shrinkage can be audited. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
+per level; a fully shrunk level's infinite λ appears as the string `"Infinity"`) derived from the persisted
+statistics, so a run's shrinkage can be audited. `artifact.id` pins an explicit version directory instead of the hash. When an artifact
 for the current plan hash already exists it is loaded at worker setup instead of re-fitting (`refit: true`
 forces a new fit) — this is the serving path: the same config, run on request data, applies the fitted
 statistics without any history. Streaming runs require an existing artifact. Paths use the Beam
@@ -325,8 +328,10 @@ coarse (4–8): the cardinality multiplies.
     targets:
       - {field: sold, stats: [mean]}
     shrinkage:
+      estimator: sequential                       # backoff (chains, default) | sequential (additive / cross, default) | joint (fit.mode static / fold / forward only)
       weights: varianceComponents                 # fixed: w = n / (n + priorWeight); varianceComponents: λ = σ²/τ² per level (batch method of moments)
       priorWeight: 20                             # fixed pseudo-count, and the fallback when a level has too few keys
+      family: gaussian                            # gaussian | betaBinomial | gammaPoisson | dirichletMultinomial; default derived from the stat
       scale: logit                                # identity | logit | log; required when a lattice uses additive
       leaveNodeOut: true                          # subtract the leaf's own statistics from every ancestor
       output: [composed, deviations, effectiveN]  # composed (default) | deviations (dev0, dev1, ...) | effectiveN (<stat>__neff)
@@ -337,6 +342,43 @@ shrinkage toward the global mean. Every lattice level is evaluated as its own ke
 window and target, and the composition is a per-row formula: `est(level) = est(parent) + w · (t(mean) −
 est(parent))` from the global level down to the key, on the declared scale. `share` is
 `n_key / n_global` over strictly-past rows.
+
+**Estimators.** `backoff` is the top-down pass above, one level at a time; `sequential` (the default of a
+lattice with `additive` / `cross`) shrinks a cell toward the sum of the shrunk main effects, so it absorbs
+part of an interaction into whichever main effect comes first when the keys are confounded. `joint` fits
+every level of the lattice **simultaneously** as one ridge / BLUP system over the lattice's cells (the
+indicator basis of every level's contexts, `t(y) = μ + Σ e_level + ε`): confounded contexts are separated
+without an order-dependent bias, and `deviations` are the orthogonalised per-level effects (`dev0` = the
+leaf, then each coarser level, on the transform scale) while `effectiveN` is the leaf's `n + λ`. The solve
+needs the whole cell table, so `joint` requires `fit.mode: static | fold | forward` (one solve; one per fold
+on the other folds' cells; under `forward` one per block window — a row reads the solution over exactly the
+blocks `(usable − windowBlocks, usable]`, like the per-level statistics, and gets null when nothing lies in
+its window) and is rejected under `expanding`. The cells are aggregated in parallel and solved on one worker
+(block Gauss–Seidel until convergence); λ per level is the same moment estimator as `varianceComponents`
+(over the level's contexts) or `priorWeight` under `fixed`, a pseudo-count in rows on every scale (on
+`logit` / `log` the ridge is rescaled by the context's mean delta-method weight, so a leaf with `n` rows
+keeps weight `n / (n + λ)` as under the other estimators), and a level whose between-context variance
+truncates to zero is fixed at 0. A row whose leaf key is null has no estimate; a null key on a coarser
+level leaves the row in the intercept and the levels it has (no effect for that level, as at apply time).
+The artifact is `<block>__<keys>__<window>__<target>.joint.avro` per keySet × target, holding the
+whole-input solution; `share` and unshrunk stats of a joint block still use the per-level statistics.
+
+**Families.** Shrinkage adds pseudo sufficient statistics inherited from the parent, so on the identity
+scale the Gaussian, Beta-Binomial (`rate` of a 0/1 target) and Gamma-Poisson (`mean` of a count target)
+posterior means coincide — `parent + n / (n + λ) · (ȳ − parent)` — and the one-way moment estimator of λ is
+also the Beta-Binomial (Kleinman) moment estimator, so `family` changes neither the value nor λ of a
+scalar statistic; it is derived from the stat (`mean` → gaussian, `rate` → betaBinomial, `distribution` →
+dirichletMultinomial) and recorded in the lineage, and an explicit family must fit the stat
+(`encoding.shrinkage.family.stat`). The conjugate closed forms need `scale: identity`: on `logit` / `log`
+the derived family of `mean` / `rate` is gaussian (Gaussian shrinkage of the transformed statistics with a
+delta-method weight, the spec's rule 7 — the lineage records `gaussian`), a *declared* conjugate family
+there is an error (`encoding.shrinkage.family.scale`), and a `distribution` is emitted unshrunk with a
+warning of the same code. `distribution` under shrinkage is the Dirichlet-Multinomial case:
+each level's per-category counts shrink toward the (leave-node-out) parent distribution,
+`p(level) = (counts + λ · p(parent)) / (n + λ)`, and the composed column is a map of probabilities over the
+categories seen at any level — chain lattices only (`encoding.shrinkage.family.lattice`), `backoff` only,
+expanding only, with `priorWeight` as λ (`varianceComponents` has no scalar target to estimate from,
+`encoding.shrinkage.weights.distribution`) and no `deviations`.
 
 A feature must not reuse the name of an input field (in-place overwrite is rejected). Generated column
 names: row `<name>` (datetime `<name>_<derive>[_sin|_cos]`), context
@@ -633,7 +675,9 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
   `factorization` / `discretize` are parsed but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
   and non-static fits. Discretize: `method: tree` / `optimal` (supervised) and non-static fits. In `shrinkage`,
-  `estimator: joint`, `weights: heldOut` and an `offset` on a logit / log scale are rejected;
+  `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
+  `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
+  `weights: heldOut` and an `offset` on a logit / log scale are rejected;
   `parentStatistic: type` falls back to token with a warning. `weights: varianceComponents` estimates the
   per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding); a level whose
   between-key variance truncates to zero is fully shrunk to its parent (logged at run time).

@@ -1,6 +1,6 @@
 ---
 name: feature-engine
-description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, and the backlog quantileTransform / svd / estimator joint / structure sequence / nested encoding), touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
+description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, and the backlog quantileTransform / svd / structure sequence / nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
 ---
 
 # Feature transform engine
@@ -104,7 +104,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   (the text report: header `columns=a/b stages=n shuffles=n waves=d (dag shuffles~n)`, `-- stages`,
   `-- columns`, `-- audit`, `-- diagnostics`) and `toJson()`.
 - Pure models used by both layers: `Shrinkage` (lattice parse + row-local top-down composition,
-  `lambdaFromMoments`), `Discretization` (quantile edges + `<block>.bins.json`), `Factorization`
+  `lambdaFromMoments`, `Family` — derived from the stat, a check plus the Dirichlet-Multinomial
+  `composeDistribution` for a shrunk `distribution`; scalar families share the arithmetic and the λ
+  estimator, see the class javadoc), `JointFit` (`estimator: joint`: cell table → ridge / BLUP by block
+  Gauss–Seidel swept coarse → fine, fold / forward variants, `<id>.joint.avro`),
+  `Discretization` (quantile edges + `<block>.bins.json`), `Factorization`
   (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding
   levels), `Durations` (ISO-8601 + calendar periods + column tokens; **kept separate** from
@@ -115,8 +119,10 @@ reads what the compile layer wrote into each column's `coordinates`.
 - `RowEvaluator.evaluateColumn` — `switch (c.operator)`: `expr` / `baseline` (Lucene expression
   engine, **doubles only**), `datetime`, `bin`, `cross`, `indicator`, `equals`, `residual`,
   `isnull`, `copy` (baselines[].emit), `noise` (murmur3 of seed + row identity → `SplittableRandom`),
-  and the hidden-level readers of a lattice: `share`, `fitStat`, `compose`, `deviation`,
-  `effectiveN` (λ from `setLambdas`, the variance-components side input).
+  and the hidden-level readers of a lattice: `share`, `fitStat`, `compose` (a scalar, or a map when the
+  `family` coordinate is `dirichletMultinomial`), `deviation`, `effectiveN` (λ from `setLambdas`, the
+  variance-components side input). `joint` columns are population-scope lookup columns filled by
+  `JointSpec.apply` in the fit stage, not row columns.
 - `ContextEvaluator.evaluateColumn` — one group at a time; `apply(op, values, self, excludeSelf)`;
   group-constant ops are evaluated once per group; `values:` lists become per-value columns
   (`valueKey` normalises integral numbers). `softmax` and `shuffle` bypass `apply`: they read two
@@ -175,8 +181,10 @@ reads what the compile layer wrote into each column's `coordinates`.
      (`NULL_KEY`) bypass evaluation (keyed columns null).
    - `fit` → `applyFit`: encoding levels (`fitLevels` → `VarianceComponents.perKeyStats` over the
      stage input re-windowed into `GlobalWindows` → `View.asMap`; artifact load / write per block
-     via `FitArtifact`), plus `StaticFitBlock`s (`FmSpec`, `DiscretizeSpec`: `fit(fitInput)` → one
-     side-input model, or `readArtifact` at `@Setup`) → `FitApplyDoFn` fills the hidden columns
+     via `FitArtifact`), plus `StaticFitBlock`s (`FmSpec`, `DiscretizeSpec`, `JointSpec` — one per
+     keySet × window × target with `estimator: joint`, cells aggregated per key then solved on one
+     worker by `JointFit`: `fit(fitInput)` → one side-input model, or `readArtifact` at `@Setup`;
+     fold / forward joint models always re-fit) → `FitApplyDoFn` fills the hidden columns
      and applies the blocks, then evaluates the stage's row columns. Rejects at construction: a fit
      input produced by the same stage (would read null), and a fit without artifact in streaming.
 3. Wave fan-out (batch only): `RowId_Pin` (`Reshuffle`) before the first fan-out when ids are
@@ -313,8 +321,9 @@ selectors and the roles from it, `Lineage.fromManifest` the `fields` and `column
 
 Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing fails at runtime:
 
-- `estimator: joint`, conjugate families, `weights: heldOut`, logit / log scale with `offset`
-  (`encoding.shrinkage.estimator` / `encoding.offset.scale`) — extend `Shrinkage` + `expandEncoding`.
+- `weights: heldOut`, logit / log scale with `offset` (`encoding.shrinkage.weights` /
+  `encoding.offset.scale`), `estimator: joint` under `fit.mode: expanding` (the row-local replay has no
+  cell table), a moment-estimated λ for a shrunk `distribution` — extend `Shrinkage` + `expandEncoding`.
 - `structure: sequence` key sets, nested encoding targets (`targets[].field.ref`) —
   `encoding.keySet.structure` / `encoding.nested`; ordering of fits is the open question.
 - `quantile` / `distribution` in static / fold (`encoding.stat.static`): a static fit keeps only

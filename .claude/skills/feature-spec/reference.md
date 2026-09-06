@@ -174,9 +174,10 @@ filters use the Filter grammar (`module/common/filter.md`); expressions are nume
   combine: product | zip
   naming: "{block}__{keys}__{window}__{target}__{stat}"   # default; empty segments collapse
   shrinkage:
-    estimator: backoff | sequential              # derived from the lattice; joint not implemented
+    estimator: backoff | sequential | joint      # derived from the lattice; joint = one simultaneous ridge / BLUP fit, fit.mode static | fold | forward only
     weights: fixed | varianceComponents          # heldOut not implemented
     priorWeight: 20
+    family: gaussian | betaBinomial | gammaPoisson | dirichletMultinomial   # derived from the stat; conjugate families need scale identity
     scale: identity | logit | log                # required with additive
     leaveNodeOut: true
     output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
@@ -186,8 +187,11 @@ filters use the Filter grammar (`module/common/filter.md`); expressions are nume
 ```
 
 Stats: `count` int64, `share` float64 (key count / global count), `mean` / `rate` float64
-(shrinkable), `std` float64, `distribution` map, `quantile` (median) / `quantile<NN>` / `q<NN>` float64.
-`std`, `distribution` and quantiles are expanding-only.
+(shrinkable), `std` float64, `distribution` map (shrinkable along a chain lattice: Dirichlet-Multinomial
+per-category pseudo-counts, `priorWeight` as λ, no deviations), `quantile` (median) / `quantile<NN>` / `q<NN>`
+float64. `std`, `distribution` and quantiles are expanding-only. `family` changes no scalar value (the
+conjugate posterior means and the moment λ coincide with the Gaussian ones); `estimator: joint` fits every
+level at once (`dev<i>` = the level effects, `<stat>__neff` = leaf n + λ) and needs a lookup fit mode.
 
 ### `type: factorization` (always static)
 

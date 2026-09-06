@@ -1026,6 +1026,168 @@ public class FeatureTransformTest {
     }
 
     // ------------------------------------------------------------------------------------------
+    // estimator: joint / conjugate families
+    // ------------------------------------------------------------------------------------------
+
+    private static String jointConfig(final String dir, final String mode) {
+        return FEATURE_CONFIG
+                .replace("            - keys: [seller_id]\n          targets:", "            - {keys: [seller_id]}\n            - {keys: [category]}\n            - {keys: [seller_id, category], structure: cross}\n          targets:")
+                .replace("- {stats: [count]}\n", "")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {estimator: joint, scale: identity, priorWeight: 1, output: [composed, deviations, effectiveN]}")
+                .replace("      output:\n", "      fit: {mode: " + mode + ", artifact: {uri: \"" + dir + "\"}}\n      output:\n");
+    }
+
+    /**
+     * seller and category are perfectly confounded here (s1 ↔ electronics, s2 ↔ toys), so the cell, seller and
+     * category levels share the two contexts (n = 4, ȳ = 3/4) and (n = 2, ȳ = 1/2). With λ = 1 on every level the
+     * ridge normal equations give, for the cross lattice, μ = 17/27 and effects ±1/27 per level (13 e₁ = 3 − 4μ,
+     * 7 e₂ = 1 − 2μ, 6μ = 4 − 12 e₁ − 6 e₂), and for the seller-only lattice μ = 7/11, a₁ = 1/11
+     * (5 a₁ = 3 − 4μ, 3 a₂ = 1 − 2μ, 6μ = 4 − 4 a₁ − 2 a₂).
+     */
+    @Test
+    public void testJointEstimatorStaticFit() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = jointConfig(dir, "static");
+        Assertions.assertTrue(config.contains("estimator: joint"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertEquals("joint", schema.getField("f_enc__seller_id_category__e1__mean").getOptions().get("feature.operator"));
+        Assertions.assertEquals("joint", schema.getField("f_enc__seller_id_category__e1__mean").getOptions().get("feature.coord.estimator"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            final double mu = 17.0 / 27, e = 1.0 / 27;
+            for (final String s1 : List.of("A/s1", "B/s1", "C/s1", "D/s1")) {
+                Assertions.assertEquals(mu + 3 * e, byKey.get(s1).getAsDouble("f_enc__seller_id_category__e1__mean"), 1e-6, s1);
+                Assertions.assertEquals(e, byKey.get(s1).getAsDouble("f_enc__seller_id_category__e1__dev0"), 1e-6, s1);
+                Assertions.assertEquals(e, byKey.get(s1).getAsDouble("f_enc__seller_id_category__e1__dev1"), 1e-6, s1);
+                Assertions.assertEquals(5.0, byKey.get(s1).getAsDouble("f_enc__seller_id_category__e1__mean__neff"), 1e-9, s1); // n = 4 + λ
+                Assertions.assertEquals(8.0 / 11, byKey.get(s1).getAsDouble("f_enc__seller_id__e1__mean"), 1e-6, s1);
+            }
+            for (final String s2 : List.of("A/s2", "C/s2")) {
+                Assertions.assertEquals(mu - 3 * e, byKey.get(s2).getAsDouble("f_enc__seller_id_category__e1__mean"), 1e-6, s2);
+                Assertions.assertEquals(-e, byKey.get(s2).getAsDouble("f_enc__seller_id_category__e1__dev2"), 1e-6, s2);
+                Assertions.assertEquals(3.0, byKey.get(s2).getAsDouble("f_enc__seller_id_category__e1__mean__neff"), 1e-9, s2);
+            }
+            return null;
+        });
+        pipeline.run();
+
+        // one artifact per joint model (keySet × target), plus its manifest
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertEquals(1, files.length, "one plan hash directory expected");
+        for (final String id : List.of("enc__seller_id_category__e1", "enc__seller_id__e1", "enc__category__e1")) {
+            Assertions.assertTrue(new java.io.File(files[0], id + ".joint.avro").exists(), id);
+            Assertions.assertTrue(new java.io.File(files[0], id + ".joint.manifest.json").exists(), id);
+        }
+        final String manifest = java.nio.file.Files.readString(new java.io.File(files[0], "enc__seller_id_category__e1.joint.manifest.json").toPath());
+        Assertions.assertTrue(manifest.contains("\"estimator\":\"joint\""), manifest);
+
+        // run 2: same plan hash on a subset → the solution is loaded, not re-fitted (s1 rows keep 20/27)
+        final String subset = SOURCE_CONFIG
+                .replace("        - {session_id: A, seller_id: s1, category: electronics, quantity: 2, start_price: 100.0, condition_grade: good, current_bid_t10: 120.0, sold: 1, final_price: 150.0, session_time: \"2025-01-01T10:00:00Z\"}\n", "")
+                .replace("        - {session_id: C, seller_id: s1, category: electronics, quantity: 4, start_price: 80.0,  condition_grade: fair, current_bid_t10: 90.0,  sold: 1, final_price: 95.0,  session_time: \"2025-01-20T10:00:00Z\"}\n", "");
+        final TestPipeline second = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> reused = MPipeline.apply(second, Config.load(subset + config));
+        PAssert.that(reused.get("features").getCollection()).satisfies(rows -> {
+            int n = 0;
+            for (final MElement row : rows) {
+                n++;
+                if ("s1".equals(row.getAsString("seller_id"))) Assertions.assertEquals(20.0 / 27, row.getAsDouble("f_enc__seller_id_category__e1__mean"), 1e-6);
+            }
+            Assertions.assertEquals(4, n);
+            return null;
+        });
+        second.run();
+    }
+
+    /** fold with entity folds: a seller's rows read the solution fitted without the seller — only the other cell remains, so its intercept. */
+    @Test
+    public void testJointEstimatorFoldFit() throws java.io.IOException {
+        final java.util.function.IntFunction<Integer> foldOf = folds -> com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                com.mercari.solution.util.pipeline.feature.FeatureValues.key(Map.of("seller_id", "s1"), List.of("seller_id")), folds);
+        final java.util.function.IntFunction<Integer> foldOf2 = folds -> com.mercari.solution.util.pipeline.feature.VarianceComponents.foldOf(
+                com.mercari.solution.util.pipeline.feature.FeatureValues.key(Map.of("seller_id", "s2"), List.of("seller_id")), folds);
+        int folds = 2;
+        while (foldOf.apply(folds).equals(foldOf2.apply(folds))) folds++;
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = jointConfig(dir, "fold, folds: " + folds + ", groupBy: seller");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // out of s1's fold only s2's cell (sold 0, 1) remains: μ = 1/2, every context unseen → 1/2; and the reverse 3/4
+            Assertions.assertEquals(0.5, byKey.get("A/s1").getAsDouble("f_enc__seller_id_category__e1__mean"), 1e-9);
+            Assertions.assertEquals(0.5, byKey.get("D/s1").getAsDouble("f_enc__seller_id_category__e1__mean"), 1e-9);
+            Assertions.assertEquals(0.0, byKey.get("D/s1").getAsDouble("f_enc__seller_id_category__e1__dev0"), 1e-9);
+            Assertions.assertEquals(0.75, byKey.get("A/s2").getAsDouble("f_enc__seller_id_category__e1__mean"), 1e-9);
+            Assertions.assertEquals(0.75, byKey.get("C/s2").getAsDouble("f_enc__seller_id__e1__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        // the artifact holds the whole-input solution
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(files[0], "enc__seller_id_category__e1.joint.avro").exists());
+    }
+
+    /** A map-valued column as String → Double (the coder round trip yields CharSequence keys). */
+    private static Map<String, Double> distribution(final MElement row, final String column) {
+        final Map<?, ?> value = (Map<?, ?>) row.getPrimitiveValue(column);
+        Assertions.assertNotNull(value, row::toString);
+        final Map<String, Double> out = new HashMap<>();
+        for (final Map.Entry<?, ?> e : value.entrySet()) out.put(e.getKey().toString(), ((Number) e.getValue()).doubleValue());
+        return out;
+    }
+
+    /**
+     * Dirichlet-Multinomial: the seller's condition_grade distribution shrunk toward the (leave-node-out) global one
+     * with λ = 1. condition_grade is a pre-event attribute, so the strictly-past rows have no near-edge shift.
+     */
+    @Test
+    public void testDistributionShrinkage() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("- {stats: [count]}\n", "")
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {field: condition_grade, stats: [distribution]}\n          shrinkage: {priorWeight: 1, output: [composed, effectiveN]}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertEquals(Schema.Type.map, schema.getField("f_enc__seller_id__condition_grade__distribution").getFieldType().getType());
+        Assertions.assertEquals("dirichletMultinomial", schema.getField("f_enc__seller_id__condition_grade__distribution").getOptions().get("feature.coord.family"));
+        Assertions.assertNull(schema.getField("enc__seller_id__condition_grade__dist"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            final String column = "f_enc__seller_id__condition_grade__distribution";
+            // Jan 1: nothing strictly past
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue(column));
+            // Jan 3, s1: own {good} (n=1); global minus own = {fair} (n=1) → w = 1/2 → {good: 1/2, fair: 1/2}, n_eff = 2
+            Map<String, Double> d = distribution(byKey.get("B/s1"), column);
+            Assertions.assertEquals(0.5, d.get("good"), 1e-9);
+            Assertions.assertEquals(0.5, d.get("fair"), 1e-9);
+            Assertions.assertEquals(2.0, byKey.get("B/s1").getAsDouble(column + "__neff"), 1e-9);
+            // Jan 20, s1: own {good, good} (n=2); global minus own = {fair} → w = 2/3 → {good: 2/3, fair: 1/3}
+            d = distribution(byKey.get("C/s1"), column);
+            Assertions.assertEquals(2.0 / 3.0, d.get("good"), 1e-9);
+            Assertions.assertEquals(1.0 / 3.0, d.get("fair"), 1e-9);
+            // Jan 20, s2: own {fair} (n=1); global minus own = {good, good} → {good: 1/2, fair: 1/2}
+            d = distribution(byKey.get("C/s2"), column);
+            Assertions.assertEquals(0.5, d.get("good"), 1e-9);
+            Assertions.assertEquals(0.5, d.get("fair"), 1e-9);
+            // Feb 1, s1: own {good, good, fair} (n=3); global minus own = {fair, good} → w = 3/4 → {good: 5/8, fair: 3/8}
+            d = distribution(byKey.get("D/s1"), column);
+            Assertions.assertEquals(0.625, d.get("good"), 1e-9);
+            Assertions.assertEquals(0.375, d.get("fair"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    // ------------------------------------------------------------------------------------------
     // fit.mode forward
     // ------------------------------------------------------------------------------------------
 
