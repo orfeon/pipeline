@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.Filter;
 
 import java.io.Serializable;
 import java.time.Duration;
@@ -214,6 +215,17 @@ public class ProcessSpec implements Serializable {
             if (rule.name != null && (START_NODE.equals(rule.name) || END_NODE.equals(rule.name))) {
                 errors.add("activities[" + i + "].name '" + rule.name + "' is reserved for the DFG start / end nodes");
             }
+            if (rule.filter != null) {
+                // parse the condition here so that a broken rule fails the assembly, not the workers' setup
+                try {
+                    final Filter.ConditionNode node = Filter.parse(rule.filter);
+                    if (inputSchema != null) {
+                        for (final String m : node.validate(inputSchema.getFields())) errors.add("activities[" + i + "].filter is illegal: " + m);
+                    }
+                } catch (final RuntimeException e) {
+                    errors.add("activities[" + i + "].filter could not be parsed: " + e.getMessage());
+                }
+            }
         }
         for (final String f : List.of("timestamp", "sequence", "resource")) {
             final String name = switch (f) { case "timestamp" -> timestamp; case "sequence" -> sequence; default -> resource; };
@@ -222,8 +234,8 @@ public class ProcessSpec implements Serializable {
         if (timestamp != null && inputSchema != null && inputSchema.hasField(timestamp)) {
             final Schema.Type type = inputSchema.getField(timestamp).getFieldType().getType();
             switch (type) {
-                case timestamp, datetime, date, string, int64, int32 -> {}
-                default -> errors.add("timestamp field '" + timestamp + "' must be a timestamp / datetime / date / string / integer field, found " + type);
+                case timestamp, date, string, int64 -> {}
+                default -> errors.add("timestamp field '" + timestamp + "' must be a timestamp / date / string / int64 (epoch micros) field, found " + type);
             }
         }
         if (sequence != null && inputSchema != null && inputSchema.hasField(sequence)) {
@@ -253,6 +265,9 @@ public class ProcessSpec implements Serializable {
         }
         for (final String reserved : ProcessStages.CASE_FIELDS) {
             if (seen.contains(reserved)) errors.add("attributes field '" + reserved + "' collides with a cases output column; rename it upstream");
+        }
+        for (final String reserved : ProcessStages.EVENT_FIELDS) {
+            if (seen.contains(reserved) && !ProcessStages.CASE_FIELDS.contains(reserved)) errors.add("attributes field '" + reserved + "' collides with a projected event column; rename it upstream");
         }
         if (dfgMinFrequency < 1) errors.add("dfg.minFrequency must be at least 1");
         if (maxTraceLength < 1) errors.add("engine.maxTraceLength must be at least 1");

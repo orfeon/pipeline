@@ -14,8 +14,8 @@ import java.util.Set;
  * Replays the time-ordered events of one case and produces everything the process outputs are built from:
  * the directly-follows edges with their waiting times, the activity counts, the variant, the resource
  * handovers and the Declare constraint verdicts. Pure Java (no Beam), streaming over the events: only the
- * capped activity list, the per-activity counters and the per-constraint state stay in memory, so a case with
- * millions of events is replayed in bounded memory.
+ * capped activity list, the per-activity and per-edge counters and the per-constraint state stay in memory, so
+ * a case with millions of events is replayed in memory bounded by its distinct activities and edges.
  */
 public final class CaseReplay {
 
@@ -24,8 +24,8 @@ public final class CaseReplay {
     /** One event of a case after the log projection. {@code sequence} breaks ties between equal timestamps. */
     public record Event(String activity, long millis, String resource, Comparable<?> sequence) implements Serializable {}
 
-    /** A directly-follows observation; {@code durationMillis} is negative for the synthetic start / end edges. */
-    public record Edge(String source, String target, long durationMillis) implements Serializable {}
+    /** A directly-follows pair; the synthetic start / end edges use {@link ProcessSpec#START_NODE} / {@link ProcessSpec#END_NODE}. */
+    public record Edge(String source, String target) implements Serializable {}
 
     /** The verdict of one constraint on one case. */
     public record Verdict(String name, boolean applicable, boolean violated) implements Serializable {}
@@ -47,7 +47,8 @@ public final class CaseReplay {
         public String firstActivity;
         public String lastActivity;
         public final Map<String, ActivityCount> activityCounts = new LinkedHashMap<>();
-        public final List<Edge> edges = new ArrayList<>();
+        /** Per-edge frequency and waiting-time distribution (in {@link ProcessSpec#unit}); no durations on the start / end edges. */
+        public final Map<Edge, ProcessStats> edges = new LinkedHashMap<>();
         public final List<String> resources = new ArrayList<>();
         public final Map<String, Long> handovers = new LinkedHashMap<>();
         public final List<Verdict> verdicts = new ArrayList<>();
@@ -86,27 +87,35 @@ public final class CaseReplay {
         final Result result = new Result();
         final List<ConstraintState> constraints = new ArrayList<>();
         for (final ProcessSpec.Constraint c : spec.constraints) constraints.add(new ConstraintState(c));
-        final List<Event> tie = new ArrayList<>();
-        long tieMillis = Long.MIN_VALUE;
         final Set<String> seenResources = new LinkedHashSet<>();
         final Map<String, Long> firstSeen = new HashMap<>();
         final Map<String, Long> lastSeen = new HashMap<>();
         Event previous = null;
-        for (final Event event : events) {
-            if (!tie.isEmpty() && event.millis() != tieMillis) {
-                previous = flush(tie, previous, result, constraints, seenResources, firstSeen, lastSeen, spec);
-                tie.clear();
+        if (spec.sequence == null) {
+            // no tie-break field: the events stream straight through in the given order
+            for (final Event event : events) {
+                previous = step(event, previous, result, constraints, seenResources, firstSeen, lastSeen, spec);
             }
-            tieMillis = event.millis();
-            tie.add(event);
+        } else {
+            // buffer the events of one timestamp so that the sequence field can order them
+            final List<Event> tie = new ArrayList<>();
+            long tieMillis = Long.MIN_VALUE;
+            for (final Event event : events) {
+                if (!tie.isEmpty() && event.millis() != tieMillis) {
+                    previous = flush(tie, previous, result, constraints, seenResources, firstSeen, lastSeen, spec);
+                    tie.clear();
+                }
+                tieMillis = event.millis();
+                tie.add(event);
+            }
+            if (!tie.isEmpty()) previous = flush(tie, previous, result, constraints, seenResources, firstSeen, lastSeen, spec);
         }
-        if (!tie.isEmpty()) previous = flush(tie, previous, result, constraints, seenResources, firstSeen, lastSeen, spec);
         if (previous == null) return result;
         result.endMillis = previous.millis();
         result.lastActivity = previous.activity();
         result.activityCounts.get(previous.activity()).last = true;
         if (spec.dfgStartEnd) {
-            result.edges.add(new Edge(previous.activity(), ProcessSpec.END_NODE, -1L));
+            edge(result, previous.activity(), ProcessSpec.END_NODE).frequency++;
         }
         result.resources.addAll(seenResources);
         // the variant string: every activity when the trace fits, the visible prefix plus the hidden count otherwise
@@ -125,7 +134,7 @@ public final class CaseReplay {
     private static Event flush(final List<Event> tie, Event previous, final Result result, final List<ConstraintState> constraints,
                                final Set<String> seenResources, final Map<String, Long> firstSeen, final Map<String, Long> lastSeen,
                                final ProcessSpec spec) {
-        if (tie.size() > 1 && spec.sequence != null) {
+        if (tie.size() > 1) {
             tie.sort((a, b) -> compareSequence(a.sequence(), b.sequence()));
         }
         for (final Event event : tie) {
@@ -138,6 +147,7 @@ public final class CaseReplay {
     static int compareSequence(final Comparable<?> a, final Comparable<?> b) {
         if (a == null) return b == null ? 0 : 1;
         if (b == null) return -1;
+        if (a instanceof Long la && b instanceof Long lb) return Long.compare(la, lb);
         if (a instanceof Number na && b instanceof Number nb) return Double.compare(na.doubleValue(), nb.doubleValue());
         if (a.getClass() == b.getClass()) return ((Comparable) a).compareTo(b);
         return a.toString().compareTo(b.toString());
@@ -162,9 +172,11 @@ public final class CaseReplay {
             result.startMillis = event.millis();
             result.firstActivity = activity;
             count.first = true;
-            if (spec.dfgStartEnd) result.edges.add(new Edge(ProcessSpec.START_NODE, activity, -1L));
+            if (spec.dfgStartEnd) edge(result, ProcessSpec.START_NODE, activity).frequency++;
         } else {
-            result.edges.add(new Edge(previous.activity(), activity, event.millis() - previous.millis()));
+            final ProcessStats edge = edge(result, previous.activity(), activity);
+            edge.frequency++;
+            edge.addDuration(spec.unit.fromMillis(event.millis() - previous.millis()));
             if (previous.resource() != null && event.resource() != null && !previous.resource().equals(event.resource())) {
                 result.handovers.merge(previous.resource() + HANDOVER_SEPARATOR + event.resource(), 1L, Long::sum);
             }
@@ -172,6 +184,14 @@ public final class CaseReplay {
         if (event.resource() != null) seenResources.add(event.resource());
         for (final ConstraintState c : constraints) c.observe(activity, previous == null ? null : previous.activity(), index);
         return event;
+    }
+
+    private static ProcessStats edge(final Result result, final String source, final String target) {
+        return result.edges.computeIfAbsent(new Edge(source, target), k -> {
+            final ProcessStats stats = new ProcessStats();
+            stats.cases = 1;
+            return stats;
+        });
     }
 
     /** Incremental state of one Declare constraint over the trace. */
@@ -185,14 +205,12 @@ public final class CaseReplay {
         private long firstTargetIndex = -1;
         /** chainResponse: an activity not immediately followed by the target; chainPrecedence: a target not immediately preceded */
         private boolean chainViolated;
-        private String firstActivity;
 
         ConstraintState(final ProcessSpec.Constraint constraint) {
             this.constraint = constraint;
         }
 
         void observe(final String activity, final String previous, final long index) {
-            if (index == 0) firstActivity = activity;
             final boolean isActivity = activity.equals(constraint.activity);
             final boolean isTarget = activity.equals(constraint.target);
             if (isActivity) {

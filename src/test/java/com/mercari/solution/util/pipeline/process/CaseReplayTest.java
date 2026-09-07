@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline.process;
 
 import com.google.gson.JsonParser;
+import com.mercari.solution.module.Schema;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -36,11 +37,16 @@ public class CaseReplayTest {
         Assertions.assertEquals("A", r.firstActivity);
         Assertions.assertEquals("C", r.lastActivity);
         Assertions.assertEquals(List.of(
-                new CaseReplay.Edge(ProcessSpec.START_NODE, "A", -1L),
-                new CaseReplay.Edge("A", "B", 10 * 60_000L),
-                new CaseReplay.Edge("B", "A", 15 * 60_000L),
-                new CaseReplay.Edge("A", "C", 5 * 60_000L),
-                new CaseReplay.Edge("C", ProcessSpec.END_NODE, -1L)), r.edges);
+                new CaseReplay.Edge(ProcessSpec.START_NODE, "A"),
+                new CaseReplay.Edge("A", "B"),
+                new CaseReplay.Edge("B", "A"),
+                new CaseReplay.Edge("A", "C"),
+                new CaseReplay.Edge("C", ProcessSpec.END_NODE)), List.copyOf(r.edges.keySet()));
+        for (final ProcessStats s : r.edges.values()) Assertions.assertEquals(1L, s.frequency);
+        Assertions.assertFalse(r.edges.get(new CaseReplay.Edge(ProcessSpec.START_NODE, "A")).hasDurations());
+        Assertions.assertEquals(10 * 60D, r.edges.get(new CaseReplay.Edge("A", "B")).durationMean(), 1e-9);
+        Assertions.assertEquals(15 * 60D, r.edges.get(new CaseReplay.Edge("B", "A")).durationMean(), 1e-9);
+        Assertions.assertEquals(5 * 60D, r.edges.get(new CaseReplay.Edge("A", "C")).durationMean(), 1e-9);
         Assertions.assertEquals(2L, r.activityCounts.get("A").frequency);
         Assertions.assertTrue(r.activityCounts.get("A").first);
         Assertions.assertFalse(r.activityCounts.get("A").last);
@@ -58,9 +64,7 @@ public class CaseReplayTest {
         Assertions.assertTrue(r.truncated);
         Assertions.assertEquals(List.of("A", "B"), r.activities);
         Assertions.assertEquals("A -> B -> ...(+2)", r.variant);
-        Assertions.assertEquals(3, r.edges.size());
-        Assertions.assertEquals("A", r.edges.get(0).source());
-        Assertions.assertEquals("D", r.edges.get(2).target());
+        Assertions.assertEquals(List.of(new CaseReplay.Edge("A", "B"), new CaseReplay.Edge("B", "C"), new CaseReplay.Edge("C", "D")), List.copyOf(r.edges.keySet()));
     }
 
     @Test
@@ -143,6 +147,19 @@ public class CaseReplayTest {
         Assertions.assertTrue(errors.stream().anyMatch(m -> m.contains("reserved")), errors.toString());
         Assertions.assertTrue(errors.stream().anyMatch(m -> m.contains("dfg.minFrequency")), errors.toString());
         Assertions.assertTrue(errors.stream().anyMatch(m -> m.contains("requires count")), errors.toString());
+        // against a schema: a case attribute may shadow neither a cases column nor a projected event column, and an
+        // integer timestamp must be int64 (epoch micros)
+        final Schema schema = Schema.builder()
+                .withField("id", Schema.FieldType.STRING)
+                .withField("activity", Schema.FieldType.STRING)
+                .withField("ts", Schema.FieldType.INT32)
+                .build();
+        final ProcessSpec spec2 = ProcessSpec.parse(JsonParser.parseString("{caseId: id, activities: [{name: A, filter: \"activity = 'a'\"}, {name: B, filter: \"nope = 'b'\"}], timestamp: ts, attributes: [activity]}").getAsJsonObject());
+        final List<String> errors2 = spec2.validate(schema);
+        Assertions.assertTrue(errors2.stream().anyMatch(m -> m.contains("attributes field 'activity' collides with a projected event column")), errors2.toString());
+        Assertions.assertTrue(errors2.stream().anyMatch(m -> m.contains("timestamp field 'ts' must be")), errors2.toString());
+        Assertions.assertTrue(errors2.stream().anyMatch(m -> m.startsWith("activities[1].filter is illegal")), errors2.toString());
+        Assertions.assertTrue(errors2.stream().noneMatch(m -> m.startsWith("activities[0].filter")), errors2.toString());
         Assertions.assertThrows(IllegalArgumentException.class, () -> ProcessSpec.parse(JsonParser.parseString("{caseId: id, activity: a, constraints: [{type: eventually}]}").getAsJsonObject()));
         Assertions.assertThrows(IllegalArgumentException.class, () -> ProcessSpec.parse(JsonParser.parseString("{caseId: id, activity: a, performance: {unit: weeks}}").getAsJsonObject()));
         Assertions.assertEquals(ProcessSpec.Unit.hours, ProcessSpec.parse(JsonParser.parseString("{caseId: id, activity: a, performance: {unit: HOURS}}").getAsJsonObject()).unit);

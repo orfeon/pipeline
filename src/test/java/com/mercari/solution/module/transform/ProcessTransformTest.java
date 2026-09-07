@@ -255,6 +255,68 @@ public class ProcessTransformTest {
         pipeline.run();
     }
 
+    /** The documented streaming topology (a session window closes a case) must assemble; every aggregate is per window. */
+    @Test
+    public void testSessionWindowAggregatesPerWindow() throws Exception {
+        final String config = """
+                sources:
+                  - name: tickets
+                    module: create
+                    timestampAttribute: at
+                    parameters:
+                      type: element
+                      elements:
+                        - {id: T1, status: Open,   at: "2025-01-01T10:00:00Z"}
+                        - {id: T1, status: Closed, at: "2025-01-01T10:20:00Z"}
+                        - {id: T2, status: Open,   at: "2025-01-10T09:00:00Z"}
+                        - {id: T2, status: Closed, at: "2025-01-10T09:30:00Z"}
+                        - {id: T3, status: Open,   at: "2025-01-10T09:10:00Z"}
+                        - {id: T3, status: Wait,   at: "2025-01-10T09:40:00Z"}
+                        - {id: T3, status: Closed, at: "2025-01-10T10:00:00Z"}
+                      schema:
+                        fields:
+                          - {name: id, type: string}
+                          - {name: status, type: string}
+                          - {name: at, type: timestamp}
+                transforms:
+                  - name: mining
+                    module: process
+                    inputs: [tickets]
+                    strategy:
+                      window:
+                        type: session
+                        unit: hour
+                        gap: 1
+                    parameters:
+                      caseId: id
+                      activity: status
+                      timestamp: at
+                """;
+        final Config c = Config.load(config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, c);
+        // T1 is alone in its session; T2 and T3 overlap and form one window (the rows carry the window end); an edge
+        // only one of them walks keeps that case's own session
+        PAssert.that(outputs.get("mining.variants").getCollection()).satisfies(rows -> {
+            final Map<String, Double> shares = new HashMap<>();
+            for (final MElement r : rows) shares.put(r.getTimestamp() + " " + r.getAsString("variant"), r.getAsDouble("caseShare"));
+            Assertions.assertEquals(3, shares.size(), shares.toString());
+            Assertions.assertEquals(1D, shares.get("2025-01-01T11:19:59.999Z Open -> Closed"), 1e-12, shares.toString());
+            Assertions.assertEquals(0.5D, shares.get("2025-01-10T10:59:59.999Z Open -> Closed"), 1e-12, shares.toString());
+            Assertions.assertEquals(0.5D, shares.get("2025-01-10T10:59:59.999Z Open -> Wait -> Closed"), 1e-12, shares.toString());
+            return null;
+        });
+        PAssert.that(outputs.get("mining").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> edges = new HashMap<>();
+            for (final MElement r : rows) edges.put(r.getTimestamp() + " " + r.getAsString("source") + "/" + r.getAsString("target"), r);
+            Assertions.assertEquals(8, edges.size(), edges.keySet().toString());
+            Assertions.assertEquals(1L, edges.get("2025-01-01T11:19:59.999Z Open/Closed").getAsLong("frequency"), edges.keySet().toString());
+            Assertions.assertEquals(1L, edges.get("2025-01-10T10:29:59.999Z Open/Closed").getAsLong("frequency"), edges.keySet().toString());
+            Assertions.assertEquals(2L, edges.get("2025-01-10T10:59:59.999Z __start__/Open").getAsLong("caseCount"), edges.keySet().toString());
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testInvalidParametersFailAtAssembly() {
         final String config = ORDERS_SOURCE + """
@@ -267,6 +329,7 @@ public class ProcessTransformTest {
                       activity: status
                       activities:
                         - {name: x}
+                        - {name: y, filter: "status = = 'Paid'"}
                       attributes: [variant]
                       constraints:
                         - {type: response, activity: Paid}
@@ -278,6 +341,7 @@ public class ProcessTransformTest {
         Assertions.assertTrue(message.contains("caseId field 'order_no' is not in the input schema"), message);
         Assertions.assertTrue(message.contains("activity and activities are exclusive"), message);
         Assertions.assertTrue(message.contains("attributes field 'variant' is not in the input schema"), message);
+        Assertions.assertTrue(message.contains("activities[1].filter could not be parsed"), message);
         Assertions.assertTrue(message.contains("(response) requires activity and target"), message);
         Assertions.assertTrue(message.contains("is not an ISO-8601 duration"), message);
     }

@@ -53,10 +53,10 @@ of every case (`dfg.startEnd`), so the process map has explicit entry and exit p
 | caseId | required | String or Array<String\> | The field(s) identifying a case. Several fields form a composite id joined by `\|`. Events with a null case id are failure records. |
 | activity | selective required | String | The field holding the activity name (any primitive type, converted to text). Exclusive with `activities`. |
 | activities | selective required | Array<Object\> | Activity derivation rules `{name, filter}` evaluated in order; the first matching rule names the activity. `filter` is a [filter condition](../common/filter.md) — JSON or SQL-like text such as `"status = 'shipped' AND op = 'UPDATE'"`; a rule without `filter` matches every event. Events matching no rule are dropped (`engine.unmatched`). |
-| timestamp | optional | String | The event time field (timestamp / datetime / date / ISO-8601 string / epoch-micros integer). Default: the element's event time. |
+| timestamp | optional | String | The event time field (timestamp / date / ISO-8601 string / int64 epoch micros). Default: the element's event time. |
 | sequence | optional | String | A numeric / string field ordering events that share a timestamp (a change-stream sequence number, a row version). Without it, ties keep an arbitrary order. |
 | resource | optional | String | The field naming who / what performed the event (user, team, system). Enables `handovers`, `resources` and `resourceCount`. |
-| attributes | optional | Array<String\> | Primitive input fields copied to the `cases` output (the first non-null value of the case), for breakdowns such as variant × country. Names may not collide with the `cases` columns. |
+| attributes | optional | Array<String\> | Primitive input fields copied to the `cases` output (the first non-null value of the case), for breakdowns such as variant × country. Names may not collide with the `cases` columns or with the projected event columns (`activity`, `resource`, `sequenceInteger`, `sequenceNumber`, `sequenceText`). |
 | dfg.minFrequency | optional | Integer | Edges observed fewer times are dropped from `edges` (noise filtering of the process map). Default `1` (keep all). |
 | dfg.startEnd | optional | Boolean | Emit the `__start__` / `__end__` edges. Default `true`. |
 | performance.unit | optional | Enum | Unit of every duration column: `millis`, `seconds` (default), `minutes`, `hours`, `days`. |
@@ -86,7 +86,7 @@ reports whether it *applied* (its premise occurred) and whether it was *violated
 | `chainResponse` | `activity`, `target` | some occurrence of `activity` is not *immediately* followed by `target` | `activity` occurs |
 | `chainPrecedence` | `activity`, `target` | some occurrence of `target` is not *immediately* preceded by `activity` | `target` occurs |
 | `notCoexistence` | `activity`, `target` | both occur in the case | always |
-| `duration` | `maxDuration` (ISO-8601, e.g. `PT48H`, `P7D`), optionally `activity` + `target` | the case lasts longer than `maxDuration`; with `activity` + `target`, the span from the first `activity` to the last `target` does | always; with the span, both occur |
+| `duration` | `maxDuration` (ISO-8601, e.g. `PT48H`, `P7D`), optionally `activity` + `target` | the case lasts longer than `maxDuration`; with `activity` + `target`, the span from the first `activity` to the last `target` does | always; with the span, both occur and the last `target` is not before the first `activity` |
 
 `cases.fitness` is `1 − violated / applicable` over the constraints that applied to the case (1.0 when
 none applied); `conformance.violationRate` is the same ratio per constraint over all cases.
@@ -98,7 +98,10 @@ streaming the input must carry a non-global window from the [strategy](../common
 `session` window with a `gap` longer than the longest pause inside a case, so that a window closes a case
 and its events are replayed together — or a `fixed` window for periodic snapshots of the process map. A
 streaming input in the global window is rejected at assembly. Events of a case that arrive after its window
-closed are not merged into the earlier replay: they form a new (partial) case in a later window.
+closed are not merged into the earlier replay: they form a new (partial) case in a later window. With a
+session window the aggregates re-merge the sessions per output key, so overlapping cases share one
+`edges` / `nodes` / `variants` row (and `caseShare` is relative to that merged window), while a case with no
+overlap keeps a row of its own.
 
 ## Scale
 
@@ -106,7 +109,9 @@ The shuffle carries a compact event (case id, activity, timestamp, resource, seq
 input row. A case's events are sorted with the same keyed spill sorter as the `feature` transform: in memory
 up to the budget, sorted chunks on worker-local disk beyond, so one huge case (a device emitting millions of
 events) never has to fit on the heap. The replay itself is streaming — only the capped activity list, the
-per-activity counters and the per-constraint state stay in memory. The aggregated outputs are one merge-only
+per-activity and per-edge counters and the per-constraint state stay in memory (bounded by the distinct
+activities of the case, not its events). `engine.spillMemoryMB` falls back to the `featureSpillMemoryMB`
+pipeline option, as in the `feature` transform. The aggregated outputs are one merge-only
 Combine per output; the duration quantiles are KLL sketches (k=200, error bound about 1.3% in rank).
 
 ## Example

@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.process;
 
+import com.mercari.solution.MPipeline;
 import com.mercari.solution.module.DataType;
 import com.mercari.solution.module.Logging;
 import com.mercari.solution.module.MElement;
@@ -12,18 +13,17 @@ import org.apache.beam.sdk.coders.BigEndianLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.transforms.Sum;
+import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
+import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
-import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.slf4j.Logger;
@@ -37,10 +37,13 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import static com.mercari.solution.module.Module.processError;
 
@@ -67,9 +70,15 @@ public final class ProcessStages {
     // event projection (the shuffled record)
     static final String EVENT_ACTIVITY = "activity";
     static final String EVENT_RESOURCE = "resource";
+    static final String EVENT_SEQUENCE_INTEGER = "sequenceInteger";
     static final String EVENT_SEQUENCE_NUMBER = "sequenceNumber";
     static final String EVENT_SEQUENCE_TEXT = "sequenceText";
     static final String EVENT_CASE_ID = "caseId";
+    /** The projected event columns a case attribute may not shadow. */
+    static final List<String> EVENT_FIELDS = List.of(EVENT_CASE_ID, EVENT_ACTIVITY, EVENT_RESOURCE, EVENT_SEQUENCE_INTEGER,
+            EVENT_SEQUENCE_NUMBER, EVENT_SEQUENCE_TEXT);
+
+    private static final Pattern VARIANT_SPLIT = Pattern.compile(Pattern.quote(CaseReplay.VARIANT_SEPARATOR));
 
     public record Outputs(PCollection<MElement> edges, PCollection<MElement> nodes, PCollection<MElement> variants,
                           PCollection<MElement> cases, PCollection<MElement> handovers, PCollection<MElement> conformance,
@@ -82,6 +91,7 @@ public final class ProcessStages {
                 .withField(EVENT_CASE_ID, Schema.FieldType.STRING)
                 .withField(EVENT_ACTIVITY, Schema.FieldType.STRING)
                 .withField(EVENT_RESOURCE, Schema.FieldType.STRING)
+                .withField(EVENT_SEQUENCE_INTEGER, Schema.FieldType.INT64)
                 .withField(EVENT_SEQUENCE_NUMBER, Schema.FieldType.FLOAT64)
                 .withField(EVENT_SEQUENCE_TEXT, Schema.FieldType.STRING);
         for (final Schema.Field f : spec.caseAttributeFields()) builder.withField(f);
@@ -189,42 +199,55 @@ public final class ProcessStages {
         final TupleTag<KV<String, ProcessStats>> variantsTag = new TupleTag<>() {};
         final TupleTag<KV<String, ProcessStats>> handoversTag = new TupleTag<>() {};
         final TupleTag<KV<String, ProcessStats>> conformanceTag = new TupleTag<>() {};
-        final TupleTag<Long> caseCountTag = new TupleTag<>() {};
         final TupleTag<BadRecord> replayFailureTag = new TupleTag<>() {};
         final PCollectionTuple replayed = extracted.get(eventTag).setCoder(sortKvCoder)
                 .apply("GroupByCase", GroupByKey.create())
                 .apply("Replay", ParDo
-                        .of(new ReplayDoFn(spec, sorter, loggings, failFast, casesTag, edgesTag, nodesTag, variantsTag, handoversTag, conformanceTag, caseCountTag, replayFailureTag))
-                        .withOutputTags(casesTag, TupleTagList.of(List.of(edgesTag, nodesTag, variantsTag, handoversTag, conformanceTag, caseCountTag, replayFailureTag))));
+                        .of(new ReplayDoFn(spec, sorter, loggings, failFast, casesTag, edgesTag, nodesTag, variantsTag, handoversTag, conformanceTag, replayFailureTag))
+                        .withOutputTags(casesTag, TupleTagList.of(List.of(edgesTag, nodesTag, variantsTag, handoversTag, conformanceTag, replayFailureTag))));
 
         final PCollection<BadRecord> failures = org.apache.beam.sdk.values.PCollectionList
                 .of(extracted.get(extractFailureTag)).and(replayed.get(replayFailureTag))
                 .apply("Failures", org.apache.beam.sdk.transforms.Flatten.pCollections());
 
-        final PCollectionView<Long> totalCases = replayed.get(caseCountTag).setCoder(VarLongCoder.of())
-                .apply("TotalCases", Sum.longsGlobally().asSingletonView());
-
-        final PCollection<MElement> edges = replayed.get(edgesTag).setCoder(statsCoder)
-                .apply("CombineEdges", Combine.perKey(new ProcessStats.Fn()))
+        // the per-case GroupByKey consumed a merging (session) window; the aggregates re-merge it per output key so
+        // that overlapping cases land in one window instead of one row per case
+        final boolean remerge = !input.getWindowingStrategy().getWindowFn().isNonMerging();
+        final PCollection<MElement> edges = combine(replayed, edgesTag, statsCoder, remerge, "Edges")
                 .apply("Edges", ParDo.of(new EdgesDoFn(spec)));
-        final PCollection<MElement> nodes = replayed.get(nodesTag).setCoder(statsCoder)
-                .apply("CombineNodes", Combine.perKey(new ProcessStats.Fn()))
+        final PCollection<MElement> nodes = combine(replayed, nodesTag, statsCoder, remerge, "Nodes")
                 .apply("Nodes", ParDo.of(new NodesDoFn()));
-        final PCollection<MElement> variants = replayed.get(variantsTag).setCoder(statsCoder)
-                .apply("CombineVariants", Combine.perKey(new ProcessStats.Fn()))
-                .apply("Variants", ParDo.of(new VariantsDoFn(spec, totalCases)).withSideInputs(totalCases));
-        final PCollection<MElement> handovers = replayed.get(handoversTag).setCoder(statsCoder)
-                .apply("CombineHandovers", Combine.perKey(new ProcessStats.Fn()))
+        // the case share needs the window total: one group over the (already combined) variants rather than a side
+        // input, which a session window (the streaming mode of this transform) does not allow
+        PCollection<KV<String, KV<String, ProcessStats>>> keyedVariants = combine(replayed, variantsTag, statsCoder, remerge, "Variants")
+                .apply("KeyVariants", WithKeys.of(""))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), statsCoder));
+        if (remerge) keyedVariants = keyedVariants.apply("RemergeVariantTotals", Window.remerge());
+        final PCollection<MElement> variants = keyedVariants
+                .apply("GroupVariants", GroupByKey.create())
+                .apply("Variants", ParDo.of(new VariantsDoFn()));
+        final PCollection<MElement> handovers = combine(replayed, handoversTag, statsCoder, remerge, "Handovers")
                 .apply("Handovers", ParDo.of(new HandoversDoFn()));
-        final PCollection<MElement> conformance = replayed.get(conformanceTag).setCoder(statsCoder)
-                .apply("CombineConformance", Combine.perKey(new ProcessStats.Fn()))
+        final PCollection<MElement> conformance = combine(replayed, conformanceTag, statsCoder, remerge, "Conformance")
                 .apply("Conformance", ParDo.of(new ConformanceDoFn(spec)));
 
         return new Outputs(edges, nodes, variants, replayed.get(casesTag), handovers, conformance, failures);
     }
 
+    private static PCollection<KV<String, ProcessStats>> combine(final PCollectionTuple replayed, final TupleTag<KV<String, ProcessStats>> tag,
+                                                                 final KvCoder<String, ProcessStats> coder, final boolean remerge, final String name) {
+        PCollection<KV<String, ProcessStats>> partials = replayed.get(tag).setCoder(coder);
+        if (remerge) partials = partials.apply("Remerge" + name, Window.remerge());
+        return partials.apply("Combine" + name, Combine.perKey(new ProcessStats.Fn()));
+    }
+
+    /** Same resolution as the feature engine: the spec, then the {@code featureSpillMemoryMB} pipeline option, then the sorter default. */
     static KeyedSpillSorter.Options spillOptions(final ProcessSpec spec, final PipelineOptions options) {
-        return new KeyedSpillSorter.Options(spec.spillMemoryMB, spec.spillDirectory, spec.spillCompress);
+        Integer memoryMB = spec.spillMemoryMB;
+        if (memoryMB == null && options != null) {
+            memoryMB = options.as(MPipeline.MPipelineOptions.class).getFeatureSpillMemoryMB();
+        }
+        return new KeyedSpillSorter.Options(memoryMB, spec.spillDirectory, spec.spillCompress);
     }
 
     // ---- event projection ----
@@ -237,7 +260,8 @@ public final class ProcessStages {
         private final boolean failFast;
         private final TupleTag<BadRecord> failureTag;
         private final Schema.Type timestampType;
-        private transient List<Filter> filters;
+        private transient List<Filter.ConditionNode> conditions;
+        private transient Set<String> conditionVariables;
 
         ExtractEventDoFn(final ProcessSpec spec, final List<Schema.Field> fields, final List<Logging> loggings,
                          final boolean failFast, final TupleTag<BadRecord> failureTag) {
@@ -255,11 +279,12 @@ public final class ProcessStages {
 
         @Setup
         public void setup() {
-            filters = new ArrayList<>();
+            conditions = new ArrayList<>();
+            conditionVariables = new HashSet<>();
             for (final ProcessSpec.ActivityRule rule : spec.activities) {
-                final Filter filter = Filter.of(rule.filter);
-                filter.setup();
-                filters.add(filter);
+                final Filter.ConditionNode node = rule.filter == null ? null : Filter.parse(rule.filter);
+                conditions.add(node);
+                if (node != null) conditionVariables.addAll(node.getRequiredVariables());
             }
         }
 
@@ -297,8 +322,10 @@ public final class ProcessStages {
                     values.put(EVENT_RESOURCE, r == null ? null : r.toString());
                 }
                 if (spec.sequence != null) {
+                    // integers keep their full precision (a double loses it above 2^53)
                     final Object s = input.getPrimitiveValue(spec.sequence);
-                    if (s instanceof Number n) values.put(EVENT_SEQUENCE_NUMBER, n.doubleValue());
+                    if (s instanceof Long || s instanceof Integer || s instanceof Short || s instanceof Byte) values.put(EVENT_SEQUENCE_INTEGER, ((Number) s).longValue());
+                    else if (s instanceof Number n) values.put(EVENT_SEQUENCE_NUMBER, n.doubleValue());
                     else if (s != null) values.put(EVENT_SEQUENCE_TEXT, s.toString());
                 }
                 for (final Schema.Field f : spec.caseAttributeFields()) {
@@ -316,8 +343,11 @@ public final class ProcessStages {
                 final Object v = input.getPrimitiveValue(spec.activity);
                 return v == null ? null : v.toString();
             }
-            for (int i = 0; i < filters.size(); i++) {
-                if (filters.get(i).filter(fields, input)) return spec.activities.get(i).name;
+            // one conversion of the variables every rule needs, then the rules in order
+            final Map<String, Object> values = input.asStandardMap(fields, conditionVariables);
+            for (int i = 0; i < conditions.size(); i++) {
+                final Filter.ConditionNode node = conditions.get(i);
+                if (node == null || Filter.filter(node, values)) return spec.activities.get(i).name;
             }
             return null;
         }
@@ -350,14 +380,13 @@ public final class ProcessStages {
         private final TupleTag<KV<String, ProcessStats>> variantsTag;
         private final TupleTag<KV<String, ProcessStats>> handoversTag;
         private final TupleTag<KV<String, ProcessStats>> conformanceTag;
-        private final TupleTag<Long> caseCountTag;
         private final TupleTag<BadRecord> failureTag;
 
         ReplayDoFn(final ProcessSpec spec, final KeyedSpillSorter sorter, final List<Logging> loggings, final boolean failFast,
                    final TupleTag<MElement> casesTag, final TupleTag<KV<String, ProcessStats>> edgesTag,
                    final TupleTag<KV<String, ProcessStats>> nodesTag, final TupleTag<KV<String, ProcessStats>> variantsTag,
                    final TupleTag<KV<String, ProcessStats>> handoversTag, final TupleTag<KV<String, ProcessStats>> conformanceTag,
-                   final TupleTag<Long> caseCountTag, final TupleTag<BadRecord> failureTag) {
+                   final TupleTag<BadRecord> failureTag) {
             this.spec = spec;
             this.sorter = sorter;
             this.logs = Logging.map(loggings);
@@ -368,7 +397,6 @@ public final class ProcessStages {
             this.variantsTag = variantsTag;
             this.handoversTag = handoversTag;
             this.conformanceTag = conformanceTag;
-            this.caseCountTag = caseCountTag;
             this.failureTag = failureTag;
         }
 
@@ -430,20 +458,11 @@ public final class ProcessStages {
             final MElement caseRecord = MElement.of(values, result.endMillis);
             c.outputWithTimestamp(casesTag, caseRecord, org.joda.time.Instant.ofEpochMilli(result.endMillis));
             Logging.log(LOG, logs, "output", caseRecord);
-            c.output(caseCountTag, 1L);
 
             // edges: one partial per distinct edge of the case
-            final Map<String, ProcessStats> edges = new LinkedHashMap<>();
-            for (final CaseReplay.Edge e : result.edges) {
-                final ProcessStats s = edges.computeIfAbsent(e.source() + KEY_SEPARATOR + e.target(), k -> {
-                    final ProcessStats n = new ProcessStats();
-                    n.cases = 1;
-                    return n;
-                });
-                s.frequency++;
-                if (e.durationMillis() >= 0) s.addDuration(spec.unit.fromMillis(e.durationMillis()));
+            for (final Map.Entry<CaseReplay.Edge, ProcessStats> e : result.edges.entrySet()) {
+                c.output(edgesTag, KV.of(e.getKey().source() + KEY_SEPARATOR + e.getKey().target(), e.getValue()));
             }
-            for (final Map.Entry<String, ProcessStats> e : edges.entrySet()) c.output(edgesTag, KV.of(e.getKey(), e.getValue()));
 
             // nodes
             for (final Map.Entry<String, CaseReplay.ActivityCount> e : result.activityCounts.entrySet()) {
@@ -506,9 +525,10 @@ public final class ProcessStages {
                     if (v != null) a.setValue(v);
                 }
             }
+            final Object integer = e.getPrimitiveValue(EVENT_SEQUENCE_INTEGER);
             final Object number = e.getPrimitiveValue(EVENT_SEQUENCE_NUMBER);
             final Object text = e.getPrimitiveValue(EVENT_SEQUENCE_TEXT);
-            final Comparable<?> sequence = number instanceof Double d ? d : (text == null ? null : text.toString());
+            final Comparable<?> sequence = integer instanceof Long l ? l : number instanceof Double d ? d : (text == null ? null : text.toString());
             final Object resource = e.getPrimitiveValue(EVENT_RESOURCE);
             return new CaseReplay.Event(e.getAsString(EVENT_ACTIVITY), row.getKey(), resource == null ? null : resource.toString(), sequence);
         }
@@ -563,28 +583,26 @@ public final class ProcessStages {
         }
     }
 
-    static class VariantsDoFn extends DoFn<KV<String, ProcessStats>, MElement> {
-        private final PCollectionView<Long> totalCases;
-
-        VariantsDoFn(final ProcessSpec spec, final PCollectionView<Long> totalCases) {
-            this.totalCases = totalCases;
-        }
-
+    /** All variants of a window under one key: the first pass sums the cases, the second emits each variant with its share. */
+    static class VariantsDoFn extends DoFn<KV<String, Iterable<KV<String, ProcessStats>>>, MElement> {
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final KV<String, ProcessStats> kv = c.element();
-            final ProcessStats stats = kv.getValue();
-            final long total = c.sideInput(totalCases);
-            final Map<String, Object> values = new HashMap<>();
-            values.put("variant", kv.getKey());
-            final List<String> activities = new ArrayList<>(Arrays.asList(kv.getKey().split(java.util.regex.Pattern.quote(CaseReplay.VARIANT_SEPARATOR))));
-            if (!activities.isEmpty() && activities.get(activities.size() - 1).startsWith("...(+")) activities.remove(activities.size() - 1);
-            values.put("activities", activities);
-            values.put("length", stats.frequency / Math.max(1, stats.cases));
-            values.put("caseCount", stats.cases);
-            values.put("caseShare", total == 0 ? 0D : (double) stats.cases / total);
-            putDurations(values, stats);
-            c.output(MElement.of(values, c.timestamp()));
+            final Iterable<KV<String, ProcessStats>> variants = c.element().getValue();
+            long total = 0;
+            for (final KV<String, ProcessStats> kv : variants) total += kv.getValue().cases;
+            for (final KV<String, ProcessStats> kv : variants) {
+                final ProcessStats stats = kv.getValue();
+                final Map<String, Object> values = new HashMap<>();
+                values.put("variant", kv.getKey());
+                final List<String> activities = new ArrayList<>(Arrays.asList(VARIANT_SPLIT.split(kv.getKey())));
+                if (!activities.isEmpty() && activities.get(activities.size() - 1).startsWith("...(+")) activities.remove(activities.size() - 1);
+                values.put("activities", activities);
+                values.put("length", stats.frequency / Math.max(1, stats.cases));
+                values.put("caseCount", stats.cases);
+                values.put("caseShare", total == 0 ? 0D : (double) stats.cases / total);
+                putDurations(values, stats);
+                c.output(MElement.of(values, c.timestamp()));
+            }
         }
     }
 
