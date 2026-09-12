@@ -20,6 +20,8 @@ import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.errorhandling.BadRecord;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
+import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
@@ -187,9 +189,18 @@ public final class ProcessStages {
         final KvCoder<String, ProcessStats> statsCoder = KvCoder.of(StringUtf8Coder.of(), ProcessStats.StatsCoder.of());
         final KeyedSpillSorter sorter = new KeyedSpillSorter(spillOptions(spec, input.getPipeline().getOptions()), eventCoder);
 
+        // Every GroupByKey / Combine below holds the output watermark at the *earliest* event of its window rather
+        // than the window end (the default END_OF_WINDOW combiner). With the default, a session that ends earlier
+        // could fire alone at a downstream re-merge while an overlapping, later-ending session was still pending
+        // upstream (its hold lies past the earlier window's end), so overlapping cases came out as separate rows
+        // depending on scheduling. Holding at the window start keeps every window open until all the sessions that
+        // overlap it have arrived. The output rows are stamped with the window end explicitly (emitAtWindowEnd).
+        final PCollection<MElement> held = input.apply("HoldEarliest",
+                Window.<MElement>configure().withTimestampCombiner(TimestampCombiner.EARLIEST));
+
         final TupleTag<KV<String, KV<Long, MElement>>> eventTag = new TupleTag<>() {};
         final TupleTag<BadRecord> extractFailureTag = new TupleTag<>() {};
-        final PCollectionTuple extracted = input.apply("Events", ParDo
+        final PCollectionTuple extracted = held.apply("Events", ParDo
                 .of(new ExtractEventDoFn(spec, inputSchema.getFields(), loggings, failFast, extractFailureTag))
                 .withOutputTags(eventTag, TupleTagList.of(extractFailureTag)));
 
@@ -231,7 +242,17 @@ public final class ProcessStages {
         final PCollection<MElement> conformance = combine(replayed, conformanceTag, statsCoder, remerge, "Conformance")
                 .apply("Conformance", ParDo.of(new ConformanceDoFn(spec)));
 
-        return new Outputs(edges, nodes, variants, replayed.get(casesTag), handovers, conformance, failures);
+        // the EARLIEST hold is an internal detail: downstream modules see the input's own timestamp combiner again
+        final TimestampCombiner combiner = input.getWindowingStrategy().getTimestampCombiner();
+        return new Outputs(
+                restore(edges, combiner, "Edges"), restore(nodes, combiner, "Nodes"), restore(variants, combiner, "Variants"),
+                restore(replayed.get(casesTag), combiner, "Cases"), restore(handovers, combiner, "Handovers"),
+                restore(conformance, combiner, "Conformance"), restore(failures, combiner, "Failures"));
+    }
+
+    private static <T> PCollection<T> restore(final PCollection<T> output, final TimestampCombiner combiner, final String name) {
+        if (combiner == null || TimestampCombiner.EARLIEST.equals(combiner)) return output;
+        return output.apply("Restore" + name, Window.<T>configure().withTimestampCombiner(combiner));
     }
 
     private static PCollection<KV<String, ProcessStats>> combine(final PCollectionTuple replayed, final TupleTag<KV<String, ProcessStats>> tag,
@@ -545,6 +566,16 @@ public final class ProcessStages {
         values.put("durationP95", quantiles[1]);
     }
 
+    /**
+     * The aggregate rows carry the end of their window (the case-closing session end in streaming, the end of time in
+     * batch), independent of the EARLIEST hold the intermediate stages run under; an output timestamp later than the
+     * input's is always allowed.
+     */
+    static void emitAtWindowEnd(final DoFn<?, MElement>.ProcessContext c, final Map<String, Object> values, final BoundedWindow window) {
+        final org.joda.time.Instant end = window.maxTimestamp();
+        c.outputWithTimestamp(MElement.of(values, end), end);
+    }
+
     static class EdgesDoFn extends DoFn<KV<String, ProcessStats>, MElement> {
         private final long minFrequency;
 
@@ -553,7 +584,7 @@ public final class ProcessStages {
         }
 
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final KV<String, ProcessStats> kv = c.element();
             final ProcessStats stats = kv.getValue();
             if (stats.frequency < minFrequency) return;
@@ -564,13 +595,13 @@ public final class ProcessStages {
             values.put("frequency", stats.frequency);
             values.put("caseCount", stats.cases);
             putDurations(values, stats);
-            c.output(MElement.of(values, c.timestamp()));
+            emitAtWindowEnd(c, values, window);
         }
     }
 
     static class NodesDoFn extends DoFn<KV<String, ProcessStats>, MElement> {
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final KV<String, ProcessStats> kv = c.element();
             final ProcessStats stats = kv.getValue();
             final Map<String, Object> values = new HashMap<>();
@@ -579,14 +610,14 @@ public final class ProcessStages {
             values.put("caseCount", stats.cases);
             values.put("startCount", stats.starts);
             values.put("endCount", stats.ends);
-            c.output(MElement.of(values, c.timestamp()));
+            emitAtWindowEnd(c, values, window);
         }
     }
 
     /** All variants of a window under one key: the first pass sums the cases, the second emits each variant with its share. */
     static class VariantsDoFn extends DoFn<KV<String, Iterable<KV<String, ProcessStats>>>, MElement> {
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final Iterable<KV<String, ProcessStats>> variants = c.element().getValue();
             long total = 0;
             for (final KV<String, ProcessStats> kv : variants) total += kv.getValue().cases;
@@ -601,14 +632,14 @@ public final class ProcessStages {
                 values.put("caseCount", stats.cases);
                 values.put("caseShare", total == 0 ? 0D : (double) stats.cases / total);
                 putDurations(values, stats);
-                c.output(MElement.of(values, c.timestamp()));
+                emitAtWindowEnd(c, values, window);
             }
         }
     }
 
     static class HandoversDoFn extends DoFn<KV<String, ProcessStats>, MElement> {
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final KV<String, ProcessStats> kv = c.element();
             final ProcessStats stats = kv.getValue();
             final String[] parts = kv.getKey().split(CaseReplay.HANDOVER_SEPARATOR, 2);
@@ -617,7 +648,7 @@ public final class ProcessStages {
             values.put("target", parts.length > 1 ? parts[1] : null);
             values.put("frequency", stats.frequency);
             values.put("caseCount", stats.cases);
-            c.output(MElement.of(values, c.timestamp()));
+            emitAtWindowEnd(c, values, window);
         }
     }
 
@@ -629,7 +660,7 @@ public final class ProcessStages {
         }
 
         @ProcessElement
-        public void processElement(final ProcessContext c) {
+        public void processElement(final ProcessContext c, final BoundedWindow window) {
             final KV<String, ProcessStats> kv = c.element();
             final ProcessStats stats = kv.getValue();
             final Map<String, Object> values = new HashMap<>();
@@ -639,7 +670,7 @@ public final class ProcessStages {
             values.put("applicable", stats.applicable);
             values.put("violations", stats.violations);
             values.put("violationRate", stats.applicable == 0 ? 0D : (double) stats.violations / stats.applicable);
-            c.output(MElement.of(values, c.timestamp()));
+            emitAtWindowEnd(c, values, window);
         }
     }
 }

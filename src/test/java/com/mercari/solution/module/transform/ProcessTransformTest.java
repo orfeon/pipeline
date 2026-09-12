@@ -299,10 +299,10 @@ public class ProcessTransformTest {
         PAssert.that(outputs.get("mining.variants").getCollection()).satisfies(rows -> {
             final Map<String, Double> shares = new HashMap<>();
             for (final MElement r : rows) shares.put(r.getTimestamp() + " " + r.getAsString("variant"), r.getAsDouble("caseShare"));
-            Assertions.assertEquals(3, shares.size(), shares.toString());
-            Assertions.assertEquals(1D, shares.get("2025-01-01T11:19:59.999Z Open -> Closed"), 1e-12, shares.toString());
-            Assertions.assertEquals(0.5D, shares.get("2025-01-10T10:59:59.999Z Open -> Closed"), 1e-12, shares.toString());
-            Assertions.assertEquals(0.5D, shares.get("2025-01-10T10:59:59.999Z Open -> Wait -> Closed"), 1e-12, shares.toString());
+            Assertions.assertEquals(Map.of(
+                    "2025-01-01T11:19:59.999Z Open -> Closed", 1D,
+                    "2025-01-10T10:59:59.999Z Open -> Closed", 0.5D,
+                    "2025-01-10T10:59:59.999Z Open -> Wait -> Closed", 0.5D), shares);
             return null;
         });
         PAssert.that(outputs.get("mining").getCollection()).satisfies(rows -> {

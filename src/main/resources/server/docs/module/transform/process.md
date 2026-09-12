@@ -101,7 +101,8 @@ streaming input in the global window is rejected at assembly. Events of a case t
 closed are not merged into the earlier replay: they form a new (partial) case in a later window. With a
 session window the aggregates re-merge the sessions per output key, so overlapping cases share one
 `edges` / `nodes` / `variants` row (and `caseShare` is relative to that merged window), while a case with no
-overlap keeps a row of its own.
+overlap keeps a row of its own. The aggregate rows carry the end of their (merged) window as event time; a
+`cases` row carries the case's own end time.
 
 ## Scale
 
