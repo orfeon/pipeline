@@ -57,7 +57,11 @@ public final class SketchAccumulator implements Serializable {
     /** The {@code bins − 1} interior boundaries at ranks i / bins (inclusive search). */
     public double[] edges(final int bins) {
         final double[] edges = new double[bins - 1];
-        for (int i = 1; i < bins; i++) edges[i - 1] = sketch.getQuantile((double) i / bins, QuantileSearchCriteria.INCLUSIVE);
+        // getQuantile lazily builds and caches the sketch's sorted view, so a sketch shared through a side input
+        // must not be read from two bundles at once (the concurrent build corrupts the sort).
+        synchronized (sketch) {
+            for (int i = 1; i < bins; i++) edges[i - 1] = sketch.getQuantile((double) i / bins, QuantileSearchCriteria.INCLUSIVE);
+        }
         return edges;
     }
 
