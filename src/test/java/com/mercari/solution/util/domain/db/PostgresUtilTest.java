@@ -326,6 +326,190 @@ public class PostgresUtilTest {
         Assertions.assertEquals(0L, (long) unanalyzed.getFirst().startBlock);
     }
 
+    // sink statement generation
+
+    private static final PostgresUtil.TableId USERS = new PostgresUtil.TableId("public", "users");
+
+    @Test
+    public void testParseTableId() {
+        Assertions.assertEquals(new PostgresUtil.TableId("public", "users"), PostgresUtil.parseTableId("users"));
+        Assertions.assertEquals(new PostgresUtil.TableId("app", "users"), PostgresUtil.parseTableId("app.users"));
+        Assertions.assertEquals(new PostgresUtil.TableId("App", "My.Table"), PostgresUtil.parseTableId("\"App\".\"My.Table\""));
+        Assertions.assertEquals(new PostgresUtil.TableId("public", "a\"b"), PostgresUtil.parseTableId("\"a\"\"b\""));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> PostgresUtil.parseTableId("a.b.c"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> PostgresUtil.parseTableId(""));
+        Assertions.assertEquals("\"app\".\"users\"", PostgresUtil.parseTableId("app.users").quotedName());
+    }
+
+    @Test
+    public void testCreateStagingStatements() {
+        final String staging = PostgresUtil.createStagingTableName(USERS, List.of("id", "name"), PostgresUtil.WriteOp.INSERT_OR_UPDATE);
+        Assertions.assertTrue(staging.startsWith("_mp_users_"), staging);
+        Assertions.assertTrue(staging.length() <= 63);
+        // a different column layout yields a different staging table
+        Assertions.assertNotEquals(staging, PostgresUtil.createStagingTableName(USERS, List.of("id"), PostgresUtil.WriteOp.INSERT_OR_UPDATE));
+        Assertions.assertNotEquals(staging, PostgresUtil.createStagingTableName(USERS, List.of("id", "name"), PostgresUtil.WriteOp.MERGE));
+
+        final PostgresUtil.TableId longName = new PostgresUtil.TableId("public", "x".repeat(80));
+        Assertions.assertTrue(PostgresUtil.createStagingTableName(longName, List.of("id"), PostgresUtil.WriteOp.DELETE).length() <= 63);
+
+        // CTAS (not LIKE) so that the destination's NOT NULL constraints are not inherited by the staging table
+        Assertions.assertEquals(
+                "CREATE TEMP TABLE IF NOT EXISTS \"stg\" ON COMMIT DELETE ROWS AS SELECT \"id\", \"name\" FROM \"public\".\"users\" WITH NO DATA",
+                PostgresUtil.createStagingTableStatement("stg", USERS, List.of("id", "name"), false));
+        Assertions.assertEquals(
+                "CREATE TEMP TABLE IF NOT EXISTS \"stg\" ON COMMIT DELETE ROWS AS SELECT \"id\", NULL::text AS \"_mp_op\" FROM \"public\".\"users\" WITH NO DATA",
+                PostgresUtil.createStagingTableStatement("stg", USERS, List.of("id"), true));
+        Assertions.assertEquals("TRUNCATE TABLE \"public\".\"users\"", PostgresUtil.createTruncateStatement(USERS));
+        Assertions.assertEquals("DELETE FROM \"public\".\"users\"", PostgresUtil.createDeleteAllStatement(USERS));
+    }
+
+    @Test
+    public void testCreateApplyStatementInsertOrUpdate() {
+        final PostgresUtil.ApplySpec spec = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.INSERT_OR_UPDATE, USERS, "stg",
+                List.of("id", "name", "age"), List.of("id"), List.of("name", "age"), null, null);
+        Assertions.assertEquals(
+                "INSERT INTO \"public\".\"users\" AS target (\"id\", \"name\", \"age\")"
+                        + " SELECT DISTINCT ON (\"id\") \"id\", \"name\", \"age\" FROM \"stg\" ORDER BY \"id\", ctid DESC"
+                        + " ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\", \"age\" = EXCLUDED.\"age\"",
+                PostgresUtil.createApplyStatement(spec));
+
+        final PostgresUtil.ApplySpec conditional = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.INSERT_OR_UPDATE, USERS, "stg",
+                List.of("id", "name", "updated"), List.of("id"), List.of("name", "updated"),
+                "target.updated < excluded.updated", null);
+        Assertions.assertTrue(PostgresUtil.createApplyStatement(conditional)
+                .endsWith(" WHERE target.updated < excluded.updated"));
+
+        // nothing to update (key-only table) degrades to DO NOTHING
+        final PostgresUtil.ApplySpec keyOnly = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.INSERT_OR_UPDATE, USERS, "stg",
+                List.of("id"), List.of("id"), List.of(), null, null);
+        Assertions.assertTrue(PostgresUtil.createApplyStatement(keyOnly).endsWith(" ON CONFLICT (\"id\") DO NOTHING"));
+    }
+
+    @Test
+    public void testCreateApplyStatementInsertOrDoNothingAndDelete() {
+        final PostgresUtil.ApplySpec doNothing = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.INSERT_OR_DONOTHING, USERS, "stg",
+                List.of("id", "name"), List.of("id"), List.of(), null, null);
+        Assertions.assertEquals(
+                "INSERT INTO \"public\".\"users\" (\"id\", \"name\") SELECT \"id\", \"name\" FROM \"stg\" ORDER BY \"id\", ctid"
+                        + " ON CONFLICT (\"id\") DO NOTHING",
+                PostgresUtil.createApplyStatement(doNothing));
+
+        final PostgresUtil.ApplySpec delete = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.DELETE, USERS, "stg",
+                List.of("tenant", "id"), List.of("tenant", "id"), List.of(), null, null);
+        Assertions.assertEquals(
+                "DELETE FROM \"public\".\"users\" USING (SELECT DISTINCT \"tenant\", \"id\" FROM \"stg\") AS s"
+                        + " WHERE \"public\".\"users\".\"tenant\" = s.\"tenant\" AND \"public\".\"users\".\"id\" = s.\"id\"",
+                PostgresUtil.createApplyStatement(delete));
+
+        Assertions.assertThrows(IllegalArgumentException.class, () -> PostgresUtil.createApplyStatement(new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.INSERT, USERS, "stg", List.of("id"), List.of(), List.of(), null, null)));
+    }
+
+    @Test
+    public void testCreateApplyStatementMerge() {
+        final PostgresUtil.ApplySpec merge = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.MERGE, USERS, "stg",
+                List.of("id", "name"), List.of("id"), List.of("name"), null, null);
+        Assertions.assertEquals(
+                "MERGE INTO \"public\".\"users\" AS t"
+                        + " USING (SELECT DISTINCT ON (\"id\") \"id\", \"name\", \"_mp_op\" FROM \"stg\" AS s0 ORDER BY \"id\", s0.ctid DESC) AS s"
+                        + " ON t.\"id\" = s.\"id\""
+                        + " WHEN MATCHED AND s.\"_mp_op\" = 'DELETE' THEN DELETE"
+                        + " WHEN MATCHED THEN UPDATE SET \"name\" = s.\"name\""
+                        + " WHEN NOT MATCHED AND s.\"_mp_op\" <> 'DELETE' THEN INSERT (\"id\", \"name\") VALUES (s.\"id\", s.\"name\")",
+                PostgresUtil.createApplyStatement(merge));
+
+        final PostgresUtil.ApplySpec guarded = new PostgresUtil.ApplySpec(
+                PostgresUtil.WriteOp.MERGE, USERS, "stg",
+                List.of("id", "name", "seq"), List.of("id"), List.of("name", "seq"), null, "seq");
+        final String sql = PostgresUtil.createApplyStatement(guarded);
+        Assertions.assertTrue(sql.contains("ORDER BY \"id\", s0.\"seq\" COLLATE \"C\" DESC"), sql);
+        Assertions.assertTrue(sql.contains(
+                " WHEN MATCHED AND t.\"seq\" IS NOT NULL AND t.\"seq\" COLLATE \"C\" >= s.\"seq\" COLLATE \"C\" THEN DO NOTHING"
+                        + " WHEN MATCHED AND s.\"_mp_op\" = 'DELETE' THEN DELETE"), sql);
+    }
+
+    @Test
+    public void testCreateCreateTableStatement() {
+        final Schema schema = SchemaBuilder.record("root").fields()
+                .name("id").type(AvroSchemaUtil.REQUIRED_LONG).noDefault()
+                .name("name").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+                .name("price").type(AvroSchemaUtil.NULLABLE_LOGICAL_DECIMAL_TYPE).noDefault()
+                .name("created").type(AvroSchemaUtil.NULLABLE_LOGICAL_TIMESTAMP_MICRO_TYPE).noDefault()
+                .name("birthday").type(AvroSchemaUtil.NULLABLE_LOGICAL_DATE_TYPE).noDefault()
+                .name("tags").type(Schema.createUnion(
+                        Schema.createArray(Schema.create(Schema.Type.STRING)), Schema.create(Schema.Type.NULL))).noDefault()
+                .name("attrs").type(Schema.createUnion(
+                        Schema.createMap(Schema.create(Schema.Type.STRING)), Schema.create(Schema.Type.NULL))).noDefault()
+                .endRecord();
+        Assertions.assertEquals(
+                "CREATE TABLE IF NOT EXISTS \"public\".\"users\" ("
+                        + "\"id\" bigint NOT NULL, \"name\" text, \"price\" numeric(38, 9), \"created\" timestamptz, \"birthday\" date,"
+                        + " \"tags\" text[], \"attrs\" jsonb, PRIMARY KEY (\"id\"))",
+                PostgresUtil.createCreateTableStatement(USERS, schema, List.of("id")));
+    }
+
+    @Test
+    public void testFromJsonValueAndParseTimestamp() {
+        Assertions.assertEquals(1700000000000000L, PostgresUtil.parseTimestampMicros("2023-11-14T22:13:20Z"));
+        Assertions.assertEquals(1700000000000000L, PostgresUtil.parseTimestampMicros("2023-11-14T22:13:20"));
+        Assertions.assertEquals(1700000000500000L, PostgresUtil.parseTimestampMicros("2023-11-15T07:13:20.5+09:00"));
+        // database text form (canal-json / postgres text output): space separator
+        Assertions.assertEquals(1700000000000000L, PostgresUtil.parseTimestampMicros("2023-11-14 22:13:20"));
+
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString("""
+                {"b": true, "i": 12, "n": "12345.67", "s": "hello", "d": "2024-01-15", "t": "12:34:56.789",
+                 "ts": "2023-11-14T22:13:20Z", "bytes": "YmluYXJ5", "arr": [1, 2], "j": {"a": 1}, "nul": null}
+                """).getAsJsonObject();
+        Assertions.assertEquals(Boolean.TRUE, PostgresUtil.fromJsonValue(new PostgresUtil.Column("b", PostgresUtil.ColumnType.BOOL), json.get("b")));
+        Assertions.assertEquals(12L, PostgresUtil.fromJsonValue(new PostgresUtil.Column("i", PostgresUtil.ColumnType.INT4), json.get("i")));
+        Assertions.assertEquals(new BigDecimal("12345.67"), PostgresUtil.fromJsonValue(new PostgresUtil.Column("n", PostgresUtil.ColumnType.NUMERIC), json.get("n")));
+        Assertions.assertEquals("hello", PostgresUtil.fromJsonValue(new PostgresUtil.Column("s", PostgresUtil.ColumnType.TEXT), json.get("s")));
+        Assertions.assertEquals((int) LocalDate.of(2024, 1, 15).toEpochDay(), PostgresUtil.fromJsonValue(new PostgresUtil.Column("d", PostgresUtil.ColumnType.DATE), json.get("d")));
+        Assertions.assertEquals(LocalTime.of(12, 34, 56, 789000000).toNanoOfDay() / 1000L, PostgresUtil.fromJsonValue(new PostgresUtil.Column("t", PostgresUtil.ColumnType.TIME), json.get("t")));
+        Assertions.assertEquals(1700000000000000L, PostgresUtil.fromJsonValue(new PostgresUtil.Column("ts", PostgresUtil.ColumnType.TIMESTAMPTZ), json.get("ts")));
+        Assertions.assertArrayEquals("binary".getBytes(StandardCharsets.UTF_8), (byte[]) PostgresUtil.fromJsonValue(new PostgresUtil.Column("bytes", PostgresUtil.ColumnType.BYTEA), json.get("bytes")));
+        Assertions.assertEquals(List.of(1L, 2L), PostgresUtil.fromJsonValue(PostgresUtil.Column.arrayOf("arr", PostgresUtil.ColumnType.INT8), json.get("arr")));
+        Assertions.assertEquals("{\"a\":1}", PostgresUtil.fromJsonValue(new PostgresUtil.Column("j", PostgresUtil.ColumnType.JSONB), json.get("j")));
+        Assertions.assertNull(PostgresUtil.fromJsonValue(new PostgresUtil.Column("nul", PostgresUtil.ColumnType.TEXT), json.get("nul")));
+        Assertions.assertNull(PostgresUtil.fromJsonValue(new PostgresUtil.Column("missing", PostgresUtil.ColumnType.TEXT), json.get("missing")));
+    }
+
+    @Test
+    public void testEncodeRejectsOutOfRangeIntegers() throws IOException {
+        final GenericData.Record record = new GenericData.Record(TEST_SCHEMA);
+        record.put("shortField", 40000);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> roundTrip(record));
+
+        final GenericData.Record record2 = new GenericData.Record(TEST_SCHEMA);
+        record2.put("intField", 1);
+        Assertions.assertEquals(1, roundTrip(record2).get("intField"));
+    }
+
+    @Test
+    public void testEncodeStructuredValuesAsJson() throws IOException {
+        final Schema nested = SchemaBuilder.record("nested").fields()
+                .name("a").type(AvroSchemaUtil.REQUIRED_LONG).noDefault()
+                .name("b").type(AvroSchemaUtil.NULLABLE_STRING).noDefault()
+                .endRecord();
+        final GenericData.Record child = new GenericData.Record(nested);
+        child.put("a", 1L);
+        child.put("b", "x");
+
+        final GenericData.Record record = new GenericData.Record(TEST_SCHEMA);
+        record.put("jsonField", child);
+        record.put("jsonbField", java.util.Map.of("k", List.of(1, 2)));
+        final GenericRecord output = roundTrip(record);
+        Assertions.assertEquals("{\"a\":1,\"b\":\"x\"}", output.get("jsonField"));
+        Assertions.assertEquals("{\"k\":[1,2]}", output.get("jsonbField"));
+    }
+
     private static GenericRecord roundTrip(final GenericRecord record) throws IOException {
         final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try(final DataOutputStream output = new DataOutputStream(bytes)) {

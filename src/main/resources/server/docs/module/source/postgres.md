@@ -14,6 +14,7 @@ Unlike the `jdbc` source module, this module transfers data in `COPY (SELECT ...
 The table is automatically split into physical block (`ctid`) ranges, and the ranges are read in parallel by distributed workers.
 A single source can also read multiple tables at once with the `tables` parameter, producing one tagged output per table (see [All-tables parameters](#all-tables-parameters)).
 With `mode: changeDataCapture` the module instead streams row changes from a logical replication slot using the built-in `pgoutput` plugin (see [Change data capture](#change-data-capture-mode-changedatacapture)).
+The write-side counterpart is the [`postgres` sink](../sink/postgres.md) (`COPY ... FROM STDIN (FORMAT BINARY)`, upsert / delete via a staging table, cdc apply).
 The number of blocks is obtained from `pg_relation_size` (the physical size of the table) and the block range is split mechanically, so no full scan or `OFFSET` is needed to plan the split.
 Each range is read with an efficient TID range scan (`WHERE ctid >= '(start,0)' AND ctid < '(end,0)'`) so that a single query does not become huge.
 

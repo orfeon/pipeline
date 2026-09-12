@@ -60,6 +60,7 @@ This page lists the modules registered in the current codebase.
 | [firestore](sink/firestore.md)   | Write or delete documents in Cloud Firestore                                                     |
 | [iceberg](sink/iceberg.md)                                                       | Write input data to Apache Iceberg tables (experimental, not yet functional)                     |
 | [jdbc](sink/jdbc.md)             | Write data to RDB tables using JDBC statements                                                   |
+| [postgres](sink/postgres.md)     | Write data to PostgreSQL tables with COPY BINARY (insert, upsert, delete, cdc apply)             |
 | [pubsub](sink/pubsub.md)         | Publish input data as messages to Cloud Pub/Sub topics                                           |
 | [storage](sink/storage.md)       | Write input data as files (Avro/Parquet/JSON/CSV) to GCS, S3, or local file systems              |
 | [files](sink/files.md)           | Write each input record as an individual file with template-driven path and content              |

@@ -1,12 +1,29 @@
 package com.mercari.solution.util.domain.db;
 
 import com.google.common.net.InetAddresses;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+import com.mercari.solution.config.options.DataflowOptions;
+import com.mercari.solution.util.DateTimeUtil;
+import com.mercari.solution.util.cloud.SecretProviders;
+import com.mercari.solution.util.schema.AvroSchemaUtil;
+import com.mercari.solution.util.schema.converter.AvroToJsonConverter;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericEnumSymbol;
+import org.apache.avro.generic.GenericFixed;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.util.Utf8;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.postgresql.PGConnection;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -29,15 +46,23 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Utility for transferring data with PostgreSQL (or compatible) databases
  * using {@code COPY ... WITH (FORMAT BINARY)} via the JDBC driver's CopyManager API.
  */
 public class PostgresUtil {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PostgresUtil.class);
 
     public static final String DRIVER = "org.postgresql.Driver";
 
@@ -264,6 +289,549 @@ public class PostgresUtil {
 
     public static String quoteIdentifier(final String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    public static String quoteLiteral(final String literal) {
+        return "'" + literal.replace("'", "''") + "'";
+    }
+
+    /**
+     * Parses a table reference as written in a config ({@code table}, {@code schema.table},
+     * optionally with double-quoted parts) into a {@link TableId}. A bare name lives in the
+     * {@code public} schema.
+     */
+    public static TableId parseTableId(final String table) {
+        if(table == null || table.isBlank()) {
+            throw new IllegalArgumentException("table must not be empty");
+        }
+        final List<String> parts = new ArrayList<>();
+        final StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        for(int i = 0; i < table.length(); i++) {
+            final char c = table.charAt(i);
+            if(c == '"') {
+                if(quoted && i + 1 < table.length() && table.charAt(i + 1) == '"') {
+                    current.append('"');
+                    i++;
+                } else {
+                    quoted = !quoted;
+                }
+            } else if(c == '.' && !quoted) {
+                parts.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        parts.add(current.toString());
+        if(parts.size() > 2 || parts.stream().anyMatch(String::isBlank)) {
+            throw new IllegalArgumentException("Illegal table reference: " + table + " (expected table or schema.table)");
+        }
+        return parts.size() == 1
+                ? new TableId("public", parts.get(0).trim())
+                : new TableId(parts.get(0).trim(), parts.get(1).trim());
+    }
+
+
+    // Connection handling shared by the postgres source and sink modules
+
+    /** Resolved connection settings ({@link #resolveCredentials}). */
+    public record Credentials(String url, String user, String password) implements Serializable { }
+
+    /**
+     * Resolves the connection credentials of a module: a missing user means Cloud SQL IAM
+     * authentication with the worker service account, otherwise secret references in
+     * {@code user} / {@code password} are resolved.
+     */
+    public static Credentials resolveCredentials(
+            final String url,
+            final String user,
+            final String password,
+            final PipelineOptions options) {
+
+        if(user == null) {
+            final String serviceAccount = DataflowOptions.getServiceAccount(options);
+            LOG.info("Using worker service account: '{}' for database user", serviceAccount);
+            final String iamUrl = url.contains("enableIamAuth") ? url : url + "&enableIamAuth=true";
+            return new Credentials(iamUrl, serviceAccount.replace(".gserviceaccount.com", ""), "dummy");
+        }
+        if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
+            LOG.info("parameters.user|password is secret resource.");
+            return new Credentials(url, SecretProviders.resolveIfSecret(user), SecretProviders.resolveIfSecret(password));
+        }
+        return new Credentials(url, user, password);
+    }
+
+    // Worker-shared connection pools, reference-counted per url+user+mode so that the teardown
+    // of one DoFn does not close a pool other DoFn instances still use.
+    private static final Map<String, PoolEntry> POOLS = new HashMap<>();
+
+    private static final class PoolEntry {
+
+        private final HikariDataSource dataSource;
+        private int refCount;
+
+        private PoolEntry(final HikariDataSource dataSource) {
+            this.dataSource = dataSource;
+        }
+    }
+
+    public static HikariDataSource acquirePool(
+            final Credentials credentials,
+            final boolean readOnly,
+            final int maximumPoolSize) {
+
+        final String key = poolKey(credentials, readOnly);
+        synchronized (POOLS) {
+            PoolEntry entry = POOLS.get(key);
+            if (entry == null) {
+                final HikariConfig config = new HikariConfig();
+                config.setJdbcUrl(credentials.url());
+                config.setUsername(credentials.user());
+                config.setPassword(credentials.password());
+                config.setDriverClassName(DRIVER);
+                config.setMaximumPoolSize(maximumPoolSize);
+                config.setReadOnly(readOnly);
+                // the sink drives its own transactions; the source's COPY OUT must stay autocommit,
+                // otherwise pgjdbc opens a BEGIN that the unwrapped connection never closes
+                config.setAutoCommit(readOnly);
+                // a write flush may wait for a pooled connection behind other threads' COPYs
+                config.setConnectionTimeout(300_000L);
+                config.addDataSourceProperty("ApplicationName", "mercari-pipeline");
+                entry = new PoolEntry(new HikariDataSource(config));
+                POOLS.put(key, entry);
+            }
+            entry.refCount++;
+            return entry.dataSource;
+        }
+    }
+
+    public static void releasePool(final Credentials credentials, final boolean readOnly) {
+        final String key = poolKey(credentials, readOnly);
+        synchronized (POOLS) {
+            final PoolEntry entry = POOLS.get(key);
+            if (entry == null) {
+                return;
+            }
+            entry.refCount--;
+            if (entry.refCount <= 0) {
+                POOLS.remove(key);
+                entry.dataSource.close();
+            }
+        }
+    }
+
+    private static String poolKey(final Credentials credentials, final boolean readOnly) {
+        return credentials.url() + "|" + credentials.user() + "|" + (readOnly ? "ro" : "rw");
+    }
+
+
+    // Destination table description (sink)
+
+    /**
+     * Description of a destination table: its columns (with COPY BINARY types), primary key,
+     * the column sets of its plain unique indexes (usable for {@code ON CONFLICT} inference),
+     * generated columns (which COPY cannot write) and the server version.
+     */
+    public record TableInfo(
+            TableId tableId,
+            List<Column> columns,
+            List<String> primaryKey,
+            List<List<String>> uniqueIndexes,
+            Set<String> generatedColumns,
+            int serverVersion) implements Serializable {
+
+        /** See {@link PostgresUtil#findColumn(List, String)}. */
+        public Column findColumn(final String name) {
+            return PostgresUtil.findColumn(columns, name);
+        }
+
+        public boolean hasUniqueIndex(final Collection<String> columnNames) {
+            final Set<String> wanted = new HashSet<>(columnNames);
+            return uniqueIndexes.stream().anyMatch(index -> new HashSet<>(index).equals(wanted));
+        }
+    }
+
+    public static boolean tableExists(final Connection connection, final TableId tableId) throws SQLException {
+        final String sql = "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ? AND c.relname = ? AND c.relkind IN ('r', 'p', 'f', 'v')";
+        try(final PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, tableId.schema());
+            statement.setString(2, tableId.name());
+            try(final ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+    public static int getServerVersion(final Connection connection) throws SQLException {
+        try(final PreparedStatement statement = connection.prepareStatement("SHOW server_version_num");
+            final ResultSet resultSet = statement.executeQuery()) {
+            if(!resultSet.next()) {
+                throw new SQLException("Empty result for SHOW server_version_num");
+            }
+            return Integer.parseInt(resultSet.getString(1));
+        }
+    }
+
+    public static TableInfo getTableInfo(final Connection connection, final TableId tableId) throws SQLException {
+        final List<Column> columns = getColumnsFromQuery(connection, "SELECT * FROM " + tableId.quotedName() + " WHERE false");
+
+        final Set<String> generatedColumns = new HashSet<>();
+        final String generatedSql = """
+                SELECT a.attname
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = ? AND c.relname = ? AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated <> ''
+                """;
+        try(final PreparedStatement statement = connection.prepareStatement(generatedSql)) {
+            statement.setString(1, tableId.schema());
+            statement.setString(2, tableId.name());
+            try(final ResultSet resultSet = statement.executeQuery()) {
+                while(resultSet.next()) {
+                    generatedColumns.add(resultSet.getString(1));
+                }
+            }
+        }
+
+        final List<String> primaryKey = new ArrayList<>();
+        final List<List<String>> uniqueIndexes = new ArrayList<>();
+        // plain unique indexes only: partial or expression indexes cannot be inferred by ON CONFLICT
+        final String indexSql = """
+                SELECT i.indisprimary, array_agg(a.attname ORDER BY k.ord)
+                FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+                WHERE n.nspname = ? AND c.relname = ? AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL
+                GROUP BY i.indexrelid, i.indisprimary
+                """;
+        try(final PreparedStatement statement = connection.prepareStatement(indexSql)) {
+            statement.setString(1, tableId.schema());
+            statement.setString(2, tableId.name());
+            try(final ResultSet resultSet = statement.executeQuery()) {
+                while(resultSet.next()) {
+                    final boolean primary = resultSet.getBoolean(1);
+                    final String[] names = (String[]) resultSet.getArray(2).getArray();
+                    final List<String> index = List.of(names);
+                    uniqueIndexes.add(index);
+                    if(primary) {
+                        primaryKey.addAll(index);
+                    }
+                }
+            }
+        }
+        return new TableInfo(tableId, columns, primaryKey, uniqueIndexes, generatedColumns, getServerVersion(connection));
+    }
+
+
+    // Statement generation for the sink module
+
+    /** Write operations of the sink: the user-facing ops plus MERGE (row-level op column). */
+    public enum WriteOp {
+        INSERT,
+        INSERT_OR_UPDATE,
+        INSERT_OR_DONOTHING,
+        DELETE,
+        MERGE;
+
+        /** Whether the rows are staged in a temporary table and applied with a statement. */
+        public boolean isStaged() {
+            return !INSERT.equals(this);
+        }
+    }
+
+    /** Name of the staging column that carries the row-level op in MERGE mode. */
+    public static final String STAGING_OP_COLUMN = "_mp_op";
+    public static final String STAGING_OP_DELETE = "DELETE";
+    public static final String STAGING_OP_UPSERT = "UPSERT";
+
+    /**
+     * Everything the apply statement of a staged write depends on. Column names are unquoted;
+     * {@code updateColumns} is the subset of {@code columns} an upsert overwrites and
+     * {@code sequenceColumn} the destination column that guards MERGE against stale rows
+     * (compared as text with the C collation).
+     */
+    public record ApplySpec(
+            WriteOp op,
+            TableId target,
+            String staging,
+            List<String> columns,
+            List<String> keyColumns,
+            List<String> updateColumns,
+            String updateCondition,
+            String sequenceColumn) implements Serializable { }
+
+    /**
+     * Exact-name match first, then the unique case-insensitive match; null if none or ambiguous.
+     */
+    public static Column findColumn(final List<Column> columns, final String name) {
+        for(final Column column : columns) {
+            if(column.name.equals(name)) {
+                return column;
+            }
+        }
+        Column found = null;
+        for(final Column column : columns) {
+            if(column.name.equalsIgnoreCase(name)) {
+                if(found != null) {
+                    return null;
+                }
+                found = column;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * {@code CREATE TEMP TABLE IF NOT EXISTS} for the staging table: the staged columns with the
+     * destination's column types (so the COPY BINARY encoding of the destination applies as is)
+     * plus the op column in MERGE mode. It is created with {@code AS SELECT ... WITH NO DATA}
+     * rather than {@code LIKE} so that the destination's NOT NULL constraints are not inherited:
+     * a delete stages the keys only (op mode) or NULL placeholders (cdc mode).
+     * {@code ON COMMIT DELETE ROWS} empties it at every commit/rollback, so one session-scoped
+     * table serves every batch of the connection.
+     */
+    public static String createStagingTableStatement(
+            final String staging,
+            final TableId target,
+            final List<String> columnNames,
+            final boolean withOpColumn) {
+
+        final String select = columnNames.stream().map(PostgresUtil::quoteIdentifier).collect(Collectors.joining(", "))
+                + (withOpColumn ? ", NULL::text AS " + quoteIdentifier(STAGING_OP_COLUMN) : "");
+        return "CREATE TEMP TABLE IF NOT EXISTS " + quoteIdentifier(staging)
+                + " ON COMMIT DELETE ROWS AS SELECT " + select + " FROM " + target.quotedName() + " WITH NO DATA";
+    }
+
+    /**
+     * A staging table name unique to the destination and the column layout of the writer (so a
+     * layout change after a schema migration never meets a stale session table), within the
+     * 63-byte identifier limit.
+     */
+    public static String createStagingTableName(final TableId target, final List<String> columns, final WriteOp op) {
+        final String fingerprint = Integer.toHexString(
+                (target.qualifiedName() + "|" + String.join(",", columns) + "|" + op).hashCode());
+        final String base = ("_mp_" + target.name()).replaceAll("[^A-Za-z0-9_]", "_");
+        return base.substring(0, Math.min(base.length(), 63 - fingerprint.length() - 1)) + "_" + fingerprint;
+    }
+
+    public static String createTruncateStatement(final TableId target) {
+        return "TRUNCATE TABLE " + target.quotedName();
+    }
+
+    public static String createDeleteAllStatement(final TableId target) {
+        return "DELETE FROM " + target.quotedName();
+    }
+
+    /** The statement that applies the staged rows to the destination ({@link ApplySpec#op()}). */
+    public static String createApplyStatement(final ApplySpec spec) {
+        final String target = spec.target().quotedName();
+        final String staging = quoteIdentifier(spec.staging());
+        final String columns = spec.columns().stream().map(PostgresUtil::quoteIdentifier).collect(Collectors.joining(", "));
+        final String keys = spec.keyColumns().stream().map(PostgresUtil::quoteIdentifier).collect(Collectors.joining(", "));
+        return switch (spec.op()) {
+            case INSERT -> throw new IllegalArgumentException("INSERT rows are copied directly into the destination");
+            case INSERT_OR_UPDATE -> {
+                // the last staged row of a key wins (ctid order = COPY order); ordering by the key
+                // also gives concurrent batches a consistent lock order
+                final StringBuilder sb = new StringBuilder();
+                // AS target: lets updateCondition refer to the existing row as target (and the new row as EXCLUDED)
+                sb.append("INSERT INTO ").append(target).append(" AS target (").append(columns).append(")")
+                        .append(" SELECT DISTINCT ON (").append(keys).append(") ").append(columns)
+                        .append(" FROM ").append(staging)
+                        .append(" ORDER BY ").append(keys).append(", ctid DESC")
+                        .append(" ON CONFLICT (").append(keys).append(")");
+                if(spec.updateColumns().isEmpty()) {
+                    sb.append(" DO NOTHING");
+                } else {
+                    sb.append(" DO UPDATE SET ").append(spec.updateColumns().stream()
+                            .map(c -> quoteIdentifier(c) + " = EXCLUDED." + quoteIdentifier(c))
+                            .collect(Collectors.joining(", ")));
+                    if(spec.updateCondition() != null && !spec.updateCondition().isBlank()) {
+                        sb.append(" WHERE ").append(spec.updateCondition());
+                    }
+                }
+                yield sb.toString();
+            }
+            case INSERT_OR_DONOTHING ->
+                // DO NOTHING tolerates a duplicated key within the statement: the first staged row
+                // (ctid order = COPY order) wins; the sort alone is not stable
+                    "INSERT INTO " + target + " (" + columns + ")"
+                            + " SELECT " + columns + " FROM " + staging + " ORDER BY " + keys + ", ctid"
+                            + " ON CONFLICT (" + keys + ") DO NOTHING";
+            case DELETE ->
+                    "DELETE FROM " + target + " USING (SELECT DISTINCT " + keys + " FROM " + staging + ") AS s"
+                            + " WHERE " + spec.keyColumns().stream()
+                            .map(k -> target + "." + quoteIdentifier(k) + " = s." + quoteIdentifier(k))
+                            .collect(Collectors.joining(" AND "));
+            case MERGE -> {
+                final String opColumn = quoteIdentifier(STAGING_OP_COLUMN);
+                final String order = spec.sequenceColumn() != null
+                        ? "s0." + quoteIdentifier(spec.sequenceColumn()) + " COLLATE \"C\" DESC"
+                        : "s0.ctid DESC";
+                final StringBuilder sb = new StringBuilder();
+                sb.append("MERGE INTO ").append(target).append(" AS t")
+                        .append(" USING (SELECT DISTINCT ON (").append(keys).append(") ").append(columns).append(", ").append(opColumn)
+                        .append(" FROM ").append(staging).append(" AS s0")
+                        .append(" ORDER BY ").append(keys).append(", ").append(order).append(") AS s")
+                        .append(" ON ").append(spec.keyColumns().stream()
+                                .map(k -> "t." + quoteIdentifier(k) + " = s." + quoteIdentifier(k))
+                                .collect(Collectors.joining(" AND ")));
+                if(spec.sequenceColumn() != null) {
+                    final String seq = quoteIdentifier(spec.sequenceColumn());
+                    sb.append(" WHEN MATCHED AND t.").append(seq).append(" IS NOT NULL AND t.").append(seq)
+                            .append(" COLLATE \"C\" >= s.").append(seq).append(" COLLATE \"C\" THEN DO NOTHING");
+                }
+                sb.append(" WHEN MATCHED AND s.").append(opColumn).append(" = ").append(quoteLiteral(STAGING_OP_DELETE)).append(" THEN DELETE");
+                if(spec.updateColumns().isEmpty()) {
+                    sb.append(" WHEN MATCHED THEN DO NOTHING");
+                } else {
+                    sb.append(" WHEN MATCHED THEN UPDATE SET ").append(spec.updateColumns().stream()
+                            .map(c -> quoteIdentifier(c) + " = s." + quoteIdentifier(c))
+                            .collect(Collectors.joining(", ")));
+                }
+                sb.append(" WHEN NOT MATCHED AND s.").append(opColumn).append(" <> ").append(quoteLiteral(STAGING_OP_DELETE))
+                        .append(" THEN INSERT (").append(columns).append(") VALUES (")
+                        .append(spec.columns().stream().map(c -> "s." + quoteIdentifier(c)).collect(Collectors.joining(", ")))
+                        .append(")");
+                yield sb.toString();
+            }
+        };
+    }
+
+    /**
+     * {@code CREATE TABLE IF NOT EXISTS} derived from an avro schema: nullable fields become
+     * nullable columns, nested records and maps become {@code jsonb}, one-dimensional arrays
+     * become array columns; {@code keyFields} form the primary key.
+     */
+    public static String createCreateTableStatement(
+            final TableId target,
+            final Schema avroSchema,
+            final List<String> keyFields) {
+
+        final List<String> definitions = new ArrayList<>();
+        for(final Schema.Field field : avroSchema.getFields()) {
+            final boolean key = keyFields != null && keyFields.contains(field.name());
+            final String type = toColumnTypeName(field.schema());
+            definitions.add(quoteIdentifier(field.name()) + " " + type
+                    + (key || !AvroSchemaUtil.isNullable(field.schema()) ? " NOT NULL" : ""));
+        }
+        if(keyFields != null && !keyFields.isEmpty()) {
+            definitions.add("PRIMARY KEY (" + keyFields.stream().map(PostgresUtil::quoteIdentifier).collect(Collectors.joining(", ")) + ")");
+        }
+        return "CREATE TABLE IF NOT EXISTS " + target.quotedName() + " (" + String.join(", ", definitions) + ")";
+    }
+
+    private static String toColumnTypeName(final Schema schema) {
+        final Schema unnested = unnestUnion(schema);
+        return switch (unnested.getType()) {
+            case BOOLEAN -> "boolean";
+            case INT -> {
+                if(LogicalTypes.date().equals(unnested.getLogicalType())) {
+                    yield "date";
+                } else if(LogicalTypes.timeMillis().equals(unnested.getLogicalType())) {
+                    yield "time";
+                }
+                yield "integer";
+            }
+            case LONG -> {
+                if(LogicalTypes.timestampMillis().equals(unnested.getLogicalType())
+                        || LogicalTypes.timestampMicros().equals(unnested.getLogicalType())) {
+                    yield "timestamptz";
+                } else if(LogicalTypes.timeMicros().equals(unnested.getLogicalType())) {
+                    yield "time";
+                }
+                yield "bigint";
+            }
+            case FLOAT -> "real";
+            case DOUBLE -> "double precision";
+            case STRING -> {
+                if(AvroSchemaUtil.isSqlTypeJson(unnested)) {
+                    yield "jsonb";
+                }
+                yield "text";
+            }
+            case ENUM -> "text";
+            case BYTES, FIXED -> {
+                if(unnested.getLogicalType() instanceof LogicalTypes.Decimal decimal) {
+                    yield "numeric(" + decimal.getPrecision() + ", " + decimal.getScale() + ")";
+                }
+                yield "bytea";
+            }
+            case RECORD, MAP -> "jsonb";
+            case ARRAY -> {
+                final Schema element = unnestUnion(unnested.getElementType());
+                if(Schema.Type.RECORD.equals(element.getType()) || Schema.Type.MAP.equals(element.getType())
+                        || Schema.Type.ARRAY.equals(element.getType())) {
+                    yield "jsonb";
+                }
+                yield toColumnTypeName(element) + "[]";
+            }
+            default -> throw new IllegalArgumentException("postgres module does not support creating a column for avro type: " + unnested);
+        };
+    }
+
+
+    // JSON value conversion (cdc apply mode: envelope keys/after values to encodable values)
+
+    /**
+     * Converts a change record JSON value into a value {@link #write} accepts for the column
+     * (the JSON forms produced by the cdc transform providers: ISO-8601 or database text form
+     * dates/times ({@code 2023-11-14 22:13:20} as emitted by canal-json), base64 bytes, plain
+     * decimal strings, arrays of the above).
+     */
+    public static Object fromJsonValue(final Column column, final JsonElement json) {
+        if(json == null || json.isJsonNull()) {
+            return null;
+        }
+        if(ColumnType.ARRAY.equals(column.type)) {
+            if(!json.isJsonArray()) {
+                throw new IllegalArgumentException("Failed to convert value: " + json + " to array column: " + column.name);
+            }
+            final List<Object> list = new ArrayList<>();
+            for(final JsonElement element : json.getAsJsonArray()) {
+                list.add(fromJsonScalar(column.elementType, element));
+            }
+            return list;
+        }
+        return fromJsonScalar(column.type, json);
+    }
+
+    private static Object fromJsonScalar(final ColumnType type, final JsonElement json) {
+        if(json.isJsonNull()) {
+            return null;
+        }
+        return switch (type) {
+            case BOOL -> json.isJsonPrimitive() && json.getAsJsonPrimitive().isBoolean()
+                    ? json.getAsBoolean() : Boolean.parseBoolean(json.getAsString());
+            case INT2, INT4, INT8 -> json.isJsonPrimitive() && json.getAsJsonPrimitive().isNumber()
+                    ? json.getAsBigDecimal().longValueExact() : Long.parseLong(json.getAsString());
+            case FLOAT4, FLOAT8 -> json.getAsDouble();
+            case NUMERIC -> json.getAsBigDecimal();
+            case BYTEA -> Base64.getDecoder().decode(json.getAsString());
+            case DATE -> DateTimeUtil.toEpochDay(json.getAsString());
+            case TIME, TIMETZ -> DateTimeUtil.toMicroOfDay(json.getAsString());
+            case TIMESTAMP, TIMESTAMPTZ -> parseTimestampMicros(json.getAsString());
+            case JSON, JSONB -> json.isJsonPrimitive() && json.getAsJsonPrimitive().isString()
+                    ? json.getAsString() : json.toString();
+            case TEXT, VARCHAR, BPCHAR, UUID, XML, ENUM, INET, CIDR, MACADDR, MACADDR8 ->
+                    json.isJsonPrimitive() ? json.getAsString() : json.toString();
+            case ARRAY -> throw new IllegalStateException("array must not be an array element type");
+        };
+    }
+
+    /**
+     * Parses a timestamp text: ISO-8601 or the database text form ({@code T} or space
+     * separator), with or without a zone (a zoneless value is UTC).
+     */
+    public static long parseTimestampMicros(final String text) {
+        final Long micros = DateTimeUtil.toEpochMicroSecond(text);
+        if(micros == null) {
+            throw new IllegalArgumentException("Failed to parse timestamp: " + text);
+        }
+        return micros;
     }
 
     /**
@@ -669,15 +1237,48 @@ public class PostgresUtil {
             final List<Schema.Field> fields,
             final GenericRecord record) throws IOException {
 
-        output.writeShort(columns.size());
+        final Object[] values = new Object[columns.size()];
+        final List<Schema> fieldSchemas = new ArrayList<>(columns.size());
         for(int i = 0; i < columns.size(); i++) {
             final Schema.Field field = fields.get(i);
-            final Object value = field == null ? null : record.get(field.pos());
+            values[i] = field == null ? null : record.get(field.pos());
+            fieldSchemas.add(field == null ? null : field.schema());
+        }
+        writeValues(output, columns, fieldSchemas, values);
+    }
+
+    /**
+     * Writes one tuple from already-typed values aligned with {@code columns} by index
+     * (the cdc apply path: values converted with {@link #fromJsonValue}, no avro schema).
+     */
+    public static void writeValues(
+            final DataOutputStream output,
+            final List<Column> columns,
+            final Object[] values) throws IOException {
+
+        writeValues(output, columns, null, values);
+    }
+
+    /**
+     * Writes one tuple from values aligned with {@code columns} by index. {@code fieldSchemas}
+     * (optional, may be shorter than {@code columns} and contain null entries) supplies the avro
+     * field schema of a value where one is known (decimal scale, millis logical types).
+     */
+    public static void writeValues(
+            final DataOutputStream output,
+            final List<Column> columns,
+            final List<Schema> fieldSchemas,
+            final Object[] values) throws IOException {
+
+        output.writeShort(columns.size());
+        for(int i = 0; i < columns.size(); i++) {
+            final Object value = values[i];
             if(value == null) {
                 output.writeInt(-1);
                 continue;
             }
-            encodeValue(output, columns.get(i), unnestUnion(field.schema()), value);
+            final Schema fieldSchema = fieldSchemas != null && i < fieldSchemas.size() ? fieldSchemas.get(i) : null;
+            encodeValue(output, columns.get(i), unnestUnion(fieldSchema), value);
         }
     }
 
@@ -752,12 +1353,20 @@ public class PostgresUtil {
                 output.writeBoolean(toBoolean(value));
             }
             case INT2 -> {
+                final long l = toLong(value);
+                if(l < Short.MIN_VALUE || l > Short.MAX_VALUE) {
+                    throw new IllegalArgumentException("Value: " + value + " is out of range for smallint column");
+                }
                 output.writeInt(2);
-                output.writeShort((short) toLong(value));
+                output.writeShort((short) l);
             }
             case INT4 -> {
+                final long l = toLong(value);
+                if(l < Integer.MIN_VALUE || l > Integer.MAX_VALUE) {
+                    throw new IllegalArgumentException("Value: " + value + " is out of range for integer column");
+                }
                 output.writeInt(4);
-                output.writeInt((int) toLong(value));
+                output.writeInt((int) l);
             }
             case INT8 -> {
                 output.writeInt(8);
@@ -777,12 +1386,12 @@ public class PostgresUtil {
                 output.write(bytes);
             }
             case TEXT, VARCHAR, BPCHAR, JSON, XML, ENUM -> {
-                final byte[] bytes = value.toString().getBytes(StandardCharsets.UTF_8);
+                final byte[] bytes = toText(value).getBytes(StandardCharsets.UTF_8);
                 output.writeInt(bytes.length);
                 output.write(bytes);
             }
             case JSONB -> {
-                final byte[] bytes = value.toString().getBytes(StandardCharsets.UTF_8);
+                final byte[] bytes = toText(value).getBytes(StandardCharsets.UTF_8);
                 output.writeInt(bytes.length + 1);
                 output.write(1); // jsonb binary format version
                 output.write(bytes);
@@ -904,6 +1513,47 @@ public class PostgresUtil {
             case Boolean b -> b;
             case Number n -> n.longValue() != 0;
             default -> Boolean.parseBoolean(value.toString());
+        };
+    }
+
+    /** Text form of a value for text-like columns: structured values (records, maps, lists) become JSON. */
+    private static String toText(final Object value) {
+        return switch (value) {
+            case CharSequence s -> s.toString();
+            case GenericEnumSymbol<?> e -> e.toString();
+            case GenericRecord r -> AvroToJsonConverter.convertObject(r).toString();
+            case Map<?, ?> m -> toJsonElement(m).toString();
+            case Collection<?> c -> toJsonElement(c).toString();
+            case ByteBuffer b -> Base64.getEncoder().encodeToString(toBytes(b));
+            case byte[] b -> Base64.getEncoder().encodeToString(b);
+            default -> value.toString();
+        };
+    }
+
+    private static JsonElement toJsonElement(final Object value) {
+        return switch (value) {
+            case null -> JsonNull.INSTANCE;
+            case GenericRecord r -> AvroToJsonConverter.convertObject(r);
+            case Map<?, ?> m -> {
+                final JsonObject object = new JsonObject();
+                for(final Map.Entry<?, ?> entry : m.entrySet()) {
+                    object.add(entry.getKey().toString(), toJsonElement(entry.getValue()));
+                }
+                yield object;
+            }
+            case Collection<?> c -> {
+                final JsonArray array = new JsonArray();
+                for(final Object element : c) {
+                    array.add(toJsonElement(element));
+                }
+                yield array;
+            }
+            case Boolean b -> new JsonPrimitive(b);
+            case Number n -> new JsonPrimitive(n);
+            case GenericFixed f -> new JsonPrimitive(Base64.getEncoder().encodeToString(f.bytes()));
+            case ByteBuffer b -> new JsonPrimitive(Base64.getEncoder().encodeToString(toBytes(b)));
+            case byte[] b -> new JsonPrimitive(Base64.getEncoder().encodeToString(b));
+            default -> new JsonPrimitive(value.toString());
         };
     }
 
