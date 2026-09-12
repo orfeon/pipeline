@@ -65,6 +65,11 @@ public final class EvaluationSpec implements Serializable {
 
     public static final int MAX_BOOTSTRAP = 10_000;
 
+    public static final String DISCOVERY_OUTPUT_PASSED = "passed";
+    public static final String DISCOVERY_OUTPUT_ALL = "all";
+    public static final List<String> DISCOVERY_OUTPUTS = List.of(DISCOVERY_OUTPUT_PASSED, DISCOVERY_OUTPUT_ALL);
+    public static final List<String> DISCOVERY_METRICS = List.of("excessLogScore", "logScore", "hitAt1", "brier");
+
     /** A prediction set: a column in a baseline form, or a grouped softmax of a score with an optional offset. */
     public static final class Prediction implements Serializable {
         public String name;
@@ -171,6 +176,49 @@ public final class EvaluationSpec implements Serializable {
         }
     }
 
+    /**
+     * Slice discovery (design §7.2): candidate slices from low-cardinality dimensions (numeric ones quantile-binned)
+     * up to {@code maxDepth}, scored on {@code discoverOn} against the random-subset null and confirmed on
+     * {@code confirmOn}.
+     */
+    public static final class Discovery implements Serializable {
+        public List<Dimension> dimensions = new ArrayList<>();
+        public int maxDepth = 2;
+        public int minSupport = 100;
+        public String discoverOn;
+        public String confirmOn;
+        /** the compared sets (names; declared or derived); empty = every set */
+        public List<String> of = new ArrayList<>();
+        public String metric = "excessLogScore";
+        public double quantile = 0.99;
+        public int maxCandidates = 20_000;
+        public String output = DISCOVERY_OUTPUT_PASSED;
+        /** the set indices (0-based among the compared sets) the discovery runs for; fixed by resolve */
+        public List<Integer> sets = new ArrayList<>();
+
+        public boolean hasNumeric() {
+            return dimensions.stream().anyMatch(Dimension::isNumeric);
+        }
+    }
+
+    /** A discovery dimension: a categorical field (its text), or a numeric field binned by quantile. */
+    public static final class Dimension implements Serializable {
+        public String field;
+        /** quantile bins of a numeric dimension (0 = categorical) */
+        public int bins;
+        public String fieldType;
+        /** categorical: position in {@link EvaluationRow#dims}; numeric: position in {@link EvaluationRow#x} */
+        public int index = -1;
+
+        public boolean isNumeric() {
+            return bins > 0;
+        }
+
+        public String name() {
+            return isNumeric() ? field + "/q" + bins : field;
+        }
+    }
+
     /** A derived prediction set: a base set under a fitted calibration. */
     public static final class Derived implements Serializable {
         public String name;
@@ -213,6 +261,10 @@ public final class EvaluationSpec implements Serializable {
     public List<Derived> derived = new ArrayList<>();
     /** output.calibration: URI / path of the fitted-parameters JSON (null = not written) */
     public String calibrationUri;
+    /** sliceDiscovery (null = none) */
+    public Discovery discovery;
+    /** the categorical discovery dimensions carried in {@link EvaluationRow#dims}, in order */
+    public List<String> dimColumns = new ArrayList<>();
     public List<Slice> slices = new ArrayList<>();
     /** SHA-256 (16 hex, the feature plan hash width) of the canonical parameters without the file locations (manifest, output) */
     public String parametersHash;
@@ -292,6 +344,10 @@ public final class EvaluationSpec implements Serializable {
 
     public boolean hasFits() {
         return !fits.isEmpty();
+    }
+
+    public boolean hasDiscovery() {
+        return discovery != null;
     }
 
     /** The derived sets of a fit, with their positions among the compared sets (declared sets first). */
@@ -606,6 +662,63 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
+        final JsonElement discovery = p.get("sliceDiscovery");
+        if (discovery != null && !discovery.isJsonNull()) {
+            if (!discovery.isJsonObject()) {
+                errors.add("sliceDiscovery must be an object {dimensions, maxDepth, minSupport, discoverOn, confirmOn, of, metric, quantile, maxCandidates, output}");
+            } else {
+                final JsonObject o = discovery.getAsJsonObject();
+                final Discovery d = new Discovery();
+                final JsonElement dims = o.get("dimensions");
+                if (dims == null || !dims.isJsonArray() || dims.getAsJsonArray().isEmpty()) {
+                    errors.add("sliceDiscovery.dimensions is required: a list of fields ({field} or {field, bins} for a numeric field)");
+                } else {
+                    int i = 0;
+                    for (final JsonElement e : dims.getAsJsonArray()) {
+                        final String at = "sliceDiscovery.dimensions[" + i++ + "]";
+                        final Dimension dim = new Dimension();
+                        if (e.isJsonPrimitive()) {
+                            dim.field = e.getAsString();
+                        } else if (e.isJsonObject()) {
+                            dim.field = string(e.getAsJsonObject(), "field");
+                            final Integer bins = integer(e.getAsJsonObject(), "bins");
+                            dim.bins = bins == null ? 0 : bins;
+                            if (bins != null && (bins < 2 || bins > 50)) errors.add(at + ".bins must be in [2, 50]");
+                        } else {
+                            errors.add(at + " must be a field name or an object {field, bins}");
+                            continue;
+                        }
+                        if (dim.field == null) errors.add(at + ".field is required");
+                        d.dimensions.add(dim);
+                    }
+                }
+                final Integer maxDepth = integer(o, "maxDepth");
+                if (maxDepth != null) d.maxDepth = maxDepth;
+                if (d.maxDepth < 1 || d.maxDepth > 3) errors.add("sliceDiscovery.maxDepth must be in [1, 3]");
+                final Integer minSupport = integer(o, "minSupport");
+                if (minSupport != null) d.minSupport = minSupport;
+                if (d.minSupport < 2) errors.add("sliceDiscovery.minSupport must be >= 2 (units of the discovery split)");
+                d.discoverOn = string(o, "discoverOn");
+                d.confirmOn = string(o, "confirmOn");
+                if (d.discoverOn == null || d.confirmOn == null) errors.add("sliceDiscovery.discoverOn and confirmOn are required (two different splits)");
+                else if (d.discoverOn.equals(d.confirmOn)) errors.add("sliceDiscovery.discoverOn and confirmOn must be different splits (a slice found in a window must be confirmed in another)");
+                d.of = strings(o, "of", errors);
+                final String metric = string(o, "metric");
+                if (metric != null) d.metric = metric;
+                if (!DISCOVERY_METRICS.contains(d.metric)) errors.add("sliceDiscovery.metric '" + d.metric + "' is unknown (available: " + DISCOVERY_METRICS + ")");
+                final Double q = number(o, "quantile");
+                if (q != null) d.quantile = q;
+                if (!(d.quantile > 0 && d.quantile < 1)) errors.add("sliceDiscovery.quantile must be in (0, 1)");
+                final Integer maxCandidates = integer(o, "maxCandidates");
+                if (maxCandidates != null) d.maxCandidates = maxCandidates;
+                if (d.maxCandidates < 1 || d.maxCandidates > 1_000_000) errors.add("sliceDiscovery.maxCandidates must be in [1, 1000000]");
+                final String out = string(o, "output");
+                if (out != null) d.output = out;
+                if (!DISCOVERY_OUTPUTS.contains(d.output)) errors.add("sliceDiscovery.output must be one of " + DISCOVERY_OUTPUTS);
+                s.discovery = d;
+            }
+        }
+
         final JsonElement output = p.get("output");
         if (output != null && !output.isJsonNull()) {
             if (output.isJsonObject()) {
@@ -784,6 +897,51 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
+        // slice discovery: the splits' roles, the sets, the dimensions' types
+        dimColumns = new ArrayList<>();
+        if (discovery != null) {
+            final Split on = discovery.discoverOn == null ? null : split(discovery.discoverOn);
+            final Split confirm = discovery.confirmOn == null ? null : split(discovery.confirmOn);
+            if (discovery.discoverOn != null && on == null) errors.add("sliceDiscovery.discoverOn '" + discovery.discoverOn + "' is not a declared split (available: " + splitNames() + ")");
+            else if (on != null && !on.isSelection()) errors.add("sliceDiscovery.discoverOn '" + discovery.discoverOn + "' has role " + on.role + ": slices are discovered on a selection split and confirmed on another");
+            if (discovery.confirmOn != null && confirm == null) errors.add("sliceDiscovery.confirmOn '" + discovery.confirmOn + "' is not a declared split (available: " + splitNames() + ")");
+            final List<String> names = predictionNames();
+            discovery.sets = new ArrayList<>();
+            if (discovery.of.isEmpty()) {
+                for (int j = 0; j < setCount(); j++) discovery.sets.add(j);
+            } else {
+                for (final String name : discovery.of) {
+                    final int idx = names.indexOf(name);
+                    if (idx <= 0) errors.add("sliceDiscovery.of '" + name + "' is not a compared prediction set (available: " + names.subList(1, names.size()) + ")");
+                    else discovery.sets.add(idx - 1);
+                }
+            }
+            if (!hasBaseline() && !isGrouped() && "excessLogScore".equals(discovery.metric)) {
+                errors.add("sliceDiscovery.metric excessLogScore needs a baseline for family binomial (the prior reference is not a per-unit value); use logScore");
+            }
+            final Set<String> seen = new HashSet<>();
+            for (int i = 0; i < discovery.dimensions.size(); i++) {
+                final Dimension dim = discovery.dimensions.get(i);
+                final String at = "sliceDiscovery.dimensions[" + i + "]";
+                if (dim.field == null) continue;
+                if (!seen.add(dim.field)) errors.add(at + " '" + dim.field + "' is declared twice");
+                if (!fields.containsKey(dim.field)) {
+                    errors.add(at + " '" + dim.field + "' is not an input field");
+                    continue;
+                }
+                dim.fieldType = fields.get(dim.field).getFieldType().getType().name();
+                final boolean numeric = FeatureLineage.isNumeric(fields.get(dim.field));
+                if (dim.isNumeric() && !numeric) errors.add(at + " '" + dim.field + "' has bins but is not numeric (" + dim.fieldType + ")");
+                if (!dim.isNumeric() && numeric && !"bool".equals(dim.fieldType) && !"int32".equals(dim.fieldType) && !"int64".equals(dim.fieldType)) {
+                    errors.add(at + " '" + dim.field + "' is a " + dim.fieldType + " field: give it bins (quantile bins) or declare a categorical field");
+                }
+                if (!dim.isNumeric()) {
+                    dim.index = dimColumns.size();
+                    dimColumns.add(dim.field);
+                }
+            }
+        }
+
         // column layout: prediction columns (a score set's score and offset side by side), then the calibration
         // fields and the utility, each column carried once
         rowColumns = new ArrayList<>();
@@ -798,6 +956,7 @@ public final class EvaluationSpec implements Serializable {
         }
         for (final Table t : tables) if (t.field != null) t.fieldIndex = column(t.field);
         if (utilityField != null) utilityIndex = column(utilityField);
+        if (discovery != null) for (final Dimension dim : discovery.dimensions) if (dim.isNumeric() && dim.field != null && fields.containsKey(dim.field)) dim.index = column(dim.field);
         for (final String c : rowColumns) {
             if (fields.containsKey(c) && !FeatureLineage.isNumeric(fields.get(c))) {
                 errors.add("column '" + c + "' must be numeric (" + fields.get(c).getFieldType().getType() + ")");

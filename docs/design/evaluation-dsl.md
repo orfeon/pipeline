@@ -1,11 +1,12 @@
 # Evaluation Transform DSL (Design Document)
 
-Status: **Implemented (stages 1–2)** — the contract described here is what `module: evaluation` accepts today:
+Status: **Implemented (stages 1–3)** — the contract described here is what `module: evaluation` accepts today:
 families `groupedMultinomial` / `binomial`, several prediction sets against one baseline, time splits with
 a `selection` / `report` role, the excess log score with a Poisson bootstrap CI (paired between prediction
 sets), the calibration tables, the calibration fits (temperature / blend, estimated on a selection split and
-compared as derived prediction sets), declared slices and period buckets, the per-unit output. §11 lists the
-stages that are designed but not built (slice discovery, the gaussian / ranking families, the HTML report). The user-facing reference is `src/main/resources/server/docs/module/transform/evaluation.md`; the
+compared as derived prediction sets), declared slices and period buckets, slice discovery (found on a
+selection split, confirmed on another), the per-unit output. §11 lists the stages that are designed but not
+built (the gaussian / ranking families, the reporting layer). The user-facing reference is `src/main/resources/server/docs/module/transform/evaluation.md`; the
 execution side is [evaluation-engine.md](evaluation-engine.md).
 
 ## 1. Purpose and position
@@ -229,6 +230,51 @@ regression). The records are the summary's `fits` and, with `output.calibration`
 (`{version, family, group, baseline, baselineForm, parametersHash, planHash, outputHash, createdAt, fits}`).
 Isotonic / Platt recalibration is out of scope: it breaks the within-group sum.
 
+### 7.2 Slice discovery
+
+```yaml
+sliceDiscovery:
+  dimensions: [country, device, {field: price, bins: 5}]
+  maxDepth: 2
+  minSupport: 300
+  discoverOn: valid
+  confirmOn: test
+  of: [candidate]
+  metric: excessLogScore
+  quantile: 0.99
+  maxCandidates: 20000
+  output: passed
+```
+
+*Where does the prediction do better or worse per unit than overall?* — the multiple-comparison trap of
+slicing, bound by the contract: slices are **found on a selection split and confirmed on another**, and the
+reported number is the confirmation window's.
+
+- **Candidates.** Every combination of up to `maxDepth` dimensions with their values (a unit's value is its
+  first row's; a numeric dimension is quantile-binned into `bins` by a KLL sketch over the discovery split's
+  units, `q0 … q<bins−1>`) that holds at least `minSupport` units of the discovery split and is a proper
+  subset of it. `dimensions` may use any input field: categorical (string / bool / integer) as its text,
+  numeric with `bins`. Above `maxCandidates` the best-supported candidates are kept and the summary says so.
+- **Statistic.** Per unit the `metric` (`excessLogScore` default, or `logScore` / `hitAt1` / `brier`; the
+  binomial prior mode has no per-unit excess, use `logScore`). For a candidate s with n units of the N in the
+  split, under the **random-subset null** (the slice is an exchangeable subset of the split's units):
+
+  ```
+  z_s = (mean_s − mean) / (σ · √((1 / n)(1 − n / N)))       σ² = the unit-level variance over the split
+  ```
+
+  The pass threshold absorbs the K candidates as the `quantile` of the maximum of K independent |z|:
+  `Φ⁻¹((1 + quantile^(1/K)) / 2)`; candidates overlap, so the threshold is conservative. Why this null
+  rather than a label permutation: a within-group permutation of the labels destroys the baseline's
+  information too (the excess under it is biased negative), and it costs candidates × permutations
+  accumulators; the exchangeability null costs three sums per candidate and asks the question as posed.
+- **Confirmation.** A passed candidate is re-read on `confirmOn` with the same statistic against that
+  split's own mean and variance; `confirmed` when the sign agrees and |z_confirm| > 1.96 (one test, the
+  candidates were chosen elsewhere). A slice confirmed twice is still a candidate: operational use wants a
+  third window.
+- **Cost.** The candidate cells ride the metrics Combine as `[n, Σd, Σd²]` under their own keys (bundle-local
+  first): no extra pass; a numeric dimension adds one sketch pass over the discovery split's units.
+
 ## 8. Outputs
 
 ### 8.1 Metrics (the default output)
@@ -253,10 +299,19 @@ One record per split × prediction set × table × bin: `split`, `prediction`, `
 
 One record per run: the roles, `predictions`, the splits (name, role, declared range, observed range, units,
 rows), the row / unit counts (in, invalid, unassigned, scored, skipped), the bootstrap parameters, the
-calibration table count, `fits` (§7.1), `parametersHash` and `notes` (role defaults applied, overlapping
-split ranges, prior mode, a fit that produced no estimate).
+calibration table count, `fits` (§7.1), `discovery` (§7.2), `parametersHash` and `notes` (role defaults
+applied, overlapping split ranges, prior mode, a fit that produced no estimate, a truncated candidate set).
 
-### 8.4 Units (`<name>.units`)
+### 8.4 Slices (`<name>.slices`)
+
+One record per candidate slice × set (`output: passed` keeps the passed ones, `all` every candidate):
+`prediction`, `metric`, `depth`, `dimensions` (the dimension names, `<field>/q<bins>` for a binned one),
+`values`, `n_discover`, `mean_discover`, `delta_discover` (the slice's mean minus the split's), `z_discover`,
+`threshold`, `passed`, `n_confirm`, `mean_confirm`, `delta_confirm`, `z_confirm`, `confirmed` — confirmed
+first, then by |z_discover|. The summary's `discovery` lists, per set, the candidate count, the threshold,
+the passed and confirmed counts and a note.
+
+### 8.5 Units (`<name>.units`)
 
 The intermediate representation: one record per unit × prediction set (the baseline included): `split`,
 `unit`, `time`, `prediction`, `n_rows`, `weight`, `logScore`, `logScoreBaseline`, `excessLogScore`,
@@ -276,7 +331,9 @@ without a field or with an unknown bucket; `bootstrap.samples` outside [0, 10000
 non-global window or a triggered input (the calibration edges are a side input and the tables are one
 Combine each); a fit whose `fitOn` is missing, unknown or a `report` split, an `of` naming no declared set,
 two fits of one type on one set, a blend without an offset, a grid outside `[min > 0, max ≥ min, 2 ≤ count ≤
-10000]`, `maxIter` outside [1, 100].
+10000]`, `maxIter` outside [1, 100]; a slice discovery without dimensions, with `discoverOn` = `confirmOn`,
+`discoverOn` not a selection split, an unknown split or set, a numeric dimension without `bins` (or `bins`
+on a non-numeric one), `maxDepth` outside [1, 3], an unknown `metric`, `excessLogScore` in binomial prior mode.
 
 Row validity: a null / non-finite label, a null group, a null / negative weight, a row not in any split →
 counted, not scored; a null time with a time-range split → the failure output. Unit skips: no positive
@@ -292,11 +349,9 @@ label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in
 
 ## 11. Stages designed, not built
 
-- **Slice discovery** (`sliceDiscovery`): candidate slices from low-cardinality dimensions (numeric ones
-  quantile-binned) up to `maxDepth`, scored on `discoverOn` and confirmed on `confirmOn` in the same Combine
-  (candidates × 2 splits × 3 sums); the null is the random-subset (exchangeability) distribution of a
-  slice's mean Δ, the maximum over candidates calibrated by Monte Carlo at finalize; a baseline-drawn
-  parametric null as an opt-in under a candidate cap.
+- **A baseline-drawn parametric null** for slice discovery (`null: {method: baseline, draws}`): the winner
+  re-drawn from p_baseline per unit, the candidates' sums per draw — the null closest to the proposal's
+  intent, under a candidate cap because it costs candidates × draws accumulators.
 - **`family: gaussian`** (Δ as the squared-error skill score) and **`ranking`** (NDCG@k).
 - **`contributions`** (the aggregation of contribution columns), **`compareWith`** (a previous summary
   JSON) and the HTML report, together (the reporting layer).

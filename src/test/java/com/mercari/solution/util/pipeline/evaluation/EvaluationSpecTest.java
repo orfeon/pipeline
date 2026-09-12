@@ -154,4 +154,27 @@ public class EvaluationSpecTest {
         final EvaluationSpec own = parse("{group: g, label: y, time: t, predictions: [{name: S, score: s, offset: qa, offsetScale: log}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid}]}").resolve(EvaluationScorerTest.SCHEMA, null);
         Assertions.assertEquals(List.of("baseline", "S", "S@blend"), own.predictionNames());
     }
+
+    @Test
+    public void testDiscoveryRules() {
+        final EvaluationSpec s = parse(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region, {field: u, bins: 4}], discoverOn: valid, confirmOn: test, of: [A], minSupport: 50}}")).resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertTrue(s.hasDiscovery());
+        Assertions.assertEquals(2, s.discovery.maxDepth);
+        Assertions.assertEquals(50, s.discovery.minSupport);
+        Assertions.assertEquals("u/q4", s.discovery.dimensions.get(1).name());
+        Assertions.assertEquals(List.of("region"), s.dimColumns);
+        Assertions.assertEquals(List.of(0), s.discovery.sets);
+        Assertions.assertTrue(s.discovery.hasNumeric());
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: valid}}")).contains("must be different"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: test, confirmOn: valid}}")).contains("discovered on a selection split"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: later}}")).contains("not a declared split"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {discoverOn: valid, confirmOn: test}}")).contains("dimensions is required"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [u], discoverOn: valid, confirmOn: test}}")).contains("give it bins"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [{field: region, bins: 3}], discoverOn: valid, confirmOn: test}}")).contains("not numeric"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [missing], discoverOn: valid, confirmOn: test}}")).contains("not an input field"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, of: [Z]}}")).contains("not a compared prediction set"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, maxDepth: 4}}")).contains("maxDepth"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: auc}}")).contains("metric 'auc'"));
+        Assertions.assertTrue(error("{family: binomial, label: y, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test}}").contains("needs a baseline"));
+    }
 }

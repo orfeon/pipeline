@@ -1,8 +1,9 @@
 # Evaluation Transform Engine (Design Document)
 
-Status: **Implemented (stages 1–2)** — the Beam execution of the contract in [evaluation-dsl.md](evaluation-dsl.md):
-one Combine for the metrics, the bootstrap and the slices, one sketch pass plus one Combine for the calibration
-tables, one grid pass per temperature fit and unrolled Newton passes per blend fit ahead of the aggregation. Code: `util/pipeline/evaluation/` and `module/transform/EvaluationTransform.java`; the tests are
+Status: **Implemented (stages 1–3)** — the Beam execution of the contract in [evaluation-dsl.md](evaluation-dsl.md):
+one Combine for the metrics, the bootstrap, the slices and the slice discovery cells, one sketch pass plus one
+Combine for the calibration tables, one grid pass per temperature fit and unrolled Newton passes per blend fit
+ahead of the aggregation, one sketch pass for the numeric discovery dimensions. Code: `util/pipeline/evaluation/` and `module/transform/EvaluationTransform.java`; the tests are
 `EvaluationScorerTest` / `EvaluationSpecTest` (pure) and `EvaluationTransformTest` (e2e). The shared parts
 live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen engine doc §1).
 
@@ -13,11 +14,11 @@ live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen 
 | `EvaluationSpec` | parse (every error collected: predictions, splits and their ordering rule, tables, slices, bootstrap) and resolve (feature role defaults, schema checks, the column layout of `EvaluationRow.x`: prediction columns, calibration fields, utility — each column once); `parametersHash` | no |
 | `EvaluationRow` | the prepared sample (split, group, identity, time, bootstrap key, label, baseline, weight, slice values, numeric columns) with a compact coder | coder only |
 | `AlignedRow` | one row of a scored unit as the calibration tables read it (split, ỹ, p, every q, the table fields, the utility) | coder only |
-| `EvaluationScorer` | per-unit: `prepare` (sort by (time, identity), the baseline and every prediction set as means per row via `Baselines.means` / `GlmFit.softmax`, the labels normalised, the skip reasons), `fitInputs` / `derive` (the fit inputs f, o of a set; the derived sets' means from the fitted parameters), `temperatureLogLikelihoods` / `blendEvaluate` (the fit passes' contributions: the grid log scores; the Newton evaluation via `GlmFit` at the uniform share), `score` (log score, hit@1, Brier per set, the baseline at index 0, derived sets last), `accumulate` (the metrics keys for the overall record and every slice value, the split bookkeeping, the Poisson weights from `seededRandom(seed, bootKey)`), `aligned`, `unitRecords`, `standardErrors` | no |
+| `EvaluationScorer` | per-unit: `prepare` (sort by (time, identity), the baseline and every prediction set as means per row via `Baselines.means` / `GlmFit.softmax`, the labels normalised, the skip reasons), `fitInputs` / `derive` (the fit inputs f, o of a set; the derived sets' means from the fitted parameters), `temperatureLogLikelihoods` / `blendEvaluate` (the fit passes' contributions: the grid log scores; the Newton evaluation via `GlmFit` at the uniform share), `score` (log score, hit@1, Brier per set, the baseline at index 0, derived sets last), `accumulate` (the metrics keys for the overall record and every slice value, the split bookkeeping, the Poisson weights from `seededRandom(seed, bootKey)`), `dimensionValues` / `accumulateDiscovery` (the unit's discovery dimension values — a numeric one binned by the sketch edges — and its `[n, Σd, Σd²]` into every candidate cell of up to `maxDepth` dimensions, discovery and confirmation splits only), `aligned`, `unitRecords`, `standardErrors` | no |
 | `FitResults` | the fits' outcome as a singleton side input: derived set name → parameters, and the fit records of the summary / `output.calibration` | Serializable |
 | `MetricAccumulator` | 8 total slots (units, rows, Σw, Σwỹ, Σw·logScore, Σw·logScoreBaseline, Σw·hit, Σw·brier) plus 6 × samples replicate slots; the same shape carries the run bookkeeping under ``-prefixed keys; coder + `Fn` | coder + CombineFn |
 | `SketchAccumulator` | a KLL doubles sketch (k = 400) of one table's value stream; bytes coder + `Fn` | coder + CombineFn |
-| `EvaluationReport` | `metric` (a weighted mean, the excess as a difference of means, the binomial prior reference from Σwỹ / Σw), `replicate` / `interval` (the 2.5 / 97.5 percentiles), `build` (records + pair records + summary), `calibration` (bins with bounds, Wilson), the table value / bin functions, the output schemas, `describe` | no |
+| `EvaluationReport` | `metric` (a weighted mean, the excess as a difference of means, the binomial prior reference from Σwỹ / Σw), `replicate` / `interval` (the 2.5 / 97.5 percentiles), `build` (records + pair records + slice discovery + summary), `discoveryZ` / `discoveryThreshold` / `discovery` (the random-subset z, the max-of-K threshold, the candidate records with their confirmation), `calibration` (bins with bounds, Wilson), the table value / bin functions, the output schemas, `describe` | no |
 | `EvaluationStages` | the graph (§2–§3) and its DoFns | yes |
 | `EvaluationTransform` | thin: streaming rejected, parse → lineage → resolve → `engineConstraints`, `describe` to the log, four outputs | module |
 
@@ -84,6 +85,22 @@ the grid argmax (flagging a boundary optimum) and the blend's best point with it
 inverse of the Fisher information, and `Align` derives the sets before scoring — so the derived sets are
 ordinary sets for everything downstream. Without fits the collect step still runs (an empty result).
 
+## 2.4 Slice discovery
+
+```
+units ─ Dimensions (KLL per numeric dimension, discovery split only) ─ Combine.perKey ─ View.asMap ─► Align
+Align ─ discovery cells KV<\u0001disc\u0001 split|set|dims|values, MetricAccumulator[n, Σd, Σd²]> ─► the metrics Combine ─► Finalize ─ slices
+```
+
+`Align` reads the dimension edges once per bundle from the sketch view, enumerates the unit's candidate
+cells (every combination of its non-null dimension values up to `maxDepth`, plus the split's overall cell)
+and adds `[n, d, d²]` per set into a bundle-local map, flushed as `MetricAccumulator`s whose first three
+total slots carry the sums — the same `Combine.perKey` and `Gather` as the metrics, so the discovery costs
+no pass of its own. `Finalize` (`EvaluationReport.discovery`) applies the support floor, the candidate cap,
+the random-subset z against the discovery split's mean and variance, the max-of-K threshold, and re-reads
+every passed cell on the confirmation split; the records go to the `slices` output and the per-set counts
+to the summary.
+
 ## 3. The calibration graph
 
 ```
@@ -130,5 +147,5 @@ are why the transform needs the global window.
 
 ## 6. Deferred (design §11)
 
-Slice discovery (analytic null in the same Combine), the gaussian / ranking families, `contributions`,
-`compareWith`, the HTML report.
+The gaussian / ranking families, `contributions`, `compareWith`, the HTML report; a baseline-drawn parametric
+null for the slice discovery.
