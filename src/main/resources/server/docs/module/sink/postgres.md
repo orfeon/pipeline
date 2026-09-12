@@ -15,7 +15,7 @@ Unlike the [`jdbc` sink](jdbc.md), which binds every value of every row into pre
 Rows are encoded into a worker-memory COPY buffer as they arrive and flushed in **one transaction per batch**:
 
 - `INSERT` copies straight into the destination table.
-- `INSERT_OR_UPDATE`, `INSERT_OR_DONOTHING`, `DELETE` and the row-level op modes copy into a session-scoped **temporary staging table** (`LIKE destination ... ON COMMIT DELETE ROWS`) and apply it with a single set-based statement (`INSERT ... ON CONFLICT`, `DELETE ... USING`, or `MERGE`). The COPY and the apply statement commit together; a failure rolls both back.
+- `INSERT_OR_UPDATE`, `INSERT_OR_DONOTHING`, `DELETE` and the row-level op modes copy into a session-scoped **temporary staging table** (the staged columns with the destination's types, `ON COMMIT DELETE ROWS`; NOT NULL constraints are not inherited, so a delete can stage keys only) and apply it with a single set-based statement (`INSERT ... ON CONFLICT`, `DELETE ... USING`, or `MERGE`). The COPY and the apply statement commit together; a failure rolls both back.
 
 Use the `jdbc` sink for other databases (MySQL, SQL Server, H2). For PostgreSQL, prefer this module.
 
@@ -64,7 +64,7 @@ Use the `jdbc` sink for other databases (MySQL, SQL Server, H2). For PostgreSQL,
 | parameter | optional | type | description |
 | --- | --- | --- | --- |
 | cdc | optional | Boolean | Apply unified change records (the [`cdc` transform](../transform/cdc.md) output) to the destination. Default: `false`. See [CDC apply mode](#cdc-apply-mode). |
-| sequenceField | optional | String | A `text` / `varchar` column of the destination that stores the change record `sequence`. When set, a change is applied only if it is newer than the stored one, so replays and out-of-order batches converge. |
+| sequenceField | optional | String | A `text` / `varchar` column of the destination that stores the change record `sequence`. When set, a change is applied only if it is newer than the stored one, so replays and out-of-order batches converge. An update always refreshes this column, even when `updateFields` omits it. |
 | onTruncate | optional | Enum | Reaction to a `TRUNCATE` control record: `skip` (default, logged), `fail` (stop the pipeline) or `apply` (run `TRUNCATE` on the destination after flushing the rows received before it). |
 
 ## Write operations

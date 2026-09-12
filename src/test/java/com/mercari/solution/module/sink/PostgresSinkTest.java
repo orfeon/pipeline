@@ -181,6 +181,10 @@ public class PostgresSinkTest {
         Assertions.assertTrue(PostgresSink.padSequence("100/1").compareTo(PostgresSink.padSequence("ff/2")) > 0);
         Assertions.assertTrue(PostgresSink.padSequence("ff/2").compareTo(PostgresSink.padSequence("ff/10")) < 0);
         Assertions.assertTrue(PostgresSink.padSequence("ff").compareTo(PostgresSink.padSequence("ff/0")) < 0);
+        // upper-case hex (allowed by ChangeRecord) is canonicalized so the C-collation compare stays numeric
+        Assertions.assertEquals(PostgresSink.padSequence("ff/1"), PostgresSink.padSequence("FF/1"));
+        Assertions.assertTrue(PostgresSink.padSequence("FF/1").compareTo(PostgresSink.padSequence("a0/1")) > 0);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> PostgresSink.padSequence("xyz"));
     }
 
 }

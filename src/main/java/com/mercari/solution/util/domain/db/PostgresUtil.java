@@ -7,6 +7,7 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.mercari.solution.config.options.DataflowOptions;
+import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.cloud.SecretProviders;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.AvroToJsonConverter;
@@ -43,11 +44,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -395,7 +392,9 @@ public class PostgresUtil {
                 config.setDriverClassName(DRIVER);
                 config.setMaximumPoolSize(maximumPoolSize);
                 config.setReadOnly(readOnly);
-                config.setAutoCommit(false);
+                // the sink drives its own transactions; the source's COPY OUT must stay autocommit,
+                // otherwise pgjdbc opens a BEGIN that the unwrapped connection never closes
+                config.setAutoCommit(readOnly);
                 // a write flush may wait for a pooled connection behind other threads' COPYs
                 config.setConnectionTimeout(300_000L);
                 config.addDataSourceProperty("ApplicationName", "mercari-pipeline");
@@ -442,27 +441,9 @@ public class PostgresUtil {
             Set<String> generatedColumns,
             int serverVersion) implements Serializable {
 
-        public Column getColumn(final String name) {
-            for(final Column column : columns) {
-                if(column.name.equals(name)) {
-                    return column;
-                }
-            }
-            return null;
-        }
-
-        /** Case-insensitive fallback lookup; null unless exactly one column matches. */
-        public Column findColumnIgnoreCase(final String name) {
-            Column found = null;
-            for(final Column column : columns) {
-                if(column.name.equalsIgnoreCase(name)) {
-                    if(found != null) {
-                        return null;
-                    }
-                    found = column;
-                }
-            }
-            return found;
+        /** See {@link PostgresUtil#findColumn(List, String)}. */
+        public Column findColumn(final String name) {
+            return PostgresUtil.findColumn(columns, name);
         }
 
         public boolean hasUniqueIndex(final Collection<String> columnNames) {
@@ -583,16 +564,45 @@ public class PostgresUtil {
             String sequenceColumn) implements Serializable { }
 
     /**
-     * {@code CREATE TEMP TABLE IF NOT EXISTS} for the staging table: the destination's column
-     * definitions (so the COPY BINARY encoding of the destination applies as is) plus the op
-     * column in MERGE mode. {@code ON COMMIT DELETE ROWS} empties it at every commit/rollback,
-     * so one session-scoped table serves every batch of the connection.
+     * Exact-name match first, then the unique case-insensitive match; null if none or ambiguous.
      */
-    public static String createStagingTableStatement(final String staging, final TableId target, final boolean withOpColumn) {
+    public static Column findColumn(final List<Column> columns, final String name) {
+        for(final Column column : columns) {
+            if(column.name.equals(name)) {
+                return column;
+            }
+        }
+        Column found = null;
+        for(final Column column : columns) {
+            if(column.name.equalsIgnoreCase(name)) {
+                if(found != null) {
+                    return null;
+                }
+                found = column;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * {@code CREATE TEMP TABLE IF NOT EXISTS} for the staging table: the staged columns with the
+     * destination's column types (so the COPY BINARY encoding of the destination applies as is)
+     * plus the op column in MERGE mode. It is created with {@code AS SELECT ... WITH NO DATA}
+     * rather than {@code LIKE} so that the destination's NOT NULL constraints are not inherited:
+     * a delete stages the keys only (op mode) or NULL placeholders (cdc mode).
+     * {@code ON COMMIT DELETE ROWS} empties it at every commit/rollback, so one session-scoped
+     * table serves every batch of the connection.
+     */
+    public static String createStagingTableStatement(
+            final String staging,
+            final TableId target,
+            final List<String> columnNames,
+            final boolean withOpColumn) {
+
+        final String select = columnNames.stream().map(PostgresUtil::quoteIdentifier).collect(Collectors.joining(", "))
+                + (withOpColumn ? ", NULL::text AS " + quoteIdentifier(STAGING_OP_COLUMN) : "");
         return "CREATE TEMP TABLE IF NOT EXISTS " + quoteIdentifier(staging)
-                + " (LIKE " + target.quotedName() + " INCLUDING DEFAULTS"
-                + (withOpColumn ? ", " + quoteIdentifier(STAGING_OP_COLUMN) + " text" : "")
-                + ") ON COMMIT DELETE ROWS";
+                + " ON COMMIT DELETE ROWS AS SELECT " + select + " FROM " + target.quotedName() + " WITH NO DATA";
     }
 
     /**
@@ -646,9 +656,10 @@ public class PostgresUtil {
                 yield sb.toString();
             }
             case INSERT_OR_DONOTHING ->
-                // DO NOTHING tolerates a duplicated key within the statement (the first row wins)
+                // DO NOTHING tolerates a duplicated key within the statement: the first staged row
+                // (ctid order = COPY order) wins; the sort alone is not stable
                     "INSERT INTO " + target + " (" + columns + ")"
-                            + " SELECT " + columns + " FROM " + staging + " ORDER BY " + keys
+                            + " SELECT " + columns + " FROM " + staging + " ORDER BY " + keys + ", ctid"
                             + " ON CONFLICT (" + keys + ") DO NOTHING";
             case DELETE ->
                     "DELETE FROM " + target + " USING (SELECT DISTINCT " + keys + " FROM " + staging + ") AS s"
@@ -767,8 +778,9 @@ public class PostgresUtil {
 
     /**
      * Converts a change record JSON value into a value {@link #write} accepts for the column
-     * (the JSON forms produced by the cdc transform providers: ISO-8601 dates/times, base64
-     * bytes, plain decimal strings, arrays of the above).
+     * (the JSON forms produced by the cdc transform providers: ISO-8601 or database text form
+     * dates/times ({@code 2023-11-14 22:13:20} as emitted by canal-json), base64 bytes, plain
+     * decimal strings, arrays of the above).
      */
     public static Object fromJsonValue(final Column column, final JsonElement json) {
         if(json == null || json.isJsonNull()) {
@@ -799,8 +811,8 @@ public class PostgresUtil {
             case FLOAT4, FLOAT8 -> json.getAsDouble();
             case NUMERIC -> json.getAsBigDecimal();
             case BYTEA -> Base64.getDecoder().decode(json.getAsString());
-            case DATE -> (int) LocalDate.parse(json.getAsString()).toEpochDay();
-            case TIME, TIMETZ -> LocalTime.parse(json.getAsString()).toNanoOfDay() / 1000L;
+            case DATE -> DateTimeUtil.toEpochDay(json.getAsString());
+            case TIME, TIMETZ -> DateTimeUtil.toMicroOfDay(json.getAsString());
             case TIMESTAMP, TIMESTAMPTZ -> parseTimestampMicros(json.getAsString());
             case JSON, JSONB -> json.isJsonPrimitive() && json.getAsJsonPrimitive().isString()
                     ? json.getAsString() : json.toString();
@@ -810,15 +822,16 @@ public class PostgresUtil {
         };
     }
 
-    /** Parses an ISO-8601 timestamp with or without a zone (a zoneless value is UTC). */
+    /**
+     * Parses a timestamp text: ISO-8601 or the database text form ({@code T} or space
+     * separator), with or without a zone (a zoneless value is UTC).
+     */
     public static long parseTimestampMicros(final String text) {
-        try {
-            final OffsetDateTime dateTime = OffsetDateTime.parse(text);
-            return dateTime.toEpochSecond() * 1_000_000L + dateTime.getNano() / 1000L;
-        } catch (final DateTimeParseException e) {
-            final LocalDateTime dateTime = LocalDateTime.parse(text);
-            return dateTime.toEpochSecond(ZoneOffset.UTC) * 1_000_000L + dateTime.getNano() / 1000L;
+        final Long micros = DateTimeUtil.toEpochMicroSecond(text);
+        if(micros == null) {
+            throw new IllegalArgumentException("Failed to parse timestamp: " + text);
         }
+        return micros;
     }
 
     /**
@@ -1224,16 +1237,14 @@ public class PostgresUtil {
             final List<Schema.Field> fields,
             final GenericRecord record) throws IOException {
 
-        output.writeShort(columns.size());
+        final Object[] values = new Object[columns.size()];
+        final List<Schema> fieldSchemas = new ArrayList<>(columns.size());
         for(int i = 0; i < columns.size(); i++) {
             final Schema.Field field = fields.get(i);
-            final Object value = field == null ? null : record.get(field.pos());
-            if(value == null) {
-                output.writeInt(-1);
-                continue;
-            }
-            encodeValue(output, columns.get(i), unnestUnion(field.schema()), value);
+            values[i] = field == null ? null : record.get(field.pos());
+            fieldSchemas.add(field == null ? null : field.schema());
         }
+        writeValues(output, columns, fieldSchemas, values);
     }
 
     /**
@@ -1245,6 +1256,20 @@ public class PostgresUtil {
             final List<Column> columns,
             final Object[] values) throws IOException {
 
+        writeValues(output, columns, null, values);
+    }
+
+    /**
+     * Writes one tuple from values aligned with {@code columns} by index. {@code fieldSchemas}
+     * (optional, may be shorter than {@code columns} and contain null entries) supplies the avro
+     * field schema of a value where one is known (decimal scale, millis logical types).
+     */
+    public static void writeValues(
+            final DataOutputStream output,
+            final List<Column> columns,
+            final List<Schema> fieldSchemas,
+            final Object[] values) throws IOException {
+
         output.writeShort(columns.size());
         for(int i = 0; i < columns.size(); i++) {
             final Object value = values[i];
@@ -1252,11 +1277,12 @@ public class PostgresUtil {
                 output.writeInt(-1);
                 continue;
             }
-            encodeValue(output, columns.get(i), null, value);
+            final Schema fieldSchema = fieldSchemas != null && i < fieldSchemas.size() ? fieldSchemas.get(i) : null;
+            encodeValue(output, columns.get(i), unnestUnion(fieldSchema), value);
         }
     }
 
-    public static void encodeValue(
+    private static void encodeValue(
             final DataOutputStream output,
             final Column column,
             final Schema fieldSchema,

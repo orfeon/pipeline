@@ -353,12 +353,13 @@ public class PostgresUtilTest {
         final PostgresUtil.TableId longName = new PostgresUtil.TableId("public", "x".repeat(80));
         Assertions.assertTrue(PostgresUtil.createStagingTableName(longName, List.of("id"), PostgresUtil.WriteOp.DELETE).length() <= 63);
 
+        // CTAS (not LIKE) so that the destination's NOT NULL constraints are not inherited by the staging table
         Assertions.assertEquals(
-                "CREATE TEMP TABLE IF NOT EXISTS \"stg\" (LIKE \"public\".\"users\" INCLUDING DEFAULTS) ON COMMIT DELETE ROWS",
-                PostgresUtil.createStagingTableStatement("stg", USERS, false));
+                "CREATE TEMP TABLE IF NOT EXISTS \"stg\" ON COMMIT DELETE ROWS AS SELECT \"id\", \"name\" FROM \"public\".\"users\" WITH NO DATA",
+                PostgresUtil.createStagingTableStatement("stg", USERS, List.of("id", "name"), false));
         Assertions.assertEquals(
-                "CREATE TEMP TABLE IF NOT EXISTS \"stg\" (LIKE \"public\".\"users\" INCLUDING DEFAULTS, \"_mp_op\" text) ON COMMIT DELETE ROWS",
-                PostgresUtil.createStagingTableStatement("stg", USERS, true));
+                "CREATE TEMP TABLE IF NOT EXISTS \"stg\" ON COMMIT DELETE ROWS AS SELECT \"id\", NULL::text AS \"_mp_op\" FROM \"public\".\"users\" WITH NO DATA",
+                PostgresUtil.createStagingTableStatement("stg", USERS, List.of("id"), true));
         Assertions.assertEquals("TRUNCATE TABLE \"public\".\"users\"", PostgresUtil.createTruncateStatement(USERS));
         Assertions.assertEquals("DELETE FROM \"public\".\"users\"", PostgresUtil.createDeleteAllStatement(USERS));
     }
@@ -394,7 +395,7 @@ public class PostgresUtilTest {
                 PostgresUtil.WriteOp.INSERT_OR_DONOTHING, USERS, "stg",
                 List.of("id", "name"), List.of("id"), List.of(), null, null);
         Assertions.assertEquals(
-                "INSERT INTO \"public\".\"users\" (\"id\", \"name\") SELECT \"id\", \"name\" FROM \"stg\" ORDER BY \"id\""
+                "INSERT INTO \"public\".\"users\" (\"id\", \"name\") SELECT \"id\", \"name\" FROM \"stg\" ORDER BY \"id\", ctid"
                         + " ON CONFLICT (\"id\") DO NOTHING",
                 PostgresUtil.createApplyStatement(doNothing));
 
@@ -459,6 +460,8 @@ public class PostgresUtilTest {
         Assertions.assertEquals(1700000000000000L, PostgresUtil.parseTimestampMicros("2023-11-14T22:13:20Z"));
         Assertions.assertEquals(1700000000000000L, PostgresUtil.parseTimestampMicros("2023-11-14T22:13:20"));
         Assertions.assertEquals(1700000000500000L, PostgresUtil.parseTimestampMicros("2023-11-15T07:13:20.5+09:00"));
+        // database text form (canal-json / postgres text output): space separator
+        Assertions.assertEquals(1700000000000000L, PostgresUtil.parseTimestampMicros("2023-11-14 22:13:20"));
 
         final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString("""
                 {"b": true, "i": 12, "n": "12345.67", "s": "hello", "d": "2024-01-15", "t": "12:34:56.789",

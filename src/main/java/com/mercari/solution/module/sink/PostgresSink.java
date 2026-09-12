@@ -47,6 +47,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -58,7 +59,7 @@ import java.util.regex.Pattern;
  * Rows are encoded into a worker-memory COPY buffer as they arrive and flushed in one
  * transaction per batch ({@code batchSize} rows / {@code maxBatchBytes} / a window change / the
  * end of the bundle). {@code INSERT} copies straight into the destination; the other operations
- * copy into a session-scoped temporary table ({@code LIKE destination ... ON COMMIT DELETE ROWS})
+ * copy into a session-scoped temporary table (the staged columns of the destination, {@code ON COMMIT DELETE ROWS})
  * and apply it with one set-based statement ({@code INSERT ... ON CONFLICT}, {@code DELETE ...
  * USING}, or {@code MERGE} for row-level ops / the cdc apply mode).
  */
@@ -386,6 +387,11 @@ public class PostgresSink extends Sink {
         final String applySql;
         final int opFieldPos;
         final int sequenceColumnIndex;
+        // avro field schemas aligned with columns (null where the plan has no input field)
+        final List<org.apache.avro.Schema> fieldSchemas;
+        // column index by exact name, and by lower-cased name (absent when ambiguous)
+        private final Map<String, Integer> columnIndexes;
+        private final Map<String, Integer> columnIndexesIgnoreCase;
 
         private WritePlan(
                 final PostgresUtil.TableId tableId,
@@ -405,6 +411,18 @@ public class PostgresSink extends Sink {
             this.columns = columns;
             this.columnNames = columns.stream().map(c -> c.name).toList();
             this.fields = fields;
+            this.fieldSchemas = fields.stream().map(f -> f == null ? null : f.schema()).toList();
+            this.columnIndexes = new HashMap<>();
+            this.columnIndexesIgnoreCase = new HashMap<>();
+            final Set<String> ambiguous = new HashSet<>();
+            for(int i = 0; i < columns.size(); i++) {
+                columnIndexes.put(columns.get(i).name, i);
+                final String lower = columns.get(i).name.toLowerCase(Locale.ROOT);
+                if(columnIndexesIgnoreCase.put(lower, i) != null) {
+                    ambiguous.add(lower);
+                }
+            }
+            ambiguous.forEach(columnIndexesIgnoreCase::remove);
             this.keyColumns = keyColumns;
             this.staged = staged;
             final List<PostgresUtil.Column> copyColumns = new ArrayList<>(columns);
@@ -444,10 +462,7 @@ public class PostgresSink extends Sink {
                         opFieldPos = field.pos();
                         continue;
                     }
-                    PostgresUtil.Column column = info.getColumn(field.name());
-                    if(column == null) {
-                        column = info.findColumnIgnoreCase(field.name());
-                    }
+                    final PostgresUtil.Column column = info.findColumn(field.name());
                     if(column == null) {
                         if(parameters.ignoreUnknownFields) {
                             LOG.info("{}ignores input field: {} (no such column)", prefix, field.name());
@@ -473,7 +488,7 @@ public class PostgresSink extends Sink {
                     throw new IllegalModuleException(prefix + "has no primary key. set keyFields for op: " + parameters.op);
                 }
                 for(final String key : requested) {
-                    final PostgresUtil.Column column = resolveColumn(columns, key);
+                    final PostgresUtil.Column column = PostgresUtil.findColumn(columns, key);
                     if(column == null) {
                         throw new IllegalModuleException(prefix + "key column: " + key + " is not among the written columns: "
                                 + columns.stream().map(c -> c.name).toList());
@@ -501,7 +516,7 @@ public class PostgresSink extends Sink {
             if(PostgresUtil.WriteOp.INSERT_OR_UPDATE.equals(op) || PostgresUtil.WriteOp.MERGE.equals(op)) {
                 if(parameters.updateFields != null) {
                     for(final String updateField : parameters.updateFields) {
-                        final PostgresUtil.Column column = resolveColumn(columns, updateField);
+                        final PostgresUtil.Column column = PostgresUtil.findColumn(columns, updateField);
                         if(column == null) {
                             throw new IllegalModuleException(prefix + "updateFields column: " + updateField + " is not among the written columns: "
                                     + columns.stream().map(c -> c.name).toList());
@@ -533,14 +548,21 @@ public class PostgresSink extends Sink {
 
             int sequenceColumnIndex = -1;
             if(parameters.sequenceField != null) {
-                final PostgresUtil.Column column = resolveColumn(columns, parameters.sequenceField);
+                final PostgresUtil.Column column = PostgresUtil.findColumn(columns, parameters.sequenceField);
                 if(column == null) {
                     throw new IllegalModuleException(prefix + "sequenceField column: " + parameters.sequenceField + " does not exist");
                 }
                 if(!PostgresUtil.ColumnType.TEXT.equals(column.type) && !PostgresUtil.ColumnType.VARCHAR.equals(column.type)) {
                     throw new IllegalModuleException(prefix + "sequenceField column: " + column.name + " must be a text or varchar column");
                 }
+                if(keyColumns.contains(column.name)) {
+                    throw new IllegalModuleException(prefix + "sequenceField column: " + column.name + " must not be a key column");
+                }
                 sequenceColumnIndex = columns.indexOf(column);
+                // the stale-row guard compares the stored sequence, so an update must always refresh it
+                if(PostgresUtil.WriteOp.MERGE.equals(op) && !updateColumns.contains(column.name)) {
+                    updateColumns.add(column.name);
+                }
             }
 
             final boolean staged = op.isStaged() || parameters.applyStatement != null;
@@ -573,36 +595,27 @@ public class PostgresSink extends Sink {
             return new WritePlan(info.tableId(), op, columns, fields, keyColumns, staged, stagingTable, copySql, applySql, opFieldPos, sequenceColumnIndex);
         }
 
-        private static PostgresUtil.Column resolveColumn(final List<PostgresUtil.Column> columns, final String name) {
-            for(final PostgresUtil.Column column : columns) {
-                if(column.name.equals(name)) {
-                    return column;
-                }
-            }
-            PostgresUtil.Column found = null;
-            for(final PostgresUtil.Column column : columns) {
-                if(column.name.equalsIgnoreCase(name)) {
-                    if(found != null) {
-                        return null;
-                    }
-                    found = column;
-                }
-            }
-            return found;
-        }
-
+        /** Index of the column for an input name (exact, then unique case-insensitive), or -1. */
         int columnIndex(final String name) {
-            return columnNames.indexOf(name);
+            final Integer exact = columnIndexes.get(name);
+            if(exact != null) {
+                return exact;
+            }
+            final Integer ignoreCase = columnIndexesIgnoreCase.get(name.toLowerCase(Locale.ROOT));
+            return ignoreCase == null ? -1 : ignoreCase;
         }
     }
 
     /**
-     * The change record sequence ({@code hex/hex/...}) left-padded per section so that the
-     * C-collation text comparison in the MERGE guard orders it like
-     * {@link ChangeRecord#compareSequence}.
+     * The change record sequence ({@code hex/hex/...}) lower-cased and left-padded per section
+     * so that the C-collation text comparison in the MERGE guard orders it like
+     * {@link ChangeRecord#compareSequence} (which parses hex case-insensitively).
      */
     static String padSequence(final String sequence) {
-        final String[] sections = sequence.split("/");
+        if(!ChangeRecord.isValidSequence(sequence)) {
+            throw new IllegalArgumentException("illegal change record sequence: " + sequence);
+        }
+        final String[] sections = sequence.toLowerCase(Locale.ROOT).split("/");
         final StringBuilder sb = new StringBuilder();
         for(final String section : sections) {
             if(!sb.isEmpty()) {
@@ -828,26 +841,12 @@ public class PostgresSink extends Sink {
                     values[i] = field == null ? null : record.get(field.pos());
                 }
                 values[plan.columns.size()] = toStagingOp(record.get(plan.opFieldPos));
-                writeTypedValues(plan, values);
+                // the field schemas cover the columns only; the op column has none
+                PostgresUtil.writeValues(rowOutput, plan.copyColumns, plan.fieldSchemas, values);
             } else {
                 PostgresUtil.write(rowOutput, plan.columns, plan.fields, record);
             }
             append(plan, batches);
-        }
-
-        /** Encodes values with the avro field schemas where the plan has them (decimal scale, millis logical types). */
-        private void writeTypedValues(final WritePlan plan, final Object[] values) throws IOException {
-            rowOutput.writeShort(plan.copyColumns.size());
-            for(int i = 0; i < plan.copyColumns.size(); i++) {
-                final Object value = values[i];
-                if(value == null) {
-                    rowOutput.writeInt(-1);
-                    continue;
-                }
-                final org.apache.avro.Schema.Field field = i < plan.fields.size() ? plan.fields.get(i) : null;
-                PostgresUtil.encodeValue(rowOutput, plan.copyColumns.get(i),
-                        field == null ? null : AvroSchemaUtil.unnestUnion(field.schema()), value);
-            }
         }
 
         private static String toStagingOp(final Object value) {
@@ -909,26 +908,19 @@ public class PostgresSink extends Sink {
                 throw new IllegalArgumentException("change record requires keys to be applied to postgres table: " + plan.tableId.qualifiedName());
             }
             final JsonObject after = ChangeRecord.Op.DELETE.equals(op) ? null : parseObject(envelope.get(ChangeRecord.FIELD_AFTER));
+            // envelope values by column (exact, then case-insensitive name match); keys win over after
+            final JsonElement[] jsons = new JsonElement[plan.columns.size()];
+            if(after != null) {
+                assignColumns(plan, after, jsons);
+            }
+            assignColumns(plan, keys, jsons);
             final Object[] values = new Object[plan.copyColumns.size()];
             for(int i = 0; i < plan.columns.size(); i++) {
-                final PostgresUtil.Column column = plan.columns.get(i);
                 if(i == plan.sequenceColumnIndex) {
                     values[i] = padSequence(String.valueOf(envelope.get(ChangeRecord.FIELD_SEQUENCE)));
                     continue;
                 }
-                final JsonElement json;
-                if(keys.has(column.name)) {
-                    json = keys.get(column.name);
-                } else if(after != null && after.has(column.name)) {
-                    json = after.get(column.name);
-                } else {
-                    json = null;
-                }
-                values[i] = PostgresUtil.fromJsonValue(column, json);
-            }
-            reportUnknownColumns(plan, keys);
-            if(after != null) {
-                reportUnknownColumns(plan, after);
+                values[i] = PostgresUtil.fromJsonValue(plan.columns.get(i), jsons[i]);
             }
             values[plan.columns.size()] = ChangeRecord.Op.DELETE.equals(op) ? PostgresUtil.STAGING_OP_DELETE : PostgresUtil.STAGING_OP_UPSERT;
             rowBuffer.reset();
@@ -936,11 +928,14 @@ public class PostgresSink extends Sink {
             append(plan, batches);
         }
 
-        private void reportUnknownColumns(final WritePlan plan, final JsonObject json) {
-            for(final String key : json.keySet()) {
-                if(plan.columnIndex(key) < 0 && reportedUnknownColumns.add(plan.tableId.qualifiedName() + "." + key)) {
+        private void assignColumns(final WritePlan plan, final JsonObject json, final JsonElement[] jsons) {
+            for(final Map.Entry<String, JsonElement> entry : json.entrySet()) {
+                final int index = plan.columnIndex(entry.getKey());
+                if(index >= 0) {
+                    jsons[index] = entry.getValue();
+                } else if(reportedUnknownColumns.add(plan.tableId.qualifiedName() + "." + entry.getKey())) {
                     LOG.warn("postgres sink module[{}] change record column: {} does not exist on table: {}, the value is ignored",
-                            name, key, plan.tableId.qualifiedName());
+                            name, entry.getKey(), plan.tableId.qualifiedName());
                 }
             }
         }
@@ -1007,7 +1002,7 @@ public class PostgresSink extends Sink {
                         batch.output.flush();
                         if(plan.staged) {
                             statement.execute(PostgresUtil.createStagingTableStatement(
-                                    plan.stagingTable, plan.tableId, PostgresUtil.WriteOp.MERGE.equals(plan.op)));
+                                    plan.stagingTable, plan.tableId, plan.columnNames, PostgresUtil.WriteOp.MERGE.equals(plan.op)));
                         }
                         final long copied = pgConnection.getCopyAPI().copyIn(plan.copySql, batch.buffer.toInputStream());
                         final long affected = plan.staged ? statement.executeUpdate(plan.applySql) : copied;
