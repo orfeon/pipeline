@@ -15,6 +15,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -37,6 +39,7 @@ public class JdbcSink extends Sink {
         private Boolean emptyTable;
         private List<String> keyFields;
         private Integer batchSize;
+        private Integer bulkInsertSize;
         private String op;
 
 
@@ -57,6 +60,17 @@ public class JdbcSink extends Sink {
             if(password == null) {
                 errorMessages.add("Parameter must contain password");
             }
+            if(batchSize != null && batchSize < 1) {
+                errorMessages.add("Parameter batchSize must be greater than or equal to 1");
+            }
+            if(bulkInsertSize != null && bulkInsertSize < 1) {
+                errorMessages.add("Parameter bulkInsertSize must be greater than or equal to 1");
+            }
+            if((JdbcUtil.OP.INSERT_OR_UPDATE.name().equals(op)
+                    || JdbcUtil.OP.INSERT_OR_DONOTHING.name().equals(op))
+                    && (keyFields == null || keyFields.isEmpty())) {
+                errorMessages.add("Parameter keyFields must not be empty for op: " + op);
+            }
 
             if(!errorMessages.isEmpty()) {
                 throw new IllegalModuleException(errorMessages);
@@ -75,6 +89,9 @@ public class JdbcSink extends Sink {
             }
             if(batchSize == null) {
                 batchSize = 1000;
+            }
+            if(bulkInsertSize == null) {
+                bulkInsertSize = 1;
             }
             if(keyFields == null) {
                 keyFields = new ArrayList<>();
@@ -132,15 +149,16 @@ public class JdbcSink extends Sink {
                     .setCoder(input.getCoder());
         }
 
-        final PreparedStatementTemplate statementTemplate = JdbcUtil.createStatement(
-                parameters.table, inputSchema.getAvroSchema(),
-                JdbcUtil.OP.valueOf(parameters.op), db,
-                parameters.keyFields);
+        final JdbcUtil.OP op = JdbcUtil.OP.valueOf(parameters.op);
+        JdbcUtil.validateStatementParameters(
+                op, db, parameters.keyFields, parameters.bulkInsertSize,
+                inputSchema.getAvroSchema().getFields().size());
 
         final PCollection<MElement> results = tableReady
                 .apply("WriteJdbc", ParDo.of(new WriteDoFn(
                         parameters.driver, parameters.url, parameters.user, parameters.password,
-                        statementTemplate, parameters.batchSize)));
+                        parameters.table, inputSchema.getAvroSchema(), op, db,
+                        parameters.keyFields, parameters.batchSize, parameters.bulkInsertSize)));
 
         return MCollectionTuple
                 .of(results, Schema.builder().withField("dummy", Schema.FieldType.STRING).build());
@@ -160,40 +178,191 @@ public class JdbcSink extends Sink {
         }
     }
 
+    static class BulkInsertBuffer {
+
+        private final JdbcUtil.OP op;
+        private final List<String> keyFields;
+        private final int capacity;
+        private final List<MElement> elements;
+        // Only upsert ops with a multi-row statement need in-statement key consolidation.
+        private final boolean consolidate;
+        private final Map<CompositeKey, Integer> keyIndexes;
+
+        BulkInsertBuffer(final JdbcUtil.OP op, final List<String> keyFields, final int capacity) {
+            this.op = op;
+            this.keyFields = keyFields;
+            this.capacity = capacity;
+            this.elements = new ArrayList<>(Math.min(capacity, 1024));
+            this.consolidate = capacity > 1
+                    && (JdbcUtil.OP.INSERT_OR_UPDATE.equals(op) || JdbcUtil.OP.INSERT_OR_DONOTHING.equals(op));
+            this.keyIndexes = consolidate ? new HashMap<>() : Map.of();
+        }
+
+        void add(final MElement element) {
+            if (!consolidate) {
+                elements.add(element);
+                return;
+            }
+
+            final CompositeKey key = CompositeKey.of(element, keyFields);
+            if (key == null) {
+                // SQL equality does not consider NULL keys equal.
+                elements.add(element);
+                return;
+            }
+
+            final Integer index = keyIndexes.get(key);
+            if (index == null) {
+                keyIndexes.put(key, elements.size());
+                elements.add(element);
+            } else if (JdbcUtil.OP.INSERT_OR_UPDATE.equals(op)) {
+                elements.set(index, element);
+            }
+        }
+
+        MElement get(final int index) {
+            return elements.get(index);
+        }
+
+        int size() {
+            return elements.size();
+        }
+
+        boolean isEmpty() {
+            return elements.isEmpty();
+        }
+
+        boolean isFull() {
+            return elements.size() >= capacity;
+        }
+
+        void clear() {
+            elements.clear();
+            if (consolidate) {
+                keyIndexes.clear();
+            }
+        }
+    }
+
+    private static class CompositeKey {
+
+        private final Object[] values;
+        private final int hashCode;
+
+        private CompositeKey(final Object[] values) {
+            this.values = values;
+            this.hashCode = Arrays.deepHashCode(values);
+        }
+
+        /** Returns null when the key cannot be compared (a null component, or a value type the
+         *  primitive accessor does not support); such records are simply not consolidated. */
+        static CompositeKey of(final MElement element, final List<String> keyFields) {
+            final Object[] values = new Object[keyFields.size()];
+            for (int i = 0; i < keyFields.size(); i++) {
+                final Object value;
+                try {
+                    value = element.getPrimitiveValue(keyFields.get(i));
+                } catch (RuntimeException e) {
+                    // e.g. Avro FIXED keys: writable by ToStatementConverter but not exposed as a primitive.
+                    return null;
+                }
+                if (value == null) {
+                    return null;
+                }
+                values[i] = normalize(value);
+            }
+            return new CompositeKey(values);
+        }
+
+        private static Object normalize(final Object value) {
+            return switch (value) {
+                case CharSequence sequence -> sequence.toString();
+                case ByteBuffer buffer -> {
+                    final ByteBuffer duplicate = buffer.duplicate();
+                    final byte[] bytes = new byte[duplicate.remaining()];
+                    duplicate.get(bytes);
+                    yield bytes;
+                }
+                case BigDecimal decimal -> decimal.stripTrailingZeros();
+                case List<?> list -> list.stream().map(CompositeKey::normalize).toArray();
+                default -> value; // byte[] and nested Object[] are handled by Arrays.deepEquals/deepHashCode
+            };
+        }
+
+        @Override
+        public boolean equals(final Object obj) {
+            if (this == obj) {
+                return true;
+            }
+            if (!(obj instanceof CompositeKey other)) {
+                return false;
+            }
+            return Arrays.deepEquals(values, other.values);
+        }
+
+        @Override
+        public int hashCode() {
+            return hashCode;
+        }
+    }
+
     private static class WriteDoFn extends DoFn<MElement, MElement> {
 
         private final String driver;
         private final String url;
         private final String user;
         private final String password;
-        private final PreparedStatementTemplate statementTemplate;
+        private final String table;
+        private final org.apache.avro.Schema schema;
+        private final JdbcUtil.OP op;
+        private final JdbcUtil.DB db;
+        private final List<String> keyFields;
         private final int batchSize;
+        private final int bulkInsertSize;
+        private final int fieldSize;
 
         private transient JdbcUtil.CloseableDataSource dataSource;
+        private transient PreparedStatementTemplate statementTemplate;
+        // Statement templates for the tail of a bundle, keyed by row count (bounded by bulkInsertSize).
+        private transient Map<Integer, PreparedStatementTemplate> partialTemplates;
         private transient Connection connection = null;
         private transient PreparedStatement preparedStatement;
 
-        private transient int bufferSize;
+        private transient BulkInsertBuffer elementBuffer;
+        private transient int batchBufferSize;
 
         public WriteDoFn(
                 final String driver,
                 final String url,
                 final String user,
                 final String password,
-                final PreparedStatementTemplate statementTemplate,
-                final int batchSize) {
+                final String table,
+                final org.apache.avro.Schema schema,
+                final JdbcUtil.OP op,
+                final JdbcUtil.DB db,
+                final List<String> keyFields,
+                final int batchSize,
+                final int bulkInsertSize) {
 
             this.driver = driver;
             this.url = url;
             this.user = user;
             this.password = password;
-            this.statementTemplate = statementTemplate;
+            this.table = table;
+            this.schema = schema;
+            this.op = op;
+            this.db = db;
+            this.keyFields = keyFields;
             this.batchSize = batchSize;
+            this.bulkInsertSize = bulkInsertSize;
+            this.fieldSize = schema.getFields().size();
         }
 
 
         @Setup
         public void setup() {
+            this.partialTemplates = new HashMap<>();
+            this.statementTemplate = createStatementTemplate(bulkInsertSize);
             this.dataSource = JdbcUtil.createDataSource(driver, url, user, password);
         }
 
@@ -209,43 +378,102 @@ public class JdbcSink extends Sink {
                 connection.setAutoCommit(false);
                 preparedStatement = connection.prepareStatement(statementTemplate.getStatementString());
             }
-            bufferSize = 0;
+            elementBuffer = new BulkInsertBuffer(op, keyFields, bulkInsertSize);
+            batchBufferSize = 0;
         }
 
         @ProcessElement
         public void processElement(ProcessContext c) throws Exception {
             try {
-                preparedStatement.clearParameters();
-                ToStatementConverter.convertElement(c.element(), this.statementTemplate.createPlaceholderSetterProxy(preparedStatement));
-                preparedStatement.addBatch();
-                bufferSize += 1;
-
-                if (bufferSize >= batchSize) {
-                    preparedStatement.executeBatch();
-                    connection.commit();
-                    bufferSize = 0;
+                elementBuffer.add(c.element());
+                if (elementBuffer.isFull()) {
+                    addBufferedElementsToBatch(statementTemplate, preparedStatement);
+                    if (batchBufferSize >= batchSize) {
+                        preparedStatement.executeBatch();
+                        connection.commit();
+                        batchBufferSize = 0;
+                    }
                 }
-            } catch (SQLException e) {
-                preparedStatement.clearBatch();
-                connection.rollback();
-                throw new RuntimeException(e);
+            } catch (Exception e) {
+                // Conversion errors are not SQLExceptions but still leave the batch/transaction dirty.
+                abortBundle(e);
             }
         }
 
         @FinishBundle
         public void finishBundle() throws Exception {
             try {
-                if (bufferSize > 0) {
+                if (batchBufferSize > 0) {
                     preparedStatement.executeBatch();
-                    connection.commit();
+                    batchBufferSize = 0;
                 }
+                if (!elementBuffer.isEmpty()) {
+                    executeRemainingElements();
+                }
+                connection.commit();
                 cleanUpStatementAndConnection();
-            } catch (SQLException e) {
-                preparedStatement.clearBatch();
-                connection.rollback();
-                cleanUpStatementAndConnection();
-                throw new RuntimeException(e);
+            } catch (Exception e) {
+                abortBundle(e);
             }
+        }
+
+        /** Binds every buffered element into one multi-row statement, adds it to the batch and empties the buffer. */
+        private void addBufferedElementsToBatch(
+                final PreparedStatementTemplate template,
+                final PreparedStatement statement) throws SQLException {
+
+            try {
+                for (int i = 0; i < elementBuffer.size(); i++) {
+                    ToStatementConverter.convertElement(
+                            elementBuffer.get(i),
+                            template.createPlaceholderSetterProxy(statement, i * fieldSize));
+                }
+                statement.addBatch();
+                batchBufferSize += 1;
+            } finally {
+                elementBuffer.clear();
+            }
+        }
+
+        private PreparedStatementTemplate createStatementTemplate(final int size) {
+            return JdbcUtil.createStatement(table, schema, op, db, keyFields, size);
+        }
+
+        /** Writes the (fewer than bulkInsertSize) elements left at the end of a bundle with a statement sized to them. */
+        private void executeRemainingElements() throws SQLException {
+            final PreparedStatementTemplate partialTemplate = partialTemplates
+                    .computeIfAbsent(elementBuffer.size(), this::createStatementTemplate);
+            try(final PreparedStatement partialStatement = connection.prepareStatement(partialTemplate.getStatementString())) {
+                addBufferedElementsToBatch(partialTemplate, partialStatement);
+                partialStatement.executeBatch();
+                batchBufferSize = 0;
+            }
+        }
+
+        /** Rolls back the open transaction, drops the connection (so the next bundle reconnects) and rethrows. */
+        private void abortBundle(final Exception cause) throws Exception {
+            elementBuffer.clear();
+            batchBufferSize = 0;
+            try {
+                if (preparedStatement != null) {
+                    preparedStatement.clearBatch();
+                }
+                if (connection != null) {
+                    connection.rollback();
+                }
+            } catch (SQLException e) {
+                cause.addSuppressed(e);
+            } finally {
+                try {
+                    cleanUpStatementAndConnection();
+                } catch (Exception e) {
+                    cause.addSuppressed(e);
+                }
+            }
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new RuntimeException(cause);
         }
 
         private void cleanUpStatementAndConnection() throws Exception {

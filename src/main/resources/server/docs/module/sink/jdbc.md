@@ -1,9 +1,9 @@
 ---
 type: Sink Module
 title: JDBC Sink Module
-description: Writes input data to relational databases via JDBC. Supports MySQL, PostgreSQL, SQL Server, and H2 with INSERT, INSERT_OR_UPDATE (upsert), and INSERT_OR_DONOTHING operations, batched commits, optional table creation from the input schema, table truncation before writing, and Secret Manager integration for credentials.
+description: Writes input data to relational databases via JDBC. Supports MySQL, PostgreSQL, SQL Server, and H2 with INSERT, INSERT_OR_UPDATE (upsert), and INSERT_OR_DONOTHING operations, multi-row bulk inserts (bulkInsertSize), batched commits, optional table creation from the input schema, table truncation before writing, and Secret Manager integration for credentials.
 tags: [sink, jdbc, mysql, postgresql, sqlserver, h2, batch, sql]
-timestamp: 2026-07-05T00:00:00Z
+timestamp: 2026-09-12T00:00:00Z
 ---
 
 # JDBC Sink Module
@@ -48,11 +48,12 @@ Any other driver class name causes the module to fail with a "Not supported JDBC
 | parameter   | optional | type           | description                                                                                                                                                                    |
 |-------------|----------|----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | table       | required | String         | Name of the table to write to.                                                                                                                                                 |
-| op          | optional | Enum           | Write operation. Values: `INSERT`, `INSERT_OR_UPDATE`, `INSERT_OR_DONOTHING`. Default: `INSERT`. See [Write operations](#write-operations).                                    |
-| keyFields   | optional | Array<String\> | Field names that form the primary key. Used as the merge key for `INSERT_OR_UPDATE` / `INSERT_OR_DONOTHING`, and as the `PRIMARY KEY` when `createTable` is `true`.           |
-| batchSize   | optional | Integer        | Number of records buffered into a single batch. The batch is executed and committed each time this size is reached (and at the end of each bundle). Default: `1000`.           |
-| createTable | optional | Boolean        | If `true`, executes `CREATE TABLE IF NOT EXISTS` before writing, deriving column definitions from the input schema and using `keyFields` as the primary key. Default: `false`. |
-| emptyTable  | optional | Boolean        | If `true`, executes `DELETE FROM <table>` before writing to empty the table. Default: `false`.                                                                                 |
+| op             | optional | Enum           | Write operation. Values: `INSERT`, `INSERT_OR_UPDATE`, `INSERT_OR_DONOTHING`. Default: `INSERT`. See [Write operations](#write-operations).                                    |
+| keyFields      | optional | Array<String\> | Field names that form the primary key. Used as the merge key for `INSERT_OR_UPDATE` / `INSERT_OR_DONOTHING`, and as the `PRIMARY KEY` when `createTable` is `true`.           |
+| batchSize      | optional | Integer        | Number of bulk operations (statements) added to the JDBC batch before it is executed and committed. The batch is also flushed at the end of each bundle. Must be >= 1. Default: `1000`. |
+| bulkInsertSize | optional | Integer        | Maximum number of records written by a single multi-row statement (`VALUES (...), (...), ...`). Must be >= 1, and `bulkInsertSize * <number of fields>` must not exceed the driver's bind-parameter limit (SQL Server: 2100, MySQL / PostgreSQL: 65535); SQL Server additionally allows at most `1000` rows per statement. Default: `1`. See [Bulk inserts](#bulk-inserts). |
+| createTable    | optional | Boolean        | If `true`, executes `CREATE TABLE IF NOT EXISTS` before writing, deriving column definitions from the input schema and using `keyFields` as the primary key. Default: `false`. |
+| emptyTable     | optional | Boolean        | If `true`, executes `DELETE FROM <table>` before writing to empty the table. Default: `false`.                                                                                 |
 
 ## Write operations
 
@@ -60,13 +61,23 @@ Any other driver class name causes the module to fail with a "Not supported JDBC
 |---------------------|--------------------------------------------------------------------------------------------------------------------|
 | INSERT (default)    | Plain `INSERT`. Fails if a row with the same primary key already exists.                                          |
 | INSERT_OR_UPDATE    | Upsert: inserts a new row, or updates the non-key columns when the key already exists (`ON DUPLICATE KEY UPDATE` for MySQL, `MERGE` for PostgreSQL/H2). Not supported for SQL Server. |
-| INSERT_OR_DONOTHING | Inserts a new row, or leaves the existing row unchanged when the key already exists. Not supported for SQL Server. |
+| INSERT_OR_DONOTHING | Inserts a new row, or leaves the existing row unchanged when the key already exists (`ON DUPLICATE KEY UPDATE` on the key columns only for MySQL, `MERGE` for PostgreSQL). Not supported for SQL Server or H2. |
 
 Notes:
 
-- `INSERT_OR_UPDATE` and `INSERT_OR_DONOTHING` require `keyFields` to identify the merge key.
-- SQL Server supports only `INSERT`; specifying the other operations fails at pipeline construction.
+- `INSERT_OR_UPDATE` and `INSERT_OR_DONOTHING` require `keyFields` to identify the merge key; an empty `keyFields` fails at pipeline construction.
+- SQL Server supports only `INSERT`; H2 supports `INSERT` and `INSERT_OR_UPDATE`. Unsupported combinations fail at pipeline construction (the statement is validated before the pipeline is launched).
 - `DELETE` is not supported by this module.
+
+## Bulk inserts
+
+`bulkInsertSize` controls how many records go into one multi-row statement, while `batchSize` controls how many of those statements are added to the JDBC batch before it is executed and committed. For example, with `bulkInsertSize: 100` and `batchSize: 10`, up to 100 records are written per statement and up to 1,000 records are processed before each commit. The records left over at the end of a bundle are written with a shorter statement sized to the remaining count.
+
+Every record binds one placeholder per field, so a multi-row statement carries `bulkInsertSize * <number of fields>` bind parameters. Drivers cap that count (SQL Server: 2100 per request, MySQL and PostgreSQL: 65535 per prepared statement); a `bulkInsertSize` that would exceed the cap for the input schema fails at pipeline construction. For example, a 20-column table on SQL Server allows `bulkInsertSize` up to `105`.
+
+For `INSERT_OR_UPDATE` and `INSERT_OR_DONOTHING`, records that share the same `keyFields` values are consolidated within each multi-row statement so that one statement does not contain two records with the same key: `INSERT_OR_DONOTHING` keeps the first record and `INSERT_OR_UPDATE` keeps the last record. Records whose key contains `null` are never consolidated. `bulkInsertSize` counts records after this consolidation. Plain `INSERT` does not consolidate duplicates.
+
+Consolidation compares the exact field values. On PostgreSQL (`MERGE`), records that the database still treats as the same row — keys that differ only under a case-insensitive collation such as `citext`, `CHAR(n)` trailing-space padding, or a second `UNIQUE` index whose columns are not in `keyFields` — make the whole statement fail with `MERGE command cannot affect row a second time` or a unique-constraint violation. Set `bulkInsertSize: 1` for such tables. MySQL and H2 process the rows of one statement in order and are not affected.
 
 ## Table preparation
 
@@ -131,7 +142,27 @@ sinks:
       batchSize: 500
 ```
 
-### Example 3: Full refresh (empty the table before writing)
+### Example 3: Multi-row inserts into SQL Server
+
+Write up to 100 records per statement and commit every 100 statements (10,000 records). With SQL Server's 2100-parameter limit, 100 rows per statement leaves room for tables of up to 21 columns.
+
+```yaml
+sinks:
+  - name: jdbc_sink
+    module: jdbc
+    inputs:
+      - source
+    parameters:
+      url: "jdbc:sqlserver://10.0.0.30:1433;databaseName=mydatabase"
+      driver: com.microsoft.sqlserver.jdbc.SQLServerDriver
+      user: "projects/myproject/secrets/db-user/versions/latest"
+      password: "projects/myproject/secrets/db-password/versions/latest"
+      table: events
+      bulkInsertSize: 100
+      batchSize: 100
+```
+
+### Example 4: Full refresh (empty the table before writing)
 
 ```yaml
 sinks:
