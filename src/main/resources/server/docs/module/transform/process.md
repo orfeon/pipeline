@@ -102,7 +102,9 @@ closed are not merged into the earlier replay: they form a new (partial) case in
 session window the aggregates re-merge the sessions per output key, so overlapping cases share one
 `edges` / `nodes` / `variants` row (and `caseShare` is relative to that merged window), while a case with no
 overlap keeps a row of its own. The aggregate rows carry the end of their (merged) window as event time; a
-`cases` row carries the case's own end time.
+`cases` row carries the case's own end time. Making the re-merge deterministic costs latency in streaming:
+with a session window every output is held until the longest session open at that moment closes, so a very
+long-lived case delays the rows of the shorter sessions that ran beside it.
 
 ## Scale
 

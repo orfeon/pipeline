@@ -189,14 +189,20 @@ public final class ProcessStages {
         final KvCoder<String, ProcessStats> statsCoder = KvCoder.of(StringUtf8Coder.of(), ProcessStats.StatsCoder.of());
         final KeyedSpillSorter sorter = new KeyedSpillSorter(spillOptions(spec, input.getPipeline().getOptions()), eventCoder);
 
-        // Every GroupByKey / Combine below holds the output watermark at the *earliest* event of its window rather
-        // than the window end (the default END_OF_WINDOW combiner). With the default, a session that ends earlier
-        // could fire alone at a downstream re-merge while an overlapping, later-ending session was still pending
-        // upstream (its hold lies past the earlier window's end), so overlapping cases came out as separate rows
-        // depending on scheduling. Holding at the window start keeps every window open until all the sessions that
-        // overlap it have arrived. The output rows are stamped with the window end explicitly (emitAtWindowEnd).
-        final PCollection<MElement> held = input.apply("HoldEarliest",
-                Window.<MElement>configure().withTimestampCombiner(TimestampCombiner.EARLIEST));
+        // the per-case GroupByKey consumes a merging (session) window; the aggregates re-merge it per output key so
+        // that overlapping cases land in one window instead of one row per case
+        final boolean remerge = !input.getWindowingStrategy().getWindowFn().isNonMerging();
+
+        // With a merging window every GroupByKey / Combine below holds the output watermark at the *earliest* event of
+        // its window rather than the window end (the default END_OF_WINDOW combiner). With the default, a session that
+        // ends earlier could fire alone at a downstream re-merge while an overlapping, later-ending session was still
+        // pending upstream (its hold lies past the earlier window's end), so overlapping cases came out as separate
+        // rows depending on scheduling. Holding at the window start keeps every window open until all the sessions
+        // that overlap it have arrived. The output rows are stamped with the window end explicitly (emitAtWindowEnd).
+        // A non-merging window has nothing to re-merge, so it keeps the input's own hold (and its output latency).
+        final PCollection<MElement> held = remerge
+                ? input.apply("HoldEarliest", Window.<MElement>configure().withTimestampCombiner(TimestampCombiner.EARLIEST))
+                : input;
 
         final TupleTag<KV<String, KV<Long, MElement>>> eventTag = new TupleTag<>() {};
         final TupleTag<BadRecord> extractFailureTag = new TupleTag<>() {};
@@ -221,9 +227,6 @@ public final class ProcessStages {
                 .of(extracted.get(extractFailureTag)).and(replayed.get(replayFailureTag))
                 .apply("Failures", org.apache.beam.sdk.transforms.Flatten.pCollections());
 
-        // the per-case GroupByKey consumed a merging (session) window; the aggregates re-merge it per output key so
-        // that overlapping cases land in one window instead of one row per case
-        final boolean remerge = !input.getWindowingStrategy().getWindowFn().isNonMerging();
         final PCollection<MElement> edges = combine(replayed, edgesTag, statsCoder, remerge, "Edges")
                 .apply("Edges", ParDo.of(new EdgesDoFn(spec)));
         final PCollection<MElement> nodes = combine(replayed, nodesTag, statsCoder, remerge, "Nodes")
@@ -242,16 +245,32 @@ public final class ProcessStages {
         final PCollection<MElement> conformance = combine(replayed, conformanceTag, statsCoder, remerge, "Conformance")
                 .apply("Conformance", ParDo.of(new ConformanceDoFn(spec)));
 
-        // the EARLIEST hold is an internal detail: downstream modules see the input's own timestamp combiner again
+        final PCollection<MElement> cases = replayed.get(casesTag);
+        if (!remerge) {
+            return new Outputs(edges, nodes, variants, cases, handovers, conformance, failures);
+        }
+        // the EARLIEST hold is an internal detail: downstream modules see the input's own timestamp combiner again.
+        // Window.configure() expands to a Flatten, which resolves the input coder eagerly, so the element coder has to
+        // be set here instead of leaving it to MCollectionTuple (a registry-inferred SerializableCoder cannot encode
+        // every MElement payload).
         final TimestampCombiner combiner = input.getWindowingStrategy().getTimestampCombiner();
         return new Outputs(
-                restore(edges, combiner, "Edges"), restore(nodes, combiner, "Nodes"), restore(variants, combiner, "Variants"),
-                restore(replayed.get(casesTag), combiner, "Cases"), restore(handovers, combiner, "Handovers"),
-                restore(conformance, combiner, "Conformance"), restore(failures, combiner, "Failures"));
+                restore(edges, edgesSchema(), combiner, "Edges"),
+                restore(nodes, nodesSchema(), combiner, "Nodes"),
+                restore(variants, variantsSchema(), combiner, "Variants"),
+                restore(cases, casesSchema(spec), combiner, "Cases"),
+                restore(handovers, handoversSchema(), combiner, "Handovers"),
+                restore(conformance, conformanceSchema(), combiner, "Conformance"),
+                restore(failures, combiner, "Failures"));
+    }
+
+    private static PCollection<MElement> restore(final PCollection<MElement> output, final Schema schema,
+                                                 final TimestampCombiner combiner, final String name) {
+        return restore(output.setCoder(ElementCoder.of(schema)), combiner, name);
     }
 
     private static <T> PCollection<T> restore(final PCollection<T> output, final TimestampCombiner combiner, final String name) {
-        if (combiner == null || TimestampCombiner.EARLIEST.equals(combiner)) return output;
+        if (TimestampCombiner.EARLIEST.equals(combiner)) return output;
         return output.apply("Restore" + name, Window.<T>configure().withTimestampCombiner(combiner));
     }
 
