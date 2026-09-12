@@ -124,4 +124,30 @@ public class EvaluationSpecTest {
         Assertions.assertEquals("t", s.timeField);
         Assertions.assertEquals(4, s.notes.size());
     }
+
+    @Test
+    public void testFitRules() {
+        final EvaluationSpec s = parse(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, grid: [0.5, 2, 4]}, {type: blend, fitOn: valid, of: [A], l2: 0.01, maxIter: 5}, {by: prediction}], output: {calibration: 'target/cal.json'}}"))
+                .resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(2, s.fits.size());
+        Assertions.assertEquals(1, s.tables.size());
+        Assertions.assertArrayEquals(new double[]{0.5, 1, 1.5, 2}, s.fits.get(0).grid(), 1e-12);
+        Assertions.assertEquals(0.01, s.fits.get(1).l2);
+        Assertions.assertEquals(List.of("baseline", "A", "A@T", "A@blend"), s.predictionNames());
+        Assertions.assertEquals(List.of(1), s.derivedOf(0));
+        Assertions.assertEquals(List.of(2), s.derivedOf(1));
+        Assertions.assertEquals("target/cal.json", s.calibrationUri);
+        Assertions.assertEquals(s.parametersHash, parse(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, grid: [0.5, 2, 4]}, {type: blend, fitOn: valid, of: [A], l2: 0.01, maxIter: 5}, {by: prediction}]}")).parametersHash);
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature}]}")).contains("fitOn is required"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: test}]}")).contains("never on the report split"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: holdout}]}")).contains("not a declared split"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, of: [Z]}]}")).contains("not a declared prediction set"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid}, {type: blend, fitOn: valid}]}")).contains("declared twice"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, grid: [0, 2, 4]}]}")).contains("grid must be"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, maxIter: 0}]}")).contains("maxIter"));
+        // a blend needs an offset: the baseline, or the score set's own
+        Assertions.assertTrue(error("{group: g, label: y, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid}]}").contains("needs an offset"));
+        final EvaluationSpec own = parse("{group: g, label: y, time: t, predictions: [{name: S, score: s, offset: qa, offsetScale: log}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid}]}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals(List.of("baseline", "S", "S@blend"), own.predictionNames());
+    }
 }

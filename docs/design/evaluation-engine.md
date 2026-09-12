@@ -1,8 +1,8 @@
 # Evaluation Transform Engine (Design Document)
 
-Status: **Implemented (stage 1)** — the Beam execution of the contract in [evaluation-dsl.md](evaluation-dsl.md):
+Status: **Implemented (stages 1–2)** — the Beam execution of the contract in [evaluation-dsl.md](evaluation-dsl.md):
 one Combine for the metrics, the bootstrap and the slices, one sketch pass plus one Combine for the calibration
-tables. Code: `util/pipeline/evaluation/` and `module/transform/EvaluationTransform.java`; the tests are
+tables, one grid pass per temperature fit and unrolled Newton passes per blend fit ahead of the aggregation. Code: `util/pipeline/evaluation/` and `module/transform/EvaluationTransform.java`; the tests are
 `EvaluationScorerTest` / `EvaluationSpecTest` (pure) and `EvaluationTransformTest` (e2e). The shared parts
 live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen engine doc §1).
 
@@ -13,7 +13,8 @@ live in `util/pipeline/glm/` and `util/pipeline/feature/FeatureLineage` (screen 
 | `EvaluationSpec` | parse (every error collected: predictions, splits and their ordering rule, tables, slices, bootstrap) and resolve (feature role defaults, schema checks, the column layout of `EvaluationRow.x`: prediction columns, calibration fields, utility — each column once); `parametersHash` | no |
 | `EvaluationRow` | the prepared sample (split, group, identity, time, bootstrap key, label, baseline, weight, slice values, numeric columns) with a compact coder | coder only |
 | `AlignedRow` | one row of a scored unit as the calibration tables read it (split, ỹ, p, every q, the table fields, the utility) | coder only |
-| `EvaluationScorer` | per-unit: `prepare` (sort by (time, identity), the baseline and every prediction set as means per row via `Baselines.means` / `GlmFit.softmax`, the labels normalised, the skip reasons), `score` (log score, hit@1, Brier per set, the baseline at index 0), `accumulate` (the metrics keys for the overall record and every slice value, the split bookkeeping, the Poisson weights from `seededRandom(seed, bootKey)`), `aligned`, `unitRecords` | no |
+| `EvaluationScorer` | per-unit: `prepare` (sort by (time, identity), the baseline and every prediction set as means per row via `Baselines.means` / `GlmFit.softmax`, the labels normalised, the skip reasons), `fitInputs` / `derive` (the fit inputs f, o of a set; the derived sets' means from the fitted parameters), `temperatureLogLikelihoods` / `blendEvaluate` (the fit passes' contributions: the grid log scores; the Newton evaluation via `GlmFit` at the uniform share), `score` (log score, hit@1, Brier per set, the baseline at index 0, derived sets last), `accumulate` (the metrics keys for the overall record and every slice value, the split bookkeeping, the Poisson weights from `seededRandom(seed, bootKey)`), `aligned`, `unitRecords`, `standardErrors` | no |
+| `FitResults` | the fits' outcome as a singleton side input: derived set name → parameters, and the fit records of the summary / `output.calibration` | Serializable |
 | `MetricAccumulator` | 8 total slots (units, rows, Σw, Σwỹ, Σw·logScore, Σw·logScoreBaseline, Σw·hit, Σw·brier) plus 6 × samples replicate slots; the same shape carries the run bookkeeping under ``-prefixed keys; coder + `Fn` | coder + CombineFn |
 | `SketchAccumulator` | a KLL doubles sketch (k = 400) of one table's value stream; bytes coder + `Fn` | coder + CombineFn |
 | `EvaluationReport` | `metric` (a weighted mean, the excess as a difference of means, the binomial prior reference from Σwỹ / Σw), `replicate` / `interval` (the 2.5 / 97.5 percentiles), `build` (records + pair records + summary), `calibration` (bins with bounds, Wilson), the table value / bin functions, the output schemas, `describe` | no |
@@ -67,6 +68,22 @@ which the totals and every replicate carry; the per-row `logScoreBaseline` is Na
 report derives the reference (also per replicate, so the excess interval is right). The grouped prior
 (uniform 1 / n) is known per unit and accumulates like a baseline.
 
+## 2.3 The fit graph
+
+```
+units ─ Temperature<i> (grid log scores per bundle, selection split only) ─ Combine.globally ─ singleton view ─┐
+Create(base) ─ Blend<i>_<base>_Init (θ = (1, 1[, 0])) ─ view = state₀                                        │
+for it in 1..maxIter: units ─ Blend<i>_<base>_Fit<it> [side: state_{it-1}] ─ Combine.globally ─ Advance ─ view │
+Create(0) ─ Fits_Collect [side: every fit view] ─ FitResults singleton ─► Align (derive), Finalize (summary, JSON)
+```
+
+Every fit pass reads the GroupByKey output and keeps the units of `fitOn` only (the unit key carries the
+split); a temperature fit is one pass whatever the grid, a blend fit is the screen transform's unrolled
+Newton chain (`FitState` cloned and advanced per pass, converged passes read nothing). `Fits_Collect` picks
+the grid argmax (flagging a boundary optimum) and the blend's best point with its standard errors from the
+inverse of the Fisher information, and `Align` derives the sets before scoring — so the derived sets are
+ordinary sets for everything downstream. Without fits the collect step still runs (an empty result).
+
 ## 3. The calibration graph
 
 ```
@@ -83,7 +100,8 @@ AlignedRow ─ Bins [side: sketches] ─ Combine.perKey(VectorAccumulator.Fn) �
   maximum) and runs `EvaluationReport.calibration` once. Without tables the output is an empty collection.
 
 Total: two passes over the aligned rows (one when no table is quantile-binned) on top of the one metrics
-pass; the sketch view is why the transform needs the global window.
+pass, plus one pass per temperature fit and `maxIter` passes per blend fit × base set; the side-input views
+are why the transform needs the global window.
 
 ## 4. Determinism and cost
 
@@ -112,6 +130,5 @@ pass; the sketch view is why the transform needs the global window.
 
 ## 6. Deferred (design §11)
 
-The calibration fits (temperature grid, blend Newton via `GlmFit` / `FitState`, derived prediction sets fed into
-the same aggregation), slice discovery (analytic null in the same Combine), the gaussian / ranking families,
-`contributions`, `compareWith`, the HTML report.
+Slice discovery (analytic null in the same Combine), the gaussian / ranking families, `contributions`,
+`compareWith`, the HTML report.

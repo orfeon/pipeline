@@ -1,11 +1,11 @@
 # Evaluation Transform DSL (Design Document)
 
-Status: **Implemented (stage 1)** — the contract described here is what `module: evaluation` accepts today:
+Status: **Implemented (stages 1–2)** — the contract described here is what `module: evaluation` accepts today:
 families `groupedMultinomial` / `binomial`, several prediction sets against one baseline, time splits with
 a `selection` / `report` role, the excess log score with a Poisson bootstrap CI (paired between prediction
-sets), the calibration tables, declared slices and period buckets, the per-unit output. §11 lists the stages
-that are designed but not built (calibration fits, slice discovery, the gaussian / ranking families, the HTML
-report). The user-facing reference is `src/main/resources/server/docs/module/transform/evaluation.md`; the
+sets), the calibration tables, the calibration fits (temperature / blend, estimated on a selection split and
+compared as derived prediction sets), declared slices and period buckets, the per-unit output. §11 lists the
+stages that are designed but not built (slice discovery, the gaussian / ranking families, the HTML report). The user-facing reference is `src/main/resources/server/docs/module/transform/evaluation.md`; the
 execution side is [evaluation-engine.md](evaluation-engine.md).
 
 ## 1. Purpose and position
@@ -196,6 +196,36 @@ Quantile bins are `bins` equal-rank intervals of the sketch (`k = 400`, an appro
 within the sketch's rank error; the counts per bin are exact for the boundaries used); `edges` bins are
 exact. Every bin record carries `lower` / `upper`; edge records carry the threshold in `lower`.
 
+### 7.1 Calibration fits
+
+```yaml
+calibration:
+  - {type: temperature, fitOn: valid, of: [candidate], grid: [0.5, 3.0, 51]}
+  - {type: blend, fitOn: valid, of: [scored], l2: 1e-4, maxIter: 10, tol: 1e-8}
+output:
+  calibration: gs://bucket/eval/${args.version}/calibration.json
+```
+
+A fit is a small model, so the contract binds it: `fitOn` must name a `selection` split (a `report` split is
+an assembly error), and the fitted set enters the run as a **derived prediction set** — `<name>@T` /
+`<name>@blend` — compared on every split like a declared set (metrics, intervals, pairs, slices, calibration
+tables, units). `of` names the base sets (default: every declared set; one fit of each type per set).
+
+Every base set has two fit inputs per row: f — a score set's score (over its declared temperature), a
+probability set's log share (grouped) / logit (binomial) — and o — the score set's own offset on the log
+scale, else the baseline's log share / logit (a blend without either is an assembly error).
+
+| type | model | estimation | record |
+|---|---|---|---|
+| `temperature` | η = o + f / T (o only for a score set with its own offset: a probability set's log share is the whole predictor, so q ∝ q^(1/T)) | the grid value maximising the weighted log score over the selection split's units: one pass with `grid` accumulators (`[min, max, count]`, linear; default 0.25 … 4 in 76 steps) | `temperature`, `logScore` at it, `logScoreAtIdentity` and `gainPerUnit` when the grid holds 1, `converged` false with a note when the optimum sits on the grid boundary |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, L2 on the average log likelihood, `maxIter` unrolled passes, a rejected step halves the step), starting at (a, b) = (1, 1) — the declared combination | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit), `z_a`, `logScore`, `logScoreAtIdentity` (at the start), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` |
+
+Reading a blend: a ≈ 1, b ≈ 1 says the declared combination is calibrated; a < 1 says the score needs
+shrinking; a's z-value tests whether the set carries information orthogonal to its offset (the Benter
+regression). The records are the summary's `fits` and, with `output.calibration`, a JSON document
+(`{version, family, group, baseline, baselineForm, parametersHash, planHash, outputHash, createdAt, fits}`).
+Isotonic / Platt recalibration is out of scope: it breaks the within-group sum.
+
 ## 8. Outputs
 
 ### 8.1 Metrics (the default output)
@@ -220,8 +250,8 @@ One record per split × prediction set × table × bin: `split`, `prediction`, `
 
 One record per run: the roles, `predictions`, the splits (name, role, declared range, observed range, units,
 rows), the row / unit counts (in, invalid, unassigned, scored, skipped), the bootstrap parameters, the
-calibration table count, `parametersHash` and `notes` (role defaults applied, overlapping split ranges,
-prior mode).
+calibration table count, `fits` (§7.1), `parametersHash` and `notes` (role defaults applied, overlapping
+split ranges, prior mode, a fit that produced no estimate).
 
 ### 8.4 Units (`<name>.units`)
 
@@ -241,7 +271,9 @@ selection range after a report range; a role or column field missing from the in
 table with an unknown `type` / `by`, `bins` < 2, unsorted `edges`, `by: field` without `field`; a slice
 without a field or with an unknown bucket; `bootstrap.samples` outside [0, 10000]; streaming input; a
 non-global window or a triggered input (the calibration edges are a side input and the tables are one
-Combine each).
+Combine each); a fit whose `fitOn` is missing, unknown or a `report` split, an `of` naming no declared set,
+two fits of one type on one set, a blend without an offset, a grid outside `[min > 0, max ≥ min, 2 ≤ count ≤
+10000]`, `maxIter` outside [1, 100].
 
 Row validity: a null / non-finite label, a null group, a null / negative weight, a row not in any split →
 counted, not scored; a null time with a time-range split → the failure output. Unit skips: no positive
@@ -257,12 +289,6 @@ label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in
 
 ## 11. Stages designed, not built
 
-- **Calibration fits** (`calibration: {type: temperature | blend, fitOn: <selection split>}`): the fit
-  runs on the selection split before the aggregation (a grid of accumulators for the temperature; the
-  shared `GlmFit` Newton passes for the blend s = a·f + b·offset) and the fitted set enters the aggregation
-  as a derived prediction set (`<name>@T`, `<name>@blend`), so every table and CI applies to it unchanged.
-  `fitOn` naming a `report` split is an assembly error. Written to `calibration.json` with the estimates
-  and their standard errors.
 - **Slice discovery** (`sliceDiscovery`): candidate slices from low-cardinality dimensions (numeric ones
   quantile-binned) up to `maxDepth`, scored on `discoverOn` and confirmed on `confirmOn` in the same Combine
   (candidates × 2 splits × 3 sums); the null is the random-subset (exchangeability) distribution of a
@@ -270,4 +296,4 @@ label (grouped), an invalid baseline or prediction value → `nUnitsSkipped` (in
   parametric null as an opt-in under a candidate cap.
 - **`family: gaussian`** (Δ as the squared-error skill score) and **`ranking`** (NDCG@k).
 - **`contributions`** (the aggregation of contribution columns), **`compareWith`** (a previous summary
-  JSON), the HTML report.
+  JSON) and the HTML report, together (the reporting layer).
