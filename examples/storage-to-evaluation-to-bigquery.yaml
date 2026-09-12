@@ -34,6 +34,13 @@ transforms:
       slices:
         - {field: session_time, bucket: month}
         - {field: category}
+      sliceDiscovery:
+        dimensions: [category, {field: start_price, bins: 5}]
+        maxDepth: 2
+        minSupport: 300
+        discoverOn: valid
+        confirmOn: test
+        of: [candidate]
       output:
         calibration: gs://${args.bucket}/evaluation/${args.job}/calibration.json
 sinks:
@@ -64,3 +71,10 @@ sinks:
     parameters:
       output: gs://${args.bucket}/evaluation/${args.job}/units
       format: parquet
+  - name: slices
+    module: bigquery
+    inputs: [eval.slices]
+    parameters:
+      table: ${args.project}.evaluation.model_slices
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND

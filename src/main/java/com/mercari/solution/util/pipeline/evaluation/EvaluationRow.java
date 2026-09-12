@@ -18,7 +18,8 @@ import java.io.Serializable;
  * One prepared sample of the evaluation transform: its split, group (null for independent rows), a
  * deterministic identity (the sort tie-break, the unit key of independent rows), event time, the bootstrap
  * resampling key (null = the unit's own key), label, baseline (NaN = absent), weight, the slice values (null =
- * missing) and the numeric columns in {@link EvaluationSpec#rowColumns} order (NaN = missing).
+ * missing), the categorical discovery dimensions (null = missing) and the numeric columns in
+ * {@link EvaluationSpec#rowColumns} order (NaN = missing).
  */
 public final class EvaluationRow implements Serializable {
 
@@ -34,10 +35,16 @@ public final class EvaluationRow implements Serializable {
     final double baseline;
     final double weight;
     final String[] slices;
+    final String[] dims;
     final double[] x;
 
     public EvaluationRow(final String split, final String group, final String identity, final long time, final String bootKey,
                          final double label, final double baseline, final double weight, final String[] slices, final double[] x) {
+        this(split, group, identity, time, bootKey, label, baseline, weight, slices, new String[0], x);
+    }
+
+    public EvaluationRow(final String split, final String group, final String identity, final long time, final String bootKey,
+                         final double label, final double baseline, final double weight, final String[] slices, final String[] dims, final double[] x) {
         this.split = split;
         this.group = group;
         this.identity = identity;
@@ -47,6 +54,7 @@ public final class EvaluationRow implements Serializable {
         this.baseline = baseline;
         this.weight = weight;
         this.slices = slices;
+        this.dims = dims;
         this.x = x;
     }
 
@@ -79,6 +87,8 @@ public final class EvaluationRow implements Serializable {
             DOUBLE.encode(value.weight, out);
             INT.encode(value.slices.length, out);
             for (final String s : value.slices) NULLABLE_STRING.encode(s, out);
+            INT.encode(value.dims.length, out);
+            for (final String s : value.dims) NULLABLE_STRING.encode(s, out);
             INT.encode(value.x.length, out);
             for (final double v : value.x) DOUBLE.encode(v, out);
         }
@@ -96,10 +106,13 @@ public final class EvaluationRow implements Serializable {
             final int ns = INT.decode(in);
             final String[] slices = new String[ns];
             for (int i = 0; i < ns; i++) slices[i] = NULLABLE_STRING.decode(in);
+            final int nd = INT.decode(in);
+            final String[] dims = new String[nd];
+            for (int i = 0; i < nd; i++) dims[i] = NULLABLE_STRING.decode(in);
             final int n = INT.decode(in);
             final double[] x = new double[n];
             for (int i = 0; i < n; i++) x[i] = DOUBLE.decode(in);
-            return new EvaluationRow(split, group, identity, time, bootKey, label, baseline, weight, slices, x);
+            return new EvaluationRow(split, group, identity, time, bootKey, label, baseline, weight, slices, dims, x);
         }
     }
 }

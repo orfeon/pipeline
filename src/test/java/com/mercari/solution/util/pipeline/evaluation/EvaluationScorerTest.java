@@ -318,4 +318,90 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(0.8, unit.means[2][0], 1e-12);
         Assertions.assertEquals(1d / (1 + Math.exp(-Math.log(4) / 2)), unit.means[3][0], 1e-12);
     }
+
+    @Test
+    public void testDiscoveryThresholdAndZ() {
+        Assertions.assertEquals(1.959963984540054, EvaluationReport.discoveryThreshold(1, 0.95), 1e-9);
+        Assertions.assertTrue(EvaluationReport.discoveryThreshold(100, 0.99) > EvaluationReport.discoveryThreshold(1, 0.99));
+        Assertions.assertTrue(Double.isNaN(EvaluationReport.discoveryThreshold(0, 0.99)));
+        // 20 units, mean 0 and unit variance; a slice of 5 with mean 1: se = sqrt((1/5)(1 − 5/20)) = sqrt(0.15)
+        Assertions.assertEquals(1 / Math.sqrt(0.15), EvaluationReport.discoveryZ(5, 5, 20, 0, 20), 1e-12);
+        Assertions.assertTrue(Double.isNaN(EvaluationReport.discoveryZ(20, 5, 20, 0, 20)));   // the whole split is not a slice
+        Assertions.assertTrue(Double.isNaN(EvaluationReport.discoveryZ(5, 5, 20, 0, 0)));     // no variance
+    }
+
+    @Test
+    public void testSliceDiscoveryFindsAPlantedSlice() {
+        // two regions, ten units each per split; the prediction beats the baseline in the east (Δ = log 1.6) and
+        // loses in the west (Δ = log 0.6): both slices pass the random-subset null on the discovery split and are
+        // confirmed on the other split
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", bootstrap: false, sliceDiscovery: {dimensions: [region, {field: u, bins: 2}], maxDepth: 2, minSupport: 4, discoverOn: valid, confirmOn: test, output: all}}");
+        Assertions.assertEquals(List.of("region"), spec.dimColumns);
+        Assertions.assertEquals(0, spec.discovery.dimensions.get(0).index);
+        Assertions.assertEquals(1, spec.discovery.dimensions.get(1).index);   // u shares the column layout: [qa, u]
+        Assertions.assertEquals(List.of(0), spec.discovery.sets);
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final Map<String, MetricAccumulator> acc = new HashMap<>();
+        final Map<String, double[]> cells = new HashMap<>();
+        final Map<Integer, double[]> edges = Map.of(1, new double[]{5.0});   // u ≤ 5 → q0, else q1
+        for (final String split : List.of("valid", "test")) {
+            for (int i = 0; i < 20; i++) {
+                final boolean east = i < 10;
+                final double u = i % 2 == 0 ? 3.0 : 8.0;
+                final List<EvaluationRow> rows = List.of(
+                        new EvaluationRow(split, "g" + i, "a", 1L, null, 1, 0.5, 1d, new String[0], new String[]{east ? "east" : "west"}, new double[]{east ? 0.8 : 0.3, u}),
+                        new EvaluationRow(split, "g" + i, "b", 1L, null, 0, 0.5, 1d, new String[0], new String[]{east ? "east" : "west"}, new double[]{east ? 0.2 : 0.7, u}));
+                final EvaluationScorer.Unit unit = scorer.prepare(rows, "g" + i);
+                final EvaluationScorer.Metrics m = scorer.score(unit);
+                Assertions.assertEquals(east ? Math.log(1.6) : Math.log(0.6), scorer.discoveryValue(m, 0, "excessLogScore"), 1e-12);
+                Assertions.assertArrayEquals(new String[]{east ? "east" : "west", u < 5 ? "q0" : "q1"}, scorer.dimensionValues(unit, edges));
+                scorer.accumulate(unit, m, acc);
+                scorer.accumulateDiscovery(unit, m, edges, cells);
+            }
+        }
+        // cells per split: overall + region (2) + u (2) + region x u (4) = 9
+        Assertions.assertEquals(18, cells.size());
+        final double[] east = cells.get(EvaluationScorer.discoveryKey("valid", 0, new int[]{0}, new String[]{"east"}));
+        Assertions.assertEquals(10, east[0]);
+        Assertions.assertEquals(10 * Math.log(1.6), east[1], 1e-12);
+        for (final Map.Entry<String, double[]> e : cells.entrySet()) {
+            final MetricAccumulator a = new MetricAccumulator();
+            final double[] slots = new double[MetricAccumulator.SLOTS];
+            System.arraycopy(e.getValue(), 0, slots, 0, 3);
+            a.add(slots);
+            acc.put(EvaluationReport.DISCOVERY_PREFIX + e.getKey(), a);
+        }
+        final EvaluationReport.Result result = EvaluationReport.build(spec, acc);
+        // 8 candidates (every proper cell with support ≥ 4): output: all lists them all
+        Assertions.assertEquals(8, result.slices().size());
+        final Map<String, Object> top = result.slices().get(0);
+        Assertions.assertEquals(Boolean.TRUE, top.get("confirmed"));
+        final List<Map<String, Object>> regions = result.slices().stream().filter(r -> ((List<?>) r.get("dimensions")).equals(List.of("region"))).toList();
+        Assertions.assertEquals(2, regions.size());
+        for (final Map<String, Object> r : regions) {
+            final boolean isEast = ((List<?>) r.get("values")).get(0).equals("east");
+            Assertions.assertEquals(10L, r.get("n_discover"));
+            Assertions.assertEquals(10L, r.get("n_confirm"));
+            Assertions.assertEquals(isEast ? Math.log(1.6) : Math.log(0.6), (Double) r.get("mean_discover"), 1e-12);
+            Assertions.assertTrue(isEast ? (Double) r.get("delta_discover") > 0 : (Double) r.get("delta_discover") < 0);
+            Assertions.assertEquals(Boolean.TRUE, r.get("passed"), r.toString());
+            Assertions.assertEquals(Boolean.TRUE, r.get("confirmed"), r.toString());
+            Assertions.assertEquals(Math.signum((Double) r.get("z_discover")), Math.signum((Double) r.get("z_confirm")));
+            Assertions.assertEquals(EvaluationReport.discoveryThreshold(8, 0.99), (Double) r.get("threshold"), 1e-12);
+        }
+        // the u bins carry no effect: not passed
+        final List<Map<String, Object>> bins = result.slices().stream().filter(r -> ((List<?>) r.get("dimensions")).equals(List.of("u/q2"))).toList();
+        Assertions.assertEquals(2, bins.size());
+        for (final Map<String, Object> r : bins) Assertions.assertEquals(Boolean.FALSE, r.get("passed"), r.toString());
+        final List<?> discovery = (List<?>) result.summary().get("discovery");
+        Assertions.assertEquals(1, discovery.size());
+        final Map<?, ?> ds = (Map<?, ?>) discovery.get(0);
+        Assertions.assertEquals("A", ds.get("prediction"));
+        Assertions.assertEquals(8L, ds.get("nCandidates"));
+        // the region x u cells inherit the effect but hold 5 units: z = 1 / sqrt(0.15) = 2.58 stays under the
+        // max-of-8 threshold (2.96), so only the two region cells pass and are confirmed
+        Assertions.assertEquals(2L, ds.get("nPassed"));
+        Assertions.assertEquals(2L, ds.get("nConfirmed"));
+    }
 }

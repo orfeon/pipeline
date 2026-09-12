@@ -67,7 +67,7 @@ public final class EvaluationStages {
     private static final String SEP = MetricAccumulator.SEP;
 
     public record Outputs(PCollection<MElement> metrics, PCollection<MElement> calibration, PCollection<MElement> units,
-                          PCollection<MElement> summary, PCollection<BadRecord> failures) {}
+                          PCollection<MElement> slices, PCollection<MElement> summary, PCollection<BadRecord> failures) {}
 
     /** Engine rejections that only the input can tell (called by the module before wiring). */
     public static List<String> engineConstraints(final PCollection<MElement> input) {
@@ -102,13 +102,20 @@ public final class EvaluationStages {
         // calibration fits on the selection split: a grid pass per temperature fit, unrolled Newton passes per
         // blend and base set; collected into one FitResults singleton the align and finalize steps read
         final PCollectionView<FitResults> fitView = fits(input, units, spec);
+        // slice discovery: the numeric dimensions' quantile edges from the discovery split's units (one sketch pass)
+        final Coder<KV<Integer, SketchAccumulator>> dimensionCoder = KvCoder.of(org.apache.beam.sdk.coders.VarIntCoder.of(), SketchAccumulator.CODER);
+        final PCollectionView<Map<Integer, SketchAccumulator>> dimensionView = (spec.hasDiscovery() && spec.discovery.hasNumeric()
+                ? units.apply("Dimensions", ParDo.of(new DimensionSketchDoFn(spec))).setCoder(dimensionCoder)
+                        .apply("Dimensions_Combine", Combine.perKey(new SketchAccumulator.Fn())).setCoder(dimensionCoder)
+                : input.getPipeline().apply("NoDimensions", Create.empty(dimensionCoder)))
+                .apply("Dimensions_View", View.asMap());
 
         final TupleTag<KV<String, MetricAccumulator>> scoredTag = new TupleTag<>() {};
         final TupleTag<MElement> unitRecordTag = new TupleTag<>() {};
         final TupleTag<AlignedRow> alignedTag = new TupleTag<>() {};
         final PCollectionTuple aligned = units.apply("Align", ParDo
-                .of(new AlignDoFn(spec, scoredTag, unitRecordTag, alignedTag, fitView))
-                .withSideInputs(fitView)
+                .of(new AlignDoFn(spec, scoredTag, unitRecordTag, alignedTag, fitView, dimensionView))
+                .withSideInputs(fitView, dimensionView)
                 .withOutputTags(scoredTag, TupleTagList.of(unitRecordTag).and(alignedTag)));
         final PCollection<KV<String, MetricAccumulator>> scored = aligned.get(scoredTag).setCoder(accumulatorCoder);
         final PCollection<MElement> unitRecords = aligned.get(unitRecordTag);
@@ -120,9 +127,10 @@ public final class EvaluationStages {
                 .setCoder(accumulatorCoder);
         final TupleTag<MElement> metricsTag = new TupleTag<>() {};
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
+        final TupleTag<MElement> slicesTag = new TupleTag<>() {};
         final PCollectionTuple finalized = combined
                 .apply("Gather", Combine.globally(new GatherFn<>(accumulatorCoder)))
-                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, metricsTag, summaryTag, fitView)).withSideInputs(fitView).withOutputTags(metricsTag, TupleTagList.of(summaryTag)));
+                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, metricsTag, summaryTag, slicesTag, fitView)).withSideInputs(fitView).withOutputTags(metricsTag, TupleTagList.of(summaryTag).and(slicesTag)));
 
         // calibration tables
         final PCollection<MElement> calibration;
@@ -145,7 +153,7 @@ public final class EvaluationStages {
                     .apply("Bins_Gather", Combine.globally(new GatherFn<>(binCoder)))
                     .apply("Bins_Finalize", ParDo.of(new CalibrationDoFn(spec, sketchView)).withSideInputs(sketchView));
         }
-        return new Outputs(finalized.get(metricsTag), calibration, unitRecords, finalized.get(summaryTag), prepared.get(failureTag));
+        return new Outputs(finalized.get(metricsTag), calibration, unitRecords, finalized.get(slicesTag), finalized.get(summaryTag), prepared.get(failureTag));
     }
 
     /**
@@ -452,6 +460,47 @@ public final class EvaluationStages {
         }
     }
 
+    /** The KLL sketches of the numeric discovery dimensions over the discovery split's units, keyed by dimension index. */
+    static class DimensionSketchDoFn extends DoFn<KV<String, Iterable<EvaluationRow>>, KV<Integer, SketchAccumulator>> {
+        private final EvaluationSpec spec;
+        private transient EvaluationScorer scorer;
+        private transient Map<Integer, SketchAccumulator> partials;
+
+        DimensionSketchDoFn(final EvaluationSpec spec) {
+            this.spec = spec;
+        }
+
+        @Setup
+        public void setup() {
+            scorer = new EvaluationScorer(spec);
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partials = new HashMap<>();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final EvaluationScorer.Unit unit = unit(scorer, c.element(), spec.discovery.discoverOn);
+            if (unit == null) return;
+            final EvaluationRow first = unit.rows.get(0);
+            for (int i = 0; i < spec.discovery.dimensions.size(); i++) {
+                final EvaluationSpec.Dimension d = spec.discovery.dimensions.get(i);
+                if (!d.isNumeric() || d.index < 0) continue;
+                partials.computeIfAbsent(i, k -> new SketchAccumulator()).update(first.x[d.index]);
+            }
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            for (final Map.Entry<Integer, SketchAccumulator> e : partials.entrySet()) {
+                c.output(KV.of(e.getKey(), e.getValue()), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            }
+            partials = new HashMap<>();
+        }
+    }
+
     /** Reads one element into an {@link EvaluationRow}: split assignment, validity, identity, slice values. */
     static class PrepareDoFn extends DoFn<MElement, KV<String, EvaluationRow>> {
         private final EvaluationSpec spec;
@@ -557,9 +606,11 @@ public final class EvaluationStages {
                         slices[i] = millis == null ? null : StatMath.periodBucket(millis, sl.bucket);
                     }
                 }
+                final String[] dims = new String[spec.dimColumns.size()];
+                for (int i = 0; i < dims.length; i++) dims[i] = text(values.get(spec.dimColumns.get(i)));
                 final String bootKey = spec.bootstrapUnit == null ? null : text(values.get(spec.bootstrapUnit));
                 final String identity = identity(values);
-                final EvaluationRow row = new EvaluationRow(split, group, identity, time, bootKey, label, baseline == null ? Double.NaN : baseline, weight, slices, x);
+                final EvaluationRow row = new EvaluationRow(split, group, identity, time, bootKey, label, baseline == null ? Double.NaN : baseline, weight, slices, dims, x);
                 c.output(rowTag, KV.of(split + SEP + (group == null ? identity : group), row));
                 book.add(slots);
             } catch (final Throwable e) {
@@ -623,16 +674,20 @@ public final class EvaluationStages {
         private final TupleTag<MElement> unitRecordTag;
         private final TupleTag<AlignedRow> alignedTag;
         private final PCollectionView<FitResults> fitView;
+        private final PCollectionView<Map<Integer, SketchAccumulator>> dimensionView;
         private transient EvaluationScorer scorer;
         private transient Map<String, MetricAccumulator> partials;
+        private transient Map<String, double[]> discovery;
+        private transient Map<Integer, double[]> edges;
 
         AlignDoFn(final EvaluationSpec spec, final TupleTag<KV<String, MetricAccumulator>> scoredTag, final TupleTag<MElement> unitRecordTag,
-                  final TupleTag<AlignedRow> alignedTag, final PCollectionView<FitResults> fitView) {
+                  final TupleTag<AlignedRow> alignedTag, final PCollectionView<FitResults> fitView, final PCollectionView<Map<Integer, SketchAccumulator>> dimensionView) {
             this.spec = spec;
             this.scoredTag = scoredTag;
             this.unitRecordTag = unitRecordTag;
             this.alignedTag = alignedTag;
             this.fitView = fitView;
+            this.dimensionView = dimensionView;
         }
 
         @Setup
@@ -643,6 +698,8 @@ public final class EvaluationStages {
         @StartBundle
         public void startBundle() {
             partials = new HashMap<>();
+            discovery = new HashMap<>();
+            edges = null;
         }
 
         @ProcessElement
@@ -660,6 +717,15 @@ public final class EvaluationStages {
             scorer.derive(unit, c.sideInput(fitView));
             final EvaluationScorer.Metrics m = scorer.score(unit);
             scorer.accumulate(unit, m, partials);
+            if (spec.hasDiscovery()) {
+                if (edges == null) {
+                    edges = new HashMap<>();
+                    for (final Map.Entry<Integer, SketchAccumulator> e : c.sideInput(dimensionView).entrySet()) {
+                        if (!e.getValue().isEmpty()) edges.put(e.getKey(), e.getValue().edges(spec.discovery.dimensions.get(e.getKey()).bins));
+                    }
+                }
+                scorer.accumulateDiscovery(unit, m, edges, discovery);
+            }
             for (final Map<String, Object> record : scorer.unitRecords(unit, m)) {
                 c.output(unitRecordTag, MElement.of(record, c.timestamp()));
             }
@@ -673,7 +739,16 @@ public final class EvaluationStages {
             for (final Map.Entry<String, MetricAccumulator> e : partials.entrySet()) {
                 c.output(scoredTag, KV.of(e.getKey(), e.getValue()), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
             }
+            // the discovery cells ride the same Combine as [n, Σd, Σd²] in the first three total slots
+            for (final Map.Entry<String, double[]> e : discovery.entrySet()) {
+                final MetricAccumulator acc = new MetricAccumulator();
+                final double[] slots = new double[MetricAccumulator.SLOTS];
+                System.arraycopy(e.getValue(), 0, slots, 0, 3);
+                acc.add(slots);
+                c.output(scoredTag, KV.of(EvaluationReport.DISCOVERY_PREFIX + e.getKey(), acc), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            }
             partials = new HashMap<>();
+            discovery = new HashMap<>();
         }
     }
 
@@ -681,13 +756,15 @@ public final class EvaluationStages {
         private final EvaluationSpec spec;
         private final TupleTag<MElement> metricsTag;
         private final TupleTag<MElement> summaryTag;
+        private final TupleTag<MElement> slicesTag;
         private final PCollectionView<FitResults> fitView;
         private static final com.google.gson.Gson JSON = new com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create();
 
-        FinalizeDoFn(final EvaluationSpec spec, final TupleTag<MElement> metricsTag, final TupleTag<MElement> summaryTag, final PCollectionView<FitResults> fitView) {
+        FinalizeDoFn(final EvaluationSpec spec, final TupleTag<MElement> metricsTag, final TupleTag<MElement> summaryTag, final TupleTag<MElement> slicesTag, final PCollectionView<FitResults> fitView) {
             this.spec = spec;
             this.metricsTag = metricsTag;
             this.summaryTag = summaryTag;
+            this.slicesTag = slicesTag;
             this.fitView = fitView;
         }
 
@@ -698,6 +775,7 @@ public final class EvaluationStages {
             final FitResults fits = c.sideInput(fitView);
             final EvaluationReport.Result result = EvaluationReport.build(spec, accumulators, fits);
             for (final Map<String, Object> record : result.records()) c.output(metricsTag, MElement.of(record, c.timestamp()));
+            for (final Map<String, Object> record : result.slices()) c.output(slicesTag, MElement.of(record, c.timestamp()));
             c.output(summaryTag, MElement.of(result.summary(), c.timestamp()));
             if (spec.calibrationUri != null) {
                 // the fitted parameters are a deliverable: a write failure fails the step
