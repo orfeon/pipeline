@@ -1,24 +1,29 @@
 package com.mercari.solution.util.pipeline.screen;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.feature.FeatureLineage;
 import com.mercari.solution.util.pipeline.feature.FeaturePlanCompiler;
+import com.mercari.solution.util.pipeline.glm.Family;
+import com.mercari.solution.util.pipeline.glm.StatMath;
 
 import java.io.Serializable;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+
+import static com.mercari.solution.util.pipeline.glm.SpecJson.bool;
+import static com.mercari.solution.util.pipeline.glm.SpecJson.integer;
+import static com.mercari.solution.util.pipeline.glm.SpecJson.longValue;
+import static com.mercari.solution.util.pipeline.glm.SpecJson.number;
+import static com.mercari.solution.util.pipeline.glm.SpecJson.parseInstant;
+import static com.mercari.solution.util.pipeline.glm.SpecJson.string;
+import static com.mercari.solution.util.pipeline.glm.SpecJson.strings;
 
 /**
  * Parsed and validated parameters of the screen transform. Rides inside DoFns, so it holds plain fields only.
@@ -26,27 +31,6 @@ import java.util.regex.Pattern;
  * lineage, or the input schema's lineage options) and chooses the candidate columns.
  */
 public final class ScreenSpec implements Serializable {
-
-    public static final String FAMILY_GROUPED_MULTINOMIAL = "groupedMultinomial";
-    public static final String FAMILY_BINOMIAL = "binomial";
-    public static final String FAMILY_GAUSSIAN = "gaussian";
-    public static final String FAMILY_POISSON = "poisson";
-    public static final List<String> FAMILIES = List.of(FAMILY_GROUPED_MULTINOMIAL, FAMILY_BINOMIAL, FAMILY_GAUSSIAN, FAMILY_POISSON);
-
-    /** gaussian baseline: the predicted value itself */
-    public static final String FORM_VALUE = "value";
-    /** poisson baseline: the predicted rate, or its log */
-    public static final String FORM_RATE = "rate";
-    public static final String FORM_LOG_RATE = "logRate";
-
-    /** Baseline forms accepted by a family, the first one being the default. */
-    public static List<String> formsFor(final String family) {
-        return switch (family == null ? "" : family) {
-            case FAMILY_GAUSSIAN -> List.of(FORM_VALUE);
-            case FAMILY_POISSON -> List.of(FORM_RATE, FORM_LOG_RATE);
-            default -> BASELINE_FORMS;
-        };
-    }
 
     /** conditioning.missing: the window mean of the column (standardised: 0) */
     public static final String MISSING_MEAN = "mean";
@@ -58,15 +42,13 @@ public final class ScreenSpec implements Serializable {
     public static final String TRANSFORM_ABSDEV = "absdev";
     public static final List<String> TRANSFORMS = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV);
 
-    public static final String FORM_PROB = "prob";
-    public static final String FORM_LOG_PROB = "logProb";
-    public static final String FORM_INVERSE_SHARE = "inverseShare";
-    public static final List<String> BASELINE_FORMS = List.of(FORM_PROB, FORM_LOG_PROB, FORM_INVERSE_SHARE);
-
     public static final String NOISE_PREFIX = "__noise_";
     public static final String SHUFFLE_PREFIX = "__shuffle_";
 
+    /** the family's config name (see {@link Family#NAMES}) */
     public String family;
+    /** {@link #family} resolved once by {@link #parse} (null while unknown) — the scorers read it per row */
+    private Family resolvedFamily;
     public String group;
     public String labelField;
     public String labelExpr;
@@ -125,20 +107,26 @@ public final class ScreenSpec implements Serializable {
         return group != null;
     }
 
+    /** The parsed family (null while unknown: parse reports the error). */
+    public Family family() {
+        if (resolvedFamily == null) resolvedFamily = Family.of(family);
+        return resolvedFamily;
+    }
+
     public boolean isGroupedMultinomial() {
-        return FAMILY_GROUPED_MULTINOMIAL.equals(family);
+        return family() == Family.GROUPED_MULTINOMIAL;
     }
 
     public boolean isBinomial() {
-        return FAMILY_BINOMIAL.equals(family);
+        return family() == Family.BINOMIAL;
     }
 
     public boolean isGaussian() {
-        return FAMILY_GAUSSIAN.equals(family);
+        return family() == Family.GAUSSIAN;
     }
 
     public boolean isPoisson() {
-        return FAMILY_POISSON.equals(family);
+        return family() == Family.POISSON;
     }
 
     /**
@@ -146,16 +134,12 @@ public final class ScreenSpec implements Serializable {
      * the report). One definition for the marginal moments, the conditioning fit and the report's prior mode.
      */
     public double fisherWeight(final double mu) {
-        if (isBinomial()) return mu * (1 - mu);
-        if (isPoisson()) return mu;
-        return 1d;
+        return family().fisherWeight(mu);
     }
 
     /** The link of a row family at the mean μ (the intercept that reproduces μ without a baseline). */
     public double link(final double mu) {
-        if (isBinomial()) return Math.log(mu / (1 - mu));
-        if (isPoisson()) return Math.log(mu);
-        return mu;
+        return family().link(mu);
     }
 
     public boolean hasBaseline() {
@@ -218,9 +202,10 @@ public final class ScreenSpec implements Serializable {
         if (p == null) throw new IllegalArgumentException("parameters must not be empty");
 
         s.family = string(p, "family");
-        if (s.family == null) s.family = FAMILY_GROUPED_MULTINOMIAL;
-        if (!FAMILIES.contains(s.family)) {
-            errors.add("unknown family '" + s.family + "' (available: " + FAMILIES + ")");
+        if (s.family == null) s.family = Family.GROUPED_MULTINOMIAL.id();
+        s.resolvedFamily = Family.of(s.family);
+        if (s.resolvedFamily == null) {
+            errors.add("unknown family '" + s.family + "' (available: " + Family.NAMES + ")");
         }
         s.group = string(p, "group");
 
@@ -242,7 +227,7 @@ public final class ScreenSpec implements Serializable {
 
         final JsonElement baseline = p.get("baseline");
         if (baseline != null && !baseline.isJsonNull()) {
-            final List<String> forms = formsFor(s.family);
+            final List<String> forms = Family.formsFor(s.family);
             if (baseline.isJsonPrimitive()) {
                 s.baselineField = baseline.getAsString();
                 s.baselineForm = forms.get(0);
@@ -318,10 +303,10 @@ public final class ScreenSpec implements Serializable {
                 s.periodsField = string(o, "field");
                 s.periodsBucket = string(o, "bucket");
                 if (s.periodsBucket == null) s.periodsBucket = "year";
-                if (!ScreenMath.PERIOD_BUCKETS.contains(s.periodsBucket)) errors.add("unknown periods.bucket '" + s.periodsBucket + "' (available: " + ScreenMath.PERIOD_BUCKETS + ")");
+                if (!StatMath.PERIOD_BUCKETS.contains(s.periodsBucket)) errors.add("unknown periods.bucket '" + s.periodsBucket + "' (available: " + StatMath.PERIOD_BUCKETS + ")");
             } else if (periods.isJsonPrimitive()) {
                 s.periodsBucket = periods.getAsString();
-                if (!ScreenMath.PERIOD_BUCKETS.contains(s.periodsBucket)) errors.add("unknown periods bucket '" + s.periodsBucket + "' (available: " + ScreenMath.PERIOD_BUCKETS + ")");
+                if (!StatMath.PERIOD_BUCKETS.contains(s.periodsBucket)) errors.add("unknown periods bucket '" + s.periodsBucket + "' (available: " + StatMath.PERIOD_BUCKETS + ")");
             } else {
                 errors.add("periods must be an object {field, bucket} or a bucket name");
             }
@@ -373,8 +358,8 @@ public final class ScreenSpec implements Serializable {
                     s.conditioningMissing = missing;
                     if (!MISSINGS.contains(missing)) {
                         errors.add("unknown conditioning.missing '" + missing + "' (available: " + MISSINGS + ")");
-                    } else if (MISSING_GROUP_MEAN.equals(missing) && FAMILIES.contains(s.family) && !s.isGroupedMultinomial()) {
-                        errors.add("conditioning.missing " + MISSING_GROUP_MEAN + " needs family " + FAMILY_GROUPED_MULTINOMIAL + " (the fill is the unit's baseline-weighted mean); the row families use " + MISSING_MEAN);
+                    } else if (MISSING_GROUP_MEAN.equals(missing) && s.resolvedFamily != null && !s.isGroupedMultinomial()) {
+                        errors.add("conditioning.missing " + MISSING_GROUP_MEAN + " needs family " + Family.GROUPED_MULTINOMIAL.id() + " (the fill is the unit's baseline-weighted mean); the row families use " + MISSING_MEAN);
                     }
                 }
                 if (s.conditioningL2 < 0) errors.add("conditioning.l2 must be >= 0");
@@ -405,134 +390,7 @@ public final class ScreenSpec implements Serializable {
         return s;
     }
 
-    private static Long parseInstant(final String text, final String key, final List<String> errors) {
-        if (text == null) return null;
-        try {
-            return Instant.parse(text).toEpochMilli();
-        } catch (final RuntimeException e) {
-            errors.add(key + " must be an ISO-8601 instant such as 2025-12-31T23:59:59Z: " + text);
-            return null;
-        }
-    }
-
     // ---- resolution ----------------------------------------------------------------------------------------
-
-    /** Column lineage known about the input: from the feature transform's schema options or its manifest. */
-    public static final class Lineage implements Serializable {
-        public final Map<String, Entry> columns = new LinkedHashMap<>();
-        /** role name → column (feature manifest {@code roles}) */
-        public final Map<String, String> roles = new LinkedHashMap<>();
-        public String timeField;
-        /** feature manifest identities (null when the lineage came from the schema) */
-        public String planHash;
-        public String outputHash;
-
-        /** {@code kind} is the source field's origin tag (pass-through inputs only; a derived column carries its kinds in {@code derivedFrom}). */
-        public record Entry(String scope, String block, Set<String> derivedFrom, String evidence, String kind) implements Serializable {
-            public Entry(final String scope, final String block, final Set<String> derivedFrom, final String evidence) {
-                this(scope, block, derivedFrom, evidence, null);
-            }
-        }
-
-        /**
-         * Lineage from the feature transform's output schema (the direct upstream): every field with
-         * {@code feature.scope} — emitted columns and pass-through inputs alike — and the roles the fields carry
-         * ({@code feature.role}; a {@code time} role is also the time field default).
-         */
-        public static Lineage fromSchema(final Schema schema) {
-            final Lineage l = new Lineage();
-            if (schema == null) return l;
-            for (final Schema.Field f : schema.getFields()) {
-                final Map<String, String> o = f.getOptions();
-                if (o == null || !o.containsKey("feature.scope")) continue;
-                l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), split(o.get("feature.derivedFrom")), o.get("feature.evidence"), o.get("feature.kind")));
-                final String role = o.get("feature.role");
-                if (role != null) {
-                    l.roles.putIfAbsent(role, f.getName());
-                    if ("time".equals(role) && l.timeField == null) l.timeField = f.getName();
-                }
-            }
-            return l;
-        }
-
-        private static Set<String> split(final String csv) {
-            final Set<String> values = new LinkedHashSet<>();
-            if (csv != null && !csv.isEmpty()) for (final String s : csv.split(",")) values.add(s.trim());
-            return values;
-        }
-
-        /** Reads a feature transform manifest (see {@code FeaturePlan.toManifest}). */
-        public static Lineage fromManifest(final String json) {
-            final Lineage l = new Lineage();
-            final JsonObject m;
-            try {
-                m = JsonParser.parseString(json).getAsJsonObject();
-            } catch (final JsonParseException | IllegalStateException e) {
-                throw new IllegalArgumentException("candidates.manifest is not a JSON object (a local path that does not exist is read as literal content): " + e.getMessage());
-            }
-            l.timeField = string(m, "timeField");
-            l.planHash = string(m, "planHash");
-            l.outputHash = string(m, "outputHash");
-            if (m.has("roles") && m.get("roles").isJsonObject()) {
-                for (final Map.Entry<String, JsonElement> e : m.getAsJsonObject("roles").entrySet()) {
-                    if (!e.getValue().isJsonObject()) continue;
-                    final JsonObject r = e.getValue().getAsJsonObject();
-                    String column = string(r, "column");
-                    if (column == null && r.has("keys") && r.get("keys").isJsonArray()) {
-                        final JsonArray keys = r.getAsJsonArray("keys");
-                        if (keys.size() == 1) column = keys.get(0).getAsString();
-                    }
-                    if (column != null) l.roles.put(e.getKey(), column);
-                }
-            }
-            // the pass-through input fields: scope input, derivedFrom = their kind (older manifests carry kind only)
-            if (m.has("fields") && m.get("fields").isJsonArray()) {
-                for (final JsonElement e : m.getAsJsonArray("fields")) {
-                    if (!e.isJsonObject()) continue;
-                    final JsonObject f = e.getAsJsonObject();
-                    final String name = string(f, "name");
-                    if (name == null) continue;
-                    final Set<String> derived = new LinkedHashSet<>();
-                    if (f.has("derivedFrom") && f.get("derivedFrom").isJsonArray()) {
-                        for (final JsonElement d : f.getAsJsonArray("derivedFrom")) derived.add(d.getAsString());
-                    } else if (string(f, "kind") != null) {
-                        derived.add(string(f, "kind"));
-                    }
-                    final String scope = string(f, "scope");
-                    l.columns.put(name, new Entry(scope == null ? "input" : scope, null, derived, string(f, "evidence"), string(f, "kind")));
-                }
-            }
-            if (m.has("columns") && m.get("columns").isJsonArray()) {
-                for (final JsonElement e : m.getAsJsonArray("columns")) {
-                    if (!e.isJsonObject()) continue;
-                    final JsonObject c = e.getAsJsonObject();
-                    final String name = string(c, "name");
-                    if (name == null) continue;
-                    final Set<String> derived = new LinkedHashSet<>();
-                    String evidence = null;
-                    if (c.has("lineage") && c.get("lineage").isJsonObject()) {
-                        final JsonObject lineage = c.getAsJsonObject("lineage");
-                        if (lineage.has("derivedFrom") && lineage.get("derivedFrom").isJsonArray()) {
-                            for (final JsonElement d : lineage.getAsJsonArray("derivedFrom")) derived.add(d.getAsString());
-                        }
-                        evidence = string(lineage, "evidence");
-                    }
-                    l.columns.put(name, new Entry(string(c, "scope"), string(c, "block"), derived, evidence));
-                }
-            }
-            return l;
-        }
-
-        public Lineage merge(final Lineage other) {
-            if (other == null) return this;
-            other.columns.forEach(columns::putIfAbsent);
-            other.roles.forEach(roles::putIfAbsent);
-            if (timeField == null) timeField = other.timeField;
-            if (planHash == null) planHash = other.planHash;
-            if (outputHash == null) outputHash = other.outputHash;
-            return this;
-        }
-    }
 
     /**
      * Applies role defaults, validates the fields against the input schema and chooses the candidate columns:
@@ -540,9 +398,9 @@ public final class ScreenSpec implements Serializable {
      * lineage selectors {@code derivedFrom:} / {@code scope:} / {@code block:} / {@code evidence:} / {@code kind:}), minus every
      * role field. Throws {@link IllegalArgumentException} listing every error.
      */
-    public ScreenSpec resolve(final Schema inputSchema, final Lineage lineage) {
+    public ScreenSpec resolve(final Schema inputSchema, final FeatureLineage lineage) {
         final List<String> errors = new ArrayList<>();
-        final Lineage l = lineage == null ? new Lineage() : lineage;
+        final FeatureLineage l = lineage == null ? new FeatureLineage() : lineage;
         if (group == null && l.roles.containsKey("group")) {
             group = l.roles.get("group");
             notes.add("group defaulted to the feature transform's role: " + group);
@@ -554,7 +412,7 @@ public final class ScreenSpec implements Serializable {
         }
         if (baselineField == null && l.roles.containsKey("baseline")) {
             baselineField = l.roles.get("baseline");
-            if (baselineForm == null) baselineForm = formsFor(family).get(0);
+            if (baselineForm == null) baselineForm = Family.formsFor(family).get(0);
             notes.add("baseline defaulted to the feature transform's role: " + baselineField);
         }
         if (weightField == null && l.roles.containsKey("weight")) {
@@ -579,7 +437,7 @@ public final class ScreenSpec implements Serializable {
                 if (!TRANSFORM_RAW.equals(t)) errors.add("transform '" + t + "' needs group (within-group " + t + "); independent rows support raw only in this version");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
-            if (FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");
+            if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");
         }
         if (periodsBucket != null && periodsField == null) errors.add("periods needs a field (periods.field or time.field)");
 
@@ -592,7 +450,7 @@ public final class ScreenSpec implements Serializable {
         for (final String id : rowId) if (!fields.containsKey(id)) errors.add("rowId '" + id + "' is not an input field");
         if (timeField != null && fields.containsKey(timeField)) timeFieldType = fields.get(timeField).getFieldType().getType().name();
         if (periodsField != null && fields.containsKey(periodsField)) periodsFieldType = fields.get(periodsField).getFieldType().getType().name();
-        if (shuffleField != null && fields.containsKey(shuffleField) && !isNumeric(fields.get(shuffleField))) {
+        if (shuffleField != null && fields.containsKey(shuffleField) && !FeatureLineage.isNumeric(fields.get(shuffleField))) {
             errors.add("placebo.shuffle.field '" + shuffleField + "' must be numeric (" + fields.get(shuffleField).getFieldType().getType() + "); a non-numeric reference makes every shuffle placebo degenerate");
         }
 
@@ -603,28 +461,28 @@ public final class ScreenSpec implements Serializable {
             reserved.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
         }
 
-        final List<Pattern> includes = candidateInclude.stream().filter(s -> s.indexOf(':') <= 0).map(ScreenMath::glob).toList();
-        final List<String> includeSelectors = candidateInclude.stream().filter(s -> s.indexOf(':') > 0).toList();
+        final List<Pattern> includes = candidateInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
+        final List<String> includeSelectors = candidateInclude.stream().filter(FeatureLineage::isSelector).toList();
         candidates = new ArrayList<>();
         final List<String> excludedByLineage = new ArrayList<>();
         if (inputSchema != null) {
             for (final Schema.Field f : inputSchema.getFields()) {
-                if (!isNumeric(f)) continue;
+                if (!FeatureLineage.isNumeric(f)) continue;
                 final String name = f.getName();
                 if (reserved.contains(name)) continue;
-                final Lineage.Entry entry = l.columns.get(name);
+                final FeatureLineage.Entry entry = l.columns.get(name);
                 boolean included = includes.stream().anyMatch(p -> p.matcher(name).matches());
-                if (!included) included = includeSelectors.stream().anyMatch(s -> selectorMatches(s, entry));
+                if (!included) included = includeSelectors.stream().anyMatch(s -> FeatureLineage.selectorMatches(s, entry));
                 if (!included) continue;
                 boolean excluded = false;
                 for (final String pattern : candidateExclude) {
-                    if (pattern.indexOf(':') > 0) {
-                        if (selectorMatches(pattern, entry)) {
+                    if (FeatureLineage.isSelector(pattern)) {
+                        if (FeatureLineage.selectorMatches(pattern, entry)) {
                             excluded = true;
                             excludedByLineage.add(name + " (" + pattern + ")");
                             break;
                         }
-                    } else if (ScreenMath.glob(pattern).matcher(name).matches()) {
+                    } else if (StatMath.glob(pattern).matcher(name).matches()) {
                         excluded = true;
                         break;
                     }
@@ -633,7 +491,7 @@ public final class ScreenSpec implements Serializable {
             }
         }
         if (!excludedByLineage.isEmpty()) notes.add("excluded by lineage: " + excludedByLineage);
-        final boolean usesSelectors = candidateExclude.stream().anyMatch(s -> s.indexOf(':') > 0) || !includeSelectors.isEmpty();
+        final boolean usesSelectors = candidateExclude.stream().anyMatch(FeatureLineage::isSelector) || !includeSelectors.isEmpty();
         if (usesSelectors && l.columns.isEmpty()) {
             errors.add("candidates use lineage selectors (derivedFrom: / scope: / block: / evidence: / kind:) but no lineage is available: "
                     + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");
@@ -647,10 +505,10 @@ public final class ScreenSpec implements Serializable {
             for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) roleOnly.add(r);
             if (labelExpr != null) roleOnly.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
             for (final String pattern : conditioningPatterns) {
-                final Pattern glob = ScreenMath.glob(pattern);
+                final Pattern glob = StatMath.glob(pattern);
                 boolean matched = false;
                 for (final Schema.Field f : inputSchema.getFields()) {
-                    if (!isNumeric(f) || roleOnly.contains(f.getName()) || !glob.matcher(f.getName()).matches()) continue;
+                    if (!FeatureLineage.isNumeric(f) || roleOnly.contains(f.getName()) || !glob.matcher(f.getName()).matches()) continue;
                     matched = true;
                     if (!conditioningFields.contains(f.getName())) conditioningFields.add(f.getName());
                 }
@@ -660,28 +518,6 @@ public final class ScreenSpec implements Serializable {
         }
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return this;
-    }
-
-    static boolean selectorMatches(final String pattern, final Lineage.Entry entry) {
-        if (entry == null) return false;
-        final int colon = pattern.indexOf(':');
-        final String selector = pattern.substring(0, colon);
-        final String value = pattern.substring(colon + 1);
-        return switch (selector) {
-            case "derivedFrom" -> entry.derivedFrom() != null && entry.derivedFrom().contains(value);
-            case "evidence" -> value.equals(entry.evidence());
-            case "scope" -> value.equals(entry.scope());
-            case "block" -> value.equals(entry.block());
-            case "kind" -> value.equals(entry.kind());
-            default -> false;
-        };
-    }
-
-    static boolean isNumeric(final Schema.Field f) {
-        return switch (f.getFieldType().getType()) {
-            case int32, int64, float32, float64, bool -> true;
-            default -> false;
-        };
     }
 
     // ---- identity ------------------------------------------------------------------------------------------
@@ -700,50 +536,5 @@ public final class ScreenSpec implements Serializable {
             if (candidates.isEmpty()) copy.remove("candidates");
         }
         return copy;
-    }
-
-    // ---- json helpers --------------------------------------------------------------------------------------
-
-    static String string(final JsonObject o, final String key) {
-        if (o == null || !o.has(key) || o.get(key).isJsonNull()) return null;
-        final JsonElement e = o.get(key);
-        return e.isJsonPrimitive() ? e.getAsString() : null;
-    }
-
-    static Boolean bool(final JsonObject o, final String key) {
-        if (o == null || !o.has(key) || o.get(key).isJsonNull() || !o.get(key).isJsonPrimitive()) return null;
-        return o.get(key).getAsBoolean();
-    }
-
-    static Integer integer(final JsonObject o, final String key) {
-        if (o == null || !o.has(key) || o.get(key).isJsonNull() || !o.get(key).isJsonPrimitive()) return null;
-        return o.get(key).getAsInt();
-    }
-
-    static Long longValue(final JsonObject o, final String key) {
-        if (o == null || !o.has(key) || o.get(key).isJsonNull() || !o.get(key).isJsonPrimitive()) return null;
-        return o.get(key).getAsLong();
-    }
-
-    static Double number(final JsonObject o, final String key) {
-        if (o == null || !o.has(key) || o.get(key).isJsonNull() || !o.get(key).isJsonPrimitive()) return null;
-        return o.get(key).getAsDouble();
-    }
-
-    static List<String> strings(final JsonObject o, final String key, final List<String> errors) {
-        final List<String> out = new ArrayList<>();
-        if (o == null || !o.has(key) || o.get(key).isJsonNull()) return out;
-        final JsonElement e = o.get(key);
-        if (e.isJsonPrimitive()) {
-            out.add(e.getAsString());
-        } else if (e.isJsonArray()) {
-            for (final JsonElement i : e.getAsJsonArray()) {
-                if (i.isJsonPrimitive()) out.add(i.getAsString());
-                else errors.add(key + " must be a list of strings");
-            }
-        } else {
-            errors.add(key + " must be a list of strings");
-        }
-        return out;
     }
 }

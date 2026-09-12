@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.domain.math.MatrixOps;
+import com.mercari.solution.util.pipeline.glm.FitState;
+import com.mercari.solution.util.pipeline.glm.StatMath;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -87,7 +89,7 @@ public final class ScreenReport {
         final double chi2 = s * s / h;
         final double z = Math.signum(s) * Math.sqrt(chi2);
         final double estGain = nUnits > 0 ? chi2 / (2 * nUnits) : Double.NaN;
-        return new Stats(s, h, s / h, chi2, z, estGain, ScreenMath.chiSquare1UpperTail(chi2), nObs, false);
+        return new Stats(s, h, s / h, chi2, z, estGain, StatMath.chiSquare1UpperTail(chi2), nObs, false);
     }
 
     /**
@@ -265,13 +267,13 @@ public final class ScreenReport {
         }
 
         // placebo threshold (theoretical chi2(1) quantile when no placebo columns are configured)
-        final double thresholdTheoretical = nUnits > 0 ? ScreenMath.chiSquare1Quantile(spec.quantile) / (2 * nUnits) : Double.NaN;
+        final double thresholdTheoretical = nUnits > 0 ? StatMath.chiSquare1Quantile(spec.quantile) / (2 * nUnits) : Double.NaN;
         final double threshold;
         if (placeboGains.isEmpty()) {
             threshold = thresholdTheoretical;
         } else {
             final double[] sorted = placeboGains.stream().mapToDouble(Double::doubleValue).sorted().toArray();
-            threshold = ScreenMath.quantile(sorted, spec.quantile);
+            threshold = StatMath.quantile(sorted, spec.quantile);
         }
 
         // q-values over the candidate records (of the effective test: partial when conditioned)
@@ -279,7 +281,7 @@ public final class ScreenReport {
         for (int i = 0; i < records.size(); i++) if (!(Boolean) records.get(i).get("placebo")) candidateRecords.add(i);
         final double[] p = new double[candidateRecords.size()];
         for (int i = 0; i < p.length; i++) p[i] = effective.get(candidateRecords.get(i)).pValue;
-        final double[] q = ScreenMath.benjaminiHochberg(p);
+        final double[] q = StatMath.benjaminiHochberg(p);
         for (int i = 0; i < p.length; i++) records.get(candidateRecords.get(i)).put("qValue", q[i]);
 
         // flags

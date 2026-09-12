@@ -5,6 +5,10 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.mercari.solution.module.Logging;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
+import com.mercari.solution.util.pipeline.glm.Baselines;
+import com.mercari.solution.util.pipeline.glm.FitState;
+import com.mercari.solution.util.pipeline.glm.StatMath;
+import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
@@ -266,7 +270,7 @@ public final class ScreenStages {
                     final Long periodMillis = spec.periodsField.equals(spec.timeField)
                             ? time
                             : FeatureValues.toEpochMillis(values.get(spec.periodsField), spec.periodsFieldType);
-                    if (periodMillis != null) period = ScreenMath.periodBucket(periodMillis, spec.periodsBucket);
+                    if (periodMillis != null) period = StatMath.periodBucket(periodMillis, spec.periodsBucket);
                 }
                 final String identity = identity(values);
                 final ScreenRow row = new ScreenRow(group, identity, time, period, label, baseline == null ? Double.NaN : baseline, weight, x);
@@ -476,7 +480,7 @@ public final class ScreenStages {
             for (final ScreenRow r : c.element().getValue()) rows.add(r);
             if (rows.isEmpty()) return;
             final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
-            if (unit.skip != GroupScorer.Skip.NONE) return;
+            if (unit.skip != Baselines.Skip.NONE) return;
             partial.add(scorer.evaluate(unit, state.proposal, moments.getValues()));
         }
 
@@ -543,7 +547,7 @@ public final class ScreenStages {
             for (final ScreenRow r : c.element().getValue()) rows.add(r);
             if (rows.isEmpty()) return;
             final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
-            if (unit.skip != GroupScorer.Skip.NONE) return;
+            if (unit.skip != Baselines.Skip.NONE) return;
             scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partial);
         }
 

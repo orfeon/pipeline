@@ -1,4 +1,4 @@
-package com.mercari.solution.util.pipeline.screen;
+package com.mercari.solution.util.pipeline.glm;
 
 import org.apache.beam.sdk.coders.AtomicCoder;
 import org.apache.beam.sdk.coders.Coder;
@@ -15,7 +15,7 @@ import java.io.Serializable;
 import java.util.Arrays;
 
 /**
- * Element-wise sum of fixed-length vectors (the conditioning passes: column moments, the Newton evaluation
+ * Element-wise sum of fixed-length vectors (the fit passes of the supervised transforms: column moments, the Newton evaluation
  * {@code [n, ll, g, G]}, the partial-test sums {@code [s, b, a]}). An empty accumulator (length 0) is the
  * identity, so a pass that emits nothing yields an empty result under {@code Combine.globally}.
  */

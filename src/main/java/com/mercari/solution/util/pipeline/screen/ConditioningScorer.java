@@ -1,6 +1,9 @@
 package com.mercari.solution.util.pipeline.screen;
 
-import com.mercari.solution.util.domain.math.MatrixOps;
+import com.mercari.solution.util.pipeline.glm.Baselines;
+import com.mercari.solution.util.pipeline.glm.FitState;
+import com.mercari.solution.util.pipeline.glm.GlmFit;
+import com.mercari.solution.util.pipeline.glm.StatMath;
 
 import java.io.Serializable;
 import java.util.Map;
@@ -50,7 +53,7 @@ public final class ConditioningScorer implements Serializable {
         final double[] m = new double[3 * kF + 2];
         for (int j = 0; j < kF; j++) {
             final double v = row.x[offset + j];
-            if (!ScreenMath.isFinite(v)) continue;
+            if (!StatMath.isFinite(v)) continue;
             m[3 * j] += 1;
             m[3 * j + 1] += v;
             m[3 * j + 2] += v * v;
@@ -73,7 +76,7 @@ public final class ConditioningScorer implements Serializable {
         final double w = moments[3 * kF + 1];
         if (!(w > 0)) return theta;
         double mean = moments[3 * kF] / w;
-        if (spec.isBinomial()) mean = Math.min(1 - GroupScorer.EPS, Math.max(GroupScorer.EPS, mean));
+        if (spec.isBinomial()) mean = Baselines.clamp(mean);
         if (spec.isPoisson() && !(mean > 0)) return theta;
         final double eta = spec.link(mean);
         if (Double.isFinite(eta)) theta[kF] = eta;
@@ -116,7 +119,7 @@ public final class ConditioningScorer implements Serializable {
                 double pm = 0, psum = 0;
                 for (int i = 0; i < n; i++) {
                     final double v = unit.rows.get(i).x[offset + j];
-                    if (!ScreenMath.isFinite(v)) continue;
+                    if (!StatMath.isFinite(v)) continue;
                     pm += unit.p[i] * v;
                     psum += unit.p[i];
                 }
@@ -127,7 +130,7 @@ public final class ConditioningScorer implements Serializable {
             final double[] x = unit.rows.get(i).x;
             for (int j = 0; j < kF; j++) {
                 final double v = x[offset + j];
-                f[i][j] = ScreenMath.isFinite(v) ? (v - scale[0][j]) / scale[1][j] : fill[j];
+                f[i][j] = StatMath.isFinite(v) ? (v - scale[0][j]) / scale[1][j] : fill[j];
             }
             if (intercept) f[i][kF] = 1d;
         }
@@ -138,99 +141,23 @@ public final class ConditioningScorer implements Serializable {
     public static final int SIGMA_KEY = -2;
 
     /**
-     * Fitted means at θ: grouped softmax of log p + F̃θ within the unit; binomial σ(logit p + F̃θ); gaussian
-     * μ + F̃θ (identity link); poisson exp(log μ + F̃θ). Without a baseline the offset is 0 and the intercept
-     * column of F̃ carries the prior.
+     * Fitted means at θ ({@link GlmFit#fitted}): grouped softmax of log p + F̃θ within the unit; binomial
+     * σ(logit p + F̃θ); gaussian μ + F̃θ (identity link); poisson exp(log μ + F̃θ). Without a baseline the offset
+     * is 0 and the intercept column of F̃ carries the prior.
      */
     public double[] fitted(final GroupScorer.Unit unit, final double[][] f, final double[] theta) {
-        final int n = unit.size();
-        final double[] eta = new double[n];
-        final boolean prior = !spec.hasBaseline();
-        for (int i = 0; i < n; i++) {
-            double e = MatrixOps.dot(f[i], theta);
-            if (spec.isGroupedMultinomial()) {
-                e += unit.p[i] > 0 ? Math.log(unit.p[i]) : Double.NEGATIVE_INFINITY;
-            } else if (!prior) {
-                if (spec.isBinomial()) e += Math.log(unit.p[i] / (1 - unit.p[i]));
-                else if (spec.isPoisson()) e += Math.log(unit.p[i]);
-                else e += unit.p[i];
-            }
-            eta[i] = e;
-        }
-        final double[] p = new double[n];
-        if (spec.isGroupedMultinomial()) {
-            double max = Double.NEGATIVE_INFINITY;
-            for (final double e : eta) if (e > max) max = e;
-            double sum = 0;
-            for (int i = 0; i < n; i++) {
-                p[i] = Math.exp(eta[i] - max);
-                sum += p[i];
-            }
-            for (int i = 0; i < n; i++) p[i] /= sum;
-        } else if (spec.isBinomial()) {
-            for (int i = 0; i < n; i++) {
-                final double s = 1d / (1d + Math.exp(-eta[i]));
-                p[i] = Math.min(1 - GroupScorer.EPS, Math.max(GroupScorer.EPS, s));
-            }
-        } else if (spec.isPoisson()) {
-            for (int i = 0; i < n; i++) p[i] = Math.exp(Math.min(eta[i], 700d));
-        } else {
-            System.arraycopy(eta, 0, p, 0, n);
-        }
-        return p;
-    }
-
-    /** Log-likelihood term of one row (gaussian at σ² = 1: the fit is least squares, σ² enters the report). */
-    private double rowLogLikelihood(final double y, final double mu) {
-        if (spec.isBinomial()) return y * Math.log(mu) + (1 - y) * Math.log(1 - mu);
-        if (spec.isPoisson()) return y * Math.log(Math.max(mu, 1e-300)) - mu;
-        return -0.5 * (y - mu) * (y - mu);
+        return GlmFit.fitted(spec.family(), !spec.hasBaseline(), unit.p, f, theta);
     }
 
     /**
-     * One Newton pass evaluation of the unit at θ: {@code [units, ll, g(k), G(k*k)]} (weighted). Units are 1 per
-     * group (grouped family) or the row count (binomial), each weighted like ll / g / G so that the average
-     * objective of {@link FitState} is invariant to a rescaling of the weight column.
+     * One Newton pass evaluation of the unit at θ ({@link GlmFit#evaluate}): {@code [units, ll, g(k), G(k*k)]}
+     * (weighted). Units are 1 per group (grouped family) or the row count (binomial), each weighted like ll / g /
+     * G so that the average objective of {@link FitState} is invariant to a rescaling of the weight column.
      */
     public double[] evaluate(final GroupScorer.Unit unit, final double[] theta, final double[] moments) {
         final double[][] f = design(unit, moments);
         final double[] p = fitted(unit, f, theta);
-        final int n = unit.size();
-        final double[] out = new double[FitState.evaluationLength(k)];
-        if (spec.isGroupedMultinomial()) {
-            final double w = unit.unitWeight;
-            double ll = 0;
-            final double[] pf = new double[k];
-            for (int i = 0; i < n; i++) {
-                if (unit.y[i] > 0) ll += unit.y[i] * Math.log(Math.max(p[i], 1e-300));
-                for (int a = 0; a < k; a++) {
-                    out[2 + a] += w * (unit.y[i] - p[i]) * f[i][a];
-                    pf[a] += p[i] * f[i][a];
-                    for (int b = 0; b < k; b++) out[2 + k + a * k + b] += w * p[i] * f[i][a] * f[i][b];
-                }
-            }
-            for (int a = 0; a < k; a++) for (int b = 0; b < k; b++) out[2 + k + a * k + b] -= w * pf[a] * pf[b];
-            // the unit count carries the same weight as ll / g / G, so the average objective is weight-invariant
-            out[0] = w;
-            out[1] = w * ll;
-        } else {
-            double ll = 0;
-            double wsum = 0;
-            for (int i = 0; i < n; i++) {
-                final double w = unit.w[i];
-                final double y = unit.y[i];
-                wsum += w;
-                ll += w * rowLogLikelihood(y, p[i]);
-                final double v = spec.fisherWeight(p[i]);
-                for (int a = 0; a < k; a++) {
-                    out[2 + a] += w * (y - p[i]) * f[i][a];
-                    for (int b = 0; b < k; b++) out[2 + k + a * k + b] += w * v * f[i][a] * f[i][b];
-                }
-            }
-            out[0] = wsum;
-            out[1] = ll;
-        }
-        return out;
+        return GlmFit.evaluate(spec.family(), unit.y, p, unit.w, unit.unitWeight, f, k);
     }
 
     /** Layout of a partial-test accumulator: {@code [s, b, a(k)]}. */
@@ -270,7 +197,7 @@ public final class ConditioningScorer implements Serializable {
                     final double pivot = GroupScorer.pivot(v);
                     double pm = 0, psum = 0;
                     for (int i = 0; i < n; i++) {
-                        if (ScreenMath.isFinite(v[i])) {
+                        if (StatMath.isFinite(v[i])) {
                             pm += p[i] * (v[i] - pivot);
                             psum += p[i];
                         }
@@ -279,7 +206,7 @@ public final class ConditioningScorer implements Serializable {
                     double s = 0, b = 0, px = 0;
                     final double[] a = new double[k];
                     for (int i = 0; i < n; i++) {
-                        final double xt = ScreenMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
+                        final double xt = StatMath.isFinite(v[i]) ? v[i] - pivot - mean : 0d;
                         s += xt * (unit.y[i] - p[i]);
                         b += p[i] * xt * xt;
                         px += p[i] * xt;
@@ -291,7 +218,7 @@ public final class ConditioningScorer implements Serializable {
                     for (int j = 0; j < k; j++) acc[2 + j] += w * (a[j] - px * pf[j]);
                 } else {
                     for (int i = 0; i < n; i++) {
-                        if (!ScreenMath.isFinite(v[i])) continue;
+                        if (!StatMath.isFinite(v[i])) continue;
                         final double w = unit.w[i];
                         final double vv = spec.fisherWeight(p[i]);
                         acc[0] += w * v[i] * (unit.y[i] - p[i]);

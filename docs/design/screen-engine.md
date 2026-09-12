@@ -12,20 +12,24 @@ feature transform does (engine doc §1.2):
 
 | class | role | Beam |
 |---|---|---|
-| `ScreenSpec` | parse (`parse(JsonObject)`, every error collected) and resolve (`resolve(schema, lineage)`: manifest role defaults, candidate / conditioning column selection, `parametersHash`); `Lineage` (schema options or manifest); the family's `fisherWeight` / `link` — the single definition the scorers and the report share | no |
-| `ScreenMath` | erfc (series + continued fraction), χ²(1) tail and quantile (Acklam inverse normal + one Halley step), Benjamini–Hochberg, calendar buckets, name globs; the sample quantile delegates to `OrderStatistics`, and the scorers / Prepare use the feature transform's `FeatureValues` directly for randomness and coercions | no |
+| `ScreenSpec` | parse (`parse(JsonObject)`, every error collected) and resolve (`resolve(schema, lineage)`: manifest role defaults, candidate / conditioning column selection, `parametersHash`); the family's `fisherWeight` / `link` delegate to the shared `Family` | no |
+| `FeatureLineage` (`util/pipeline/feature/`) | the feature transform's lineage as a downstream transform reads it: `fromSchema` (the `feature.*` field options), `fromManifest`, the role defaults, the selector matching (`derivedFrom:` / `scope:` / `block:` / `evidence:` / `kind:`) and the numeric-column rule; shared with the evaluation transform | no |
+| `glm.Family` / `glm.Baselines` / `glm.GlmFit` (`util/pipeline/glm/`) | the vocabulary shared by the supervised transforms: the families with their baseline forms, Fisher weight and link; the baseline → mean-per-row conversion and the grouped label normalisation (`Baselines.means` / `normalizeLabels`, with the `Skip` reasons); the offset GLM's fitted means and Newton pass evaluation `[n, ll, g, G]` (`GlmFit.fitted` / `evaluate`) | no |
+| `glm.StatMath` | erfc (series + continued fraction), χ²(1) tail and quantile (Acklam inverse normal + one Halley step), Benjamini–Hochberg, calendar buckets, name globs; the sample quantile delegates to `OrderStatistics`, and the scorers / Prepare use the feature transform's `FeatureValues` directly for randomness and coercions | no |
+| `glm.SpecJson` | the lenient parameter readers (`string` / `number` / `strings` / `parseInstant`, …) the specs share | no |
 | `ScreenRow` | the prepared sample (unit key, identity, time, period, label, baseline, weight, `x[]` = candidates, the shuffle reference, the conditioning columns) with a compact coder; `conditioningOnly` = the projection the fit passes read | coder only |
 | `GroupScorer` | per-unit marginal scoring: `prepare` (sort, baseline → mean, labels, weights), `columns` (candidates + placebos), transforms, the family's contribution into `ScoreAccumulator`s | no |
 | `ScoreAccumulator` | 9 slots (`S`, `H`, `N_OBS`, `C1..C6`) for the window plus the same per period, min / max time; the bookkeeping key reuses the slots for run counts; custom coder; `Fn` (input = accumulator = output) | coder + CombineFn |
-| `ConditioningScorer` | per-unit conditioning computations: `moments`, `initialTheta`, `design`, `fitted`, `evaluate` (`[n, ll, g, G]`), `partial` (`[s, b, a]`, plus the gaussian variance sums) | no |
-| `FitState` | the Newton controller (proposal, best point, direction, step size, convergence, history); `advance(eval, l2, tol)` | Serializable |
-| `VectorAccumulator` | element-wise sum of fixed-length vectors (the conditioning passes), empty = identity; coder + `Fn` | coder + CombineFn |
+| `ConditioningScorer` | per-unit conditioning computations: `moments`, `initialTheta`, `design`, `fitted` and `evaluate` (`[n, ll, g, G]`, both delegating to `GlmFit`), `partial` (`[s, b, a]`, plus the gaussian variance sums) | no |
+| `glm.FitState` | the Newton controller (proposal, best point, direction, step size, convergence, history); `advance(eval, l2, tol)` | Serializable |
+| `glm.VectorAccumulator` | element-wise sum of fixed-length vectors (the conditioning passes), empty = identity; coder + `Fn` | coder + CombineFn |
 | `ScreenReport` | `stats` per slot array, `gammas` + `partial` (the orthogonalisation), `build` (records + summary), `selection` (the pass list), the output schemas, `describe` | no |
 | `ScreenStages` | the graph (§2–§4) and its DoFns | yes |
 | `ScreenTransform` | thin: streaming rejected, parse → lineage → resolve → `engineConstraints`, `describe` to the log, two outputs | module |
 
 Invariant: nothing Beam-specific reaches the pure classes, and the pure classes are what the hand-computed
-tests pin (§7).
+tests pin (§7). The `glm` package and `FeatureLineage` are the parts the evaluation transform shares: the
+screen classes own only the screening statistic (score test, placebos, transforms, partial test, pass list).
 
 ## 2. The marginal graph
 
@@ -145,7 +149,7 @@ transform) key periods × 9 doubles; per Newton pass `2 + k + k²` doubles (k �
 
 ## 7. Tests
 
-- Pure, hand-computed: `ScreenMathTest` (tails, quantiles, BH, buckets, globs),
+- Pure, hand-computed: `StatMathTest` (`util/pipeline/glm`; tails, quantiles, BH, buckets, globs),
   `GroupScorerTest` (grouped and binomial S / H / chi2 from small groups, scale-shift invariance, baseline
   forms and skips, transforms, placebo determinism, the report's threshold / flags / q-values, spec
   validation, manifest roles and lineage selectors), `FamilyScorerTest` (gaussian and poisson prior / offset

@@ -1,4 +1,4 @@
-package com.mercari.solution.util.pipeline.screen;
+package com.mercari.solution.util.pipeline.glm;
 
 import com.mercari.solution.util.domain.math.NormalDistribution;
 import com.mercari.solution.util.pipeline.feature.OrderStatistics;
@@ -13,13 +13,13 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 /**
- * Pure numeric helpers of the screen transform: tail probabilities, quantiles, multiple-comparison
+ * Pure numeric helpers of the supervised transforms (screen, evaluation): tail probabilities, quantiles, multiple-comparison
  * correction, calendar buckets and name globs. No Beam, no state. Randomness and value coercions are the
  * feature transform's ({@code FeatureValues}), used directly.
  */
-public final class ScreenMath {
+public final class StatMath {
 
-    private ScreenMath() {}
+    private StatMath() {}
 
     /** Complementary error function (see {@link NormalDistribution#erfc}). */
     public static double erfc(final double x) {
@@ -57,7 +57,7 @@ public final class ScreenMath {
         return quantile(finite, 0.5);
     }
 
-    static double[] finite(final double[] values) {
+    public static double[] finite(final double[] values) {
         int n = 0;
         for (final double v : values) if (isFinite(v)) n++;
         final double[] out = new double[n];
@@ -66,7 +66,7 @@ public final class ScreenMath {
         return out;
     }
 
-    static boolean isFinite(final double v) {
+    public static boolean isFinite(final double v) {
         return !Double.isNaN(v) && !Double.isInfinite(v);
     }
 

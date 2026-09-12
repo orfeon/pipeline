@@ -215,8 +215,9 @@ shape the output schema (lineage in field options: `OutputColumn.toOptions` for 
 `FeaturePlan.passThroughOptions` for inputs — `feature.scope = input`, `feature.kind`,
 `feature.derivedFrom` = the kind plus any upstream lineage the field arrived with, `feature.sources`,
 `feature.evidence`; other upstream `feature.*` options are dropped — and `feature.role` on both; the same
-map feeds the manifest's `fields` entries, and the `screen` transform's `Lineage.fromSchema` reads the
-selectors and the roles from it, `Lineage.fromManifest` the `fields` and `columns` entries).
+map feeds the manifest's `fields` entries, and `FeatureLineage.fromSchema` (`util/pipeline/feature/`, read by
+the `screen` and `evaluation` transforms) reads the selectors and the roles from it,
+`FeatureLineage.fromManifest` the `fields` and `columns` entries).
 
 ## Invariants — what a change must keep true
 
