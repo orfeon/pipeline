@@ -42,10 +42,13 @@ public enum Family {
         return id;
     }
 
+    /** {@code values()} clones its array on every call; the lookup runs on per-row paths. */
+    private static final Family[] VALUES = values();
+
     /** The family of a config name, or null when unknown. */
     public static Family of(final String name) {
         if (name == null) return null;
-        for (final Family f : values()) if (f.id.equals(name)) return f;
+        for (final Family f : VALUES) if (f.id.equals(name)) return f;
         return null;
     }
 

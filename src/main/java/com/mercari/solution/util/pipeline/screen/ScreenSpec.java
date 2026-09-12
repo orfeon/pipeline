@@ -32,21 +32,6 @@ import static com.mercari.solution.util.pipeline.glm.SpecJson.strings;
  */
 public final class ScreenSpec implements Serializable {
 
-    public static final String FAMILY_GROUPED_MULTINOMIAL = Family.GROUPED_MULTINOMIAL.id();
-    public static final String FAMILY_BINOMIAL = Family.BINOMIAL.id();
-    public static final String FAMILY_GAUSSIAN = Family.GAUSSIAN.id();
-    public static final String FAMILY_POISSON = Family.POISSON.id();
-    public static final List<String> FAMILIES = Family.NAMES;
-
-    public static final String FORM_VALUE = Family.FORM_VALUE;
-    public static final String FORM_RATE = Family.FORM_RATE;
-    public static final String FORM_LOG_RATE = Family.FORM_LOG_RATE;
-
-    /** Baseline forms accepted by a family, the first one being the default (see {@link Family#forms}). */
-    public static List<String> formsFor(final String family) {
-        return Family.formsFor(family);
-    }
-
     /** conditioning.missing: the window mean of the column (standardised: 0) */
     public static final String MISSING_MEAN = "mean";
     /** conditioning.missing: the unit's baseline-weighted mean of its observed values (grouped family only) */
@@ -57,15 +42,13 @@ public final class ScreenSpec implements Serializable {
     public static final String TRANSFORM_ABSDEV = "absdev";
     public static final List<String> TRANSFORMS = List.of(TRANSFORM_RAW, TRANSFORM_RANK, TRANSFORM_ABSDEV);
 
-    public static final String FORM_PROB = Family.FORM_PROB;
-    public static final String FORM_LOG_PROB = Family.FORM_LOG_PROB;
-    public static final String FORM_INVERSE_SHARE = Family.FORM_INVERSE_SHARE;
-    public static final List<String> BASELINE_FORMS = Family.PROBABILITY_FORMS;
-
     public static final String NOISE_PREFIX = "__noise_";
     public static final String SHUFFLE_PREFIX = "__shuffle_";
 
+    /** the family's config name (see {@link Family#NAMES}) */
     public String family;
+    /** {@link #family} resolved once by {@link #parse} (null while unknown) — the scorers read it per row */
+    private Family resolvedFamily;
     public String group;
     public String labelField;
     public String labelExpr;
@@ -126,23 +109,24 @@ public final class ScreenSpec implements Serializable {
 
     /** The parsed family (null while unknown: parse reports the error). */
     public Family family() {
-        return Family.of(family);
+        if (resolvedFamily == null) resolvedFamily = Family.of(family);
+        return resolvedFamily;
     }
 
     public boolean isGroupedMultinomial() {
-        return FAMILY_GROUPED_MULTINOMIAL.equals(family);
+        return family() == Family.GROUPED_MULTINOMIAL;
     }
 
     public boolean isBinomial() {
-        return FAMILY_BINOMIAL.equals(family);
+        return family() == Family.BINOMIAL;
     }
 
     public boolean isGaussian() {
-        return FAMILY_GAUSSIAN.equals(family);
+        return family() == Family.GAUSSIAN;
     }
 
     public boolean isPoisson() {
-        return FAMILY_POISSON.equals(family);
+        return family() == Family.POISSON;
     }
 
     /**
@@ -218,9 +202,10 @@ public final class ScreenSpec implements Serializable {
         if (p == null) throw new IllegalArgumentException("parameters must not be empty");
 
         s.family = string(p, "family");
-        if (s.family == null) s.family = FAMILY_GROUPED_MULTINOMIAL;
-        if (!FAMILIES.contains(s.family)) {
-            errors.add("unknown family '" + s.family + "' (available: " + FAMILIES + ")");
+        if (s.family == null) s.family = Family.GROUPED_MULTINOMIAL.id();
+        s.resolvedFamily = Family.of(s.family);
+        if (s.resolvedFamily == null) {
+            errors.add("unknown family '" + s.family + "' (available: " + Family.NAMES + ")");
         }
         s.group = string(p, "group");
 
@@ -242,7 +227,7 @@ public final class ScreenSpec implements Serializable {
 
         final JsonElement baseline = p.get("baseline");
         if (baseline != null && !baseline.isJsonNull()) {
-            final List<String> forms = formsFor(s.family);
+            final List<String> forms = Family.formsFor(s.family);
             if (baseline.isJsonPrimitive()) {
                 s.baselineField = baseline.getAsString();
                 s.baselineForm = forms.get(0);
@@ -373,8 +358,8 @@ public final class ScreenSpec implements Serializable {
                     s.conditioningMissing = missing;
                     if (!MISSINGS.contains(missing)) {
                         errors.add("unknown conditioning.missing '" + missing + "' (available: " + MISSINGS + ")");
-                    } else if (MISSING_GROUP_MEAN.equals(missing) && FAMILIES.contains(s.family) && !s.isGroupedMultinomial()) {
-                        errors.add("conditioning.missing " + MISSING_GROUP_MEAN + " needs family " + FAMILY_GROUPED_MULTINOMIAL + " (the fill is the unit's baseline-weighted mean); the row families use " + MISSING_MEAN);
+                    } else if (MISSING_GROUP_MEAN.equals(missing) && s.resolvedFamily != null && !s.isGroupedMultinomial()) {
+                        errors.add("conditioning.missing " + MISSING_GROUP_MEAN + " needs family " + Family.GROUPED_MULTINOMIAL.id() + " (the fill is the unit's baseline-weighted mean); the row families use " + MISSING_MEAN);
                     }
                 }
                 if (s.conditioningL2 < 0) errors.add("conditioning.l2 must be >= 0");
@@ -427,7 +412,7 @@ public final class ScreenSpec implements Serializable {
         }
         if (baselineField == null && l.roles.containsKey("baseline")) {
             baselineField = l.roles.get("baseline");
-            if (baselineForm == null) baselineForm = formsFor(family).get(0);
+            if (baselineForm == null) baselineForm = Family.formsFor(family).get(0);
             notes.add("baseline defaulted to the feature transform's role: " + baselineField);
         }
         if (weightField == null && l.roles.containsKey("weight")) {
@@ -452,7 +437,7 @@ public final class ScreenSpec implements Serializable {
                 if (!TRANSFORM_RAW.equals(t)) errors.add("transform '" + t + "' needs group (within-group " + t + "); independent rows support raw only in this version");
             }
             if (hasShuffle()) errors.add("placebo.shuffle needs group (within-group permutation)");
-            if (FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");
+            if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");
         }
         if (periodsBucket != null && periodsField == null) errors.add("periods needs a field (periods.field or time.field)");
 
@@ -476,8 +461,8 @@ public final class ScreenSpec implements Serializable {
             reserved.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
         }
 
-        final List<Pattern> includes = candidateInclude.stream().filter(s -> s.indexOf(':') <= 0).map(StatMath::glob).toList();
-        final List<String> includeSelectors = candidateInclude.stream().filter(s -> s.indexOf(':') > 0).toList();
+        final List<Pattern> includes = candidateInclude.stream().filter(s -> !FeatureLineage.isSelector(s)).map(StatMath::glob).toList();
+        final List<String> includeSelectors = candidateInclude.stream().filter(FeatureLineage::isSelector).toList();
         candidates = new ArrayList<>();
         final List<String> excludedByLineage = new ArrayList<>();
         if (inputSchema != null) {
@@ -491,7 +476,7 @@ public final class ScreenSpec implements Serializable {
                 if (!included) continue;
                 boolean excluded = false;
                 for (final String pattern : candidateExclude) {
-                    if (pattern.indexOf(':') > 0) {
+                    if (FeatureLineage.isSelector(pattern)) {
                         if (FeatureLineage.selectorMatches(pattern, entry)) {
                             excluded = true;
                             excludedByLineage.add(name + " (" + pattern + ")");
@@ -506,7 +491,7 @@ public final class ScreenSpec implements Serializable {
             }
         }
         if (!excludedByLineage.isEmpty()) notes.add("excluded by lineage: " + excludedByLineage);
-        final boolean usesSelectors = candidateExclude.stream().anyMatch(s -> s.indexOf(':') > 0) || !includeSelectors.isEmpty();
+        final boolean usesSelectors = candidateExclude.stream().anyMatch(FeatureLineage::isSelector) || !includeSelectors.isEmpty();
         if (usesSelectors && l.columns.isEmpty()) {
             errors.add("candidates use lineage selectors (derivedFrom: / scope: / block: / evidence: / kind:) but no lineage is available: "
                     + "put the feature transform directly upstream or set candidates.manifest to its manifest URI");

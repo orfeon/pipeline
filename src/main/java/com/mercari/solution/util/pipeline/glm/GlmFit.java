@@ -30,11 +30,7 @@ public final class GlmFit {
             if (family.isGrouped()) {
                 e += p[i] > 0 ? Math.log(p[i]) : Double.NEGATIVE_INFINITY;
             } else if (!prior) {
-                e += switch (family) {
-                    case BINOMIAL -> Math.log(p[i] / (1 - p[i]));
-                    case POISSON -> Math.log(p[i]);
-                    default -> p[i];
-                };
+                e += family.link(p[i]);
             }
             eta[i] = e;
         }

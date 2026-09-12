@@ -1,6 +1,5 @@
 package com.mercari.solution.util.pipeline.screen;
 
-import com.mercari.solution.util.domain.math.MatrixOps;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.GlmFit;

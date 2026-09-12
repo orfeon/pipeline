@@ -3,6 +3,7 @@ package com.mercari.solution.util.pipeline.screen;
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
 import com.mercari.solution.util.pipeline.feature.FeatureLineage;
+import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ public class GroupScorerTest {
         final ScreenSpec spec = spec("{family: groupedMultinomial, group: g, label: y, time: t, candidates: [x], transforms: [raw], placebo: {noise: 0}}");
         final GroupScorer scorer = new GroupScorer(spec);
         final Map<Integer, ScoreAccumulator> acc = new HashMap<>();
-        Assertions.assertEquals(GroupScorer.Skip.NONE, scorer.score(List.of(row("a", 1, 1, Double.NaN, 3), row("a", 1, 0, Double.NaN, 1), row("a", 1, 0, Double.NaN, 2)), "a", acc));
+        Assertions.assertEquals(Baselines.Skip.NONE, scorer.score(List.of(row("a", 1, 1, Double.NaN, 3), row("a", 1, 0, Double.NaN, 1), row("a", 1, 0, Double.NaN, 2)), "a", acc));
         final double[] a = acc.get(spec.key(0, 0)).getTotal();
         Assertions.assertEquals(1d, a[ScoreAccumulator.S], 1e-12);
         Assertions.assertEquals(2d / 3, a[ScoreAccumulator.H], 1e-12);
@@ -78,11 +79,11 @@ public class GroupScorerTest {
         Assertions.assertEquals(0.25, a[ScoreAccumulator.H], 1e-12);
         // a group whose baseline is invalid for the form is skipped
         final Map<Integer, ScoreAccumulator> skipped = new HashMap<>();
-        Assertions.assertEquals(GroupScorer.Skip.INVALID_BASELINE, new GroupScorer(spec).score(List.of(row("b", 1, 1, 0, 1), row("b", 1, 0, 4, 0)), "b", skipped));
+        Assertions.assertEquals(Baselines.Skip.INVALID_BASELINE, new GroupScorer(spec).score(List.of(row("b", 1, 1, 0, 1), row("b", 1, 0, 4, 0)), "b", skipped));
         Assertions.assertEquals(1, skipped.get(ScoreAccumulator.BOOKKEEPING_KEY).getTotal()[ScoreAccumulator.UNITS_SKIPPED]);
         // a group without a positive label is skipped
         final Map<Integer, ScoreAccumulator> noPositive = new HashMap<>();
-        Assertions.assertEquals(GroupScorer.Skip.NO_POSITIVE_LABEL, new GroupScorer(spec).score(List.of(row("c", 1, 0, 2, 1), row("c", 1, 0, 4, 0)), "c", noPositive));
+        Assertions.assertEquals(Baselines.Skip.NO_POSITIVE_LABEL, new GroupScorer(spec).score(List.of(row("c", 1, 0, 2, 1), row("c", 1, 0, 4, 0)), "c", noPositive));
     }
 
     @Test

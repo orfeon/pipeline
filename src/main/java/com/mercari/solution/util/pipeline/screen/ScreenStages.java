@@ -5,6 +5,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.mercari.solution.module.Logging;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
+import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
@@ -479,7 +480,7 @@ public final class ScreenStages {
             for (final ScreenRow r : c.element().getValue()) rows.add(r);
             if (rows.isEmpty()) return;
             final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
-            if (unit.skip != GroupScorer.Skip.NONE) return;
+            if (unit.skip != Baselines.Skip.NONE) return;
             partial.add(scorer.evaluate(unit, state.proposal, moments.getValues()));
         }
 
@@ -546,7 +547,7 @@ public final class ScreenStages {
             for (final ScreenRow r : c.element().getValue()) rows.add(r);
             if (rows.isEmpty()) return;
             final GroupScorer.Unit unit = groups.prepare(rows, c.element().getKey());
-            if (unit.skip != GroupScorer.Skip.NONE) return;
+            if (unit.skip != Baselines.Skip.NONE) return;
             scorer.partial(unit, groups.columns(unit), state.bestTheta, moments.getValues(), partial);
         }
 

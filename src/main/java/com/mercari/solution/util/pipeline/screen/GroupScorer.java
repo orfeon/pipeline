@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.screen;
 
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
+import com.mercari.solution.util.pipeline.glm.Baselines.Skip;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -22,7 +23,6 @@ import java.util.SplittableRandom;
 public final class GroupScorer implements Serializable {
 
     private static final String SEP = String.valueOf((char) 0);
-    static final double EPS = Baselines.EPS;
 
     private final ScreenSpec spec;
     private final int nCandidates;
@@ -34,19 +34,6 @@ public final class GroupScorer implements Serializable {
         this.nCandidates = spec.candidates.size();
         this.nColumns = spec.columnCount();
         this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
-    }
-
-    /** Skip reasons of a unit, counted in the bookkeeping accumulator (the shared {@link Baselines.Skip}). */
-    public enum Skip {
-        NONE, NO_POSITIVE_LABEL, INVALID_BASELINE;
-
-        static Skip of(final Baselines.Skip skip) {
-            return switch (skip) {
-                case NONE -> NONE;
-                case NO_POSITIVE_LABEL -> NO_POSITIVE_LABEL;
-                case INVALID_BASELINE -> INVALID_BASELINE;
-            };
-        }
     }
 
     /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
@@ -87,16 +74,16 @@ public final class GroupScorer implements Serializable {
         final int n = rows.size();
         final double[] p = new double[n];
         if (spec.hasBaseline()) {
-            final double[] baseline = new double[n];
-            for (int i = 0; i < n; i++) baseline[i] = rows.get(i).baseline;
-            final Skip skip = Skip.of(Baselines.means(spec.family(), spec.baselineForm, baseline, p));
+            // Baselines.means reads each baseline before writing the mean at the same index, so p carries both
+            for (int i = 0; i < n; i++) p[i] = rows.get(i).baseline;
+            final Skip skip = Baselines.means(spec.family(), spec.baselineForm, p, p);
             if (skip != Skip.NONE) return new Unit(rows, unitKey, skip, p, null, null, 0);
         } else if (spec.isGroupedMultinomial()) {
             Arrays.fill(p, 1d / n);
         }
         final double[] y = new double[n];
         for (int i = 0; i < n; i++) y[i] = rows.get(i).label;
-        final Skip labels = Skip.of(Baselines.normalizeLabels(spec.family(), spec.normalizeTies, y));
+        final Skip labels = Baselines.normalizeLabels(spec.family(), spec.normalizeTies, y);
         if (labels != Skip.NONE) return new Unit(rows, unitKey, labels, p, y, null, 0);
         final double[] w = new double[n];
         double wsum = 0;

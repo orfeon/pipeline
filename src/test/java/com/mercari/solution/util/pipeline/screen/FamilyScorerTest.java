@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.screen;
 
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import org.junit.jupiter.api.Assertions;
@@ -89,7 +90,7 @@ public class FamilyScorerTest {
         Assertions.assertEquals(st.chi2(), lst.chi2(), 1e-12);
         // a non-positive rate invalidates the unit
         final GroupScorer scorer = new GroupScorer(s);
-        Assertions.assertEquals(GroupScorer.Skip.INVALID_BASELINE, scorer.score(List.of(row(9, 1, 0, 1, 0)), "r9", new HashMap<>()));
+        Assertions.assertEquals(Baselines.Skip.INVALID_BASELINE, scorer.score(List.of(row(9, 1, 0, 1, 0)), "r9", new HashMap<>()));
     }
 
     @Test
