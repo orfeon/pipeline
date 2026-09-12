@@ -1,8 +1,6 @@
 package com.mercari.solution.module.source;
 
 import com.google.gson.JsonElement;
-import com.mercari.solution.util.cloud.SecretProviders;
-import com.mercari.solution.config.options.DataflowOptions;
 import com.mercari.solution.module.*;
 import com.mercari.solution.util.DateTimeUtil;
 import com.mercari.solution.util.TemplateUtil;
@@ -14,7 +12,6 @@ import com.mercari.solution.util.domain.db.PostgresUtil;
 import com.mercari.solution.util.pipeline.cdc.PostgresChangeCapture;
 import com.mercari.solution.util.schema.AvroSchemaUtil;
 import com.mercari.solution.util.schema.converter.ResultSetToRecordConverter;
-import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.Pipeline;
@@ -177,19 +174,11 @@ public class PostgresSource extends Source {
         }
 
         public void replaceParameters(final Pipeline pipeline) {
-            if(user == null) {
-                final String serviceAccount = DataflowOptions.getServiceAccount(pipeline.getOptions());
-                LOG.info("Using worker service account: '{}' for database user", serviceAccount);
-                user = serviceAccount.replace(".gserviceaccount.com", "");
-                password = "dummy";
-                if(!url.contains("enableIamAuth")) {
-                    url = url + "&enableIamAuth=true";
-                }
-            } else if(SecretProviders.isSecretReference(user) || SecretProviders.isSecretReference(password)) {
-                LOG.info("parameters.user|password is secret resource.");
-                user = SecretProviders.resolveIfSecret(user);
-                password = SecretProviders.resolveIfSecret(password);
-            }
+            final PostgresUtil.Credentials credentials = PostgresUtil
+                    .resolveCredentials(url, user, password, pipeline.getOptions());
+            url = credentials.url();
+            user = credentials.user();
+            password = credentials.password();
         }
 
     }
@@ -660,20 +649,6 @@ public class PostgresSource extends Source {
         private transient org.apache.avro.Schema schema;
         private transient HikariDataSource dataSource;
 
-        // Worker-shared connection pools, reference-counted per url+user so that the teardown
-        // of one read branch's DoFn does not close a pool other branches still use.
-        private static final Map<String, PoolEntry> POOLS = new HashMap<>();
-
-        private static final class PoolEntry {
-
-            private final HikariDataSource dataSource;
-            private int refCount;
-
-            private PoolEntry(final HikariDataSource dataSource) {
-                this.dataSource = dataSource;
-            }
-        }
-
         ReadDoFn(
                 final String url,
                 final String user,
@@ -694,53 +669,17 @@ public class PostgresSource extends Source {
             this.schemaString = schemaString;
         }
 
-        private static HikariDataSource acquire(final String url, final String user, final String password) {
-            final String key = url + "|" + user;
-            synchronized (POOLS) {
-                PoolEntry entry = POOLS.get(key);
-                if (entry == null) {
-                    final HikariConfig config = new HikariConfig();
-                    config.setJdbcUrl(url);
-                    config.setUsername(user);
-                    config.setPassword(password);
-                    config.setDriverClassName(PostgresUtil.DRIVER);
-                    config.setMaximumPoolSize(10);
-                    config.setReadOnly(true);
-                    config.addDataSourceProperty("ApplicationName", "mercari-pipeline");
-                    entry = new PoolEntry(new HikariDataSource(config));
-                    POOLS.put(key, entry);
-                }
-                entry.refCount++;
-                return entry.dataSource;
-            }
-        }
-
-        private static void release(final String url, final String user) {
-            final String key = url + "|" + user;
-            synchronized (POOLS) {
-                final PoolEntry entry = POOLS.get(key);
-                if (entry == null) {
-                    return;
-                }
-                entry.refCount--;
-                if (entry.refCount <= 0) {
-                    POOLS.remove(key);
-                    entry.dataSource.close();
-                }
-            }
-        }
-
         @Setup
         public void setup() {
             this.schema = AvroSchemaUtil.convertSchema(schemaString);
-            this.dataSource = acquire(url, user, password);
+            this.dataSource = PostgresUtil.acquirePool(new PostgresUtil.Credentials(url, user, password), true, 10);
         }
 
         @Teardown
         public void teardown() {
             if (dataSource != null) {
                 dataSource = null;
-                release(url, user);
+                PostgresUtil.releasePool(new PostgresUtil.Credentials(url, user, password), true);
             }
         }
 

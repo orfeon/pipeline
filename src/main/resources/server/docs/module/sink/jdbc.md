@@ -21,6 +21,8 @@ The target database type is detected from the `driver` class name. Supported dat
 
 Any other driver class name causes the module to fail with a "Not supported JDBC driver" error.
 
+> For PostgreSQL, the [`postgres` sink](postgres.md) writes with `COPY ... FROM STDIN (FORMAT BINARY)` (no bind-parameter limit, native types such as arrays / enums / jsonb, staged upsert and a CDC apply mode) and is the faster choice.
+
 ## Sink module common parameters
 
 | parameter  | optional | type                | description                                                           |
