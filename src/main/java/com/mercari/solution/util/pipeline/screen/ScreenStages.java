@@ -7,6 +7,7 @@ import com.mercari.solution.module.Logging;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.FitState;
+import com.mercari.solution.util.pipeline.glm.GatherFn;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import com.mercari.solution.module.MElement;
@@ -14,10 +15,8 @@ import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
-import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.coders.VarIntCoder;
@@ -557,48 +556,6 @@ public final class ScreenStages {
                 c.output(KV.of(e.getKey(), new VectorAccumulator(e.getValue())), GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
             }
             partial = new HashMap<>();
-        }
-    }
-
-    /** Gathers the (few) combined accumulators into one list for the finalize step. */
-    static class GatherFn<T> extends Combine.CombineFn<T, List<T>, List<T>> {
-        private final Coder<List<T>> coder;
-
-        GatherFn(final Coder<T> elementCoder) {
-            this.coder = ListCoder.of(elementCoder);
-        }
-
-        @Override
-        public List<T> createAccumulator() {
-            return new ArrayList<>();
-        }
-
-        @Override
-        public List<T> addInput(final List<T> acc, final T input) {
-            acc.add(input);
-            return acc;
-        }
-
-        @Override
-        public List<T> mergeAccumulators(final Iterable<List<T>> accs) {
-            final List<T> merged = new ArrayList<>();
-            for (final List<T> a : accs) merged.addAll(a);
-            return merged;
-        }
-
-        @Override
-        public List<T> extractOutput(final List<T> acc) {
-            return acc;
-        }
-
-        @Override
-        public Coder<List<T>> getAccumulatorCoder(final CoderRegistry registry, final Coder<T> inputCoder) {
-            return coder;
-        }
-
-        @Override
-        public Coder<List<T>> getDefaultOutputCoder(final CoderRegistry registry, final Coder<T> inputCoder) {
-            return coder;
         }
     }
 
