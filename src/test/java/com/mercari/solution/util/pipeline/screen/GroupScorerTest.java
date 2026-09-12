@@ -2,6 +2,8 @@ package com.mercari.solution.util.pipeline.screen;
 
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.feature.FeatureLineage;
+import com.mercari.solution.util.pipeline.glm.StatMath;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -179,8 +181,8 @@ public class GroupScorerTest {
         Assertions.assertEquals(20L, xRaw.get("n_groups"));
         Assertions.assertEquals(Math.sqrt(30), (Double) xRaw.get("z"), 1e-9);   // chi2 = 20 * 1.5
         // no placebo column: the threshold is the theoretical chi2(1) quantile / 2N
-        Assertions.assertEquals(ScreenMath.chiSquare1Quantile(0.99) / 40, (Double) xRaw.get("threshold"), 1e-12);
-        Assertions.assertEquals(ScreenMath.chiSquare1Quantile(0.99) / 40, (Double) result.summary().get("thresholdTheoretical"), 1e-12);
+        Assertions.assertEquals(StatMath.chiSquare1Quantile(0.99) / 40, (Double) xRaw.get("threshold"), 1e-12);
+        Assertions.assertEquals(StatMath.chiSquare1Quantile(0.99) / 40, (Double) result.summary().get("thresholdTheoretical"), 1e-12);
         Assertions.assertEquals(Boolean.TRUE, xRaw.get("passed"));
         Assertions.assertEquals(Boolean.TRUE, xRaw.get("leakSuspect"));
         Assertions.assertEquals(1L, xRaw.get("periods_agree"));
@@ -216,7 +218,7 @@ public class GroupScorerTest {
     public void testLineageDefaultsAndSelectors() {
         final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}, baseline: {name: b, column: b}},"
                 + " columns: [{name: x, scope: row, block: blk, lineage: {derivedFrom: [market], evidence: declared}}, {name: x2, scope: context, block: ctx, lineage: {derivedFrom: [attribute], evidence: measured}}]}";
-        final ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromManifest(manifest);
+        final FeatureLineage lineage = FeatureLineage.fromManifest(manifest, "candidates.manifest");
         final ScreenSpec s = ScreenSpec.parse(JsonParser.parseString("{candidates: {exclude: ['derivedFrom:market']}, placebo: {noise: 0}}").getAsJsonObject()).resolve(SCHEMA, lineage);
         Assertions.assertEquals("g", s.group);
         Assertions.assertEquals("y", s.labelField);
@@ -234,7 +236,7 @@ public class GroupScorerTest {
         // kind only), so a selector drops a passed-through market input on the manifest path too
         final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}, baseline: {name: b, column: b}},"
                 + " fields: [{name: x, scope: input, kind: market}, {name: x2, kind: attribute, derivedFrom: [attribute]}], columns: []}";
-        final ScreenSpec.Lineage fromManifest = ScreenSpec.Lineage.fromManifest(manifest);
+        final FeatureLineage fromManifest = FeatureLineage.fromManifest(manifest, "candidates.manifest");
         Assertions.assertEquals("input", fromManifest.columns.get("x2").scope());
         final ScreenSpec byManifest = ScreenSpec.parse(JsonParser.parseString("{candidates: {include: ['scope:input'], exclude: ['derivedFrom:market']}, placebo: {noise: 0}}").getAsJsonObject())
                 .resolve(SCHEMA, fromManifest);
@@ -249,7 +251,7 @@ public class GroupScorerTest {
                 .withField("x2", Schema.FieldType.FLOAT64)
                 .build();
         final ScreenSpec bySchema = ScreenSpec.parse(JsonParser.parseString("{candidates: {exclude: ['derivedFrom:market']}, placebo: {noise: 0}}").getAsJsonObject())
-                .resolve(schema, ScreenSpec.Lineage.fromSchema(schema));
+                .resolve(schema, FeatureLineage.fromSchema(schema));
         Assertions.assertEquals("g", bySchema.group);
         Assertions.assertEquals("y", bySchema.labelField);
         Assertions.assertEquals("b", bySchema.baselineField);
@@ -268,7 +270,7 @@ public class GroupScorerTest {
         // kind: is the source field's origin tag on both lineage paths (pass-through inputs only; derived columns carry kinds in derivedFrom)
         final String manifest = "{roles: {group: {column: g}, label: {column: y}, baseline: {column: b}}, fields: [{name: x, scope: input, kind: market, derivedFrom: [market]}, {name: x2, scope: input, kind: attribute}], columns: []}";
         final ScreenSpec byManifest = ScreenSpec.parse(JsonParser.parseString("{candidates: {exclude: ['kind:market']}, placebo: {noise: 0}}").getAsJsonObject())
-                .resolve(SCHEMA, ScreenSpec.Lineage.fromManifest(manifest));
+                .resolve(SCHEMA, FeatureLineage.fromManifest(manifest, "candidates.manifest"));
         Assertions.assertEquals(List.of("x2"), byManifest.candidates);
         Assertions.assertTrue(byManifest.notes.stream().anyMatch(n -> n.contains("x (kind:market)")), byManifest.notes::toString);
         final Schema schema = Schema.builder()
@@ -277,7 +279,7 @@ public class GroupScorerTest {
                 .withField(Schema.Field.of("x2", Schema.FieldType.FLOAT64).withOptions(options("feature.scope", "row", "feature.derivedFrom", "market")))
                 .build();
         final ScreenSpec bySchema = ScreenSpec.parse(JsonParser.parseString("{group: g, label: y, baseline: b, candidates: {exclude: ['kind:market']}, placebo: {noise: 0}}").getAsJsonObject())
-                .resolve(schema, ScreenSpec.Lineage.fromSchema(schema));
+                .resolve(schema, FeatureLineage.fromSchema(schema));
         Assertions.assertEquals(List.of("x2"), bySchema.candidates);   // the derived column has no kind: derivedFrom:market would drop it, kind:market does not
     }
 
@@ -347,7 +349,7 @@ public class GroupScorerTest {
     @Test
     public void testExplicitTransformsSurviveGroupDefault() {
         final String manifest = "{timeField: t, roles: {group: {name: g, column: g}, label: {name: y, column: y}}}";
-        final ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromManifest(manifest);
+        final FeatureLineage lineage = FeatureLineage.fromManifest(manifest, "candidates.manifest");
         final ScreenSpec raw = ScreenSpec.parse(JsonParser.parseString("{transforms: [raw], candidates: [x], placebo: {noise: 0}}").getAsJsonObject()).resolve(SCHEMA, lineage);
         Assertions.assertEquals("g", raw.group);
         Assertions.assertEquals(List.of("raw"), raw.transforms);
@@ -368,7 +370,7 @@ public class GroupScorerTest {
         Assertions.assertEquals("timestamp", s.timeFieldType);
         Assertions.assertEquals("date", s.periodsFieldType);
         // a manifest that is not JSON (e.g. a local path that does not exist) is reported as a config error
-        Assertions.assertThrows(IllegalArgumentException.class, () -> ScreenSpec.Lineage.fromManifest("manifests/missing.json"));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> FeatureLineage.fromManifest("manifests/missing.json", "candidates.manifest"));
         // the list form of conditioning must not silently disable the partial test
         Assertions.assertThrows(IllegalArgumentException.class, () -> spec("{family: binomial, label: y, candidates: [x], conditioning: []}"));
         // the baseline is the model offset: it is a role field for conditioning like it is for candidates

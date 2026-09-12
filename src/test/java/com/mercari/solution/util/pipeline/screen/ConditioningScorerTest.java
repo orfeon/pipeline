@@ -2,6 +2,8 @@ package com.mercari.solution.util.pipeline.screen;
 
 import com.google.gson.JsonParser;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.glm.FitState;
+import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 

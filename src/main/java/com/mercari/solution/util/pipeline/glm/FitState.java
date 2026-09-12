@@ -1,4 +1,4 @@
-package com.mercari.solution.util.pipeline.screen;
+package com.mercari.solution.util.pipeline.glm;
 
 import com.mercari.solution.util.domain.math.MatrixOps;
 
@@ -8,7 +8,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * State of the unrolled Newton fit of the conditioning model (η = offset + F̃·θ, L2-penalised average
+ * State of the unrolled Newton fit of an offset GLM (η = offset + F̃·θ, L2-penalised average
  * log-likelihood). One pass evaluates {@code [n, ll, g, G]} at {@link #proposal}; {@link #advance} is the
  * controller: accept the proposal when the objective did not decrease (then propose a full Newton step),
  * otherwise halve the step from the best point (backtracking costs one pass per halving, never a second
@@ -46,7 +46,7 @@ public final class FitState implements Serializable {
         return initial(k, new double[k]);
     }
 
-    /** The state before the first pass, evaluating {@code theta} (see {@code ConditioningScorer.initialTheta}). */
+    /** The state before the first pass, evaluating {@code theta} (the starting point chosen by the caller). */
     public static FitState initial(final int k, final double[] theta) {
         final FitState s = new FitState(k);
         s.proposal = theta.clone();

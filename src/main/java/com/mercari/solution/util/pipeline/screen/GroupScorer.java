@@ -1,6 +1,8 @@
 package com.mercari.solution.util.pipeline.screen;
 
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
+import com.mercari.solution.util.pipeline.glm.Baselines;
+import com.mercari.solution.util.pipeline.glm.StatMath;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -20,7 +22,7 @@ import java.util.SplittableRandom;
 public final class GroupScorer implements Serializable {
 
     private static final String SEP = String.valueOf((char) 0);
-    static final double EPS = 1e-12;
+    static final double EPS = Baselines.EPS;
 
     private final ScreenSpec spec;
     private final int nCandidates;
@@ -34,8 +36,18 @@ public final class GroupScorer implements Serializable {
         this.shuffleRef = spec.hasShuffle() ? spec.shuffleIndex() : -1;
     }
 
-    /** Skip reasons of a unit, counted in the bookkeeping accumulator. */
-    public enum Skip { NONE, NO_POSITIVE_LABEL, INVALID_BASELINE }
+    /** Skip reasons of a unit, counted in the bookkeeping accumulator (the shared {@link Baselines.Skip}). */
+    public enum Skip {
+        NONE, NO_POSITIVE_LABEL, INVALID_BASELINE;
+
+        static Skip of(final Baselines.Skip skip) {
+            return switch (skip) {
+                case NONE -> NONE;
+                case NO_POSITIVE_LABEL -> NO_POSITIVE_LABEL;
+                case INVALID_BASELINE -> INVALID_BASELINE;
+            };
+        }
+    }
 
     /** A prepared unit: rows sorted by (time, identity), baseline probabilities, normalised labels, weights. */
     public static final class Unit {
@@ -75,19 +87,17 @@ public final class GroupScorer implements Serializable {
         final int n = rows.size();
         final double[] p = new double[n];
         if (spec.hasBaseline()) {
-            final Skip skip = probabilities(rows, p);
+            final double[] baseline = new double[n];
+            for (int i = 0; i < n; i++) baseline[i] = rows.get(i).baseline;
+            final Skip skip = Skip.of(Baselines.means(spec.family(), spec.baselineForm, baseline, p));
             if (skip != Skip.NONE) return new Unit(rows, unitKey, skip, p, null, null, 0);
         } else if (spec.isGroupedMultinomial()) {
             Arrays.fill(p, 1d / n);
         }
         final double[] y = new double[n];
         for (int i = 0; i < n; i++) y[i] = rows.get(i).label;
-        if (spec.isGroupedMultinomial()) {
-            double sum = 0;
-            for (final double v : y) sum += v;
-            if (!(sum > 0)) return new Unit(rows, unitKey, Skip.NO_POSITIVE_LABEL, p, y, null, 0);
-            if (spec.normalizeTies) for (int i = 0; i < n; i++) y[i] /= sum;
-        }
+        final Skip labels = Skip.of(Baselines.normalizeLabels(spec.family(), spec.normalizeTies, y));
+        if (labels != Skip.NONE) return new Unit(rows, unitKey, labels, p, y, null, 0);
         final double[] w = new double[n];
         double wsum = 0;
         for (int i = 0; i < n; i++) {
@@ -172,58 +182,6 @@ public final class GroupScorer implements Serializable {
     }
 
     /**
-     * Fills {@code p} (the baseline mean per row: a share / probability, the gaussian value, the poisson rate)
-     * from the baselines; NONE when every row is usable.
-     */
-    private Skip probabilities(final List<ScreenRow> rows, final double[] p) {
-        final int n = rows.size();
-        final String form = spec.baselineForm;
-        double max = Double.NEGATIVE_INFINITY;
-        for (int i = 0; i < n; i++) {
-            final double b = rows.get(i).baseline;
-            if (Double.isNaN(b) || Double.isInfinite(b)) return Skip.INVALID_BASELINE;
-            switch (form) {
-                case ScreenSpec.FORM_PROB -> {
-                    if (b < 0 || b > 1) return Skip.INVALID_BASELINE;
-                    p[i] = b;
-                }
-                case ScreenSpec.FORM_LOG_PROB -> {
-                    if (b > 0) return Skip.INVALID_BASELINE;
-                    p[i] = b;
-                    if (b > max) max = b;
-                }
-                case ScreenSpec.FORM_INVERSE_SHARE -> {
-                    if (!(b > 0)) return Skip.INVALID_BASELINE;
-                    p[i] = 1d / b;
-                }
-                case ScreenSpec.FORM_VALUE -> p[i] = b;
-                case ScreenSpec.FORM_RATE -> {
-                    if (!(b > 0)) return Skip.INVALID_BASELINE;
-                    p[i] = b;
-                }
-                case ScreenSpec.FORM_LOG_RATE -> {
-                    p[i] = Math.exp(b);
-                    if (!(p[i] > 0) || Double.isInfinite(p[i])) return Skip.INVALID_BASELINE;
-                }
-                default -> throw new IllegalStateException("unknown baseline form " + form);
-            }
-        }
-        if (ScreenSpec.FORM_LOG_PROB.equals(form)) {
-            for (int i = 0; i < n; i++) p[i] = Math.exp(p[i] - (spec.isGroupedMultinomial() ? max : 0d));
-        }
-        if (spec.isGroupedMultinomial() || ScreenSpec.FORM_INVERSE_SHARE.equals(form)) {
-            double sum = 0;
-            for (final double v : p) sum += v;
-            if (!(sum > 0)) return Skip.INVALID_BASELINE;
-            for (int i = 0; i < n; i++) p[i] /= sum;
-        }
-        if (spec.isBinomial()) {
-            for (int i = 0; i < n; i++) p[i] = Math.min(1 - EPS, Math.max(EPS, p[i]));
-        }
-        return Skip.NONE;
-    }
-
-    /**
      * Grouped multinomial (conditional logit) contribution: x centred by the p-weighted mean over the observed
      * rows (a missing row contributes nothing), S = Σ x̃ (ỹ − p), H = Σ p x̃² − (Σ p x̃)², both scaled by the
      * unit weight. The values are shifted by the unit's {@link #pivot} first, so a column constant within the
@@ -235,7 +193,7 @@ public final class GroupScorer implements Serializable {
         double pm = 0, psum = 0;
         int nObs = 0;
         for (int i = 0; i < n; i++) {
-            if (ScreenMath.isFinite(v[i])) {
+            if (StatMath.isFinite(v[i])) {
                 pm += p[i] * (v[i] - pivot);
                 psum += p[i];
                 nObs++;
@@ -244,7 +202,7 @@ public final class GroupScorer implements Serializable {
         final double mean = psum > 0 ? pm / psum : 0d;
         double s = 0, h = 0, px = 0;
         for (int i = 0; i < n; i++) {
-            if (!ScreenMath.isFinite(v[i])) continue;
+            if (!StatMath.isFinite(v[i])) continue;
             final double xt = v[i] - pivot - mean;
             s += xt * (y[i] - p[i]);
             h += p[i] * xt * xt;
@@ -264,7 +222,7 @@ public final class GroupScorer implements Serializable {
      * spread keeps every digit of that spread. Shared by the marginal test and {@link ConditioningScorer#partial}.
      */
     static double pivot(final double[] v) {
-        for (final double x : v) if (ScreenMath.isFinite(x)) return x;
+        for (final double x : v) if (StatMath.isFinite(x)) return x;
         return 0d;
     }
 
@@ -279,7 +237,7 @@ public final class GroupScorer implements Serializable {
                                   final double[] w, final boolean prior, final ScoreAccumulator acc) {
         final Map<String, double[]> byPeriod = new HashMap<>();
         for (int i = 0; i < v.length; i++) {
-            if (!ScreenMath.isFinite(v[i])) continue;
+            if (!StatMath.isFinite(v[i])) continue;
             final double[] c = byPeriod.computeIfAbsent(rows.get(i).period, k -> new double[ScoreAccumulator.SLOTS]);
             final double x = v[i];
             c[ScoreAccumulator.N_OBS] += 1;
@@ -314,9 +272,9 @@ public final class GroupScorer implements Serializable {
                 return percentileRank(v);
             }
             case ScreenSpec.TRANSFORM_ABSDEV -> {
-                final double median = ScreenMath.medianFinite(v);
+                final double median = StatMath.medianFinite(v);
                 final double[] out = new double[v.length];
-                for (int i = 0; i < v.length; i++) out[i] = ScreenMath.isFinite(v[i]) ? Math.abs(v[i] - median) : Double.NaN;
+                for (int i = 0; i < v.length; i++) out[i] = StatMath.isFinite(v[i]) ? Math.abs(v[i] - median) : Double.NaN;
                 return out;
             }
             default -> throw new IllegalArgumentException("unknown transform " + transform);
@@ -333,7 +291,7 @@ public final class GroupScorer implements Serializable {
         Arrays.fill(out, Double.NaN);
         final Integer[] idx = new Integer[n];
         int m = 0;
-        for (int i = 0; i < n; i++) if (ScreenMath.isFinite(v[i])) idx[m++] = i;
+        for (int i = 0; i < n; i++) if (StatMath.isFinite(v[i])) idx[m++] = i;
         if (m == 0) return out;
         if (m == 1) {
             out[idx[0]] = 0.5;

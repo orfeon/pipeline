@@ -13,6 +13,7 @@ import com.mercari.solution.module.Transform;
 import com.mercari.solution.util.pipeline.OptionUtil;
 import com.mercari.solution.util.pipeline.Union;
 import com.mercari.solution.util.pipeline.screen.ScreenReport;
+import com.mercari.solution.util.pipeline.feature.FeatureLineage;
 import com.mercari.solution.util.pipeline.screen.ScreenSpec;
 import com.mercari.solution.util.pipeline.screen.ScreenStages;
 import org.apache.beam.sdk.values.PCollection;
@@ -47,7 +48,7 @@ public class ScreenTransform extends Transform {
         try {
             final JsonObject parameters = JsonParser.parseString(getParametersText()).getAsJsonObject();
             final ScreenSpec parsed = ScreenSpec.parse(parameters);
-            ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromSchema(inputSchema);
+            FeatureLineage lineage = FeatureLineage.fromSchema(inputSchema);
             if (parsed.candidateManifest != null) {
                 final String manifest;
                 try {
@@ -55,7 +56,7 @@ public class ScreenTransform extends Transform {
                 } catch (final RuntimeException e) {
                     throw new IllegalModuleException(getName(), "screen", "failed to read candidates.manifest '" + parsed.candidateManifest + "': " + e.getMessage());
                 }
-                lineage = lineage.merge(ScreenSpec.Lineage.fromManifest(manifest));
+                lineage = lineage.merge(FeatureLineage.fromManifest(manifest, "candidates.manifest"));
             }
             spec = parsed.resolve(inputSchema, lineage);
         } catch (final IllegalArgumentException | IllegalStateException | JsonParseException e) {

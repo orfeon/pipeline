@@ -30,7 +30,7 @@ public class ScreenSelectionIncludeTest {
                 .withField("x", Schema.FieldType.FLOAT64)
                 .withField("x2", Schema.FieldType.FLOAT64)
                 .build();
-        final ScreenSpec.Lineage lineage = ScreenSpec.Lineage.fromManifest("{planHash: abc123, outputHash: def456, timeField: t}");
+        final FeatureLineage lineage = FeatureLineage.fromManifest("{planHash: abc123, outputHash: def456, timeField: t}", "candidates.manifest");
         final ScreenSpec spec = ScreenSpec.parse(JsonParser.parseString(
                         "{family: groupedMultinomial, group: g, label: y, candidates: [x, x2], transforms: [raw], placebo: {noise: 0}, output: {selection: 'target/unused.json'}}").getAsJsonObject())
                 .resolve(schema, lineage);
