@@ -632,6 +632,47 @@ public class JdbcUtilTest {
     }
 
     @Test
+    public void testValidateBindParameterLimit() {
+        // 2100 parameters on SQL Server: 105 rows x 20 fields is the maximum
+        JdbcUtil.validateStatementParameters(
+                JdbcUtil.OP.INSERT, JdbcUtil.DB.SQLSERVER, null, 105, 20);
+        IllegalArgumentException sqlServerException = Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> JdbcUtil.validateStatementParameters(
+                        JdbcUtil.OP.INSERT, JdbcUtil.DB.SQLSERVER, null, 106, 20));
+        Assertions.assertTrue(sqlServerException.getMessage().contains("2100"), sqlServerException.getMessage());
+        Assertions.assertTrue(sqlServerException.getMessage().contains("Reduce bulkInsertSize to 105"), sqlServerException.getMessage());
+
+        // 65535 parameters on PostgreSQL / MySQL
+        JdbcUtil.validateStatementParameters(
+                JdbcUtil.OP.INSERT, JdbcUtil.DB.POSTGRESQL, null, 1000, 65);
+        Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> JdbcUtil.validateStatementParameters(
+                        JdbcUtil.OP.INSERT, JdbcUtil.DB.MYSQL, null, 1000, 66));
+
+        // H2 has no known limit; an unknown field count (0) skips the check
+        JdbcUtil.validateStatementParameters(
+                JdbcUtil.OP.INSERT, JdbcUtil.DB.H2, null, 100000, 100);
+        JdbcUtil.validateStatementParameters(
+                JdbcUtil.OP.INSERT, JdbcUtil.DB.SQLSERVER, null, 1000, 0);
+
+        // createStatement applies the cap using the schema's field count
+        Schema schema = SchemaBuilder.builder()
+                .record("root").fields()
+                .requiredInt("id")
+                .requiredString("name")
+                .requiredInt("age")
+                .endRecord();
+        Assertions.assertThrows(
+                IllegalArgumentException.class,
+                () -> JdbcUtil.createStatement(
+                        "people", schema, JdbcUtil.OP.INSERT, JdbcUtil.DB.SQLSERVER, null, 701));
+        Assertions.assertNotNull(JdbcUtil.createStatement(
+                "people", schema, JdbcUtil.OP.INSERT, JdbcUtil.DB.SQLSERVER, null, 700));
+    }
+
+    @Test
     public void testCreateSQLServerStatementInsert() {
         Schema schema = SchemaBuilder.builder()
                 .record("root").fields()

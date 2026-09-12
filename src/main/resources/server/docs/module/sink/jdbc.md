@@ -51,7 +51,7 @@ Any other driver class name causes the module to fail with a "Not supported JDBC
 | op             | optional | Enum           | Write operation. Values: `INSERT`, `INSERT_OR_UPDATE`, `INSERT_OR_DONOTHING`. Default: `INSERT`. See [Write operations](#write-operations).                                    |
 | keyFields      | optional | Array<String\> | Field names that form the primary key. Used as the merge key for `INSERT_OR_UPDATE` / `INSERT_OR_DONOTHING`, and as the `PRIMARY KEY` when `createTable` is `true`.           |
 | batchSize      | optional | Integer        | Number of bulk operations (statements) added to the JDBC batch before it is executed and committed. The batch is also flushed at the end of each bundle. Must be >= 1. Default: `1000`. |
-| bulkInsertSize | optional | Integer        | Maximum number of records written by a single multi-row statement (`VALUES (...), (...), ...`). Must be >= 1. SQL Server allows at most `1000`. Default: `1`. See [Bulk inserts](#bulk-inserts). |
+| bulkInsertSize | optional | Integer        | Maximum number of records written by a single multi-row statement (`VALUES (...), (...), ...`). Must be >= 1, and `bulkInsertSize * <number of fields>` must not exceed the driver's bind-parameter limit (SQL Server: 2100, MySQL / PostgreSQL: 65535); SQL Server additionally allows at most `1000` rows per statement. Default: `1`. See [Bulk inserts](#bulk-inserts). |
 | createTable    | optional | Boolean        | If `true`, executes `CREATE TABLE IF NOT EXISTS` before writing, deriving column definitions from the input schema and using `keyFields` as the primary key. Default: `false`. |
 | emptyTable     | optional | Boolean        | If `true`, executes `DELETE FROM <table>` before writing to empty the table. Default: `false`.                                                                                 |
 
@@ -73,7 +73,11 @@ Notes:
 
 `bulkInsertSize` controls how many records go into one multi-row statement, while `batchSize` controls how many of those statements are added to the JDBC batch before it is executed and committed. For example, with `bulkInsertSize: 100` and `batchSize: 10`, up to 100 records are written per statement and up to 1,000 records are processed before each commit. The records left over at the end of a bundle are written with a shorter statement sized to the remaining count.
 
-For `INSERT_OR_UPDATE` and `INSERT_OR_DONOTHING`, records that share the same `keyFields` values are consolidated within each multi-row statement so that the database never sees the same key twice in one statement: `INSERT_OR_DONOTHING` keeps the first record and `INSERT_OR_UPDATE` keeps the last record. Records whose key contains `null` are never consolidated. `bulkInsertSize` counts records after this consolidation. Plain `INSERT` does not consolidate duplicates.
+Every record binds one placeholder per field, so a multi-row statement carries `bulkInsertSize * <number of fields>` bind parameters. Drivers cap that count (SQL Server: 2100 per request, MySQL and PostgreSQL: 65535 per prepared statement); a `bulkInsertSize` that would exceed the cap for the input schema fails at pipeline construction. For example, a 20-column table on SQL Server allows `bulkInsertSize` up to `105`.
+
+For `INSERT_OR_UPDATE` and `INSERT_OR_DONOTHING`, records that share the same `keyFields` values are consolidated within each multi-row statement so that one statement does not contain two records with the same key: `INSERT_OR_DONOTHING` keeps the first record and `INSERT_OR_UPDATE` keeps the last record. Records whose key contains `null` are never consolidated. `bulkInsertSize` counts records after this consolidation. Plain `INSERT` does not consolidate duplicates.
+
+Consolidation compares the exact field values. On PostgreSQL (`MERGE`), records that the database still treats as the same row — keys that differ only under a case-insensitive collation such as `citext`, `CHAR(n)` trailing-space padding, or a second `UNIQUE` index whose columns are not in `keyFields` — make the whole statement fail with `MERGE command cannot affect row a second time` or a unique-constraint violation. Set `bulkInsertSize: 1` for such tables. MySQL and H2 process the rows of one statement in order and are not affected.
 
 ## Table preparation
 
@@ -140,7 +144,7 @@ sinks:
 
 ### Example 3: Multi-row inserts into SQL Server
 
-Write up to 500 records per statement and commit every 20 statements (10,000 records).
+Write up to 100 records per statement and commit every 100 statements (10,000 records). With SQL Server's 2100-parameter limit, 100 rows per statement leaves room for tables of up to 21 columns.
 
 ```yaml
 sinks:
@@ -154,8 +158,8 @@ sinks:
       user: "projects/myproject/secrets/db-user/versions/latest"
       password: "projects/myproject/secrets/db-password/versions/latest"
       table: events
-      bulkInsertSize: 500
-      batchSize: 20
+      bulkInsertSize: 100
+      batchSize: 100
 ```
 
 ### Example 4: Full refresh (empty the table before writing)

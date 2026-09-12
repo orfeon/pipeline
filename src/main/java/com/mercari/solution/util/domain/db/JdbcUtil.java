@@ -25,7 +25,6 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 
 public class JdbcUtil {
@@ -218,7 +217,7 @@ public class JdbcUtil {
                                          final List<String> keyFields,
                                          final int bulkInsertSize) {
 
-        validateStatementParameters(op, db, keyFields, bulkInsertSize);
+        validateStatementParameters(op, db, keyFields, bulkInsertSize, schema.getFields().size());
 
         return switch (db) {
             case MYSQL -> createMySQLStatement(table, schema, op, keyFields, bulkInsertSize);
@@ -234,6 +233,19 @@ public class JdbcUtil {
             final DB db,
             final List<String> keyFields,
             final int bulkInsertSize) {
+
+        validateStatementParameters(op, db, keyFields, bulkInsertSize, 0);
+    }
+
+    /**
+     * @param fieldCount number of columns written per record (0 = unknown, skips the bind-parameter cap check).
+     */
+    public static void validateStatementParameters(
+            final OP op,
+            final DB db,
+            final List<String> keyFields,
+            final int bulkInsertSize,
+            final int fieldCount) {
 
         if(op.equals(OP.DELETE)) {
             throw new IllegalArgumentException("jdbc module does not support DELETE op.");
@@ -266,6 +278,47 @@ public class JdbcUtil {
             case MYSQL, POSTGRESQL -> {
             }
         }
+
+        final long maxParameters = maxBindParameters(db);
+        if(fieldCount > 0 && maxParameters > 0 && (long) bulkInsertSize * fieldCount > maxParameters) {
+            throw new IllegalArgumentException(String.format(
+                    "%s supports at most %d bind parameters per statement, but bulkInsertSize(%d) * fields(%d) = %d. Reduce bulkInsertSize to %d or less.",
+                    db, maxParameters, bulkInsertSize, fieldCount, (long) bulkInsertSize * fieldCount, maxParameters / fieldCount));
+        }
+    }
+
+    /** Driver/server limit on `?` placeholders in one prepared statement (0 = no known limit). */
+    private static long maxBindParameters(final DB db) {
+        return switch (db) {
+            case SQLSERVER -> 2100;
+            case MYSQL, POSTGRESQL -> 65535;
+            default -> 0;
+        };
+    }
+
+    @FunctionalInterface
+    private interface PlaceholderAppender {
+        void append(PreparedStatementTemplate.Builder sb, int placeholderIndex, Schema.Field field);
+    }
+
+    /** Appends `(?,?,..),(?,?,..),...` with placeholders numbered rowIndex * fieldCount + fieldIndex + 1. */
+    private static void appendValuesTuples(
+            final PreparedStatementTemplate.Builder sb,
+            final Schema schema,
+            final int bulkInsertSize,
+            final PlaceholderAppender appender) {
+
+        final List<Schema.Field> fields = schema.getFields();
+        for(int rowIndex = 0; rowIndex < bulkInsertSize; rowIndex++) {
+            sb.appendString("(");
+            for(int i = 0; i < fields.size(); i++) {
+                appender.append(sb, rowIndex * fields.size() + i + 1, fields.get(i));
+                sb.appendString(",");
+            }
+            sb.removeLast();
+            sb.appendString(")").appendString(",");
+        }
+        sb.removeLast();
     }
 
     private static PreparedStatementTemplate createMySQLStatement(final String table, final Schema schema,
@@ -282,15 +335,7 @@ public class JdbcUtil {
         sb.appendString(")");
 
         sb.appendString(" VALUES ");
-        IntStream.range(0, bulkInsertSize).forEach(rowIndex -> {
-            sb.appendString("(");
-            IntStream.range(0, schema.getFields().size()).forEach(
-                    i -> sb.appendPlaceholder(rowIndex * schema.getFields().size() + i + 1).appendString(",")
-            );
-            sb.removeLast();
-            sb.appendString(")").appendString(",");
-        });
-        sb.removeLast();
+        appendValuesTuples(sb, schema, bulkInsertSize, (b, index, field) -> b.appendPlaceholder(index));
 
         if(op.equals(OP.INSERT_OR_UPDATE)) {
             sb.appendString(" ON DUPLICATE KEY UPDATE ");
@@ -346,33 +391,13 @@ public class JdbcUtil {
             sb.appendString(")");
 
             sb.appendString(" VALUES ");
-            IntStream.range(0, bulkInsertSize).forEach(rowIndex -> {
-                sb.appendString("(");
-                IntStream.range(0, schema.getFields().size()).forEach(i -> {
-                    appendPostgreSQLTypedPlaceholder(
-                            sb, rowIndex * schema.getFields().size() + i + 1, schema.getFields().get(i));
-                    sb.appendString(",");
-                });
-                sb.removeLast();
-                sb.appendString(")").appendString(",");
-            });
-            sb.removeLast();
+            appendValuesTuples(sb, schema, bulkInsertSize, JdbcUtil::appendPostgreSQLTypedPlaceholder);
         } else if (op.equals(OP.INSERT_OR_UPDATE) || op.equals(OP.INSERT_OR_DONOTHING)) {
             sb.appendString("MERGE INTO ");
             sb.appendString(table);
 
             sb.appendString(" USING (VALUES ");
-            IntStream.range(0, bulkInsertSize).forEach(rowIndex -> {
-                sb.appendString("(");
-                IntStream.range(0, schema.getFields().size()).forEach(i -> {
-                    appendPostgreSQLTypedPlaceholder(
-                            sb, rowIndex * schema.getFields().size() + i + 1, schema.getFields().get(i));
-                    sb.appendString(",");
-                });
-                sb.removeLast();
-                sb.appendString(")").appendString(",");
-            });
-            sb.removeLast();
+            appendValuesTuples(sb, schema, bulkInsertSize, JdbcUtil::appendPostgreSQLTypedPlaceholder);
             sb.appendString(")");
 
             sb.appendString(" AS item (");
@@ -430,15 +455,7 @@ public class JdbcUtil {
             sb.appendString(")");
 
             sb.appendString(" VALUES ");
-            IntStream.range(0, bulkInsertSize).forEach(rowIndex -> {
-                sb.appendString("(");
-                IntStream.range(0, schema.getFields().size()).forEach(
-                        i -> sb.appendPlaceholder(rowIndex * schema.getFields().size() + i + 1).appendString(",")
-                );
-                sb.removeLast();
-                sb.appendString(")").appendString(",");
-            });
-            sb.removeLast();
+            appendValuesTuples(sb, schema, bulkInsertSize, (b, index, field) -> b.appendPlaceholder(index));
         } else if(op.equals(OP.INSERT_OR_UPDATE)) {
             sb.appendString("MERGE INTO ").appendString(table);
 
@@ -453,15 +470,7 @@ public class JdbcUtil {
             sb.appendString(")");
 
             sb.appendString(" VALUES ");
-            IntStream.range(0, bulkInsertSize).forEach(rowIndex -> {
-                sb.appendString("(");
-                IntStream.range(0, schema.getFields().size()).forEach(
-                        i -> sb.appendPlaceholder(rowIndex * schema.getFields().size() + i + 1).appendString(",")
-                );
-                sb.removeLast();
-                sb.appendString(")").appendString(",");
-            });
-            sb.removeLast();
+            appendValuesTuples(sb, schema, bulkInsertSize, (b, index, field) -> b.appendPlaceholder(index));
         }
 
         return sb.build();
@@ -482,15 +491,7 @@ public class JdbcUtil {
             sb.appendString(")");
 
             sb.appendString(" VALUES ");
-            IntStream.range(0, bulkInsertSize).forEach(rowIndex -> {
-                sb.appendString("(");
-                IntStream.range(0, schema.getFields().size()).forEach(
-                        i -> sb.appendPlaceholder(rowIndex * schema.getFields().size() + i + 1).appendString(",")
-                );
-                sb.removeLast();
-                sb.appendString(")").appendString(",");
-            });
-            sb.removeLast();
+            appendValuesTuples(sb, schema, bulkInsertSize, (b, index, field) -> b.appendPlaceholder(index));
         }
 
         return sb.build();

@@ -150,7 +150,9 @@ public class JdbcSink extends Sink {
         }
 
         final JdbcUtil.OP op = JdbcUtil.OP.valueOf(parameters.op);
-        JdbcUtil.validateStatementParameters(op, db, parameters.keyFields, parameters.bulkInsertSize);
+        JdbcUtil.validateStatementParameters(
+                op, db, parameters.keyFields, parameters.bulkInsertSize,
+                inputSchema.getAvroSchema().getFields().size());
 
         final PCollection<MElement> results = tableReady
                 .apply("WriteJdbc", ParDo.of(new WriteDoFn(
@@ -182,18 +184,22 @@ public class JdbcSink extends Sink {
         private final List<String> keyFields;
         private final int capacity;
         private final List<MElement> elements;
+        // Only upsert ops with a multi-row statement need in-statement key consolidation.
+        private final boolean consolidate;
         private final Map<CompositeKey, Integer> keyIndexes;
 
         BulkInsertBuffer(final JdbcUtil.OP op, final List<String> keyFields, final int capacity) {
             this.op = op;
             this.keyFields = keyFields;
             this.capacity = capacity;
-            this.elements = new ArrayList<>(capacity);
-            this.keyIndexes = new HashMap<>(capacity);
+            this.elements = new ArrayList<>(Math.min(capacity, 1024));
+            this.consolidate = capacity > 1
+                    && (JdbcUtil.OP.INSERT_OR_UPDATE.equals(op) || JdbcUtil.OP.INSERT_OR_DONOTHING.equals(op));
+            this.keyIndexes = consolidate ? new HashMap<>() : Map.of();
         }
 
         void add(final MElement element) {
-            if (!isUpsert()) {
+            if (!consolidate) {
                 elements.add(element);
                 return;
             }
@@ -232,12 +238,9 @@ public class JdbcSink extends Sink {
 
         void clear() {
             elements.clear();
-            keyIndexes.clear();
-        }
-
-        private boolean isUpsert() {
-            return JdbcUtil.OP.INSERT_OR_UPDATE.equals(op)
-                    || JdbcUtil.OP.INSERT_OR_DONOTHING.equals(op);
+            if (consolidate) {
+                keyIndexes.clear();
+            }
         }
     }
 
@@ -251,10 +254,18 @@ public class JdbcSink extends Sink {
             this.hashCode = Arrays.deepHashCode(values);
         }
 
+        /** Returns null when the key cannot be compared (a null component, or a value type the
+         *  primitive accessor does not support); such records are simply not consolidated. */
         static CompositeKey of(final MElement element, final List<String> keyFields) {
             final Object[] values = new Object[keyFields.size()];
             for (int i = 0; i < keyFields.size(); i++) {
-                final Object value = element.getPrimitiveValue(keyFields.get(i));
+                final Object value;
+                try {
+                    value = element.getPrimitiveValue(keyFields.get(i));
+                } catch (RuntimeException e) {
+                    // e.g. Avro FIXED keys: writable by ToStatementConverter but not exposed as a primitive.
+                    return null;
+                }
                 if (value == null) {
                     return null;
                 }
@@ -273,18 +284,8 @@ public class JdbcSink extends Sink {
                     yield bytes;
                 }
                 case BigDecimal decimal -> decimal.stripTrailingZeros();
-                case byte[] values -> values.clone();
-                case short[] values -> values.clone();
-                case int[] values -> values.clone();
-                case long[] values -> values.clone();
-                case char[] values -> values.clone();
-                case float[] values -> values.clone();
-                case double[] values -> values.clone();
-                case boolean[] values -> values.clone();
-                case Object[] values -> Arrays.stream(values)
-                        .map(CompositeKey::normalize)
-                        .toArray(Object[]::new);
-                default -> value;
+                case List<?> list -> list.stream().map(CompositeKey::normalize).toArray();
+                default -> value; // byte[] and nested Object[] are handled by Arrays.deepEquals/deepHashCode
             };
         }
 
@@ -322,6 +323,8 @@ public class JdbcSink extends Sink {
 
         private transient JdbcUtil.CloseableDataSource dataSource;
         private transient PreparedStatementTemplate statementTemplate;
+        // Statement templates for the tail of a bundle, keyed by row count (bounded by bulkInsertSize).
+        private transient Map<Integer, PreparedStatementTemplate> partialTemplates;
         private transient Connection connection = null;
         private transient PreparedStatement preparedStatement;
 
@@ -358,6 +361,7 @@ public class JdbcSink extends Sink {
 
         @Setup
         public void setup() {
+            this.partialTemplates = new HashMap<>();
             this.statementTemplate = createStatementTemplate(bulkInsertSize);
             this.dataSource = JdbcUtil.createDataSource(driver, url, user, password);
         }
@@ -383,61 +387,51 @@ public class JdbcSink extends Sink {
             try {
                 elementBuffer.add(c.element());
                 if (elementBuffer.isFull()) {
-                    addBufferedElementsToBatch(statementTemplate, preparedStatement, true);
-                    elementBuffer.clear();
+                    addBufferedElementsToBatch(statementTemplate, preparedStatement);
+                    if (batchBufferSize >= batchSize) {
+                        preparedStatement.executeBatch();
+                        connection.commit();
+                        batchBufferSize = 0;
+                    }
                 }
-            } catch (SQLException e) {
-                preparedStatement.clearBatch();
-                connection.rollback();
-                elementBuffer.clear();
-                batchBufferSize = 0;
-                throw new RuntimeException(e);
+            } catch (Exception e) {
+                // Conversion errors are not SQLExceptions but still leave the batch/transaction dirty.
+                abortBundle(e);
             }
         }
 
         @FinishBundle
         public void finishBundle() throws Exception {
             try {
-                boolean flushed = false;
                 if (batchBufferSize > 0) {
                     preparedStatement.executeBatch();
                     batchBufferSize = 0;
-                    flushed = true;
                 }
                 if (!elementBuffer.isEmpty()) {
                     executeRemainingElements();
-                    flushed = true;
                 }
-                if (flushed) {
-                    connection.commit();
-                }
+                connection.commit();
                 cleanUpStatementAndConnection();
-            } catch (SQLException e) {
-                preparedStatement.clearBatch();
-                connection.rollback();
-                cleanUpStatementAndConnection();
-                throw new RuntimeException(e);
+            } catch (Exception e) {
+                abortBundle(e);
             }
         }
 
+        /** Binds every buffered element into one multi-row statement, adds it to the batch and empties the buffer. */
         private void addBufferedElementsToBatch(
                 final PreparedStatementTemplate template,
-                final PreparedStatement statement,
-                final boolean commitOnBatchSize) throws SQLException {
+                final PreparedStatement statement) throws SQLException {
 
-            statement.clearParameters();
-            for (int i = 0; i < elementBuffer.size(); i++) {
-                ToStatementConverter.convertElement(
-                        elementBuffer.get(i),
-                        template.createPlaceholderSetterProxy(statement, i * fieldSize));
-            }
-            statement.addBatch();
-            batchBufferSize += 1;
-
-            if (commitOnBatchSize && batchBufferSize >= batchSize) {
-                statement.executeBatch();
-                connection.commit();
-                batchBufferSize = 0;
+            try {
+                for (int i = 0; i < elementBuffer.size(); i++) {
+                    ToStatementConverter.convertElement(
+                            elementBuffer.get(i),
+                            template.createPlaceholderSetterProxy(statement, i * fieldSize));
+                }
+                statement.addBatch();
+                batchBufferSize += 1;
+            } finally {
+                elementBuffer.clear();
             }
         }
 
@@ -445,17 +439,41 @@ public class JdbcSink extends Sink {
             return JdbcUtil.createStatement(table, schema, op, db, keyFields, size);
         }
 
+        /** Writes the (fewer than bulkInsertSize) elements left at the end of a bundle with a statement sized to them. */
         private void executeRemainingElements() throws SQLException {
-            final PreparedStatementTemplate partialTemplate = createStatementTemplate(elementBuffer.size());
+            final PreparedStatementTemplate partialTemplate = partialTemplates
+                    .computeIfAbsent(elementBuffer.size(), this::createStatementTemplate);
             try(final PreparedStatement partialStatement = connection.prepareStatement(partialTemplate.getStatementString())) {
-                addBufferedElementsToBatch(partialTemplate, partialStatement, false);
-                if(batchBufferSize > 0) {
-                    partialStatement.executeBatch();
-                    batchBufferSize = 0;
-                }
-            } finally {
-                elementBuffer.clear();
+                addBufferedElementsToBatch(partialTemplate, partialStatement);
+                partialStatement.executeBatch();
+                batchBufferSize = 0;
             }
+        }
+
+        /** Rolls back the open transaction, drops the connection (so the next bundle reconnects) and rethrows. */
+        private void abortBundle(final Exception cause) throws Exception {
+            elementBuffer.clear();
+            batchBufferSize = 0;
+            try {
+                if (preparedStatement != null) {
+                    preparedStatement.clearBatch();
+                }
+                if (connection != null) {
+                    connection.rollback();
+                }
+            } catch (SQLException e) {
+                cause.addSuppressed(e);
+            } finally {
+                try {
+                    cleanUpStatementAndConnection();
+                } catch (Exception e) {
+                    cause.addSuppressed(e);
+                }
+            }
+            if (cause instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw new RuntimeException(cause);
         }
 
         private void cleanUpStatementAndConnection() throws Exception {

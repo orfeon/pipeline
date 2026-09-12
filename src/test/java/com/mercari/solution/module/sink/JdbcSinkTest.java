@@ -102,6 +102,42 @@ public class JdbcSinkTest {
         Assertions.assertTrue(buffer.isFull());
     }
 
+    @Test
+    public void testBulkInsertBufferSingleRowDoesNotTouchKeys() {
+        // With bulkInsertSize = 1 no consolidation can happen, so the key fields must not be read at all:
+        // an upsert whose key type the primitive accessor cannot handle worked before bulk inserts existed.
+        final JdbcSink.BulkInsertBuffer buffer = new JdbcSink.BulkInsertBuffer(
+                JdbcUtil.OP.INSERT_OR_UPDATE, List.of("id"), 1);
+
+        buffer.add(fixedKeyElement());
+        Assertions.assertEquals(1, buffer.size());
+        Assertions.assertTrue(buffer.isFull());
+    }
+
+    @Test
+    public void testBulkInsertBufferUnsupportedKeyTypeIsNotConsolidated() {
+        final JdbcSink.BulkInsertBuffer buffer = new JdbcSink.BulkInsertBuffer(
+                JdbcUtil.OP.INSERT_OR_UPDATE, List.of("id"), 2);
+
+        buffer.add(fixedKeyElement());
+        buffer.add(fixedKeyElement());
+
+        Assertions.assertEquals(2, buffer.size());
+    }
+
+    /** An Avro record whose key column is a FIXED (writable by ToStatementConverter, rejected by getPrimitiveValue). */
+    private static MElement fixedKeyElement() {
+        final org.apache.avro.Schema schema = org.apache.avro.SchemaBuilder.builder()
+                .record("root").fields()
+                .name("id").type().fixed("fixedId").size(2).noDefault()
+                .requiredString("name")
+                .endRecord();
+        final org.apache.avro.generic.GenericRecord record = new org.apache.avro.generic.GenericData.Record(schema);
+        record.put("id", new org.apache.avro.generic.GenericData.Fixed(schema.getField("id").schema(), new byte[]{1, 2}));
+        record.put("name", "first");
+        return MElement.of(record, 0L);
+    }
+
     private static MElement element(final Map<String, Object> values) {
         return MElement.of(values, 0L);
     }
