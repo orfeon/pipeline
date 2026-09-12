@@ -26,9 +26,10 @@ import java.util.List;
 /**
  * Prediction verification against a baseline: matches prediction sets with the outcome on time splits with
  * a selection / report role and reports the excess log score over the baseline (with a Poisson bootstrap CI,
- * paired between prediction sets), logloss, hit@1 and Brier, per declared slice, plus calibration tables.
- * Outputs the metrics (default), {@code calibration}, {@code units} (the per-unit loss decomposition) and one
- * {@code summary} record. Batch only.
+ * paired between prediction sets), logloss, hit@1 and Brier, per declared slice, plus calibration tables, calibration
+ * fits as derived prediction sets and slice discovery. Outputs the metrics (default), {@code calibration},
+ * {@code units} (the per-unit loss decomposition), {@code slices} (the discovered slices) and one {@code summary}
+ * record. Batch only.
  */
 @Transform.Module(name = "evaluation")
 public class EvaluationTransform extends Transform {
@@ -80,6 +81,7 @@ public class EvaluationTransform extends Transform {
                 .of(outputs.metrics(), EvaluationReport.metricsSchema())
                 .and("calibration", outputs.calibration(), EvaluationReport.calibrationSchema())
                 .and("units", outputs.units(), EvaluationReport.unitsSchema())
+                .and("slices", outputs.slices(), EvaluationReport.slicesSchema())
                 .and("summary", outputs.summary(), EvaluationReport.summarySchema());
     }
 }

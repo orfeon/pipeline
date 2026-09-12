@@ -24,8 +24,11 @@ public final class EvaluationReport {
     public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier");
     static final double Z95 = 1.959963984540054;
 
-    /** Result of {@link #build}: the metrics records and the summary, as output-schema maps. */
-    public record Result(List<Map<String, Object>> records, Map<String, Object> summary) {}
+    /** Result of {@link #build}: the metrics records, the slice discovery records and the summary, as output-schema maps. */
+    public record Result(List<Map<String, Object>> records, List<Map<String, Object>> slices, Map<String, Object> summary) {}
+
+    /** key prefix of a discovery cell in the metrics accumulator map */
+    public static final String DISCOVERY_PREFIX = "\u0001disc\u0001";
 
     // ---- metrics -------------------------------------------------------------------------------------------
 
@@ -178,7 +181,8 @@ public final class EvaluationReport {
                 }
             }
         }
-        return new Result(records, summary(spec, accumulators, fits));
+        final Discovery discovery = spec.hasDiscovery() ? discovery(spec, accumulators) : null;
+        return new Result(records, discovery == null ? List.of() : discovery.records, summary(spec, accumulators, fits, discovery));
     }
 
     private static void putCounts(final Map<String, Object> r, final MetricAccumulator acc) {
@@ -191,7 +195,7 @@ public final class EvaluationReport {
 
     // ---- summary -------------------------------------------------------------------------------------------
 
-    static Map<String, Object> summary(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits) {
+    static Map<String, Object> summary(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits, final Discovery discovery) {
         final Map<String, Object> s = new LinkedHashMap<>();
         final MetricAccumulator rows = accumulators.getOrDefault(MetricAccumulator.ROWS_KEY, new MetricAccumulator());
         final List<String> notes = new ArrayList<>(spec.notes);
@@ -253,6 +257,8 @@ public final class EvaluationReport {
             }
         }
         s.put("fits", fitRecords);
+        s.put("discovery", discovery == null ? new ArrayList<>() : discovery.summary);
+        if (discovery != null) notes.addAll(discovery.notes);
         final List<String> slices = new ArrayList<>();
         for (final EvaluationSpec.Slice sl : spec.slices) slices.add(sl.name());
         s.put("slices", slices);
@@ -261,6 +267,136 @@ public final class EvaluationReport {
         s.put("outputHash", spec.manifestOutputHash);
         s.put("notes", notes);
         return s;
+    }
+
+    // ---- slice discovery -----------------------------------------------------------------------------------
+
+    /** The slice discovery's outcome: the records (filtered by {@code output}), one summary record per set, notes. */
+    public static final class Discovery {
+        public final List<Map<String, Object>> records = new ArrayList<>();
+        public final List<Map<String, Object>> summary = new ArrayList<>();
+        public final List<String> notes = new ArrayList<>();
+    }
+
+    /**
+     * The null threshold of the maximum |z| over {@code candidates} independent standard normals at level
+     * {@code quantile}: Φ⁻¹((1 + quantile^(1/K)) / 2). Candidates overlap, so the true maximum is smaller: the
+     * threshold is conservative.
+     */
+    public static double discoveryThreshold(final int candidates, final double quantile) {
+        if (candidates <= 0) return Double.NaN;
+        return StatMath.inverseNormal((1 + Math.pow(quantile, 1d / candidates)) / 2);
+    }
+
+    /**
+     * The z of a slice's mean against the split's overall mean under the random-subset (exchangeability) null:
+     * (m_s − m) / (σ √((1/n)(1 − n/N))), with σ the unit-level standard deviation over the split.
+     */
+    public static double discoveryZ(final double n, final double sum, final double total, final double totalSum, final double totalSumSq) {
+        if (!(n > 1) || !(total > n)) return Double.NaN;
+        final double mean = totalSum / total;
+        final double variance = totalSumSq / total - mean * mean;
+        if (!(variance > 0)) return Double.NaN;
+        final double se = Math.sqrt(variance * (1d / n) * (1d - n / total));
+        return (sum / n - mean) / se;
+    }
+
+    static Discovery discovery(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators) {
+        final EvaluationSpec.Discovery d = spec.discovery;
+        final Discovery out = new Discovery();
+        final List<String> names = spec.predictionNames();
+        // cells per (split, set): dims csv + values → [n, Σd, Σd²]
+        final Map<String, Map<String, double[]>> cells = new LinkedHashMap<>();
+        for (final Map.Entry<String, MetricAccumulator> e : accumulators.entrySet()) {
+            if (!e.getKey().startsWith(DISCOVERY_PREFIX)) continue;
+            final String[] parts = EvaluationScorer.parseDiscoveryKey(e.getKey().substring(DISCOVERY_PREFIX.length()));
+            final double[] t = e.getValue().getTotal();
+            cells.computeIfAbsent(parts[0] + SEP + parts[1], k -> new LinkedHashMap<>()).put(parts[2] + SEP + parts[3], new double[]{t[0], t[1], t[2]});
+        }
+        final double z95 = Z95;
+        for (final int set : d.sets) {
+            final String name = names.get(1 + set);
+            final Map<String, double[]> discover = cells.getOrDefault(d.discoverOn + SEP + set, Map.of());
+            final Map<String, double[]> confirm = cells.getOrDefault(d.confirmOn + SEP + set, Map.of());
+            final double[] all = discover.get(SEP);
+            final double[] allConfirm = confirm.get(SEP);
+            final Map<String, Object> sr = new LinkedHashMap<>();
+            sr.put("prediction", name);
+            sr.put("metric", d.metric);
+            if (all == null || !(all[0] > 1)) {
+                sr.put("nCandidates", 0L);
+                sr.put("threshold", null);
+                sr.put("nPassed", 0L);
+                sr.put("nConfirmed", 0L);
+                sr.put("note", "no scored unit in split " + d.discoverOn);
+                out.summary.add(sr);
+                continue;
+            }
+            // candidates: the cells with enough support that are a proper subset of the split
+            final List<Map.Entry<String, double[]>> candidates = new ArrayList<>();
+            for (final Map.Entry<String, double[]> e : discover.entrySet()) {
+                if (e.getKey().equals(SEP)) continue;
+                if (e.getValue()[0] >= d.minSupport && e.getValue()[0] < all[0]) candidates.add(e);
+            }
+            String note = null;
+            if (candidates.size() > d.maxCandidates) {
+                candidates.sort((a, b) -> Double.compare(b.getValue()[0], a.getValue()[0]));
+                note = candidates.size() + " candidate slices exceed maxCandidates " + d.maxCandidates + ": the " + d.maxCandidates + " best supported were kept";
+                candidates.subList(d.maxCandidates, candidates.size()).clear();
+            }
+            final int k = candidates.size();
+            final double threshold = discoveryThreshold(k, d.quantile);
+            long passed = 0, confirmed = 0;
+            for (final Map.Entry<String, double[]> e : candidates) {
+                final String[] parts = e.getKey().split(SEP, -1);
+                final String[] dimIdx = parts[0].split(",");
+                final String[] values = parts[1].split(String.valueOf((char) 2), -1);
+                final double[] c = e.getValue();
+                final double z = discoveryZ(c[0], c[1], all[0], all[1], all[2]);
+                final boolean pass = Double.isFinite(z) && Math.abs(z) > threshold;
+                final double[] cc = confirm.get(e.getKey());
+                final double zc = cc == null || allConfirm == null ? Double.NaN : discoveryZ(cc[0], cc[1], allConfirm[0], allConfirm[1], allConfirm[2]);
+                final boolean confirm2 = pass && Double.isFinite(zc) && Math.signum(zc) == Math.signum(z) && Math.abs(zc) > z95;
+                if (pass) passed++;
+                if (confirm2) confirmed++;
+                if (!pass && EvaluationSpec.DISCOVERY_OUTPUT_PASSED.equals(d.output)) continue;
+                final Map<String, Object> r = new LinkedHashMap<>();
+                r.put("prediction", name);
+                r.put("metric", d.metric);
+                r.put("depth", (long) dimIdx.length);
+                final List<String> dimNames = new ArrayList<>();
+                for (final String i : dimIdx) dimNames.add(d.dimensions.get(Integer.parseInt(i)).name());
+                r.put("dimensions", dimNames);
+                r.put("values", new ArrayList<>(Arrays.asList(values)));
+                r.put("n_discover", (long) c[0]);
+                r.put("mean_discover", c[1] / c[0]);
+                r.put("delta_discover", c[1] / c[0] - all[1] / all[0]);
+                r.put("z_discover", finiteOrNull(z));
+                r.put("threshold", finiteOrNull(threshold));
+                r.put("passed", pass);
+                r.put("n_confirm", cc == null ? 0L : (long) cc[0]);
+                r.put("mean_confirm", cc == null || !(cc[0] > 0) ? null : cc[1] / cc[0]);
+                r.put("delta_confirm", cc == null || !(cc[0] > 0) || allConfirm == null ? null : cc[1] / cc[0] - allConfirm[1] / allConfirm[0]);
+                r.put("z_confirm", finiteOrNull(zc));
+                r.put("confirmed", confirm2);
+                out.records.add(r);
+            }
+            sr.put("nCandidates", (long) k);
+            sr.put("threshold", finiteOrNull(threshold));
+            sr.put("nPassed", passed);
+            sr.put("nConfirmed", confirmed);
+            sr.put("note", note);
+            if (note != null) out.notes.add("sliceDiscovery on " + name + ": " + note);
+            out.summary.add(sr);
+        }
+        // records ordered: confirmed first, then by |z_discover|
+        out.records.sort((a, b) -> {
+            final int c = Boolean.compare((Boolean) b.get("confirmed"), (Boolean) a.get("confirmed"));
+            if (c != 0) return c;
+            final Double za = (Double) a.get("z_discover"), zb = (Double) b.get("z_discover");
+            return Double.compare(zb == null ? 0 : Math.abs(zb), za == null ? 0 : Math.abs(za));
+        });
+        return out;
     }
 
     // ---- calibration ---------------------------------------------------------------------------------------
@@ -442,6 +578,40 @@ public final class EvaluationReport {
                 .build();
     }
 
+    public static Schema slicesSchema() {
+        return Schema.builder()
+                .withField("prediction", Schema.FieldType.STRING)
+                .withField("metric", Schema.FieldType.STRING)
+                .withField("depth", Schema.FieldType.INT64)
+                .withField("dimensions", Schema.FieldType.array(Schema.FieldType.STRING))
+                .withField("values", Schema.FieldType.array(Schema.FieldType.STRING))
+                .withField("n_discover", Schema.FieldType.INT64)
+                .withField("mean_discover", Schema.FieldType.FLOAT64)
+                .withField("delta_discover", Schema.FieldType.FLOAT64)
+                .withField("z_discover", Schema.FieldType.FLOAT64)
+                .withField("threshold", Schema.FieldType.FLOAT64)
+                .withField("passed", Schema.FieldType.BOOLEAN)
+                .withField("n_confirm", Schema.FieldType.INT64)
+                .withField("mean_confirm", Schema.FieldType.FLOAT64)
+                .withField("delta_confirm", Schema.FieldType.FLOAT64)
+                .withField("z_confirm", Schema.FieldType.FLOAT64)
+                .withField("confirmed", Schema.FieldType.BOOLEAN)
+                .build();
+    }
+
+    /** One slice discovery summary record per set (the summary's {@code discovery}). */
+    public static Schema discoverySummarySchema() {
+        return Schema.builder()
+                .withField("prediction", Schema.FieldType.STRING)
+                .withField("metric", Schema.FieldType.STRING)
+                .withField("nCandidates", Schema.FieldType.INT64)
+                .withField("threshold", Schema.FieldType.FLOAT64)
+                .withField("nPassed", Schema.FieldType.INT64)
+                .withField("nConfirmed", Schema.FieldType.INT64)
+                .withField("note", Schema.FieldType.STRING)
+                .build();
+    }
+
     /** One calibration fit record (the summary's {@code fits}, the {@code output.calibration} file). */
     public static Schema fitSchema() {
         return Schema.builder()
@@ -532,6 +702,7 @@ public final class EvaluationReport {
                 .withField("bootstrapUnit", Schema.FieldType.STRING)
                 .withField("nCalibrationTables", Schema.FieldType.INT64)
                 .withField("fits", Schema.FieldType.array(Schema.FieldType.element(fitSchema())))
+                .withField("discovery", Schema.FieldType.array(Schema.FieldType.element(discoverySummarySchema())))
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("parametersHash", Schema.FieldType.STRING)
                 .withField("planHash", Schema.FieldType.STRING)
@@ -573,6 +744,12 @@ public final class EvaluationReport {
             parts.add("slices=" + slices);
         }
         if (spec.utilityField != null) parts.add("utility=" + spec.utilityField);
+        if (spec.hasDiscovery()) {
+            final List<String> dims = new ArrayList<>();
+            for (final EvaluationSpec.Dimension dim : spec.discovery.dimensions) dims.add(dim.name());
+            parts.add("sliceDiscovery=" + dims + " depth<=" + spec.discovery.maxDepth + " support>=" + spec.discovery.minSupport + " " + spec.discovery.discoverOn + "->" + spec.discovery.confirmOn
+                    + " metric=" + spec.discovery.metric + " q" + spec.discovery.quantile + (spec.discovery.hasNumeric() ? " (+1 sketch pass)" : ""));
+        }
         if (!spec.notes.isEmpty()) parts.add("notes=" + spec.notes);
         return "evaluation " + String.join(" ", parts);
     }

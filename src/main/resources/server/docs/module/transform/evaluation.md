@@ -1,8 +1,8 @@
 ---
 type: Transform Module
 title: Evaluation Transform Module
-description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; the per-unit loss decomposition as an output. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
-tags: [transform, evaluation, machine-learning, statistics, calibration, bootstrap, batch]
+description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; slice discovery (candidate slices over declared dimensions up to a depth, scored against the random-subset null on a selection split and confirmed on another); the per-unit loss decomposition as an output. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
+tags: [transform, evaluation, machine-learning, statistics, calibration, bootstrap, slices, batch]
 timestamp: 2026-09-13T00:00:00Z
 ---
 
@@ -142,6 +142,29 @@ logit.
 The fit records (estimates, standard errors, `logScore`, `gainPerUnit` over the start, iterations,
 convergence) are the summary's `fits`; `output.calibration` also writes them as JSON.
 
+### Slice discovery
+
+```yaml
+sliceDiscovery:
+  dimensions: [country, device, {field: price, bins: 5}]
+  maxDepth: 2
+  minSupport: 300
+  discoverOn: valid
+  confirmOn: test
+  of: [candidate]
+  metric: excessLogScore
+```
+
+*Where does the prediction do better or worse than overall?* Every combination of up to `maxDepth` dimension
+values (a numeric dimension binned into `bins` quantiles) with at least `minSupport` units is a candidate
+slice. On `discoverOn` (a selection split) its mean of the per-unit `metric` is tested against the split's
+mean under the random-subset null — z = (mean_s − mean) / (σ √((1/n)(1 − n/N))) — with a threshold for the
+maximum over the K candidates (`quantile`, default 0.99). A passed slice is re-read on `confirmOn` and
+`confirmed` when the sign agrees and |z| > 1.96 there. **Report the confirmation window's number**; the
+discovery window's is a reference column. Even a confirmed slice is a candidate for operational use — ask for
+a third window. The candidate cells share the metrics Combine (no extra pass); a numeric dimension adds one
+sketch pass.
+
 ## Input contract
 
 | role | description |
@@ -191,6 +214,7 @@ the time partition.
 | utility | optional | String or Object | The realised value of a positive row; `utility` in the calibration records. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 6 × samples doubles. |
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}`. |
+| sliceDiscovery | optional | Object | `dimensions` (fields; `{field, bins}` for a numeric one), `maxDepth` (default 2, at most 3), `minSupport` (default 100 units), `discoverOn` (a selection split), `confirmOn` (another split), `of` (compared sets, default all), `metric` (`excessLogScore` default, `logScore`, `hitAt1`, `brier`), `quantile` (default 0.99), `maxCandidates` (default 20000), `output` (`passed` default / `all`). See [Slice discovery](#slice-discovery). |
 | output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
 | slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row. Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
@@ -202,6 +226,7 @@ the time partition.
 | `<name>` | the metrics: one record per split × prediction set (the baseline under `prediction: baseline`) × slice value (`slice` / `value` null for the overall record), plus one pair record per ordered pair of prediction sets (`pair` = the other set, values = differences) |
 | `<name>.calibration` | one record per split × prediction set × table × bin |
 | `<name>.units` | the per-unit loss decomposition: one record per unit × prediction set (the baseline included) |
+| `<name>.slices` | the discovered slices: one record per candidate × set (`output: passed` keeps the passed ones) |
 | `<name>.summary` | one record per run |
 
 ### Metrics record
@@ -226,6 +251,13 @@ the time partition.
 outside the edges; the threshold in `lower` for `edge`), `n`, `positives`, `p_model`, `p_baseline` (null in
 binomial prior mode), `rate`, `rate_lo`, `rate_hi` (Wilson), `utility`.
 
+### Slices record
+
+`prediction`, `metric`, `depth`, `dimensions` (ARRAY<STRING>; `<field>/q<bins>` for a binned dimension),
+`values` (ARRAY<STRING>), `n_discover`, `mean_discover`, `delta_discover` (the slice's mean minus the
+split's), `z_discover`, `threshold`, `passed`, `n_confirm`, `mean_confirm`, `delta_confirm`, `z_confirm`,
+`confirmed`. Confirmed slices first, then by |z_discover|.
+
 ### Units record
 
 `split`, `unit` (the group key, or the row identity), `time`, `prediction`, `n_rows`, `weight`, `logScore`,
@@ -241,7 +273,8 @@ and observed range of each split), `nRows`, `nRowsInvalid` (null label / group /
 (in no split), `nUnits`, `nUnitsSkipped` (no positive label, an invalid baseline or prediction value),
 `bootstrapSamples`, `bootstrapSeed`, `bootstrapUnit`, `nCalibrationTables`, `fits` (ARRAY<STRUCT<prediction,
 derived, type, fitOn, fitted, temperature, a, b, intercept, se_a, se_b, se_intercept, z_a, nUnits, logScore,
-logScoreAtIdentity, gainPerUnit, iterations, rejectedSteps, converged, note\>\>), `slices`,
+logScoreAtIdentity, gainPerUnit, iterations, rejectedSteps, converged, note\>\>), `discovery`
+(ARRAY<STRUCT<prediction, metric, nCandidates, threshold, nPassed, nConfirmed, note\>\>), `slices`,
 `parametersHash` (the SHA-256, 16 hex characters, of the canonical parameters without `manifest` and
 `output`), `planHash` / `outputHash` (of the feature manifest when given), `notes` (role defaults applied,
 prior mode, overlapping split ranges, a fit without an estimate).
@@ -283,6 +316,13 @@ transforms:
       slices:
         - {field: session_time, bucket: month}
         - {field: category}
+      sliceDiscovery:
+        dimensions: [category, {field: start_price, bins: 5}]
+        maxDepth: 2
+        minSupport: 300
+        discoverOn: valid
+        confirmOn: test
+        of: [candidate]
       output:
         calibration: gs://bucket/eval/${args.job}/calibration.json
 sinks:
@@ -304,6 +344,11 @@ sinks:
     parameters:
       output: gs://bucket/eval/${args.job}/units
       format: parquet
+  - name: slices
+    module: bigquery
+    inputs: [eval.slices]
+    parameters:
+      table: project.dataset.model_slices
 ```
 
 The report split's `candidate` record answers the question: `excessLogScore` with `excessLogScore_lo` above 0
@@ -375,7 +420,8 @@ parameters:
   the model (information) or the baseline (over-confidence)? The `edge` groups ask the same per ratio
   threshold.
 - Slices with a negative Δ where the overall is positive are where the model loses to the baseline; the
-  `units` output feeds the `attribution` transform for the total decomposition.
+  `slices` output lists the ones that survived discovery and confirmation, and the `units` output feeds the
+  `attribution` transform for the total decomposition.
 
 ## Limits
 
@@ -386,8 +432,12 @@ parameters:
 - Slices are for low-cardinality dimensions: every distinct value costs splits × (1 + prediction sets)
   accumulators of 6 × `bootstrap.samples` doubles (about 48 KB each at the default 1000), all gathered on one
   worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a
-  high-cardinality field (an id) belongs in a coarser bucket, not in `slices`.
+  high-cardinality field (an id) belongs in `sliceDiscovery` dimensions or a coarser bucket, not in `slices`.
 - A calibration fit is a small model: estimated on the selection split, reported on the report split; taking
   its parameters to production is the user's call.
-- Batch, global window only. Slice discovery, the gaussian / ranking families and the HTML report are the
-  next stages (see `docs/design/evaluation-dsl.md` §11).
+- Slice discovery is a multiple-comparison device: the threshold treats the candidates as independent
+  (conservative), the confirmation is one test per passed slice, and the correlation between units is
+  ignored (as by the bootstrap). Report the confirmation window's number and ask for a third window before
+  acting.
+- Batch, global window only. The gaussian / ranking families and the HTML report are the next stages (see
+  `docs/design/evaluation-dsl.md` §11).
