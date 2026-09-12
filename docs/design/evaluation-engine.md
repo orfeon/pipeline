@@ -46,7 +46,11 @@ input ─ Prepare ─┬─ rows KV<split|unit, EvaluationRow> ─ Group (GBK) o
   the unit's replicate weights.
 - **Combine.perKey** merges the totals and the replicate vectors; **Gather** collects the few hundred
   accumulators into one list; **Finalize** runs `EvaluationReport.build` once. In the global window the
-  default empty list still fires, so the summary is emitted on an empty input.
+  default empty list still fires, so the summary is emitted on an empty input. The gather is the engine's
+  memory boundary: the key count is splits × (1 + k) × (1 + Σ slice cardinalities) and nothing bounds a
+  slice's cardinality, so a slice on a high-cardinality field (an id) gathers gigabytes onto one worker;
+  the docs restrict `slices` to low-cardinality dimensions. `build` only ever needs the accumulators of one
+  cell together (the summary reads the bookkeeping keys alone), so a per-cell finalize is the future shape.
 
 ### 2.1 Why the pair interval is free
 

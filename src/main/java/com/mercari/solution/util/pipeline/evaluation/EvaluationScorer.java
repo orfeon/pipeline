@@ -23,9 +23,12 @@ import java.util.SplittableRandom;
  */
 public final class EvaluationScorer implements Serializable {
 
-    private static final String SEP = String.valueOf((char) 1);
-    /** floor of a mean inside a log score (a prediction giving a positive row probability 0 scores log EPS) */
-    static final double LOG_FLOOR = 1e-12;
+    private static final String SEP = MetricAccumulator.SEP;
+    /**
+     * floor of a mean inside a log score (a prediction giving a positive row probability 0 scores log EPS): the same
+     * clamp {@link Baselines#means} applies, on purpose not GlmFit's 1e-300 optimizer guard (this is a reported metric's cap)
+     */
+    static final double LOG_FLOOR = Baselines.EPS;
 
     private final EvaluationSpec spec;
     private final Family family;
@@ -243,7 +246,7 @@ public final class EvaluationScorer implements Serializable {
 
     /** The parts of a metrics key: {@code [split, prediction index, slice index, slice value]} (null for a bookkeeping key). */
     public static String[] parseKey(final String key) {
-        if (key.startsWith("")) return null;
+        if (key.startsWith(SEP)) return null;
         final String[] parts = key.split(SEP, -1);
         return parts.length == 4 ? parts : null;
     }
@@ -338,18 +341,15 @@ public final class EvaluationScorer implements Serializable {
             r.put("prediction", names.get(j));
             r.put("n_rows", (long) unit.size());
             r.put("weight", unit.unitWeight);
-            r.put("logScore", finiteOrNull(m.logScore[j]));
+            r.put("logScore", EvaluationReport.finiteOrNull(m.logScore[j]));
             r.put("logScoreBaseline", priorBase ? null : m.logScore[0]);
-            r.put("excessLogScore", priorBase ? null : m.logScore[j] - m.logScore[0]);
-            r.put("hitAt1", finiteOrNull(m.hitAt1[j]));
-            r.put("brier", finiteOrNull(m.brier[j]));
+            r.put("excessLogScore", priorBase ? null : EvaluationReport.finiteOrNull(m.logScore[j] - m.logScore[0]));
+            r.put("hitAt1", EvaluationReport.finiteOrNull(m.hitAt1[j]));
+            r.put("brier", EvaluationReport.finiteOrNull(m.brier[j]));
             r.put("slices", slices);
             records.add(r);
         }
         return records;
     }
 
-    static Double finiteOrNull(final double v) {
-        return Double.isNaN(v) || Double.isInfinite(v) ? null : v;
-    }
 }

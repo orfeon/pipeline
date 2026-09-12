@@ -66,7 +66,7 @@ public class EvaluationTransform extends Transform {
         } catch (final IOException e) {
             throw new IllegalModuleException(getName(), "evaluation", "failed to read manifest: " + e.getMessage());
         }
-        final List<String> constraints = EvaluationStages.engineConstraints(input, spec);
+        final List<String> constraints = EvaluationStages.engineConstraints(input);
         if (!constraints.isEmpty()) {
             throw new IllegalModuleException(getName(), "evaluation", constraints);
         }

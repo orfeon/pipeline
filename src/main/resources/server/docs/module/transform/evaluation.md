@@ -164,7 +164,7 @@ the time partition.
 | utility | optional | String or Object | The realised value of a positive row; `utility` in the calibration records. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 6 × samples doubles. |
 | calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`. |
-| slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. |
+| slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row. Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
 
 ## Outputs
@@ -346,5 +346,9 @@ parameters:
   the summary records which column and form the baseline was.
 - The bootstrap interval assumes independent resampling units; correlated units need `bootstrap.unit`.
 - Quantile bin boundaries are sketch approximations; `edges` are exact.
+- Slices are for low-cardinality dimensions: every distinct value costs splits × (1 + prediction sets)
+  accumulators of 6 × `bootstrap.samples` doubles (about 48 KB each at the default 1000), all gathered on one
+  worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a
+  high-cardinality field (an id) belongs in a coarser bucket, not in `slices`.
 - Batch, global window only. Calibration fits (temperature / blend), slice discovery, the gaussian / ranking
   families and the HTML report are the next stages (see `docs/design/evaluation-dsl.md` §11).

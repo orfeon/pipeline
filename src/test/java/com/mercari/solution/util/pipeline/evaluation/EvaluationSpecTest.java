@@ -58,6 +58,12 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], splits: {valid: {from: '2024-07-01', to: '2024-12-31', role: selection}, test: {from: '2024-01-01', to: '2024-06-30', role: report}}}").contains("must end before"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], splits: {test: {from: '2024-01-01', to: '2024-06-30', role: holdout}}}").contains("role must be one of"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("time.field is not set"));
+        // a range-less split takes every row, with or without a time (a bounded source has no event time)
+        final EvaluationSpec rangeless = parse("{group: g, label: y, baseline: b, predictions: [{name: A, prob: qa}], splits: {all: {role: report}}}").resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertEquals("all", rangeless.splitOf(EvaluationRow.NO_TIME));
+        Assertions.assertEquals("all", rangeless.splitOf(0L));
+        final EvaluationSpec ranged = parse(OK).resolve(EvaluationScorerTest.SCHEMA, null);
+        Assertions.assertNull(ranged.splitOf(EvaluationRow.NO_TIME));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], splits: {valid: {from: 'yesterday', role: selection}, test: {role: report}}}").contains("ISO-8601"));
         // by column: no ordering check, the summary reports the observed ranges
         final EvaluationSpec byColumn = parse("{group: g, label: y, baseline: b, predictions: [{name: A, prob: qa}], splits: {field: region, roles: {east: selection, west: report}}}").resolve(EvaluationScorerTest.SCHEMA, null);
@@ -77,7 +83,11 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, field: qa, form: rate}], " + EvaluationScorerTest.SPLITS + "}").contains("not valid for family"));
         Assertions.assertTrue(error("{family: gaussian, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("not supported"));
         Assertions.assertTrue(error("{family: groupedMultinomial, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("group is required"));
-        Assertions.assertTrue(error("{family: binomial, label: y, baseline: b, time: t, predictions: [{name: A, score: s}], " + EvaluationScorerTest.SPLITS + "}").contains("needs group"));
+        Assertions.assertTrue(error("{family: binomial, label: y, baseline: b, time: t, predictions: [{name: A, score: s}], " + EvaluationScorerTest.SPLITS + "}").contains("needs family groupedMultinomial"));
+        // the family, not the group, decides: a score set on a binomial spec with a group would softmax over one row
+        Assertions.assertTrue(error("{family: binomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, score: s}], " + EvaluationScorerTest.SPLITS + "}").contains("needs family groupedMultinomial"));
+        Assertions.assertTrue(error("{family: binomial, group: g, label: y, baseline: {field: b, form: inverseShare}, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + "}").contains("inverseShare needs family"));
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa, form: logProb}], " + EvaluationScorerTest.SPLITS + "}").contains("either prob or field + form"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: missing}], " + EvaluationScorerTest.SPLITS + "}").contains("not an input field"));
         Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: region}], " + EvaluationScorerTest.SPLITS + "}").contains("must be numeric"));
     }
@@ -91,6 +101,8 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: edge}]}")).contains("thresholds is required"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: region, bucket: decade}]}")).contains("bucket 'decade'"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: u, bucket: month}]}")).contains("needs a timestamp"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, slices: [{field: y, bucket: month}]}")).contains("needs a timestamp"));   // int64 would read as micros
+        Assertions.assertTrue(error(OK.replace("time: t", "time: y")).contains("time.field 'y' must be"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, bootstrap: {samples: 20000}}")).contains("bootstrap.samples"));
         Assertions.assertEquals(0, parse(OK.replace("}}}", "}}, bootstrap: false}")).bootstrapSamples);
     }

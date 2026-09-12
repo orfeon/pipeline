@@ -50,14 +50,6 @@ public final class EvaluationRow implements Serializable {
         this.x = x;
     }
 
-    public String getSplit() {
-        return split;
-    }
-
-    public String getGroup() {
-        return group;
-    }
-
     public String getIdentity() {
         return identity;
     }

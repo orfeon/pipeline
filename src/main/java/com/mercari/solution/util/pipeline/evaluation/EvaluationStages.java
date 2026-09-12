@@ -60,13 +60,13 @@ public final class EvaluationStages {
 
     private EvaluationStages() {}
 
-    private static final String SEP = String.valueOf((char) 1);
+    private static final String SEP = MetricAccumulator.SEP;
 
     public record Outputs(PCollection<MElement> metrics, PCollection<MElement> calibration, PCollection<MElement> units,
                           PCollection<MElement> summary, PCollection<BadRecord> failures) {}
 
     /** Engine rejections that only the input can tell (called by the module before wiring). */
-    public static List<String> engineConstraints(final PCollection<MElement> input, final EvaluationSpec spec) {
+    public static List<String> engineConstraints(final PCollection<MElement> input) {
         final List<String> errors = new ArrayList<>();
         final WindowingStrategy<?, ?> strategy = input.getWindowingStrategy();
         if (!(strategy.getWindowFn() instanceof GlobalWindows)) {
@@ -208,7 +208,7 @@ public final class EvaluationStages {
                     final String value = text(values.get(spec.splitField));
                     split = value != null && spec.split(value) != null ? value : null;
                 } else {
-                    split = time == EvaluationRow.NO_TIME ? null : spec.splitOf(time);
+                    split = spec.splitOf(time);
                 }
                 if (split == null) {
                     slots[MetricAccumulator.ROWS_UNASSIGNED] = 1;

@@ -18,7 +18,7 @@ import java.io.Serializable;
  * Bounded accumulator of one metrics key (split × prediction set × slice value): the weighted sums of the
  * per-unit metrics plus, per bootstrap replicate, the same sums under the replicate's Poisson weights. The
  * same shape carries the run's bookkeeping (row counts, per-split unit counts and time range) under the
- * {@code }-prefixed keys. Combined by {@link Fn} (input = accumulator = output).
+ * {@link #SEP}-prefixed keys. Combined by {@link Fn} (input = accumulator = output).
  */
 public final class MetricAccumulator implements Serializable {
 
@@ -28,9 +28,11 @@ public final class MetricAccumulator implements Serializable {
     public static final int BOOT_SLOTS = 6;
     public static final int BOOT_FIRST = W;
 
+    /** separator inside composite keys; a key starting with it is a bookkeeping key, never a metrics cell */
+    public static final String SEP = "\u0001";
     /** bookkeeping keys and their slots (the same array, read differently) */
-    public static final String ROWS_KEY = "rows";
-    public static final String SPLIT_KEY_PREFIX = "split";
+    public static final String ROWS_KEY = SEP + "rows";
+    public static final String SPLIT_KEY_PREFIX = SEP + "split" + SEP;
     public static final int ROWS_IN = 0, ROWS_INVALID = 1, ROWS_UNASSIGNED = 2, UNITS_SKIPPED = 3, UNITS = 4, ROWS = 5;
 
     final double[] total = new double[SLOTS];

@@ -206,7 +206,9 @@ value (the overall record has `slice` and `value` null), plus the pair records (
 for each of `logScore`, `excessLogScore`, `hitAt1`, `brier`: the value and `_lo` / `_hi` (null without
 bootstrap); `logloss` (= −logScore). Slices come from `slices[]`: `{field}` (one record per distinct value)
 or `{field, bucket: year | quarter | month | week | day}` (the period buckets of a time field; `field`
-defaults to `time.field`).
+defaults to `time.field`). For `groupedMultinomial` a slice field is a group-level attribute (the same value
+on every row of the group); a unit takes the slice values of its earliest row. Slices are meant for
+low-cardinality dimensions — every distinct value is a set of accumulators gathered on one worker (see evaluation-engine.md, Metrics).
 
 ### 8.2 Calibration (`<name>.calibration`)
 

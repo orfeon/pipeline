@@ -43,6 +43,8 @@ public final class EvaluationSpec implements Serializable {
     public static final String BASELINE_NAME = "baseline";
 
     public static final String OFFSET_SCALE_PROB = "prob";
+    /** field types a time / bucket field may have (a string is parsed as ISO-8601) */
+    static final List<String> TIME_FIELD_TYPES = List.of("timestamp", "datetime", "date", "string");
     public static final String OFFSET_SCALE_LOG = "log";
     public static final List<String> OFFSET_SCALES = List.of(OFFSET_SCALE_PROB, OFFSET_SCALE_LOG);
 
@@ -71,10 +73,6 @@ public final class EvaluationSpec implements Serializable {
 
         public boolean isScore() {
             return scoreField != null;
-        }
-
-        public int columns() {
-            return isScore() ? (offsetField != null ? 2 : 1) : 1;
         }
 
         public String describe() {
@@ -208,9 +206,11 @@ public final class EvaluationSpec implements Serializable {
         return null;
     }
 
-    /** The split of a time (time-range splits): its name, or null when the time falls outside every range. */
+    /** The split of a time (time-range splits): its name, or null when the time falls outside every range; a range-less split takes every row, timed or not. */
     public String splitOf(final long time) {
         for (final Split s : splits) {
+            if (s.fromMillis == null && s.toMillis == null) return s.name;
+            if (time == EvaluationRow.NO_TIME) continue;
             if (s.fromMillis != null && time < s.fromMillis) continue;
             if (s.toMillis != null && time > s.toMillis) continue;
             return s.name;
@@ -323,6 +323,7 @@ public final class EvaluationSpec implements Serializable {
                 d.scoreField = string(o, "score");
                 d.offsetField = string(o, "offset");
                 final String prob = string(o, "prob");
+                if (prob != null && (o.has("field") || o.has("form"))) errors.add(at + ": prob is a probability column; specify either prob or field + form, not both");
                 d.field = prob != null ? prob : string(o, "field");
                 d.form = prob != null ? Family.FORM_PROB : string(o, "form");
                 if (d.scoreField != null) {
@@ -578,11 +579,13 @@ public final class EvaluationSpec implements Serializable {
 
         if (labelField == null && labelExpr == null) errors.add("label is required (a field name, {field} or {expr})");
         if (isGrouped() && group == null) errors.add("group is required for family " + Family.GROUPED_MULTINOMIAL.id());
-        if (group == null) {
-            if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs group (the share is taken within the group)");
+        if (!isGrouped()) {
+            // a score set / inverseShare normalise within the group: on a non-grouped family every unit is one row and the share is 1
+            final String grouped = "family " + Family.GROUPED_MULTINOMIAL.id();
+            if (Family.FORM_INVERSE_SHARE.equals(baselineForm)) errors.add("baseline.form inverseShare needs " + grouped + " (the share is taken within the group)");
             for (final Prediction d : predictions) {
-                if (d.isScore()) errors.add("predictions '" + d.name + "': a score set (grouped softmax) needs group");
-                if (Family.FORM_INVERSE_SHARE.equals(d.form)) errors.add("predictions '" + d.name + "': form inverseShare needs group");
+                if (d.isScore()) errors.add("predictions '" + d.name + "': a score set (grouped softmax) needs " + grouped);
+                if (Family.FORM_INVERSE_SHARE.equals(d.form)) errors.add("predictions '" + d.name + "': form inverseShare needs " + grouped);
             }
         }
         final boolean timeRanges = splitField == null && splits.stream().anyMatch(sp -> sp.fromMillis != null || sp.toMillis != null);
@@ -607,11 +610,15 @@ public final class EvaluationSpec implements Serializable {
             if (ref[1] != null && !fields.containsKey(ref[1])) errors.add(ref[0] + " '" + ref[1] + "' is not an input field");
         }
         for (final String id : rowId) if (!fields.containsKey(id)) errors.add("rowId '" + id + "' is not an input field");
-        if (timeField != null && fields.containsKey(timeField)) timeFieldType = fields.get(timeField).getFieldType().getType().name();
+        if (timeField != null && fields.containsKey(timeField)) {
+            timeFieldType = fields.get(timeField).getFieldType().getType().name();
+            // an int64 would be read as epoch microseconds (the framework's primitive timestamp), silently unassigning every row
+            if (!TIME_FIELD_TYPES.contains(timeFieldType)) errors.add("time.field '" + timeField + "' must be a timestamp / datetime / date field (" + timeFieldType + ")");
+        }
         for (final Slice sl : slices) {
             if (sl.field != null && fields.containsKey(sl.field)) {
                 sl.fieldType = fields.get(sl.field).getFieldType().getType().name();
-                if (sl.bucket != null && !"timestamp".equals(sl.fieldType) && !"date".equals(sl.fieldType) && !"string".equals(sl.fieldType) && !"int64".equals(sl.fieldType)) {
+                if (sl.bucket != null && !TIME_FIELD_TYPES.contains(sl.fieldType)) {
                     errors.add("slices '" + sl.field + "' with bucket " + sl.bucket + " needs a timestamp / date field (" + sl.fieldType + ")");
                 }
             }

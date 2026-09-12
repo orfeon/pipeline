@@ -42,10 +42,6 @@ public final class SketchAccumulator implements Serializable {
         return sketch.isEmpty();
     }
 
-    public long count() {
-        return sketch.getN();
-    }
-
     public double min() {
         return sketch.getMinItem();
     }

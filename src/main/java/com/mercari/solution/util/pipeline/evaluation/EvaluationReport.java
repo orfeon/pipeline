@@ -7,10 +7,8 @@ import com.mercari.solution.util.pipeline.glm.StatMath;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -22,7 +20,7 @@ public final class EvaluationReport {
 
     private EvaluationReport() {}
 
-    private static final String SEP = String.valueOf((char) 1);
+    private static final String SEP = MetricAccumulator.SEP;
     public static final List<String> METRICS = List.of("logScore", "excessLogScore", "hitAt1", "brier");
     static final double Z95 = 1.959963984540054;
 
@@ -91,9 +89,10 @@ public final class EvaluationReport {
         }
         // ordered: splits as declared, the overall cell first, then the slices in order with sorted values
         final List<String> ordered = new ArrayList<>(cells.keySet());
+        final List<String> splitNames = spec.splitNames();
         ordered.sort((a, b) -> {
             final String[] pa = cellParts.get(a), pb = cellParts.get(b);
-            final int sa = spec.splitNames().indexOf(pa[0]), sb = spec.splitNames().indexOf(pb[0]);
+            final int sa = splitNames.indexOf(pa[0]), sb = splitNames.indexOf(pb[0]);
             if (sa != sb) return Integer.compare(sa, sb);
             final int ia = Integer.parseInt(pa[2]), ib = Integer.parseInt(pb[2]);
             if (ia != ib) return Integer.compare(ia, ib);
@@ -116,8 +115,11 @@ public final class EvaluationReport {
                 for (final String m : METRICS) {
                     final double[] values = new double[b + 1];
                     values[0] = metric(spec, m, acc.getTotal());
-                    for (int r = 0; r < b; r++) values[1 + r] = metric(spec, m, replicate(acc, r));
                     s.put(m, values);
+                }
+                for (int r = 0; r < b; r++) {
+                    final double[] sums = replicate(acc, r);   // one replicate vector feeds every metric
+                    for (final String m : METRICS) s.get(m)[1 + r] = metric(spec, m, sums);
                 }
                 series.put(e.getKey(), s);
             }
@@ -307,8 +309,7 @@ public final class EvaluationReport {
     public static List<Map<String, Object>> calibration(final EvaluationSpec spec, final Map<String, double[]> bins, final Map<String, SketchAccumulator> sketches) {
         final List<Map<String, Object>> records = new ArrayList<>();
         final List<String> names = spec.predictionNames();
-        final Set<String> splits = new LinkedHashSet<>(spec.splitNames());
-        for (final String split : splits) {
+        for (final String split : spec.splitNames()) {
             for (int j = 1; j < names.size(); j++) {
                 for (int t = 0; t < spec.tables.size(); t++) {
                     final EvaluationSpec.Table table = spec.tables.get(t);
