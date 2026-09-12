@@ -233,7 +233,8 @@ warehouse, or feed it to the `attribution` transform to ask which slices Δ's to
 ## 9. Constraints and diagnostics
 
 Assembly errors (every message names the parameter): an unknown family or form; `groupedMultinomial`
-without `group`; `score` / `inverseShare` without `group`; a `score` set with `temperature` ≤ 0 or an unknown
+without `group`; `score` / `inverseShare` on a family other than `groupedMultinomial`; `prob` together with `field` /
+`form` on one set; a `score` set with `temperature` ≤ 0 or an unknown
 `offsetScale`; a duplicate or reserved prediction name; no prediction set; no split, no `report` split, a
 split without a role, an unknown role; a time-range split without `time.field`; overlapping ranges or a
 selection range after a report range; a role or column field missing from the input schema; a calibration
