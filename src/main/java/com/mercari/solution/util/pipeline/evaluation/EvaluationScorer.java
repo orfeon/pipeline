@@ -1,8 +1,10 @@
 package com.mercari.solution.util.pipeline.evaluation;
 
+import com.mercari.solution.util.domain.math.MatrixOps;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
 import com.mercari.solution.util.pipeline.glm.Baselines;
 import com.mercari.solution.util.pipeline.glm.Family;
+import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.GlmFit;
 
 import java.io.Serializable;
@@ -17,9 +19,10 @@ import java.util.SplittableRandom;
 /**
  * The per-unit computations of the evaluation transform, pure and deterministic (design §4): {@link #prepare}
  * aligns a unit (the baseline and every prediction set as means per row, the normalised labels, the weights),
- * {@link #score} reduces it to its loss decomposition per prediction set, {@link #accumulate} adds that into
- * the metrics accumulators (overall and per slice value) with the unit's Poisson bootstrap weights, and
- * {@link #aligned} gives the rows as the calibration tables read them.
+ * {@link #derive} adds the derived sets of the calibration fits, {@link #score} reduces the unit to its loss
+ * decomposition per set, {@link #accumulate} adds that into the metrics accumulators (overall and per slice
+ * value) with the unit's Poisson bootstrap weights, {@link #aligned} gives the rows as the calibration tables
+ * read them, and {@link #temperatureLogLikelihoods} / {@link #blendEvaluate} are the fit passes' contributions.
  */
 public final class EvaluationScorer implements Serializable {
 
@@ -32,24 +35,28 @@ public final class EvaluationScorer implements Serializable {
 
     private final EvaluationSpec spec;
     private final Family family;
+    /** declared prediction sets */
     private final int k;
+    /** compared sets: declared + derived */
+    private final int sets;
 
     public EvaluationScorer(final EvaluationSpec spec) {
         this.spec = spec;
         this.family = spec.family();
         this.k = spec.predictions.size();
+        this.sets = spec.setCount();
     }
 
     /** Why a unit cannot be scored (the common unit set: any invalid side skips the unit for every side). */
     public enum Skip { NONE, NO_POSITIVE_LABEL, INVALID_BASELINE, INVALID_PREDICTION }
 
-    /** A prepared unit: rows sorted by (time, identity); means per row of the baseline (index 0) and every prediction set. */
+    /** A prepared unit: rows sorted by (time, identity); means per row of the baseline (index 0), every prediction set and every derived set. */
     public static final class Unit {
         public final List<EvaluationRow> rows;
         public final String key;
         public final String split;
         public final Skip skip;
-        /** [1 + k][n]: the baseline means (NaN in binomial prior mode), then each prediction set's */
+        /** [1 + sets][n]: the baseline means (NaN in binomial prior mode), each prediction set's, then each derived set's (NaN until derived) */
         public final double[][] means;
         public final double[] y;
         public final double[] w;
@@ -86,7 +93,7 @@ public final class EvaluationScorer implements Serializable {
         }
     }
 
-    /** The loss decomposition of one unit: per prediction set (index 0 = the baseline). */
+    /** The loss decomposition of one unit: per set (index 0 = the baseline). */
     public static final class Metrics {
         public final double[] logScore;
         public final double[] hitAt1;
@@ -103,7 +110,8 @@ public final class EvaluationScorer implements Serializable {
         final List<EvaluationRow> rows = new ArrayList<>(input);
         rows.sort(Comparator.comparingLong(EvaluationRow::getTime).thenComparing(EvaluationRow::getIdentity));
         final int n = rows.size();
-        final double[][] means = new double[1 + k][n];
+        final double[][] means = new double[1 + sets][n];
+        for (int j = 1 + k; j <= sets; j++) Arrays.fill(means[j], Double.NaN);
         // baseline
         if (spec.hasBaseline()) {
             final double[] baseline = new double[n];
@@ -174,26 +182,192 @@ public final class EvaluationScorer implements Serializable {
         return true;
     }
 
-    /** The loss decomposition of a scored unit (design §4.1). */
+    // ---- calibration fits ----------------------------------------------------------------------------------
+
+    /**
+     * The fit inputs of a declared set (design §7.1): {@code [f, o]} per row — a score set's score (over its
+     * declared temperature) and its offset on the log scale; a probability set's log share (grouped) / logit
+     * (binomial). {@code o} falls back to the baseline's log share / logit; NaN without one.
+     */
+    public double[][] fitInputs(final Unit unit, final int base) {
+        final int n = unit.size();
+        final EvaluationSpec.Prediction d = spec.predictions.get(base);
+        final double[] f = new double[n];
+        final double[] o = new double[n];
+        for (int i = 0; i < n; i++) {
+            final double[] x = unit.rows.get(i).x;
+            if (d.isScore()) {
+                f[i] = x[d.offset] / d.temperature;
+                if (d.offsetField != null) {
+                    final double offset = x[d.offset + 1];
+                    o[i] = EvaluationSpec.OFFSET_SCALE_LOG.equals(d.offsetScale) ? offset : Math.log(Math.max(offset, LOG_FLOOR));
+                } else {
+                    o[i] = link(unit.means[0][i]);
+                }
+            } else {
+                f[i] = link(unit.means[1 + base][i]);
+                o[i] = link(unit.means[0][i]);
+            }
+        }
+        return new double[][]{f, o};
+    }
+
+    /** Whether a set carries its own offset (a score set with an offset field): the temperature fit keeps it in the predictor. */
+    private boolean ownOffset(final int base) {
+        final EvaluationSpec.Prediction d = spec.predictions.get(base);
+        return d.isScore() && d.offsetField != null;
+    }
+
+    /** log of a share (grouped) / logit of a probability (binomial), floored; NaN stays NaN (no baseline). */
+    private double link(final double p) {
+        if (Double.isNaN(p)) return Double.NaN;
+        final double c = Math.max(p, LOG_FLOOR);
+        return family.isGrouped() ? Math.log(c) : Math.log(c / Math.max(1 - c, LOG_FLOOR));
+    }
+
+    /**
+     * Fills the derived sets' means from the fitted parameters: temperature η = o + f / T (o only for a score
+     * set with its own offset: a probability set's log share / logit is the whole predictor); blend η = a·f +
+     * b·o (+ c). A derived set without parameters (a fit that produced none) stays NaN.
+     */
+    public void derive(final Unit unit, final FitResults fits) {
+        if (fits == null || unit.skip != Skip.NONE) return;
+        final int n = unit.size();
+        for (int i = 0; i < spec.derived.size(); i++) {
+            final EvaluationSpec.Derived dv = spec.derived.get(i);
+            final double[] params = fits.parameters(dv.name);
+            if (params == null) continue;
+            final EvaluationSpec.Fit fit = spec.fits.get(dv.fit);
+            final double[][] fo = fitInputs(unit, dv.base);
+            final double[] eta = new double[n];
+            if (fit.isTemperature()) {
+                final boolean own = ownOffset(dv.base);
+                for (int r = 0; r < n; r++) eta[r] = (own ? fo[1][r] : 0d) + fo[0][r] / params[0];
+            } else {
+                for (int r = 0; r < n; r++) eta[r] = params[0] * fo[0][r] + params[1] * fo[1][r] + (params.length > 2 ? params[2] : 0d);
+            }
+            unit.means[1 + k + i] = GlmFit.means(family, eta);
+        }
+    }
+
+    /** Layout of a temperature fit's pass vector: per base set, the grid's weighted log scores; then the unit mass. */
+    public static int temperatureLength(final EvaluationSpec.Fit fit, final int bases) {
+        return bases * fit.gridSize + 1;
+    }
+
+    /**
+     * A unit's contribution to a temperature fit: for every base set and every grid value T, the weighted log
+     * score of η = o + f / T (see {@link #derive}); the last entry is the unit's weight mass.
+     */
+    public double[] temperatureLogLikelihoods(final Unit unit, final int fitIndex) {
+        final EvaluationSpec.Fit fit = spec.fits.get(fitIndex);
+        final List<Integer> derivedSets = spec.derivedOf(fitIndex);
+        final double[] grid = fit.grid();
+        final double[] out = new double[temperatureLength(fit, derivedSets.size())];
+        final int n = unit.size();
+        for (int s = 0; s < derivedSets.size(); s++) {
+            final EvaluationSpec.Derived dv = spec.derived.get(derivedSets.get(s) - k);
+            final boolean own = ownOffset(dv.base);
+            final double[][] fo = fitInputs(unit, dv.base);
+            final double[] eta = new double[n];
+            for (int g = 0; g < grid.length; g++) {
+                for (int r = 0; r < n; r++) eta[r] = (own ? fo[1][r] : 0d) + fo[0][r] / grid[g];
+                out[s * fit.gridSize + g] = unit.unitWeight * logScore(GlmFit.means(family, eta), unit);
+            }
+        }
+        out[out.length - 1] = unit.unitWeight;
+        return out;
+    }
+
+    /** Number of blend coefficients: [a, b] for the grouped family, [a, b, intercept] for binomial. */
+    public int blendK() {
+        return family.isGrouped() ? 2 : 3;
+    }
+
+    /** The blend design of a unit: rows {@code [f, o]} (+ 1). */
+    public double[][] blendDesign(final Unit unit, final int base) {
+        final double[][] fo = fitInputs(unit, base);
+        final int n = unit.size();
+        final int kk = blendK();
+        final double[][] design = new double[n][kk];
+        for (int r = 0; r < n; r++) {
+            design[r][0] = fo[0][r];
+            design[r][1] = fo[1][r];
+            if (kk > 2) design[r][2] = 1d;
+        }
+        return design;
+    }
+
+    /**
+     * One Newton pass evaluation of a unit for a blend fit of the base set at θ: {@code [n, ll, g, G]} via the
+     * shared offset GLM (the grouped family at the uniform share, so the design carries the whole predictor).
+     */
+    public double[] blendEvaluate(final Unit unit, final int base, final double[] theta) {
+        final double[][] f = blendDesign(unit, base);
+        final int n = unit.size();
+        final double[] uniform = new double[n];
+        Arrays.fill(uniform, 1d / n);
+        final double[] mu = GlmFit.fitted(family, true, uniform, f, theta);
+        return GlmFit.evaluate(family, unit.y, mu, unit.w, unit.unitWeight, f, theta.length);
+    }
+
+    /** The starting point of a blend: a = 1, b = 1 (the set and its offset as declared), intercept 0. */
+    public double[] blendStart() {
+        final double[] theta = new double[blendK()];
+        theta[0] = 1d;
+        theta[1] = 1d;
+        return theta;
+    }
+
+    /** Standard errors of a fitted blend: the square roots of the inverse Fisher information's diagonal. */
+    public static double[] standardErrors(final FitState state) {
+        final double[] se = new double[state.k];
+        Arrays.fill(se, Double.NaN);
+        if (!state.hasBest || state.bestG == null) return se;
+        try {
+            final double[][] inverse = MatrixOps.inverse(state.bestG);
+            for (int i = 0; i < state.k; i++) se[i] = inverse[i][i] > 0 ? Math.sqrt(inverse[i][i]) : Double.NaN;
+        } catch (final RuntimeException e) {
+            // a singular information matrix: no standard error
+        }
+        return se;
+    }
+
+    // ---- scoring -------------------------------------------------------------------------------------------
+
+    private double logScore(final double[] q, final Unit unit) {
+        final int n = unit.size();
+        double ls = 0;
+        if (family.isGrouped()) {
+            for (int i = 0; i < n; i++) if (unit.y[i] > 0) ls += unit.y[i] * Math.log(Math.max(q[i], LOG_FLOOR));
+        } else {
+            final double y = unit.y[0];
+            final double p = q[0];
+            ls = y * Math.log(Math.max(p, LOG_FLOOR)) + (1 - y) * Math.log(Math.max(1 - p, LOG_FLOOR));
+        }
+        return ls;
+    }
+
+    /** The loss decomposition of a scored unit (design §4.1); a set whose means are not available scores NaN. */
     public Metrics score(final Unit unit) {
         final int n = unit.size();
-        final double[] logScore = new double[1 + k];
-        final double[] hit = new double[1 + k];
-        final double[] brier = new double[1 + k];
-        for (int j = 0; j <= k; j++) {
+        final double[] logScore = new double[1 + sets];
+        final double[] hit = new double[1 + sets];
+        final double[] brier = new double[1 + sets];
+        for (int j = 0; j <= sets; j++) {
             final double[] q = unit.means[j];
-            if (j == 0 && Double.isNaN(q[0])) {
-                // binomial prior mode: the reference is a function of the split's label mean, derived by the report
+            if (Double.isNaN(q[0])) {
+                // binomial prior mode (the reference is a function of the split's label mean, derived by the report),
+                // or a derived set without parameters
                 logScore[j] = Double.NaN;
                 hit[j] = Double.NaN;
                 brier[j] = Double.NaN;
                 continue;
             }
-            double ls = 0, br = 0;
+            double br = 0;
             if (family.isGrouped()) {
                 double max = Double.NEGATIVE_INFINITY;
                 for (int i = 0; i < n; i++) {
-                    if (unit.y[i] > 0) ls += unit.y[i] * Math.log(Math.max(q[i], LOG_FLOOR));
                     br += (q[i] - unit.y[i]) * (q[i] - unit.y[i]);
                     if (q[i] > max) max = q[i];
                 }
@@ -208,14 +382,12 @@ public final class EvaluationScorer implements Serializable {
                 }
                 hit[j] = ties > 0 ? hitSum / ties : 0d;
             } else {
-                // one independent row per unit
                 final double y = unit.y[0];
                 final double p = q[0];
-                ls = y * Math.log(Math.max(p, LOG_FLOOR)) + (1 - y) * Math.log(Math.max(1 - p, LOG_FLOOR));
                 br = (p - y) * (p - y);
                 hit[j] = Double.NaN;
             }
-            logScore[j] = ls;
+            logScore[j] = logScore(q, unit);
             brier[j] = br;
         }
         return new Metrics(logScore, hit, brier);
@@ -252,9 +424,9 @@ public final class EvaluationScorer implements Serializable {
     }
 
     /**
-     * Adds a scored unit into the accumulators: one key per prediction set (the baseline first) for the overall
-     * record and for each of its slice values (a null slice value is skipped), with the unit's bootstrap
-     * weights; and the split's bookkeeping (units, rows, time range).
+     * Adds a scored unit into the accumulators: one key per set (the baseline first) for the overall record and
+     * for each of its slice values (a null slice value is skipped), with the unit's bootstrap weights; and the
+     * split's bookkeeping (units, rows, time range).
      */
     public void accumulate(final Unit unit, final Metrics m, final Map<String, MetricAccumulator> into) {
         final double[] boot = poissonWeights(spec.bootstrapSeed, unit.bootKey(), spec.bootstrapSamples);
@@ -263,7 +435,7 @@ public final class EvaluationScorer implements Serializable {
         for (int i = 0; i < n; i++) positives += unit.w[i] * unit.y[i];
         final double wu = unit.unitWeight;
         final String[] slices = unit.slices();
-        for (int j = 0; j <= k; j++) {
+        for (int j = 0; j <= sets; j++) {
             final double[] slots = new double[MetricAccumulator.SLOTS];
             slots[MetricAccumulator.N_UNITS] = 1;
             slots[MetricAccumulator.N_ROWS] = n;
@@ -301,14 +473,14 @@ public final class EvaluationScorer implements Serializable {
         book.add(slots);
     }
 
-    /** The unit's rows as the calibration tables read them. */
+    /** The unit's rows as the calibration tables read them (every compared set, derived ones included). */
     public List<AlignedRow> aligned(final Unit unit) {
         final int n = unit.size();
         final List<AlignedRow> out = new ArrayList<>(n);
         final int nFields = spec.tables.size();
         for (int i = 0; i < n; i++) {
-            final double[] q = new double[k];
-            for (int j = 0; j < k; j++) q[j] = unit.means[1 + j][i];
+            final double[] q = new double[sets];
+            for (int j = 0; j < sets; j++) q[j] = unit.means[1 + j][i];
             final double[] fields = new double[nFields];
             for (int t = 0; t < nFields; t++) {
                 final int idx = spec.tables.get(t).fieldIndex;
@@ -320,9 +492,9 @@ public final class EvaluationScorer implements Serializable {
         return out;
     }
 
-    /** The unit's output records (design §8.4): one per prediction set, the baseline first. */
+    /** The unit's output records (design §8.4): one per set, the baseline first. */
     public List<Map<String, Object>> unitRecords(final Unit unit, final Metrics m) {
-        final List<Map<String, Object>> records = new ArrayList<>(1 + k);
+        final List<Map<String, Object>> records = new ArrayList<>(1 + sets);
         final List<String> names = spec.predictionNames();
         final List<Map<String, Object>> slices = new ArrayList<>();
         final String[] values = unit.slices();
@@ -333,7 +505,7 @@ public final class EvaluationScorer implements Serializable {
             slices.add(sl);
         }
         final boolean priorBase = Double.isNaN(m.logScore[0]);
-        for (int j = 0; j <= k; j++) {
+        for (int j = 0; j <= sets; j++) {
             final Map<String, Object> r = new LinkedHashMap<>();
             r.put("split", unit.split);
             r.put("unit", unit.key);

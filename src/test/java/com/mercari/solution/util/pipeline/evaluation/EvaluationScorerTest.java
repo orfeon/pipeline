@@ -233,4 +233,89 @@ public class EvaluationScorerTest {
         final Map<String, Object> valid = records.stream().filter(r -> "valid".equals(r.get("split"))).findFirst().orElseThrow();
         Assertions.assertEquals(0L, valid.get("n"));
     }
+
+    @Test
+    public void testTemperatureGridAndDerivedSet() {
+        // a probability set under temperature T: q ∝ q^(1/T) within the group; at T = 1 the set is unchanged
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", bootstrap: false, calibration: [{type: temperature, fitOn: valid, grid: [0.5, 2.0, 4]}]}");
+        Assertions.assertEquals(List.of("baseline", "A", "A@T"), spec.predictionNames());
+        Assertions.assertEquals(2, spec.setCount());
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("valid", "g1", 1, 0.5, null, 0.6), row("valid", "g1", 0, 0.3, null, 0.2), row("valid", "g1", 0, 0.2, null, 0.2)), "g1");
+        Assertions.assertTrue(Double.isNaN(unit.means[2][0]));
+        final double[] v = scorer.temperatureLogLikelihoods(unit, 0);
+        // grid 0.5, 1.0, 1.5, 2.0: at T = 1 the log score is log 0.6; at T = 0.5 the shares are q² normalised: 0.36 / 0.44
+        Assertions.assertEquals(5, v.length);
+        Assertions.assertEquals(Math.log(0.36 / 0.44), v[0], 1e-12);
+        Assertions.assertEquals(Math.log(0.6), v[1], 1e-12);
+        Assertions.assertEquals(1d, v[4], 0d);
+        // the fitted parameter derives the set: T = 0.5 sharpens the winner's share
+        final FitResults fits = new FitResults();
+        fits.parameters.put("A@T", new double[]{0.5});
+        scorer.derive(unit, fits);
+        Assertions.assertEquals(0.36 / 0.44, unit.means[2][0], 1e-12);
+        final EvaluationScorer.Metrics m = scorer.score(unit);
+        Assertions.assertEquals(Math.log(0.36 / 0.44), m.logScore[2], 1e-12);
+        Assertions.assertEquals("A@T", scorer.unitRecords(unit, m).get(2).get("prediction"));
+        Assertions.assertEquals(2, scorer.aligned(unit).get(0).predictions.length);
+        // without parameters the derived set stays NaN and scores NaN
+        final EvaluationScorer.Unit again = scorer.prepare(unit.rows, "g1");
+        scorer.derive(again, new FitResults());
+        Assertions.assertTrue(Double.isNaN(scorer.score(again).logScore[2]));
+    }
+
+    @Test
+    public void testBlendEvaluationAndDerivedSet() {
+        // blend of a score set with the baseline as its offset: at (a, b) = (0, 1) the fitted means are the baseline
+        // shares, so the gradient on a is Σ (ỹ − p) f and the information Σ p f² − (Σ p f)²
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: S, score: s}], " + SPLITS
+                + ", bootstrap: false, calibration: [{type: blend, fitOn: valid}]}");
+        Assertions.assertEquals(List.of("baseline", "S", "S@blend"), spec.predictionNames());
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        Assertions.assertEquals(2, scorer.blendK());
+        Assertions.assertArrayEquals(new double[]{1, 1}, scorer.blendStart(), 0d);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("valid", "g1", 1, 0.5, null, 1.0), row("valid", "g1", 0, 0.3, null, 0.0), row("valid", "g1", 0, 0.2, null, -1.0)), "g1");
+        final double[][] fo = scorer.fitInputs(unit, 0);
+        Assertions.assertArrayEquals(new double[]{1, 0, -1}, fo[0], 1e-12);
+        Assertions.assertArrayEquals(new double[]{Math.log(0.5), Math.log(0.3), Math.log(0.2)}, fo[1], 1e-12);
+        final double[] eval = scorer.blendEvaluate(unit, 0, new double[]{0, 1});
+        Assertions.assertEquals(1d, eval[0], 0d);
+        Assertions.assertEquals(Math.log(0.5), eval[1], 1e-12);
+        final double pf = 0.5 * 1 + 0.3 * 0 + 0.2 * -1;
+        Assertions.assertEquals(1 - pf, eval[2], 1e-12);                       // g_a = Σ (ỹ − p) f
+        Assertions.assertEquals(0.5 + 0.2 - pf * pf, eval[4], 1e-12);          // G_aa = Σ p f² − (Σ p f)²
+        // a Newton chain on this one unit moves a upward (the winner has the largest score)
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(2, scorer.blendStart());
+        for (int it = 0; it < 6; it++) state = state.advance(scorer.blendEvaluate(unit, 0, state.proposal), 1e-4, 1e-10);
+        Assertions.assertTrue(state.hasBest);
+        Assertions.assertTrue(state.bestTheta[0] > 1d, "a: " + state.bestTheta[0]);
+        final double[] se = EvaluationScorer.standardErrors(state);
+        Assertions.assertEquals(2, se.length);
+        Assertions.assertTrue(se[0] > 0);
+        // deriving with (a, b) = (1, 1) reproduces the declared combination: softmax(f + log p)
+        final FitResults fits = new FitResults();
+        fits.parameters.put("S@blend", new double[]{1, 1});
+        scorer.derive(unit, fits);
+        final double z = 0.5 * Math.E + 0.3 + 0.2 / Math.E;
+        Assertions.assertEquals(0.5 * Math.E / z, unit.means[2][0], 1e-12);
+    }
+
+    @Test
+    public void testBinomialBlendCarriesAnIntercept() {
+        final EvaluationSpec spec = spec("{family: binomial, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + SPLITS
+                + ", bootstrap: false, calibration: [{type: blend, fitOn: valid}, {type: temperature, fitOn: valid}]}");
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        Assertions.assertEquals(3, scorer.blendK());
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("valid", null, 1, 0.25, null, 0.8)), "r1");
+        final double[][] fo = scorer.fitInputs(unit, 0);
+        Assertions.assertEquals(Math.log(4), fo[0][0], 1e-12);                 // logit 0.8
+        Assertions.assertEquals(Math.log(1d / 3), fo[1][0], 1e-12);            // logit 0.25
+        final FitResults fits = new FitResults();
+        fits.parameters.put("A@blend", new double[]{1, 0, 0});                 // the set alone
+        fits.parameters.put("A@T", new double[]{2});                           // logit / 2
+        scorer.derive(unit, fits);
+        Assertions.assertEquals(0.8, unit.means[2][0], 1e-12);
+        Assertions.assertEquals(1d / (1 + Math.exp(-Math.log(4) / 2)), unit.means[3][0], 1e-12);
+    }
 }
