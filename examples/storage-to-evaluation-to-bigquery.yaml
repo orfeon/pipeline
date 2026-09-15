@@ -1,0 +1,62 @@
+# Verify a candidate model's predictions against the current model (the baseline) on time splits:
+# the selection split chose the model, the report split is the number to decide on. Writes the metrics
+# (excess log score with a bootstrap CI, paired between prediction sets, per slice) and the calibration
+# tables to BigQuery and the per-unit loss decomposition to storage.
+sources:
+  - name: predictions
+    module: storage
+    parameters:
+      input: gs://${args.bucket}/jobs/${args.job}/predictions.parquet
+      format: parquet
+transforms:
+  - name: eval
+    module: evaluation
+    inputs: [predictions]
+    parameters:
+      family: groupedMultinomial
+      group: session_id
+      label: sold
+      baseline: {field: p_current, form: prob}
+      time: session_time
+      predictions:
+        - {name: candidate, prob: p_candidate}
+        - {name: scored, score: f_candidate, offset: p_current, offsetScale: prob}
+      splits:
+        valid: {from: "2026-01-01", to: "2026-03-31", role: selection}
+        test:  {from: "2026-04-01", to: "2026-06-30", role: report}
+      bootstrap: {samples: 1000, seed: 7, unit: session_date}
+      calibration:
+        - {type: reliability, by: prediction, bins: 10}
+        - {type: reliability, by: divergence, bins: 10}
+        - {type: edge, thresholds: [1.0, 1.25, 1.5, 2.0]}
+      slices:
+        - {field: session_time, bucket: month}
+        - {field: category}
+sinks:
+  - name: metrics
+    module: bigquery
+    inputs: [eval]
+    parameters:
+      table: ${args.project}.evaluation.model_metrics
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND
+  - name: calibration
+    module: bigquery
+    inputs: [eval.calibration]
+    parameters:
+      table: ${args.project}.evaluation.model_calibration
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND
+  - name: summary
+    module: bigquery
+    inputs: [eval.summary]
+    parameters:
+      table: ${args.project}.evaluation.model_runs
+      createDisposition: CREATE_IF_NEEDED
+      writeDisposition: WRITE_APPEND
+  - name: units
+    module: storage
+    inputs: [eval.units]
+    parameters:
+      output: gs://${args.bucket}/evaluation/${args.job}/units
+      format: parquet

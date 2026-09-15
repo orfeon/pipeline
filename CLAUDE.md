@@ -69,7 +69,7 @@ Four module kinds are auto-discovered by scanning their packages (Guava `ClassPa
 `jdbc` `postgres` `tidb` `storage` `files` `drive` `http` `pubsub` `kafka` `create` `request`.
 
 **Transforms** (`module/transform/`): `select` `aggregation` `beamsql` `query` `partition`
-`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature` `screen` `process`.
+`compare` `reshuffle` `onnx` `onnx_gen` `pdfextract` `feature` `screen` `evaluation` `process`.
 
 **Sinks** (`module/sink/`): `bigquery` `spanner` `bigtable` `datastore` `firestore` `iceberg` `jdbc`
 `postgres` `pubsub` `storage` `files` `debug` `auxia` `tasks` `http` `grpc` `localH2` `profile`.
@@ -242,7 +242,8 @@ self-contained (parameters, examples) — the agent reads one file per module.
 - `docs/design/` — design documents (each opens with a `Status:` line; the code cites them by section
   number): [schema-redesign.md](docs/design/schema-redesign.md), [cloud-auth.md](docs/design/cloud-auth.md),
   [feature-dsl.md](docs/design/feature-dsl.md), [feature-engine.md](docs/design/feature-engine.md),
-  [screen-dsl.md](docs/design/screen-dsl.md) / [screen-engine.md](docs/design/screen-engine.md) (the `screen` transform).
+  [screen-dsl.md](docs/design/screen-dsl.md) / [screen-engine.md](docs/design/screen-engine.md) (the `screen` transform),
+  [evaluation-dsl.md](docs/design/evaluation-dsl.md) / [evaluation-engine.md](docs/design/evaluation-engine.md) (the `evaluation` transform).
   New design documents go here, not in `docs/developer/`.
 - `docs/images/` — images referenced by the root README.
 - `examples/` — runnable example configs (`examples/README.md` indexes them by use case).
