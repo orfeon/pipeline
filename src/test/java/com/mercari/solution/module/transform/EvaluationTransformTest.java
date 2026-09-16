@@ -23,7 +23,8 @@ import java.util.Random;
  * Config-driven e2e tests of the evaluation transform on a synthetic online-auction dataset: sessions of
  * listings where one listing sells. {@code p_model} is the exact conditional probability given {@code f_known}
  * (the baseline); {@code p_true} is the true probability (it knows {@code f_extra} too), {@code p_copy} is the
- * baseline again, and {@code s_extra} is a raw score to be combined with the baseline as an offset.
+ * baseline again, {@code s_extra} is a raw score to be combined with the baseline as an offset, and {@code p_mixed}
+ * is the true probability on track A and the baseline on track B (a planted slice effect).
  */
 public class EvaluationTransformTest {
 
@@ -81,8 +82,8 @@ public class EvaluationTransformTest {
             final String fold = time.toString().startsWith("2024") ? "valid" : time.toString().startsWith("2025") ? "test" : "later";
             for (int i = 0; i < LISTINGS; i++) {
                 sb.append(String.format(Locale.ROOT,
-                        "        - {session_id: S%d, listing_id: L%d_%d, f_known: %.6f, f_extra: %.6f, start_price: %.2f, p_model: %.6f, p_true: %.6f, p_copy: %.6f, s_extra: %.6f, sold: %d, payoff: %.4f, track: %s, fold: %s, session_time: \"%s\"}\n",
-                        s, s, i, known[i], extra[i], price[i], base[i], truth[i], base[i], extra[i], i == winner ? 1 : 0, i == winner ? 1d / base[i] : 0d, s % 2 == 0 ? "A" : "B", fold, time));
+                        "        - {session_id: S%d, listing_id: L%d_%d, f_known: %.6f, f_extra: %.6f, start_price: %.2f, p_model: %.6f, p_true: %.6f, p_copy: %.6f, p_mixed: %.6f, s_extra: %.6f, sold: %d, payoff: %.4f, track: %s, fold: %s, session_time: \"%s\"}\n",
+                        s, s, i, known[i], extra[i], price[i], base[i], truth[i], base[i], s % 2 == 0 ? truth[i] : base[i], extra[i], i == winner ? 1 : 0, i == winner ? 1d / base[i] : 0d, s % 2 == 0 ? "A" : "B", fold, time));
             }
         }
         sb.append("""
@@ -96,6 +97,7 @@ public class EvaluationTransformTest {
                           - {name: p_model, type: float64}
                           - {name: p_true, type: float64}
                           - {name: p_copy, type: float64}
+                          - {name: p_mixed, type: float64}
                           - {name: s_extra, type: float64}
                           - {name: sold, type: int32}
                           - {name: payoff, type: float64}
@@ -127,10 +129,19 @@ public class EvaluationTransformTest {
                         - {name: truth, prob: p_true}
                         - {name: copy, prob: p_copy}
                         - {name: scored, score: s_extra, offset: p_model, offsetScale: prob}
+                        - {name: mixed, prob: p_mixed}
                       splits:
                         valid: {from: "2024-01-01", to: "2024-12-31", role: selection}
                         test:  {from: "2025-01-01", to: "2025-12-31", role: report}
                       bootstrap: {samples: 200, seed: 7}
+                      sliceDiscovery:
+                        dimensions: [track, {field: start_price, bins: 3}]
+                        maxDepth: 2
+                        minSupport: 20
+                        discoverOn: valid
+                        confirmOn: test
+                        of: [mixed, truth]
+                        output: all
                       calibration:
                         - {type: reliability, by: prediction, bins: 5}
                         - {type: reliability, by: divergence, bins: 5}
@@ -155,9 +166,9 @@ public class EvaluationTransformTest {
         PAssert.that(outputs.get("eval").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = new HashMap<>();
             for (final MElement r : rows) records.put(key(r), r);
-            // per split: overall cell = baseline + 6 sets (3 declared + truth@T, truth@blend, scored@blend) + 15 pairs
-            // = 22; track A / B = 44; four quarters per split (sessions every two days cover the year) = 88 → 154
-            Assertions.assertEquals(2 * (22 + 44 + 88), records.size(), records.keySet().toString());
+            // per split: overall cell = baseline + 7 sets (4 declared + truth@T, truth@blend, scored@blend) + 21 pairs
+            // = 29; track A / B = 58; four quarters per split (sessions every two days cover the year) = 116 → 203
+            Assertions.assertEquals(2 * (29 + 58 + 116), records.size(), records.keySet().toString());
             // the derived sets: a temperature near 1 leaves the true model about as good; the blend of the score set
             // with the baseline is informative; the derived sets compare on the same units
             final MElement truthT = records.get("test/truth@T/null/null/null");
@@ -208,8 +219,8 @@ public class EvaluationTransformTest {
         PAssert.that(outputs.get("eval.calibration").getCollection()).satisfies(rows -> {
             final List<MElement> list = new ArrayList<>();
             rows.forEach(list::add);
-            // 2 splits x 6 sets (derived included) x (5 + 5 + 3 + 2) bins
-            Assertions.assertEquals(2 * 6 * 15, list.size());
+            // 2 splits x 7 sets (derived included) x (5 + 5 + 3 + 2) bins
+            Assertions.assertEquals(2 * 7 * 15, list.size());
             long n = 0;
             double positives = 0;
             for (final MElement r : list) {
@@ -244,7 +255,7 @@ public class EvaluationTransformTest {
         PAssert.that(outputs.get("eval.units").getCollection()).satisfies(rows -> {
             final List<MElement> list = new ArrayList<>();
             rows.forEach(list::add);
-            Assertions.assertEquals((validUnits + testUnits) * 7, list.size());
+            Assertions.assertEquals((validUnits + testUnits) * 8, list.size());
             final MElement one = list.stream().filter(r -> "truth".equals(r.getAsString("prediction")) && "test".equals(r.getAsString("split"))).findFirst().orElseThrow();
             Assertions.assertEquals(4L, one.getAsLong("n_rows"));
             Assertions.assertNotNull(one.getPrimitiveValue("time"));
@@ -265,7 +276,7 @@ public class EvaluationTransformTest {
             Assertions.assertEquals(0L, summary.getAsLong("nUnitsSkipped"));
             Assertions.assertEquals("session_id", summary.getAsString("group"));
             Assertions.assertEquals("prob", summary.getAsString("baselineForm"));
-            Assertions.assertEquals(List.of("truth", "copy", "scored"), summary.getPrimitiveValue("predictions"));
+            Assertions.assertEquals(List.of("truth", "copy", "scored", "mixed"), summary.getPrimitiveValue("predictions"));
             Assertions.assertEquals(200L, summary.getAsLong("bootstrapSamples"));
             Assertions.assertEquals(4L, summary.getAsLong("nCalibrationTables"));
             final List<?> splits = (List<?>) summary.getPrimitiveValue("splits");
@@ -296,6 +307,42 @@ public class EvaluationTransformTest {
             final double a2 = (Double) blendScored.get("a"), b2 = (Double) blendScored.get("b");
             Assertions.assertTrue(a2 > 0.6 && a2 < 1.4, "a of scored: " + a2);
             Assertions.assertTrue(b2 > 0.6 && b2 < 1.4, "b of scored: " + b2);
+            // slice discovery: the planted effect (mixed is the true model on track A only) is found and confirmed;
+            // the true model has no confirmed slice
+            final List<?> discovery = (List<?>) summary.getPrimitiveValue("discovery");
+            Assertions.assertEquals(2, discovery.size());
+            final Map<?, ?> mixed = (Map<?, ?>) discovery.get(0);
+            Assertions.assertEquals("mixed", mixed.get("prediction"));
+            // track (2) + price bins (3) + track x price (6) = 11 candidates
+            Assertions.assertEquals(11L, mixed.get("nCandidates"));
+            Assertions.assertTrue((Long) mixed.get("nConfirmed") >= 2, "confirmed slices of mixed: " + mixed.get("nConfirmed"));
+            final Map<?, ?> truthDiscovery = (Map<?, ?>) discovery.get(1);
+            Assertions.assertEquals("truth", truthDiscovery.get("prediction"));
+            Assertions.assertEquals(0L, truthDiscovery.get("nConfirmed"), "confirmed slices of truth: " + truthDiscovery);
+            return null;
+        });
+        PAssert.that(outputs.get("eval.slices").getCollection()).satisfies(rows -> {
+            final List<MElement> list = new ArrayList<>();
+            rows.forEach(list::add);
+            // output: all → every candidate of both sets
+            Assertions.assertEquals(22, list.size());
+            final MElement trackA = list.stream().filter(r -> "mixed".equals(r.getAsString("prediction")) && List.of("track").equals(r.getPrimitiveValue("dimensions")) && List.of("A").equals(r.getPrimitiveValue("values"))).findFirst().orElseThrow();
+            final MElement trackB = list.stream().filter(r -> "mixed".equals(r.getAsString("prediction")) && List.of("track").equals(r.getPrimitiveValue("dimensions")) && List.of("B").equals(r.getPrimitiveValue("values"))).findFirst().orElseThrow();
+            Assertions.assertEquals(1L, trackA.getAsLong("depth"));
+            Assertions.assertEquals("excessLogScore", trackA.getAsString("metric"));
+            Assertions.assertTrue(trackA.getAsDouble("delta_discover") > 0 && trackA.getAsDouble("delta_confirm") > 0, trackA.toString());
+            Assertions.assertTrue(trackB.getAsDouble("delta_discover") < 0 && trackB.getAsDouble("delta_confirm") < 0, trackB.toString());
+            Assertions.assertEquals(Boolean.TRUE, trackA.getPrimitiveValue("confirmed"), trackA.toString());
+            Assertions.assertEquals(Boolean.TRUE, trackB.getPrimitiveValue("confirmed"), trackB.toString());
+            Assertions.assertEquals(trackA.getAsLong("n_discover") + trackB.getAsLong("n_discover"), validUnits);
+            // on track B the mixed set is the baseline: its excess is exactly zero there
+            Assertions.assertEquals(0d, trackB.getAsDouble("mean_confirm"), 1e-12);
+            // the numeric dimension: the three tertile bins of start_price, labelled q0..q2, partition the discovery split
+            final List<MElement> price = list.stream().filter(r -> "mixed".equals(r.getAsString("prediction")) && List.of("start_price/q3").equals(r.getPrimitiveValue("dimensions"))).toList();
+            Assertions.assertEquals(3, price.size(), price.toString());
+            Assertions.assertEquals(java.util.Set.of(List.of("q0"), List.of("q1"), List.of("q2")), price.stream().map(r -> r.getPrimitiveValue("values")).collect(java.util.stream.Collectors.toSet()));
+            for (final MElement r : price) Assertions.assertTrue(r.getAsLong("n_discover") >= 20, r.toString());
+            Assertions.assertEquals(validUnits, price.stream().mapToLong(r -> r.getAsLong("n_discover")).sum());
             return null;
         });
         pipeline.run();

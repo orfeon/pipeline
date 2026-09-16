@@ -480,6 +480,103 @@ public final class EvaluationScorer implements Serializable {
         if (boot.length > 0) acc.addReplicates(slots, boot);
     }
 
+    // ---- slice discovery -----------------------------------------------------------------------------------
+
+    /** The per-unit value of the discovery metric for a set (NaN when not available). */
+    public double discoveryValue(final Metrics m, final int set, final String metric) {
+        final int j = 1 + set;
+        return switch (metric) {
+            case "excessLogScore" -> m.logScore[j] - m.logScore[0];
+            case "logScore" -> m.logScore[j];
+            case "hitAt1" -> m.hitAt1[j];
+            case "brier" -> m.brier[j];
+            default -> throw new IllegalArgumentException("unknown discovery metric " + metric);
+        };
+    }
+
+    /**
+     * The unit's dimension values as the discovery reads them: a categorical dimension's text, a numeric one's
+     * quantile bin (from the discovery split's edges; null without edges), null when missing.
+     */
+    public String[] dimensionValues(final Unit unit, final Map<Integer, double[]> edges) {
+        final List<EvaluationSpec.Dimension> dims = spec.discovery.dimensions;
+        final String[] values = new String[dims.size()];
+        final EvaluationRow first = unit.rows.get(0);
+        for (int i = 0; i < dims.size(); i++) {
+            final EvaluationSpec.Dimension d = dims.get(i);
+            if (d.index < 0) continue;
+            if (d.isNumeric()) {
+                final double v = first.x[d.index];
+                final double[] e = edges == null ? null : edges.get(i);
+                if (Double.isNaN(v) || e == null) continue;
+                values[i] = "q" + EvaluationReport.bin(v, e);
+            } else {
+                values[i] = first.dims[d.index];
+            }
+        }
+        return values;
+    }
+
+    /** Accumulator key of a candidate slice: (split, set, the dimension indices, their values); an empty cell is the split's overall. */
+    public static String discoveryKey(final String split, final int set, final int[] dims, final String[] values) {
+        final StringBuilder sb = new StringBuilder(split).append(SEP).append(set).append(SEP);
+        for (int i = 0; i < dims.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(dims[i]);
+        }
+        sb.append(SEP);
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) sb.append((char) 2);
+            sb.append(values[i]);
+        }
+        return sb.toString();
+    }
+
+    /** The parts of a discovery key: {@code [split, set, dims csv, values]} (values joined by \u0002). */
+    public static String[] parseDiscoveryKey(final String key) {
+        // exactly four parts, like parseKey: a categorical value carrying the separator is not a cell
+        final String[] parts = key.split(SEP, -1);
+        return parts.length == 4 ? parts : null;
+    }
+
+    /**
+     * Adds the unit's discovery contributions: for each set of the discovery and each combination of up to
+     * {@code maxDepth} dimensions with non-null values, the cell's {@code [n, Σd, Σd²]}, and the split's overall cell.
+     * Only the discovery and confirmation splits contribute.
+     */
+    public void accumulateDiscovery(final Unit unit, final Metrics m, final Map<Integer, double[]> edges, final Map<String, double[]> into) {
+        final EvaluationSpec.Discovery d = spec.discovery;
+        if (!unit.split.equals(d.discoverOn) && !unit.split.equals(d.confirmOn)) return;
+        final String[] values = dimensionValues(unit, edges);
+        final List<Integer> present = new ArrayList<>();
+        for (int i = 0; i < values.length; i++) if (values[i] != null) present.add(i);
+        final List<int[]> combos = new ArrayList<>();
+        combos.add(new int[0]);
+        combinations(present, d.maxDepth, 0, new ArrayList<>(), combos);
+        for (final int set : d.sets) {
+            final double v = discoveryValue(m, set, d.metric);
+            if (Double.isNaN(v)) continue;
+            for (final int[] combo : combos) {
+                final String[] vals = new String[combo.length];
+                for (int i = 0; i < combo.length; i++) vals[i] = values[combo[i]];
+                final double[] cell = into.computeIfAbsent(discoveryKey(unit.split, set, combo, vals), key -> new double[3]);
+                cell[0] += 1;
+                cell[1] += v;
+                cell[2] += v * v;
+            }
+        }
+    }
+
+    private static void combinations(final List<Integer> items, final int maxDepth, final int from, final List<Integer> current, final List<int[]> out) {
+        if (current.size() == maxDepth) return;
+        for (int i = from; i < items.size(); i++) {
+            current.add(items.get(i));
+            out.add(current.stream().mapToInt(Integer::intValue).toArray());
+            combinations(items, maxDepth, i + 1, current, out);
+            current.remove(current.size() - 1);
+        }
+    }
+
     /** Counts a skipped unit in its split's bookkeeping. */
     public void skipped(final Unit unit, final Map<String, MetricAccumulator> into) {
         final MetricAccumulator book = into.computeIfAbsent(MetricAccumulator.SPLIT_KEY_PREFIX + unit.split, key -> new MetricAccumulator());
