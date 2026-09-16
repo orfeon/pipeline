@@ -141,6 +141,19 @@ public final class MatrixOps {
     }
 
     /**
+     * Inverse of a symmetric positive-definite matrix (a Gram / Fisher information matrix) via Cholesky, or
+     * {@code null} when the matrix is not positive definite (singular or indefinite) — unlike {@link #inverse},
+     * which returns a pseudo-inverse in that case.
+     */
+    public static double[][] inverseSpd(final double[][] a) {
+        checkDecomposable("inverseSpd", a);
+        final R064Store matrix = R064Store.FACTORY.rows(a);
+        final Cholesky<Double> cholesky = Cholesky.R064.make(matrix);
+        if (!cholesky.decompose(matrix) || !cholesky.isSolvable()) return null;
+        return toArray(cholesky.getInverse());
+    }
+
+    /**
      * Mahalanobis distance {@code sqrt((x-m)^T P (x-m))} with {@code P} the
      * <em>precision</em> (inverse covariance) matrix — invert a covariance
      * matrix once with {@link #inverse} and reuse it. A slightly negative

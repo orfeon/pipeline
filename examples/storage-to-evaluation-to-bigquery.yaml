@@ -29,9 +29,13 @@ transforms:
         - {type: reliability, by: prediction, bins: 10}
         - {type: reliability, by: divergence, bins: 10}
         - {type: edge, thresholds: [1.0, 1.25, 1.5, 2.0]}
+        - {type: temperature, fitOn: valid, of: [candidate]}
+        - {type: blend, fitOn: valid, of: [scored]}
       slices:
         - {field: session_time, bucket: month}
         - {field: category}
+      output:
+        calibration: gs://${args.bucket}/evaluation/${args.job}/calibration.json
 sinks:
   - name: metrics
     module: bigquery

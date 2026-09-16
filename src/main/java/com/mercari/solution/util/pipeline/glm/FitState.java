@@ -33,6 +33,8 @@ public final class FitState implements Serializable {
     public double[] direction;
     public double alpha = 1d;
     public boolean converged = false;
+    /** the fit ended because every step from the best point was rejected down to the step floor (a stall, not a convergence) */
+    public boolean stalled = false;
     public double nUnits = 0;
     public double ll0 = Double.NaN;
     public int rejected = 0;
@@ -119,6 +121,7 @@ public final class FitState implements Serializable {
             alpha /= 2;
             if (alpha < MIN_ALPHA) {
                 converged = true;
+                stalled = true;
                 proposal = bestTheta.clone();
             } else {
                 proposal = step(bestTheta, direction, alpha);
