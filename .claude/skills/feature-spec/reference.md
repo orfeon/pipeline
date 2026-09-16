@@ -170,7 +170,7 @@ filters use the Filter grammar (`module/common/filter.md`); expressions are nume
     - {stats: [count, share]}                    # no target
     - {field: <f>, stats: [mean, rate, std, distribution, quantile, q25, quantile90], as: <alias>}
     - {expr: "<numeric expr>", stats: [mean]}
-  offset: <baselines[].name>                     # target minus baseline (identity scale only)
+  offset: <baselines[].name>                     # target minus baseline; on scale logit / log the composed value is the log-odds / log-rate ratio against the baseline (info encoding.offset.additive)
   combine: product | zip
   naming: "{block}__{keys}__{window}__{target}__{stat}"   # default; empty segments collapse
   shrinkage:

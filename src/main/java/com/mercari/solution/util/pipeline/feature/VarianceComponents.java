@@ -67,7 +67,7 @@ public final class VarianceComponents {
     public static PCollection<KV<String, ForwardBlocks.Series>> forwardSeries(final PCollection<MElement> input, final List<ForwardSpec> specs, final String label) {
         return input
                 .apply(label + "_Values", ParDo.of(new ForwardExtractDoFn(specs)))
-                .setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), valueCoder()))
                 .apply(label + "_PerBlock", Combine.perKey(new KeyStatsFn()))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(KeyStats.class)))
                 .apply(label + "_ByKey", ParDo.of(new DoFn<KV<String, KeyStats>, KV<String, KV<Long, KeyStats>>>() {
@@ -87,19 +87,21 @@ public final class VarianceComponents {
                         for (final KV<Long, KeyStats> e : c.element().getValue()) entries.add(e);
                         entries.sort(Comparator.comparingLong(KV::getKey));
                         final long[] blocks = new long[entries.size()];
-                        final double[] n = new double[entries.size()], sum = new double[entries.size()], sumSq = new double[entries.size()];
-                        double cn = 0, cs = 0, cq = 0;
+                        final double[] n = new double[entries.size()], sum = new double[entries.size()], sumSq = new double[entries.size()], sumOff = new double[entries.size()];
+                        double cn = 0, cs = 0, cq = 0, co = 0;
                         for (int i = 0; i < entries.size(); i++) {
                             final KeyStats s = entries.get(i).getValue();
                             cn += s.n;
                             cs += s.sum;
                             cq += s.sumSq;
+                            co += s.sumOff;
                             blocks[i] = entries.get(i).getKey();
                             n[i] = cn;
                             sum[i] = cs;
                             sumSq[i] = cq;
+                            sumOff[i] = co;
                         }
-                        c.output(KV.of(c.element().getKey(), new ForwardBlocks.Series(blocks, n, sum, sumSq)));
+                        c.output(KV.of(c.element().getKey(), new ForwardBlocks.Series(blocks, n, sum, sumSq, sumOff)));
                     }
                 }))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(ForwardBlocks.Series.class)));
@@ -262,7 +264,7 @@ public final class VarianceComponents {
         }
     }
 
-    static class ForwardExtractDoFn extends DoFn<MElement, KV<String, Double>> {
+    static class ForwardExtractDoFn extends DoFn<MElement, KV<String, KV<Double, Double>>> {
         private final List<ForwardSpec> specs;
 
         ForwardExtractDoFn(final List<ForwardSpec> specs) {
@@ -275,18 +277,13 @@ public final class VarianceComponents {
             if (element == null) return;
             final Map<String, Object> row = element.asPrimitiveMap();
             for (final ForwardSpec spec : specs) {
-                Double y = spec.field() == null ? Double.valueOf(0d) : FeatureValues.toDouble(row.get(spec.field()));
-                if (y == null) continue;
-                if (spec.offsetColumn() != null) {
-                    final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-                    if (b == null) continue;
-                    y -= b;
-                }
+                final KV<Double, Double> value = FeatureValues.offsetTarget(row, spec.field(), spec.offsetColumn());
+                if (value == null) continue;
                 final String key = FeatureValues.key(row, spec.keys());
                 if (key == null) continue;
                 final Long millis = FeatureValues.toEpochMillis(row.get(spec.timeField()), spec.timeFieldType());
                 if (millis == null) continue;
-                c.output(KV.of(spec.id() + SEPARATOR + key + SEPARATOR + spec.blocks().indexOf(millis), y));
+                c.output(KV.of(spec.id() + SEPARATOR + key + SEPARATOR + spec.blocks().indexOf(millis), value));
             }
         }
     }
@@ -312,6 +309,7 @@ public final class VarianceComponents {
         out.n = total.n - part.n;
         out.sum = total.sum - part.sum;
         out.sumSq = total.sumSq - part.sumSq;
+        out.sumOff = total.sumOff - part.sumOff;
         return out.n <= 0 ? null : out;
     }
 
@@ -348,7 +346,7 @@ public final class VarianceComponents {
     public static PCollection<KV<String, KeyStats>> perKeyStats(final PCollection<MElement> input, final List<LevelSpec> specs, final String label) {
         return input
                 .apply(label + "_Values", ParDo.of(new ExtractDoFn(specs)))
-                .setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), valueCoder()))
                 .apply(label + "_PerKey", Combine.perKey(new KeyStatsFn()))
                 .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(KeyStats.class)));
     }
@@ -403,7 +401,8 @@ public final class VarianceComponents {
                 .apply(label + "_View", View.asMap());
     }
 
-    static class ExtractDoFn extends DoFn<MElement, KV<String, Double>> {
+    /** Per row and level: {@code KV<levelId + key, KV<y − b, b>>} — the (offset) target value and, under an offset, the baseline it was offset by (else null). */
+    static class ExtractDoFn extends DoFn<MElement, KV<String, KV<Double, Double>>> {
         private final List<LevelSpec> specs;
 
         ExtractDoFn(final List<LevelSpec> specs) {
@@ -416,41 +415,43 @@ public final class VarianceComponents {
             if (element == null) return;
             final Map<String, Object> row = element.asPrimitiveMap();
             for (final LevelSpec spec : specs) {
-                // a level without a target counts rows: contribute y = 0 so n is tracked
-                Double y = spec.field() == null ? Double.valueOf(0d) : FeatureValues.toDouble(row.get(spec.field())); // boxed: a primitive branch would unbox a null target
-                if (y == null) continue;
-                if (spec.offsetColumn() != null) {
-                    final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-                    if (b == null) continue;
-                    y -= b;
-                }
+                // a level without a target counts rows (y = 0 so n is tracked); otherwise (y − b, b) or nothing
+                final KV<Double, Double> value = FeatureValues.offsetTarget(row, spec.field(), spec.offsetColumn());
+                if (value == null) continue;
                 final String key = FeatureValues.key(row, spec.keys());
                 if (key == null) continue;
                 final String entry = spec.id() + SEPARATOR + key;
-                c.output(KV.of(entry, y));
+                c.output(KV.of(entry, value));
                 if (spec.foldKeys() != null) {
                     // the row's own fold, subtracted at apply time (rows with a null fold unit are not tagged)
                     final String unit = FeatureValues.key(row, spec.foldKeys());
-                    if (unit != null) c.output(KV.of(foldEntry(foldOf(unit, spec.folds()), entry), y));
+                    if (unit != null) c.output(KV.of(foldEntry(foldOf(unit, spec.folds()), entry), value));
                 }
             }
         }
     }
 
-    /** Per-key sufficient statistics (n, Σy, Σy²). */
+    /** Per-key sufficient statistics (n, Σy, Σy²) plus, under a baseline offset, Σb of the same rows ({@code sumOff}, else 0). */
     public static class KeyStats implements Serializable {
-        double n, sum, sumSq;
+        double n, sum, sumSq, sumOff;
     }
 
-    static class KeyStatsFn extends Combine.CombineFn<Double, KeyStats, KeyStats> {
+    /** Coder of the extracted values: {@code KV<y (offset), b or null>}. */
+    static Coder<KV<Double, Double>> valueCoder() {
+        return KvCoder.of(DoubleCoder.of(), org.apache.beam.sdk.coders.NullableCoder.of(DoubleCoder.of()));
+    }
+
+    static class KeyStatsFn extends Combine.CombineFn<KV<Double, Double>, KeyStats, KeyStats> {
         @Override
         public KeyStats createAccumulator() { return new KeyStats(); }
 
         @Override
-        public KeyStats addInput(final KeyStats acc, final Double y) {
+        public KeyStats addInput(final KeyStats acc, final KV<Double, Double> value) {
+            final double y = value.getKey();
             acc.n += 1;
             acc.sum += y;
             acc.sumSq += y * y;
+            if (value.getValue() != null) acc.sumOff += value.getValue();
             return acc;
         }
 
@@ -461,6 +462,7 @@ public final class VarianceComponents {
                 out.n += a.n;
                 out.sum += a.sum;
                 out.sumSq += a.sumSq;
+                out.sumOff += a.sumOff;
             }
             return out;
         }
@@ -469,7 +471,7 @@ public final class VarianceComponents {
         public KeyStats extractOutput(final KeyStats acc) { return acc; }
 
         @Override
-        public Coder<KeyStats> getAccumulatorCoder(final CoderRegistry registry, final Coder<Double> inputCoder) {
+        public Coder<KeyStats> getAccumulatorCoder(final CoderRegistry registry, final Coder<KV<Double, Double>> inputCoder) {
             return SerializableCoder.of(KeyStats.class);
         }
     }

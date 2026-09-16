@@ -188,6 +188,26 @@ such as BigQuery or a model that takes flat numeric columns. Categories are matc
 (an INT64 category `1` is `values: [1]`); unlisted categories are not emitted, and `values` on a target
 without `distribution` is an error (`encoding.target.values`).
 
+**Baseline offset (`offset: <baseline>`).** A block may subtract a named baseline from its target
+(`offset: market` with `baselines: [{name: market, ...}]`; the block then computes at `predictAt`,
+`encoding.offset.computeAt`). The offset is an additive term on the shrinkage scale:
+
+- `scale: identity` (default) — every statistic is taken over `target − baseline`: `mean` / `rate` are the
+  key's mean residual (shrunk toward the parent's), `std` the residual spread. A past row whose baseline is
+  missing (or NaN) has no residual: it is left out of every statistic of the block, `count` included, in the
+  expanding replay and in the static / fold / forward fits alike.
+- `scale: logit` / `log` — each level's own term is `t(observed) − t(mean baseline)` over the level's rows
+  (the observed-over-expected **log-odds ratio** on logit, the Poisson-offset MLE `log(Σy / Σb)` on log),
+  the leaf shrinks that term toward the parent's term, and the **composed value is the term itself** — a
+  residual on the scale, *not* a probability or rate — with `deviations` on the same scale (info
+  `encoding.offset.additive`). The levels keep a hidden `Σ baseline` (`<level>__sumoff`) next to
+  `Σ(y − b)`, in the expanding replay and in the static / fold / forward artifacts alike; `std` and the
+  quantiles stay statistics of the identity residual. A level whose mean baseline is outside the scale
+  (`Σ baseline ≤ 0`, or `≥ n` on logit — e.g. a baseline that is 0 for every row of a cold-start key) has
+  no term of its own and falls back to its parent, as an unseen level does. `estimator: joint` fits the
+  same per-cell terms (such a cell is skipped). A keySet with its own identity-scale or disabled `shrinkage`
+  stays on the residual statistics above.
+
 ### Static fits and artifacts (fit.mode static)
 
 ```yaml
@@ -757,7 +777,7 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   warmStart` are accepted and ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
   `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
-  `weights: heldOut` and an `offset` on a logit / log scale are rejected;
+  `weights: heldOut` is rejected;
   `parentStatistic: type` falls back to token with a warning. `weights: varianceComponents` estimates the
   per-level pseudo-count from the whole batch (a hyper-parameter, not time-expanding); a level whose
   between-key variance truncates to zero is fully shrunk to its parent (logged at run time).

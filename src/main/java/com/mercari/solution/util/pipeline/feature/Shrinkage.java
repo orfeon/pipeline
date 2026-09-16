@@ -24,6 +24,12 @@ import java.util.Map;
  * estimator). {@code t} is the declared scale (identity / logit / log); the composed value is returned on
  * the original scale, deviations on the transform scale.
  *
+ * <p><b>Baseline offset</b> (spec §3 rule 5: the offset is an additive term on the shrinkage scale). Each
+ * level's own estimate becomes {@code t(ȳ) − t(b̄)} — observed statistic minus mean baseline of the same rows,
+ * both read from the hidden sums ({@code Σ(y − b)} and {@code Σb}, see {@link #own}) — the levels shrink that
+ * term toward the parent's, and the composed value is the term itself (a log-odds / log-rate ratio against
+ * the baseline; on identity the mean residual, as without the extra sum).
+ *
  * <p><b>Conjugate families</b> (§5.1.1, §5.5 {@code family}). Shrinkage is "add pseudo sufficient statistics
  * inherited from the parent": with pseudo-count {@code m = λ} the posterior mean of every conjugate family is
  * {@code (Σy + m · parent) / (n + m) = parent + n / (n + m) · (ȳ − parent)}, i.e. the recursion above on the
@@ -226,9 +232,14 @@ public final class Shrinkage implements Serializable {
 
     /**
      * One lattice level resolved to the hidden statistics columns of the row. {@code additive} levels carry
-     * the main-effect chains instead of statistics.
+     * the main-effect chains instead of statistics. {@code offColumn} is the level's hidden Σ baseline (the
+     * {@code __sumoff} column an offset block on a logit / log scale registers, see {@link #own}); null otherwise.
      */
-    public record Level(String token, String nColumn, String sumColumn, List<List<Level>> mainEffects) implements Serializable {
+    public record Level(String token, String nColumn, String sumColumn, String offColumn, List<List<Level>> mainEffects) implements Serializable {
+        public Level(final String token, final String nColumn, final String sumColumn, final List<List<Level>> mainEffects) {
+            this(token, nColumn, sumColumn, null, mainEffects);
+        }
+
         boolean isAdditive() {
             return mainEffects != null;
         }
@@ -305,11 +316,51 @@ public final class Shrinkage implements Serializable {
      */
     public Composition compose(final Map<String, Object> row, final List<Level> levels, final Map<String, Double> lambdas) {
         final Double[] deviations = new Double[levels.size()];
-        final double leafN = n(row, levels.get(0).nColumn());
-        final double leafSum = n(row, levels.get(0).sumColumn());
+        final Level leaf = levels.get(0);
+        final double leafN = n(row, leaf.nColumn());
+        final double leafSum = n(row, leaf.sumColumn());
+        final double leafOff = leaf.offColumn() == null ? 0 : n(row, leaf.offColumn());
         final double[] effectiveN = new double[1];
-        final Double est = estimate(row, levels, 0, leafN, leafSum, deviations, effectiveN, lambdas, false);
-        return new Composition(est == null ? null : inverse(est), deviations, est == null ? null : effectiveN[0]);
+        final Double est = estimate(row, levels, 0, leafN, leafSum, leafOff, deviations, effectiveN, lambdas, false);
+        return new Composition(est == null ? null : output(scale, est, leaf.offColumn() != null), deviations, est == null ? null : effectiveN[0]);
+    }
+
+    /**
+     * A level's (or a joint cell's) own estimate on the transform scale: {@code t(Σy / n)} — or, under a baseline
+     * offset, the additive term {@code t(ȳ) − t(b̄)} with {@code ȳ = (Σ(y − b) + Σb) / n} the observed statistic and
+     * {@code b̄ = Σb / n} the mean baseline of the same rows (the observed-over-expected log-odds ratio on logit, the
+     * exact Poisson-offset MLE {@code log(Σy / Σb)} on log). On the identity scale both forms are {@code Σ(y − b) / n},
+     * so the hidden sum alone decides there. Null — no estimate, as for {@code n = 0} — when the mean baseline lies
+     * outside the open domain of the transform ({@link #baselineDefined}): the term is undefined there, and the
+     * transform's clamp would otherwise leak its constant (±13.8 on logit, −27.6 on log) into the term.
+     *
+     * @param n      the rows of the level (> 0)
+     * @param sum    Σ(y − b) of those rows (Σy without an offset)
+     * @param sumOff Σb of the same rows (ignored without an offset)
+     * @param offset whether the target is offset by a baseline
+     */
+    static Double own(final Scale scale, final double n, final double sum, final double sumOff, final boolean offset) {
+        if (!offset || scale == Scale.identity) return transform(scale, sum / n);
+        if (!baselineDefined(scale, n, sumOff)) return null;
+        return transform(scale, (sum + sumOff) / n) - transform(scale, sumOff / n);
+    }
+
+    /** Whether the mean baseline {@code Σb / n} lies in the open domain of the scale: (0, ∞) on log, (0, 1) on logit. */
+    static boolean baselineDefined(final Scale scale, final double n, final double sumOff) {
+        return switch (scale) {
+            case identity -> true;
+            case log -> sumOff > 0;
+            case logit -> sumOff > 0 && sumOff < n;
+        };
+    }
+
+    /**
+     * The composed value of a shrunk estimate {@code eta} on the transform scale: mapped back to the original scale —
+     * or, under a baseline offset on a logit / log scale, the additive term itself (spec §3 rule 5:
+     * {@code logit(p) = logit(baseline) + δ}, and the value is δ — a log-odds / log-rate ratio, not a probability / rate).
+     */
+    static double output(final Scale scale, final double eta, final boolean offset) {
+        return offset && scale != Scale.identity ? eta : inverse(scale, eta);
     }
 
     private double lambda(final Level level, final Map<String, Double> lambdas) {
@@ -319,20 +370,20 @@ public final class Shrinkage implements Serializable {
     }
 
     private Double estimate(final Map<String, Object> row, final List<Level> levels, final int index,
-                            final double looN, final double looSum, final Double[] deviations, final double[] effectiveN,
+                            final double looN, final double looSum, final double looOff, final Double[] deviations, final double[] effectiveN,
                             final Map<String, Double> lambdas, final boolean subtractLeaf) {
         final Level level = levels.get(index);
         if (level.isAdditive()) {
             // sequential estimator: parent of the cell is the additive prediction of the main effects.
             // every main-effect level also contains the cell's rows, so leave-node-out subtracts the leaf
             // statistics at every level of the main chains (subtractLeaf = true).
-            final Double root = estimate(row, levels, index + 1, looN, looSum, deviations, effectiveN, lambdas, false);
+            final Double root = estimate(row, levels, index + 1, looN, looSum, looOff, deviations, effectiveN, lambdas, false);
             if (root == null) return null;
             double sum = root;
             for (final List<Level> main : level.mainEffects()) {
                 final Double[] mainDev = new Double[main.size()];
                 final double[] ignored = new double[1];
-                final Double mainEst = estimate(row, main, 0, looN, looSum, mainDev, ignored, lambdas, true);
+                final Double mainEst = estimate(row, main, 0, looN, looSum, looOff, mainDev, ignored, lambdas, true);
                 if (mainEst != null) sum += mainEst - root;
             }
             deviations[index] = sum - root;
@@ -340,16 +391,19 @@ public final class Shrinkage implements Serializable {
         }
         double n = n(row, level.nColumn());
         double s = n(row, level.sumColumn());
+        final boolean hasOffset = level.offColumn() != null;
+        double off = hasOffset ? n(row, level.offColumn()) : 0;
         if ((index > 0 || subtractLeaf) && leaveNodeOut) {
             n -= looN;
             s -= looSum;
+            off -= looOff;
         }
-        final Double own = n > 0 ? transform(s / n) : null;
+        final Double own = n > 0 ? own(scale, n, s, off, hasOffset) : null;
         if (index == levels.size() - 1) {
             effectiveN[0] = n;
             return own;
         }
-        final Double parent = estimate(row, levels, index + 1, looN, looSum, deviations, effectiveN, lambdas, subtractLeaf);
+        final Double parent = estimate(row, levels, index + 1, looN, looSum, looOff, deviations, effectiveN, lambdas, subtractLeaf);
         if (own == null) {
             deviations[index] = 0d;
             return parent;
@@ -485,6 +539,7 @@ public final class Shrinkage implements Serializable {
                 sb.append(')');
             } else {
                 sb.append(l.token()).append(',').append(l.nColumn()).append(',').append(l.sumColumn());
+                if (l.offColumn() != null) sb.append(',').append(l.offColumn());
             }
         }
         return sb.toString();
@@ -505,7 +560,7 @@ public final class Shrinkage implements Serializable {
                 int end = i;
                 while (end < text.length() && text.charAt(end) != ';') end++;
                 final String[] parts = text.substring(i, end).split(",", -1);
-                levels.add(new Level(parts[0], parts[1], parts[2], null));
+                levels.add(new Level(parts[0], parts[1], parts[2], parts.length > 3 && !parts[3].isEmpty() ? parts[3] : null, null));
                 i = end;
             }
             if (i < text.length() && text.charAt(i) == ';') i++;

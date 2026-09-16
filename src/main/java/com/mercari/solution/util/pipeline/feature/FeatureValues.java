@@ -1,6 +1,7 @@
 package com.mercari.solution.util.pipeline.feature;
 
 import com.mercari.solution.util.ExpressionUtil;
+import org.apache.beam.sdk.values.KV;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -34,6 +35,24 @@ public final class FeatureValues {
         if (value instanceof Instant i) return (double) i.toEpochMilli();
         if (value instanceof org.joda.time.Instant i) return (double) i.getMillis();
         return null;
+    }
+
+    /**
+     * The numeric target of a row under an optional baseline offset, as the pair {@code (y − b, b)} — {@code b} null
+     * without an offset — or null when the target or the baseline is missing / NaN (the row contributes to no
+     * statistic, and to no count). A null {@code field} is a target-less statistic (count / share denominator):
+     * every row contributes {@code y = 0} and the baseline is not consulted. The single rule behind the expanding
+     * replay ({@link PopulationEvaluator}) and the static / fold / forward and joint fits ({@link VarianceComponents},
+     * {@link FeatureStages}), so the engines count the same rows.
+     */
+    static KV<Double, Double> offsetTarget(final Map<String, Object> row, final String field, final String offsetColumn) {
+        if (field == null) return KV.of(0d, null);
+        final Double y = toDouble(row.get(field));
+        if (y == null || y.isNaN()) return null;
+        if (offsetColumn == null) return KV.of(y, null);
+        final Double b = toDouble(row.get(offsetColumn));
+        if (b == null || b.isNaN()) return null;
+        return KV.of(y - b, b);
     }
 
     static String toText(final Object value) {

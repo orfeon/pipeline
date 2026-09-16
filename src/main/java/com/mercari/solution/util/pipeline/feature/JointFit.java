@@ -64,8 +64,16 @@ public final class JointFit implements Serializable {
         }
     }
 
-    /** One aggregated cell (or a fold / block tagged part of one): the finest partition of the lattice. */
-    public record Cell(String key, double n, double sum, double sumSq) implements Serializable {}
+    /**
+     * One aggregated cell (or a fold / block tagged part of one): the finest partition of the lattice.
+     * {@code sumOff} is the cell's Σ baseline under an offset block (0 otherwise), so the cell's observed statistic
+     * is {@code (sum + sumOff) / n} and its mean baseline {@code sumOff / n}.
+     */
+    public record Cell(String key, double n, double sum, double sumSq, double sumOff) implements Serializable {
+        public Cell(final String key, final double n, final double sum, final double sumSq) {
+            this(key, n, sum, sumSq, 0d);
+        }
+    }
 
     /** The fitted effects of one solve. */
     public static final class Solution implements Serializable {
@@ -89,6 +97,8 @@ public final class JointFit implements Serializable {
     /** The effect levels (non-global) in lattice order. */
     public final List<Level> effectLevels;
     public final Shrinkage.Scale scale;
+    /** Whether the target was offset by a baseline: the estimate is then the additive term on the scale (spec §3 rule 5). */
+    public final boolean offset;
     public final Solution total;
     /** fit.mode fold: the out-of-fold solution per fold, or null. */
     public final Solution[] folds;
@@ -101,11 +111,12 @@ public final class JointFit implements Serializable {
     /** fit.mode forward: the block indices that carried data (minBlocks counts these, not the change points). */
     public final TreeSet<Long> observedBlocks;
 
-    JointFit(final List<Level> levels, final Shrinkage.Scale scale, final Solution total,
+    JointFit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final Solution total,
              final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks) {
         this.levels = levels;
         this.effectLevels = effectLevelsOf(levels);
         this.scale = scale;
+        this.offset = offset;
         this.total = total;
         this.folds = folds;
         this.blocks = blocks;
@@ -142,8 +153,10 @@ public final class JointFit implements Serializable {
      * Fits the model from the gathered aggregation entries: plain cell keys (static / fold totals),
      * {@link #foldEntry fold-tagged} parts ({@code folds > 1}) and {@link #blockEntry block-tagged} parts
      * ({@code forward}).
+     *
+     * @param offset the target is offset by a baseline: cells carry Σb and the solve fits the additive term (see {@link #solve})
      */
-    public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final String weights, final double priorWeight,
+    public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
                                final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks) {
         final List<String> cellKeys = cellKeysOf(levels);
         final Map<String, Cell> total = new HashMap<>();
@@ -164,7 +177,7 @@ public final class JointFit implements Serializable {
                 merge(total, e.key(), e);
             }
         }
-        final Solution totalSolution = solve(levels, cellKeys, total.values(), scale, weights, priorWeight);
+        final Solution totalSolution = solve(levels, cellKeys, total.values(), scale, offset, weights, priorWeight);
         LOG.info("joint fit: {} cells, {} rows, {} iterations (max delta {})", total.size(), totalSolution.rows, totalSolution.iterations, totalSolution.maxDelta);
         Solution[] foldSolutions = null;
         if (folds > 1) {
@@ -177,7 +190,7 @@ public final class JointFit implements Serializable {
                     final Cell rest = own == null ? e.getValue() : subtract(e.getValue(), own);
                     if (rest != null) outOfFold.put(e.getKey(), rest);
                 }
-                foldSolutions[f] = solve(levels, cellKeys, outOfFold.values(), scale, weights, priorWeight);
+                foldSolutions[f] = solve(levels, cellKeys, outOfFold.values(), scale, offset, weights, priorWeight);
             }
         }
         TreeMap<Long, Solution> blockSolutions = null;
@@ -208,15 +221,15 @@ public final class JointFit implements Serializable {
                         oldest++;
                     }
                 }
-                blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, weights, priorWeight));
+                blockSolutions.put(at, solve(levels, cellKeys, window.values(), scale, offset, weights, priorWeight));
             }
         }
-        return new JointFit(levels, scale, totalSolution, foldSolutions, blockSolutions, observed);
+        return new JointFit(levels, scale, offset, totalSolution, foldSolutions, blockSolutions, observed);
     }
 
     private static void merge(final Map<String, Cell> into, final String key, final Cell part) {
-        into.merge(key, new Cell(key, part.n(), part.sum(), part.sumSq()),
-                (a, b) -> new Cell(key, a.n() + b.n(), a.sum() + b.sum(), a.sumSq() + b.sumSq()));
+        into.merge(key, new Cell(key, part.n(), part.sum(), part.sumSq(), part.sumOff()),
+                (a, b) -> new Cell(key, a.n() + b.n(), a.sum() + b.sum(), a.sumSq() + b.sumSq(), a.sumOff() + b.sumOff()));
     }
 
     /** {@code total − part}; null when nothing remains. */
@@ -224,7 +237,7 @@ public final class JointFit implements Serializable {
         if (total == null) return null;
         final double n = total.n() - part.n();
         if (n <= 1e-9) return null;
-        return new Cell(total.key(), n, total.sum() - part.sum(), total.sumSq() - part.sumSq());
+        return new Cell(total.key(), n, total.sum() - part.sum(), total.sumSq() - part.sumSq(), total.sumOff() - part.sumOff());
     }
 
     /** Delta-method weight factor of the transformed cell mean: 1 / p(1−p) / μ. */
@@ -248,9 +261,14 @@ public final class JointFit implements Serializable {
      * for cells of equal weight, and the identity scale ({@code v = 1}) is the plain ridge. A cell whose key
      * is null on a level (see {@link FeatureValues#keyWithNulls}) carries no indicator for that level: it
      * still informs the intercept and the levels whose keys it has.
+     *
+     * @param offset the cells' targets are offset by a baseline: {@code z_c = t(ȳ_c) − t(b̄_c)} with
+     *               {@code ȳ_c = (Σ(y − b) + Σb) / n} the observed statistic and {@code b̄_c = Σb / n} the mean baseline
+     *               ({@link Shrinkage#own}: the additive term on the scale, spec §3 rule 5; on identity the mean
+     *               residual as before), weighted by the observed statistic's delta-method factor
      */
     public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
-                                 final Shrinkage.Scale scale, final String weights, final double priorWeight) {
+                                 final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight) {
         final Solution solution = new Solution();
         final List<Level> effectLevels = effectLevelsOf(levels);
         final int L = effectLevels.size();
@@ -258,7 +276,8 @@ public final class JointFit implements Serializable {
         solution.effects = new ArrayList<>();
         for (int l = 0; l < L; l++) solution.effects.add(new HashMap<>());
         final List<Cell> cells = new ArrayList<>();
-        for (final Cell c : input) if (c.n() > 0) cells.add(c);
+        // a cell without rows — or, under an offset, whose mean baseline is outside the scale's domain — has no term
+        for (final Cell c : input) if (c.n() > 0 && (!offset || Shrinkage.baselineDefined(scale, c.n(), c.sumOff()))) cells.add(c);
         if (cells.isEmpty()) return solution;
         cells.sort(Comparator.comparing(Cell::key));
         final int m = cells.size();
@@ -266,9 +285,10 @@ public final class JointFit implements Serializable {
         double maxZ = 0, rows = 0;
         for (int i = 0; i < m; i++) {
             final Cell c = cells.get(i);
-            final double mean = c.sum() / c.n();
-            z[i] = Shrinkage.transform(scale, mean);
-            w[i] = c.n() * varianceFactor(scale, mean);
+            // the observed statistic (Σy / n: the residual plus the baseline under an offset) sets the delta-method weight
+            final double observed = (c.sum() + (offset ? c.sumOff() : 0)) / c.n();
+            z[i] = Shrinkage.own(scale, c.n(), c.sum(), c.sumOff(), offset);
+            w[i] = c.n() * varianceFactor(scale, observed);
             maxZ = Math.max(maxZ, Math.abs(z[i]));
             rows += c.n();
         }
@@ -418,7 +438,10 @@ public final class JointFit implements Serializable {
         return total;
     }
 
-    /** The composed estimate on the original scale; null without a leaf key or a solution. */
+    /**
+     * The composed estimate on the original scale — or, under an offset, the additive term on the shrinkage scale
+     * itself; null without a leaf key or a solution.
+     */
     public Double estimate(final Solution s, final Map<String, Object> row) {
         if (s == null || s.isEmpty()) return null;
         if (!effectLevels.isEmpty() && FeatureValues.key(row, effectLevels.get(0).keys()) == null) return null;
@@ -427,7 +450,7 @@ public final class JointFit implements Serializable {
             final Double e = effect(s, l, row);
             if (e != null) eta += e;
         }
-        return Shrinkage.inverse(scale, eta);
+        return Shrinkage.output(scale, eta, offset);
     }
 
     /** The effect of one level for the row (transform scale): 0 for an unseen context, null without a key. */
@@ -521,6 +544,7 @@ public final class JointFit implements Serializable {
             final JsonObject manifest = FitArtifact.manifest(planHash, id);
             manifest.addProperty("estimator", "joint");
             manifest.addProperty("scale", fit.scale.name());
+            manifest.addProperty("offset", fit.offset);
             final JsonArray levels = new JsonArray();
             for (final Level l : fit.levels) {
                 final JsonObject o = new JsonObject();
@@ -559,7 +583,8 @@ public final class JointFit implements Serializable {
     }
 
     /** Loads the whole-input solution written by {@link #write} (the geometry comes from the column coordinates). */
-    public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels, final Shrinkage.Scale scale) {
+    public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels,
+                                final Shrinkage.Scale scale, final boolean offset) {
         final String path = artifactPath(artifactUri, planHash, id);
         final Solution s = new Solution();
         final List<Level> effectLevels = effectLevelsOf(levels);
@@ -589,7 +614,7 @@ public final class JointFit implements Serializable {
             throw new RuntimeException("Failed to read joint fit artifact: " + path, e);
         }
         LOG.info("loaded joint fit artifact {}", path);
-        return new JointFit(levels, scale, s, null, null, null);
+        return new JointFit(levels, scale, offset, s, null, null, null);
     }
 
 }

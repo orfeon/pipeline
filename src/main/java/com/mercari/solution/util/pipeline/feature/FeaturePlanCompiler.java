@@ -1857,8 +1857,12 @@ public final class FeaturePlanCompiler {
             if (needsRoot) levels.add(List.of());
             lattices.add(new Lattice(ks, shrinkage, levels, additiveAt));
         }
-        if (def.offset != null && lattices.stream().anyMatch(l -> l.shrinkage.scale != Shrinkage.Scale.identity)) {
-            diagnostics.error("encoding.offset.scale", loc, "offset with a logit / log shrinkage scale is not implemented yet");
+        if (lattices.stream().anyMatch(l -> offsetTerm(def, l.shrinkage))) {
+            // spec §3 rule 5: the offset is an additive term on the shrinkage scale. The levels keep Σ baseline next to
+            // Σ(y − b) (hidden __sumoff), each level's term is t(observed) − t(mean baseline), and the composed value is
+            // that term (a log-odds / log-rate ratio against the baseline), not a probability / rate
+            diagnostics.info("encoding.offset.additive", loc, "offset '" + def.offset + "' on a logit / log shrinkage scale: the composed value is the additive term on that scale"
+                    + " (t(key's observed statistic) − t(its mean baseline), shrunk toward the parent's term; deviations on the same scale) — not a probability / rate");
         }
 
         // expansion: keySet × window × target × stat (product) or zip(keySet, target) × window × stat
@@ -1883,10 +1887,10 @@ public final class FeaturePlanCompiler {
                 for (final Window window : windowsOf(lattice.keySet)) {
                     // a shrunk distribution needs the per-category shares of the level, the scalar statistics its sum
                     if (target.stats.stream().anyMatch(s -> !"distribution".equals(s)) || !distribution) {
-                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, false);
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, offsetTerm(def, lattice.shrinkage), computeAt, mode, fitSpec, false);
                     }
                     if (distribution) {
-                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, true);
+                        levelStats(def, List.of(), lookupWindow(window, mode, def), target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, true);
                     }
                 }
             }
@@ -1934,7 +1938,8 @@ public final class FeaturePlanCompiler {
                             diagnostics.error("encoding.stat.static", loc, "stat " + stat + " is not available in fit.mode " + mode.token() + " (expanding only)");
                             continue;
                         }
-                        final Shrinkage.Level leaf = levelStats(def, ks.keys, null, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, false);
+                        // unshrunk: the statistic is read straight from the leaf's (n, Σy, Σy²), never as an offset term
+                        final Shrinkage.Level leaf = levelStats(def, ks.keys, null, target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, false);
                         final OutputColumn c = newColumn(def.name, Scope.row, "fitStat", canonical, s.output(), computeAt);
                         c.fitted = true;
                         c.coordinates.put("keys", String.join(",", ks.keys));
@@ -1966,6 +1971,7 @@ public final class FeaturePlanCompiler {
                     }
                     // lattice: hidden statistics per level, composed in a row column
                     final boolean distribution = "distribution".equals(stat);
+                    final boolean offsetTerm = offsetTerm(def, lattice.shrinkage);
                     final List<Shrinkage.Level> levels = new ArrayList<>();
                     for (final List<String> levelKeys : lattice.levels) {
                         if (levelKeys.size() == 1 && Shrinkage.ADDITIVE.equals(levelKeys.get(0))) {
@@ -1974,13 +1980,13 @@ public final class FeaturePlanCompiler {
                                 final KeySet main = singleKeySets.get(key);
                                 if (main == null) continue;
                                 final List<Shrinkage.Level> chain = new ArrayList<>();
-                                chain.add(levelStats(def, main.keys, window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, distribution));
-                                chain.add(levelStats(def, List.of(), window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, distribution));
+                                chain.add(levelStats(def, main.keys, window, target.name, target.reference, offsetColumn, offsetTerm, computeAt, mode, fitSpec, distribution));
+                                chain.add(levelStats(def, List.of(), window, target.name, target.reference, offsetColumn, offsetTerm, computeAt, mode, fitSpec, distribution));
                                 mains.add(chain);
                             }
                             levels.add(new Shrinkage.Level(Shrinkage.ADDITIVE, null, null, mains));
                         } else {
-                            levels.add(levelStats(def, levelKeys, window, target.name, target.reference, offsetColumn, computeAt, mode, fitSpec, distribution));
+                            levels.add(levelStats(def, levelKeys, window, target.name, target.reference, offsetColumn, offsetTerm, computeAt, mode, fitSpec, distribution));
                         }
                     }
                     if ("share".equals(stat)) {
@@ -2091,6 +2097,7 @@ public final class FeaturePlanCompiler {
         for (final Shrinkage.Level l : Shrinkage.leaves(List.of(level))) {
             addSelfInput(c, l.nColumn());
             addSelfInput(c, l.sumColumn());
+            if (l.offColumn() != null) addSelfInput(c, l.offColumn());
         }
     }
 
@@ -2126,8 +2133,19 @@ public final class FeaturePlanCompiler {
      * distribution) of one lattice level for a (window, target), registered once per block and shared by every
      * keySet whose lattice contains the level.
      */
+    /**
+     * Whether the lattice composes its levels as offset terms (spec §3 rule 5): a baseline offset shrunk on a logit /
+     * log scale. Its levels then also keep Σ baseline ({@code __sumoff}); an identity or unshrunk lattice of the same
+     * block does not (its statistics are the plain residual Σ(y − b) / n).
+     */
+    private static boolean offsetTerm(final FeatureDef def, final Shrinkage shrinkage) {
+        return def.offset != null && shrinkage.enabled && shrinkage.scale != Shrinkage.Scale.identity;
+    }
+
+    /** @param offsetTerm the level is composed as an offset term ({@link #offsetTerm}): register its hidden Σ baseline too */
     private Shrinkage.Level levelStats(final FeatureDef def, final List<String> levelKeys, final Window window,
                                        final String targetName, final String targetReference, final String offsetColumn,
+                                       final boolean offsetTerm,
                                        final AvailableAt computeAt, final FitMode mode, final FeatureSpec.FitSpec fitSpec,
                                        final boolean distribution) {
         final String token = levelKeys.isEmpty() ? Shrinkage.GLOBAL : String.join("_", levelKeys);
@@ -2135,11 +2153,15 @@ public final class FeaturePlanCompiler {
                 "block", def.name, "keys", token, "window", window == null ? "" : window.token(), "target", targetName));
         final String nName = base + "__n";
         final String valueName = base + (distribution ? "__dist" : "__sum");
+        final String offName = base + "__" + PopulationEvaluator.SUM_OFFSET;
         final boolean isStatic = mode.isLookup();
+        // an offset term also keeps Σ baseline (the level's term is t(observed) − t(mean baseline))
+        final boolean offsetSum = offsetTerm && !distribution && targetReference != null;
         // static / fold fits also keep Σy² so std can be derived from the artifact
-        final String[] stats = distribution ? new String[]{"count", "distribution"} : isStatic ? new String[]{"count", "sum", "sumsq"} : new String[]{"count", "sum"};
+        final List<String> stats = new ArrayList<>(distribution ? List.of("count", "distribution") : isStatic ? List.of("count", "sum", "sumsq") : List.of("count", "sum"));
+        if (offsetSum) stats.add(PopulationEvaluator.SUM_OFFSET);
         for (final String stat : stats) {
-            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; default -> base + "__sumsq"; };
+            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; case PopulationEvaluator.SUM_OFFSET -> offName; default -> base + "__sumsq"; };
             if (!"count".equals(stat) && targetReference == null) continue;
             if (columnsByCanonical.containsKey(name)) continue;
             final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name,
@@ -2152,7 +2174,7 @@ public final class FeaturePlanCompiler {
             populationColumn(c, level, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
             register(c);
         }
-        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, null);
+        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, offsetSum ? offName : null, null);
     }
 
     /**

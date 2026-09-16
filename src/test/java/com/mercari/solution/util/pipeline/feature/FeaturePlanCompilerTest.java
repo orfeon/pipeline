@@ -444,6 +444,46 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("market", column(okPlan, "enc__seller_id__count").getCoordinates().get("offset"));
     }
 
+    /**
+     * An offset on a logit / log shrinkage scale is accepted: the block's levels keep a hidden Σ baseline
+     * ({@code __sumoff}) next to Σ(y − b), the composed column reads it through its {@code levels} coordinate, and
+     * an info diagnostic says the value is the additive term on the scale. On identity nothing changes (no extra
+     * column), and the joint estimator accepts the same declaration.
+     */
+    @Test
+    public void testOffsetOnLogitScaleKeepsBaselineSum() {
+        final String logit = SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: logit}");
+        final FeaturePlan plan = compile(SOURCES, logit);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "encoding.offset.additive"), plan::describe);
+        final OutputColumn off = column(plan, "enc__seller_id__e2__sumoff");
+        Assertions.assertTrue(off.isIntermediate());
+        Assertions.assertEquals("sumoff", off.getCoordinates().get("stat"));
+        Assertions.assertEquals("market", off.getCoordinates().get("offset"));
+        Assertions.assertEquals(off.getCoordinates().get("field"), column(plan, "enc__seller_id__e2__sum").getCoordinates().get("field"));
+        Assertions.assertNotNull(plan.getColumn("enc__global__e2__sumoff"));
+        Assertions.assertNotNull(plan.getColumn("enc__category__365d__e2__sumoff"));
+        final OutputColumn composed = column(plan, "enc__seller_id__e2__mean");
+        Assertions.assertEquals("compose", composed.getOperator());
+        Assertions.assertEquals("logit", composed.getCoordinates().get("scale"));
+        Assertions.assertTrue(composed.getCoordinates().get("levels").contains("enc__seller_id__e2__sumoff"), composed.getCoordinates().get("levels"));
+        Assertions.assertTrue(composed.getInputs().contains("enc__seller_id__e2__sumoff"));
+        // the target-less count / share levels have no baseline sum
+        Assertions.assertNull(plan.getColumn("enc__seller_id__sumoff"));
+
+        final FeaturePlan identity = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2}"));
+        Assertions.assertFalse(identity.getDiagnostics().hasErrors(), identity::describe);
+        Assertions.assertFalse(hasCode(identity, "encoding.offset.additive"));
+        Assertions.assertNull(identity.getColumn("enc__seller_id__e2__sumoff"));
+        Assertions.assertFalse(column(identity, "enc__seller_id__e2__mean").getCoordinates().get("levels").contains("sumoff"));
+
+        final FeaturePlan joint = compile(SOURCES, SPEC.replace("maxFeatures: 50", "maxFeatures: 50\n    offset: market\n    shrinkage: {priorWeight: 2, scale: log, estimator: joint}\n    fit: {mode: static}"));
+        Assertions.assertFalse(joint.getDiagnostics().hasErrors(), joint::describe);
+        Assertions.assertTrue(hasCode(joint, "encoding.offset.additive"), joint::describe);
+        Assertions.assertEquals("joint", column(joint, "enc__seller_id__e2__mean").getOperator());
+        Assertions.assertEquals("market", column(joint, "enc__seller_id__e2__mean").getCoordinates().get("offset"));
+    }
+
     private static final String LATTICE_ENC = """
                   - name: enc
                     scope: population

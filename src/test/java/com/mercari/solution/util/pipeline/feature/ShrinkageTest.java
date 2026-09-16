@@ -61,6 +61,75 @@ public class ShrinkageTest {
     }
 
     /**
+     * A baseline offset on a logit scale: each level's own term is logit(observed) − logit(mean baseline) from the
+     * hidden Σ(y − b) and Σb, the leaf shrinks toward the parent's term, and the composed value is the term itself
+     * (not a probability). On the identity scale the extra sum changes nothing (Σ(y − b) / n as before).
+     */
+    @Test
+    public void testOffsetOnLogitScaleComposesAdditiveTerm() {
+        // leaf: n = 4, Σy = 3, Σb = 2 → Σ(y − b) = 1; global (leave-node-out): n = 10 − 4 = 6, Σy = 3 − ... given below
+        final Shrinkage logit = Shrinkage.of(Shrinkage.Scale.logit, 2, true);
+        final List<Shrinkage.Level> levels = List.of(
+                new Shrinkage.Level("seller", "s_n", "s_sum", "s_off", null),
+                new Shrinkage.Level(Shrinkage.GLOBAL, "g_n", "g_sum", "g_off", null));
+        // global totals include the leaf: n = 10, Σ(y − b) = 1 + (−1) = 0, Σb = 2 + 4 = 6 → without the leaf n = 6, Σ(y − b) = −1, Σb = 4
+        final Map<String, Object> row = Map.of("s_n", 4.0, "s_sum", 1.0, "s_off", 2.0, "g_n", 10.0, "g_sum", 0.0, "g_off", 6.0);
+        final java.util.function.DoubleUnaryOperator lg = p -> Math.log(p / (1 - p));
+        final double own = lg.applyAsDouble(3.0 / 4) - lg.applyAsDouble(2.0 / 4);      // observed 3/4 vs mean baseline 1/2
+        final double root = lg.applyAsDouble(3.0 / 6) - lg.applyAsDouble(4.0 / 6);     // (Σ(y − b) + Σb) / n = (−1 + 4) / 6 = 1/2 vs 2/3
+        final double w = 4.0 / (4 + 2);
+        final Shrinkage.Composition c = logit.compose(row, levels, null);
+        Assertions.assertEquals(root + w * (own - root), c.value(), 1e-12);
+        Assertions.assertEquals(w * (own - root), c.deviations()[0], 1e-12);
+        Assertions.assertTrue(c.value() > 0, "a key whose observed rate beats its baseline has a positive log-odds term");
+
+        // the levels encode / parse with the offset column
+        final List<Shrinkage.Level> parsed = Shrinkage.parseLevels(Shrinkage.encodeLevels(levels));
+        Assertions.assertEquals("s_off", parsed.get(0).offColumn());
+        Assertions.assertEquals("g_off", parsed.get(1).offColumn());
+        Assertions.assertNull(Shrinkage.parseLevels(Shrinkage.encodeLevels(List.of(new Shrinkage.Level("seller", "s_n", "s_sum", null)))).get(0).offColumn());
+
+        // identity: the mean residual, with or without the offset column
+        final Shrinkage identity = Shrinkage.of(Shrinkage.Scale.identity, 2, true);
+        final List<Shrinkage.Level> plain = List.of(
+                new Shrinkage.Level("seller", "s_n", "s_sum", null),
+                new Shrinkage.Level(Shrinkage.GLOBAL, "g_n", "g_sum", null));
+        final double ownId = 1.0 / 4, rootId = -1.0 / 6;
+        Assertions.assertEquals(rootId + w * (ownId - rootId), identity.compose(row, levels, null).value(), 1e-12);
+        Assertions.assertEquals(identity.compose(row, plain, null).value(), identity.compose(row, levels, null).value(), 1e-12);
+    }
+
+    /**
+     * A level whose mean baseline is outside the scale's domain (Σb = 0 here) has no term: it defers to its parent
+     * with a zero deviation instead of leaking the transform's clamp (log(1e-12) = −27.6) into the composed value;
+     * with every level undefined there is no estimate at all. The identity scale never has an undefined baseline.
+     */
+    @Test
+    public void testOffsetTermWithUndefinedBaselineDefersToParent() {
+        final Shrinkage log = Shrinkage.of(Shrinkage.Scale.log, 2, true);
+        final List<Shrinkage.Level> levels = List.of(
+                new Shrinkage.Level("seller", "s_n", "s_sum", "s_off", null),
+                new Shrinkage.Level(Shrinkage.GLOBAL, "g_n", "g_sum", "g_off", null));
+        // leaf: n = 4, Σ(y − b) = 2, Σb = 0 (cold-start baseline); global without the leaf: n = 6, Σ(y − b) = −1, Σb = 8
+        final Map<String, Object> row = Map.of("s_n", 4.0, "s_sum", 2.0, "s_off", 0.0, "g_n", 10.0, "g_sum", 1.0, "g_off", 8.0);
+        final Shrinkage.Composition c = log.compose(row, levels, null);
+        Assertions.assertEquals(Math.log(7.0 / 6) - Math.log(8.0 / 6), c.value(), 1e-12, "the parent's term log(Σy / Σb)");
+        Assertions.assertEquals(0d, c.deviations()[0], 0d);
+        Assertions.assertNull(log.compose(Map.of("s_n", 4.0, "s_sum", 2.0, "s_off", 0.0, "g_n", 4.0, "g_sum", 2.0, "g_off", 0.0), levels, null).value());
+        Assertions.assertFalse(Shrinkage.baselineDefined(Shrinkage.Scale.logit, 4, 4), "a mean baseline of 1 is outside logit");
+        Assertions.assertTrue(Shrinkage.baselineDefined(Shrinkage.Scale.identity, 4, 0));
+        Assertions.assertEquals(0.5, Shrinkage.own(Shrinkage.Scale.identity, 4, 2, 0, true), 0d);
+
+        // the rows a level counts and sums: target and (under an offset) baseline present, NaN missing; a target-less
+        // statistic counts every row without consulting the baseline
+        Assertions.assertEquals(org.apache.beam.sdk.values.KV.of(0.25, 0.5), FeatureValues.offsetTarget(Map.of("y", 0.75, "b", 0.5), "y", "b"));
+        Assertions.assertNull(FeatureValues.offsetTarget(Map.of("y", 0.75), "y", "b"), "a row without a baseline is outside every statistic");
+        Assertions.assertNull(FeatureValues.offsetTarget(Map.of("y", 0.75, "b", Double.NaN), "y", "b"));
+        Assertions.assertEquals(org.apache.beam.sdk.values.KV.of(0.75, null), FeatureValues.offsetTarget(Map.of("y", 0.75), "y", null));
+        Assertions.assertEquals(org.apache.beam.sdk.values.KV.of(0d, null), FeatureValues.offsetTarget(Map.of("y", 0.75), null, "b"));
+    }
+
+    /**
      * The one-way moment estimator λ = σ²/τ² equals Kleinman's Beta-Binomial moment estimator m = (1 − ρ) / ρ with
      * ρ = (BMS − WMS) / (BMS + (n₀ − 1) WMS) on 0/1 data — the reason a declared betaBinomial family changes
      * neither the pseudo-count nor the point estimate of a rate.
