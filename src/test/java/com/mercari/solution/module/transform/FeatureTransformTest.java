@@ -225,6 +225,44 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * History is strictly past by timestamp, not by day: a row later the same day sees the morning's rows of its
+     * entity, while rows that share a timestamp never see each other. Session B is moved to 15:00 on Jan 1 and a
+     * second s1 session (E) is added at A's exact time — B counts both, A and E count nothing. A date-granularity
+     * time field would make every same-day row invisible (they would all share the timestamp), so a "same-day
+     * earlier events" feature needs the event's actual time in {@code time.field}.
+     */
+    @Test
+    public void testSameDayEarlierRowsAreStrictlyPast() throws java.io.IOException {
+        final String source = SOURCE_CONFIG
+                .replace("sold: 0, final_price: 0.0,   session_time: \"2025-01-03T10:00:00Z\"}", "sold: 0, final_price: 0.0,   session_time: \"2025-01-01T15:00:00Z\"}")
+                .replace("        - {session_id: C, seller_id: s1,",
+                        "        - {session_id: E, seller_id: s1, category: electronics, quantity: 1, start_price: 90.0,  condition_grade: good, current_bid_t10: 95.0,  sold: 0, final_price: 0.0,   session_time: \"2025-01-01T10:00:00Z\"}\n        - {session_id: C, seller_id: s1,");
+        Assertions.assertTrue(source.contains("2025-01-01T15:00:00Z") && source.contains("session_id: E"), source);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(source + FEATURE_CONFIG));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(7, byKey.size());
+            // 10:00: A/s1 and E/s1 share the timestamp — neither is in the other's past
+            for (final String same : List.of("A/s1", "E/s1")) {
+                Assertions.assertEquals(0L, ((Number) byKey.get(same).getPrimitiveValue("f_recent_n5_start_price_count")).longValue(), same);
+                Assertions.assertNull(byKey.get(same).getPrimitiveValue("f_recent_n5_start_price_lag1"), same);
+                Assertions.assertEquals(0L, ((Number) byKey.get(same).getPrimitiveValue("f_enc__seller_id__count")).longValue(), same);
+            }
+            // 15:00 the same day: both morning sessions of s1 are strictly past (pre-event attributes need no shift)
+            Assertions.assertEquals(2L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_recent_n5_start_price_count")).longValue());
+            Assertions.assertEquals(95.0, byKey.get("B/s1").getAsDouble("f_recent_n5_start_price_mean"), 1e-9);
+            Assertions.assertTrue(List.of(100.0, 90.0).contains(byKey.get("B/s1").getAsDouble("f_recent_n5_start_price_lag1")));
+            Assertions.assertEquals(2L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            // the outcome of the morning sessions is still unknown at 15:00 (settlement + ingestion lag)
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_recent_n5_sold_lag1"));
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testShrinkageAndShare() throws java.io.IOException {
         // seller-level mean of (sold >= 1) shrunk toward the global mean (leave-node-out), plus share = n_seller / n_global
