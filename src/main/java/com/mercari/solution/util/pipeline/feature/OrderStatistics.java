@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.feature;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.function.DoubleConsumer;
 
 /**
  * Exact order statistics over a multiset of doubles that supports insertion AND deletion — the running
@@ -99,6 +100,18 @@ public final class OrderStatistics implements Serializable {
         }
         size--;
         return true;
+    }
+
+    /**
+     * Feeds every value in ascending order to {@code consumer}. Unlike {@code size} × {@link #select} it walks the
+     * blocks directly, so it is O(n) and — being the read side of a {@code merge} — leaves the Fenwick index alone
+     * instead of rebuilding it as a side effect on the source.
+     */
+    public void forEachAscending(final DoubleConsumer consumer) {
+        for (int b = 0; b < blockCount; b++) {
+            final double[] block = blocks[b];
+            for (int i = 0; i < sizes[b]; i++) consumer.accept(block[i]);
+        }
     }
 
     /** The k-th smallest value (0-based). */

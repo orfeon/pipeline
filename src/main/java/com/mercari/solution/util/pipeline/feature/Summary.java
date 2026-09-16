@@ -22,7 +22,8 @@ import java.util.TreeMap;
  * </ul>
  *
  * <p>The evaluator owns the <em>extraction</em> (which value of a past row contributes — target minus baseline,
- * a category, a bare 1 for a count) and the null convention of its scope; the summary owns the arithmetic.
+ * a category, a bare 0 for a count — only {@code n} moves) and the null convention of its scope; the summary
+ * owns the arithmetic.
  * {@link OperatorCatalog#summary} maps a statistic token to its family and {@link Readout}; {@link Summaries}
  * holds the built-in families.
  *
@@ -210,7 +211,14 @@ public interface Summary<S extends Serializable> extends Serializable {
         @Override
         public void update(final State s, final Object contribution, final int sign) {
             s.n += sign;
-            s.counts.merge(contribution.toString(), (long) sign, Long::sum);
+            // a category evicted back to zero is dropped, so the state stays bounded by the values currently inside
+            s.counts.merge(contribution.toString(), (long) sign, Counts::add);
+        }
+
+        /** Σ with the zero entry removed (the map holds only the categories currently present). */
+        private static Long add(final Long a, final Long b) {
+            final long sum = a + b;
+            return sum == 0 ? null : sum;
         }
 
         @Override
@@ -221,7 +229,7 @@ public interface Summary<S extends Serializable> extends Serializable {
         @Override
         public void merge(final State into, final State other) {
             into.n += other.n;
-            for (final Map.Entry<String, Long> e : other.counts.entrySet()) into.counts.merge(e.getKey(), e.getValue(), Long::sum);
+            for (final Map.Entry<String, Long> e : other.counts.entrySet()) into.counts.merge(e.getKey(), e.getValue(), Counts::add);
         }
 
         @Override
@@ -271,7 +279,7 @@ public interface Summary<S extends Serializable> extends Serializable {
 
         @Override
         public void merge(final State into, final State other) {
-            for (int i = 0; i < other.order.size(); i++) into.order.add(other.order.select(i));
+            other.order.forEachAscending(into.order::add);
         }
 
         @Override
