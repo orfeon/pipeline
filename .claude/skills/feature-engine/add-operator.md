@@ -52,10 +52,16 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
    window coordinates and runs `classifyPast`. Predicate ops go through the predicate branch
    (`conditionText` parses and quotes reserved identifiers at compile time).
 4. `SequenceEvaluator`: decide the evaluation path.
-   - **Incremental** (preferred): extend `incrementalStat` to return the op's stat token, add
-     accumulator fields to `Accumulator`, update `contribute(plan, acc, past, sign)` (sign −1 is
-     eviction under `maxAge` — if the statistic cannot be evicted, exclude it like max / min in
-     `plan()`), and `readStatistic`. The `EqualityFilter` sub-key dispatch comes for free.
+   - **Incremental** (preferred): give the statistic a `Summary` family. Either an existing one
+     serves it (add a readout `case` to the family's `read` and a line to
+     `OperatorCatalog.summary`), or write a new family: a `State` class + `create` / `update(state,
+     contribution, ±1)` / `merge` / `read` / `count`, declaring `invertible()` honestly (sign −1 is
+     eviction under `maxAge`; a family that cannot remove — extrema — returns false and `plan()`
+     sends windowed columns to the scan path automatically). What a past row *contributes* is the
+     evaluator's job (`contribution(plan, past)`, null = skip); the scope's null / cast convention is
+     `readStatistic`. The `EqualityFilter` sub-key dispatch and the fold / evict pointers come for
+     free. `SummaryTest` has the monoid / group harness (`assertMonoid`, `assertInvertible`) —
+     add the family there.
    - **Scan**: a new `case` in `evaluateScan` over the `window` sublist. Then declare the
      retention: a bounded tail in `tailSize` (`lag` / `trend` = k, `delta` = k+1, `maxEvents`), else
      the column is *unbounded* — `unboundedReason` must describe it and the
@@ -75,10 +81,11 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
 2. Sufficient stat: `RowEvaluator` `case "fitStat"` (static / fold read the leaf level's hidden
    columns) and `PopulationEvaluator.readStatistic` (expanding). `AVAILABLE_STATS` and the
    `engineConstraints` check derive from the catalog.
-3. Non-sufficient stat (the `quantile` pattern): a state field on `Accumulator` (must support
-   removal for `maxAge` eviction — `OrderStatistics` exists for order-based stats), `contribute`
-   (sign ±1), `readStatistic`, and the scan-path branch in `PopulationEvaluator.evaluateScan`.
-   Resolve any per-row parsing at plan time into `ColumnPlan` (`plan.quantile`), never per row.
+3. Non-sufficient stat (the `quantile` pattern): a `Summary` family whose state holds what the
+   statistic needs (`ORDER` wraps `OrderStatistics` so it can remove for `maxAge` eviction), a
+   `Readout` carrying the parameter (`Readout.of("quantile", p)` — resolved once in
+   `OperatorCatalog.summary`, never per row), `PopulationEvaluator.contribution` if the extraction
+   differs from "target minus offset", and the scan-path branch in `PopulationEvaluator.evaluateScan`.
 4. If the stat is shrinkable (mean / rate are), wire it through `Shrinkage` / `composeCoordinates`;
    raw statistics (quantile, distribution) bypass composition — say so in the docs.
 5. Tests: `FeaturePlanCompilerTest.testQuantileStat` pattern (coordinates, `fit=expanding`, the

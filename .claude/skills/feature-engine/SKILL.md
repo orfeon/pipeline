@@ -133,19 +133,34 @@ reads what the compile layer wrote into each column's `coordinates`.
   `shuffle(c, rows)` = Fisher–Yates from (seed, group key) over rows sorted by `order` + `tieBreak`
   coordinates — the tie-break over all input fields is what makes it engine-mode independent). Op
   parameters that are not a single field go through `FeaturePlanCompiler.configureContextOp`.
+- `Summary<S>` — the typed, mergeable accumulator behind every statistic the engine serves without
+  re-reading rows: `create` / `update(state, contribution, ±1)` / `merge` / `read(state, Readout)`,
+  with `invertible()` saying whether a contribution can be removed again (a group: windows can evict)
+  or only added (a monoid: extrema). Built-in families in `Summary.Summaries`: `MOMENTS` (n, Σ, Σ²:
+  count / sum / mean / std), `EXTREMA` (max / min, not invertible), `COUNTS` (value → count:
+  distribution), `ORDER` (`OrderStatistics`: quantiles). `OperatorCatalog.summary(stat)` maps a
+  statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
+  families are meant to become the per-block Combine state of the fit stage, the prefix-scan state and
+  the streaming state (proposal-feature-unification §2.1), so a new statistic is one family + one
+  catalog line.
 - `SequenceEvaluator` — the keyed replay logic. `ColumnPlan` from coordinates (shift, `maxAge`,
-  `maxEvents`, filter → `EqualityFilter` when `f = $self.f`, `stat`, `quantile`); two paths per
-  column: **incremental** (fold / evict pointers over the history + `Accumulator` — n, Σ, Σ², max,
-  min, value counts, order statistics; `contribute` / `readStatistic`) when `incrementalStat` is
-  non-null, no `maxEvents`, no general filter, and not max/min with eviction; else **scan**
+  `maxEvents`, filter → `EqualityFilter` when `f = $self.f`, `stat` token, `summary` spec, `empty`
+  state); two paths per column: **incremental** (fold / evict pointers over the history + one
+  `Summary` state per filter value; `contribution(plan, past)` extracts what a row contributes,
+  `readStatistic` applies the scope's null / cast convention) when `summaryOf(c)` is non-null, no
+  `maxEvents`, no general filter, and either no `maxAge` or the family is invertible; else **scan**
   (`select` = binary-searched sublist view, `evaluateScan` switch). `History` (absolute indices,
   trimmable prefix), `Watermarks` (per-field trim floors), `retainInto` / `tailSize` /
   `unboundedColumns` / `unboundedReason` (the compile-time twin used by the
   `sequence.window.unbounded` hint). `bufferedFields()` = union of `pastInputs` = what the stage
   projects per past row.
-- `PopulationEvaluator extends SequenceEvaluator` — encoding statistics: overrides `contribute` /
-  `readStatistic` / scan for `count` / `sum` / `mean` / `rate` / `std` / `distribution` /
-  quantiles; `isSupported(stat)` is what `engineConstraints` checks; NaN counts as missing.
+- `PopulationEvaluator extends SequenceEvaluator` — encoding statistics: overrides `statToken` /
+  `summaryOf` (encoding stats through the catalog, plus the hidden `sumoff` on the moments family),
+  `contribution` (target minus baseline offset — the baseline itself for `sumoff` — a bare 0 for the
+  target-less row counts and for the counted rows, the category of a distribution; the rows a level
+  counts and sums are the one rule `FeatureValues.offsetTarget`), `readStatistic` (a hidden `sum` /
+  `sumoff` reads 0 when empty) and the scan path; `isSupported(stat)` = "has a summary family" and is
+  what `engineConstraints` checks; NaN counts as missing.
 - `VarianceComponents` — per-level (n, Σy, Σy²) per key as a Beam `Combine`, λ = σ²/τ² by the method
   of moments (side input `Map<levelNColumn, λ>`), fold-tagged entries for `fit.mode: fold`,
   `lambdasInMemory` for loaded artifacts; `forwardSeries` (a `View.asList` the apply DoFn indexes once
