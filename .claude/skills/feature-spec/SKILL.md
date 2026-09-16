@@ -46,7 +46,7 @@ launch and monitoring).
 
 For the input relation (one relation; joins happen upstream in the pipeline), write down:
 
-- the event-time field and a tie-break field for rows sharing a timestamp (an event id);
+- the event-time field and a tie-break field for rows sharing a timestamp (an event id). Use the actual event time, not a date: history is strictly past by timestamp, so rows sharing one never see each other, while a row later the same day does see that day's earlier rows (what a "same-day earlier events" feature needs);
 - for every field: is it known before the event (attribute), a market snapshot taken at a known time
   before the event, or an outcome known after it? When exactly? How long after that does it show up in
   the table this pipeline reads (batch reflection delay)? Is the row corrected later (withdrawals,
