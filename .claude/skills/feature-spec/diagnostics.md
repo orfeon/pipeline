@@ -168,7 +168,8 @@ not expand because another block failed).
 | `encoding.stat.static` | error | `quantile` / `distribution` are expanding-only; use `fit.mode: expanding` or another stat |
 | `encoding.target.values` | error | `targets[].values` lists the categories of a `distribution` to emit as flat FLOAT64 columns (`<column>_<value>`, like `countByValue`); the target declares no `distribution` stat |
 | `encoding.nested` | error | nested targets (`field.ref`) not implemented |
-| `encoding.offset` / `encoding.offset.computeAt` / `encoding.offset.scale` | error | offset must name a baseline; offset blocks compute at `predictAt`; offset with logit / log scale not implemented |
+| `encoding.offset` / `encoding.offset.computeAt` | error | offset must name a baseline; offset blocks compute at `predictAt` |
+| `encoding.offset.additive` | info | offset on a logit / log scale: the composed value is the additive term on that scale (`t(observed) − t(mean baseline)`, shrunk toward the parent's term) — a log-odds / log-rate ratio against the baseline, not a probability / rate |
 | `encoding.shrinkage.estimator` | error | `backoff` on an overlapping lattice (additive / cross) is invalid (use `sequential` or `joint`); `joint` needs `fit.mode: static \| fold \| forward` (rejected under `expanding`; a `distribution` there is `encoding.stat.static`) |
 | `encoding.shrinkage.joint` | info | what the joint solve fits: the levels, λ rule and scale of the lattice (one ridge / BLUP system per keySet × target on one worker) |
 | `encoding.shrinkage.weights` | error / info | `fixed \| varianceComponents` (`heldOut` not implemented); as info: variance components are estimated from the whole batch |

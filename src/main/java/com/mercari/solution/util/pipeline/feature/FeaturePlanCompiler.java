@@ -54,6 +54,8 @@ public final class FeaturePlanCompiler {
     private boolean unresolvedBlocks = false;
     /** Hint codes already reported per block (some hints are per block, not per column). */
     private final Set<String> hintedBlocks = new HashSet<>();
+    /** Encoding blocks with a baseline offset on a logit / log scale: their levels also keep Σ baseline ({@code __sumoff}). */
+    private final Set<String> offsetScaledBlocks = new HashSet<>();
     private final List<FeaturePlan.ObservedAtAudit> observedAtAudits = new ArrayList<>();
     private int anonymousCounter = 0;
 
@@ -1857,8 +1859,13 @@ public final class FeaturePlanCompiler {
             if (needsRoot) levels.add(List.of());
             lattices.add(new Lattice(ks, shrinkage, levels, additiveAt));
         }
-        if (def.offset != null && lattices.stream().anyMatch(l -> l.shrinkage.scale != Shrinkage.Scale.identity)) {
-            diagnostics.error("encoding.offset.scale", loc, "offset with a logit / log shrinkage scale is not implemented yet");
+        if (def.offset != null && lattices.stream().anyMatch(l -> l.shrinkage.enabled && l.shrinkage.scale != Shrinkage.Scale.identity)) {
+            // spec §3 rule 5: the offset is an additive term on the shrinkage scale. The levels keep Σ baseline next to
+            // Σ(y − b) (hidden __sumoff), each level's term is t(observed) − t(mean baseline), and the composed value is
+            // that term (a log-odds / log-rate ratio against the baseline), not a probability / rate
+            offsetScaledBlocks.add(def.name);
+            diagnostics.info("encoding.offset.additive", loc, "offset '" + def.offset + "' on a logit / log shrinkage scale: the composed value is the additive term on that scale"
+                    + " (t(key's observed statistic) − t(its mean baseline), shrunk toward the parent's term; deviations on the same scale) — not a probability / rate");
         }
 
         // expansion: keySet × window × target × stat (product) or zip(keySet, target) × window × stat
@@ -2091,6 +2098,7 @@ public final class FeaturePlanCompiler {
         for (final Shrinkage.Level l : Shrinkage.leaves(List.of(level))) {
             addSelfInput(c, l.nColumn());
             addSelfInput(c, l.sumColumn());
+            if (l.offColumn() != null) addSelfInput(c, l.offColumn());
         }
     }
 
@@ -2135,11 +2143,15 @@ public final class FeaturePlanCompiler {
                 "block", def.name, "keys", token, "window", window == null ? "" : window.token(), "target", targetName));
         final String nName = base + "__n";
         final String valueName = base + (distribution ? "__dist" : "__sum");
+        final String offName = base + "__" + PopulationEvaluator.SUM_OFFSET;
         final boolean isStatic = mode.isLookup();
+        // an offset block on a logit / log scale also keeps Σ baseline (the level's term is t(observed) − t(mean baseline))
+        final boolean offsetSum = !distribution && offsetColumn != null && targetReference != null && offsetScaledBlocks.contains(def.name);
         // static / fold fits also keep Σy² so std can be derived from the artifact
-        final String[] stats = distribution ? new String[]{"count", "distribution"} : isStatic ? new String[]{"count", "sum", "sumsq"} : new String[]{"count", "sum"};
+        final List<String> stats = new ArrayList<>(distribution ? List.of("count", "distribution") : isStatic ? List.of("count", "sum", "sumsq") : List.of("count", "sum"));
+        if (offsetSum) stats.add(PopulationEvaluator.SUM_OFFSET);
         for (final String stat : stats) {
-            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; default -> base + "__sumsq"; };
+            final String name = switch (stat) { case "count" -> nName; case "sum", "distribution" -> valueName; case PopulationEvaluator.SUM_OFFSET -> offName; default -> base + "__sumsq"; };
             if (!"count".equals(stat) && targetReference == null) continue;
             if (columnsByCanonical.containsKey(name)) continue;
             final OutputColumn c = newColumn(def.name, Scope.population, "encoding", name,
@@ -2152,7 +2164,7 @@ public final class FeaturePlanCompiler {
             populationColumn(c, level, window, targetReference, stat, offsetColumn, mode, def, fitSpec);
             register(c);
         }
-        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, null);
+        return new Shrinkage.Level(token, nName, targetReference == null ? nName : valueName, offsetSum ? offName : null, null);
     }
 
     /**

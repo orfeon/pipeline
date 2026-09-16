@@ -331,9 +331,10 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
 
 Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing fails at runtime:
 
-- `weights: heldOut`, logit / log scale with `offset` (`encoding.shrinkage.weights` /
-  `encoding.offset.scale`), `estimator: joint` under `fit.mode: expanding` (the row-local replay has no
-  cell table), a moment-estimated λ for a shrunk `distribution` — extend `Shrinkage` + `expandEncoding`.
+- `weights: heldOut` (`encoding.shrinkage.weights`), `estimator: joint` under `fit.mode: expanding` (the
+  row-local replay has no cell table), a moment-estimated λ for a shrunk `distribution` — extend `Shrinkage` +
+  `expandEncoding`. (An `offset` on a logit / log scale is implemented: hidden `__sumoff` per level,
+  `Shrinkage.Level.offColumn`, `KeyStats.sumOff`, info `encoding.offset.additive`.)
 - `structure: sequence` key sets, nested encoding targets (`targets[].field.ref`) —
   `encoding.keySet.structure` / `encoding.nested`; ordering of fits is the open question.
 - `quantile` / `distribution` in static / fold (`encoding.stat.static`): a static fit keeps only

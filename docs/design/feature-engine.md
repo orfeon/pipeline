@@ -517,6 +517,19 @@ production run for tens of minutes with no output (consumer feedback on PR #117)
 sequential read per DoFn instance; the whole forward series of a stage must fit a worker's memory (a
 series holds four arrays over the blocks a key touches), which the artifact writer already assumed.
 
+**Baseline offset on a logit / log scale** (spec §3 rule 5). An offset block whose shrinkage scale is not the
+identity registers one more hidden statistic per lattice level, `<level>__sumoff` = Σ baseline over the rows the
+level's `sum` counts (`PopulationEvaluator.SUM_OFFSET`, served by the incremental accumulator like `sum`); the
+compiler tracks such blocks (`offsetScaledBlocks`) so an identity-scale plan is unchanged. `Shrinkage.Level`
+carries the column (`offColumn`, a fourth token in the `levels` coordinate) and `Shrinkage.own` computes the
+level's term `t((Σ(y − b) + Σb) / n) − t(Σb / n)` with leave-node-out over all three sums; `compose` returns the
+shrunk term without the inverse transform. On the fit side the extracted value is a pair `(y − b, b)`
+(`VarianceComponents.valueCoder`), `KeyStats` / `ForwardBlocks.Series` / `JointFit.Cell` carry `sumOff`, the
+artifact schema gains a defaulted `sumOff` field (older artifacts read 0), `FitApplyDoFn` fills the hidden
+column from it, and `JointFit.solve(offset = true)` uses the per-cell term as `z_c` with the observed
+statistic's delta-method weight, `estimate` returning η itself. The diagnostic is the info
+`encoding.offset.additive` (the former `encoding.offset.scale` rejection is gone).
+
 **Joint estimator and conjugate families.** `estimator: joint` is a fit-stage estimator: the lattice's
 statistics-carrying levels (an `additive` entry expands to the main-effect key lists) become the effect
 levels of one mixed model `t(y) = μ + Σ e_level + ε` solved as ridge / BLUP over the aggregated cells
@@ -581,7 +594,7 @@ inner-class name and enum-typed setter — and fixed in the same arc); `engine.s
 (§9.5) and the prism image is the local / Cloud Run subset tier (in-memory, no spill, container memory
 roughly linear in the input).
 
-**Deferred (parsed, rejected with a diagnostic)**: `weights: heldOut`, logit / log scale with `offset`,
+**Deferred (parsed, rejected with a diagnostic)**: `weights: heldOut`,
 `estimator: joint` under `fit.mode: expanding` (row-local replay cannot hold the cell table), a variance-components
 λ for a shrunk `distribution`; `structure: sequence`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target

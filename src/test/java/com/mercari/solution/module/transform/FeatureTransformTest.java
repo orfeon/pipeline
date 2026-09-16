@@ -1309,6 +1309,142 @@ public class FeatureTransformTest {
         Assertions.assertTrue(new java.io.File(files[0], "enc__seller_id_category__e1.joint.avro").exists());
     }
 
+    private static double logit(final double p) {
+        return Math.log(p / (1 - p));
+    }
+
+    /** The market baseline of each row: share(1 / current_bid_t10) within its session. */
+    private static final double MARKET_A1 = 55.0 / 175, MARKET_A2 = 120.0 / 175, MARKET_B1 = 1.0, MARKET_C1 = 70.0 / 160, MARKET_C2 = 90.0 / 160, MARKET_D1 = 1.0;
+
+    /**
+     * Expanding encoding with a baseline offset on the logit scale: the composed value is the shrunk log-odds ratio
+     * of the seller's observed sale rate against its mean market baseline (spec §3 rule 5), the global term being
+     * the leave-node-out counterpart; on the identity scale the same declaration is the mean residual as before.
+     */
+    @Test
+    public void testOffsetOnLogitScale() throws java.io.IOException {
+        final String logitConfig = FEATURE_CONFIG.replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                "- {expr: \"sold >= 1\", stats: [mean]}\n          offset: market\n          shrinkage: {priorWeight: 1, scale: logit, output: [composed, deviations]}");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + logitConfig));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertNotNull(schema.getField("f_enc__seller_id__e2__mean"));
+        Assertions.assertNull(schema.getField("enc__seller_id__e2__sumoff"), "hidden statistics are not emitted");
+        Assertions.assertTrue(schema.getField("f_enc__seller_id__e2__mean").getOptions().get("feature.derivedFrom").contains("market"), "lineage carries the baseline");
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            // Jan 3: no outcome has reached the system yet
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            // Feb 1, s1: own rows A (1), B (0), C (1) → observed 2/3 vs mean baseline (bA1 + bB1 + bC1) / 3;
+            // global without s1 = s2's rows A (0), C (1) → observed 1/2 vs (bA2 + bC2) / 2; w = 3 / (3 + 1)
+            final double own = logit(2.0 / 3) - logit((MARKET_A1 + MARKET_B1 + MARKET_C1) / 3);
+            final double root = logit(0.5) - logit((MARKET_A2 + MARKET_C2) / 2);
+            Assertions.assertEquals(root + 0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(0.75 * (own - root), byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__dev0"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+
+        // identity: Σ(y − b) / n shrunk toward the leave-node-out global mean residual — unchanged by the offset sum
+        final String identityConfig = logitConfig.replace("scale: logit, ", "");
+        final TestPipeline second = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> identity = MPipeline.apply(second, Config.load(SOURCE_CONFIG + identityConfig));
+        PAssert.that(identity.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) {
+                if (!"D".equals(row.getAsString("session_id"))) continue;
+                final double own = (2 - (MARKET_A1 + MARKET_B1 + MARKET_C1)) / 3;
+                final double root = (1 - (MARKET_A2 + MARKET_C2)) / 2;
+                Assertions.assertEquals(root + 0.75 * (own - root), row.getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            }
+            return null;
+        });
+        second.run();
+    }
+
+    /**
+     * The same declaration under {@code fit.mode: static}: the fit stage keeps Σ baseline per key next to (n, Σy, Σy²),
+     * the artifact persists it, and a second run applies the loaded statistics (the fitted log-odds ratio is reproduced
+     * from the artifact alone).
+     */
+    @Test
+    public void testOffsetOnLogitScaleStaticFitAndArtifact() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = FEATURE_CONFIG
+                .replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                        "- {expr: \"sold >= 1\", stats: [mean]}\n          offset: market\n          shrinkage: {priorWeight: 1, scale: logit}")
+                .replace("      output:\n", "      fit: {mode: static, artifact: {uri: \"" + dir + "\"}}\n      output:\n");
+        // s1: rows A, B, C, D → observed 3/4 vs mean baseline; global without s1 = s2's rows → 1/2 vs its mean baseline; w = 4/5
+        final double own = logit(0.75) - logit((MARKET_A1 + MARKET_B1 + MARKET_C1 + MARKET_D1) / 4);
+        final double root = logit(0.5) - logit((MARKET_A2 + MARKET_C2) / 2);
+        final double expected = root + 0.8 * (own - root);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) {
+                if ("s1".equals(row.getAsString("seller_id"))) Assertions.assertEquals(expected, row.getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            }
+            return null;
+        });
+        pipeline.run();
+
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(files[0], "enc.avro").exists());
+
+        // run 2 on a subset: the statistics (Σ baseline included) come from the artifact
+        final String subset = SOURCE_CONFIG
+                .replace("        - {session_id: A, seller_id: s1, category: electronics, quantity: 2, start_price: 100.0, condition_grade: good, current_bid_t10: 120.0, sold: 1, final_price: 150.0, session_time: \"2025-01-01T10:00:00Z\"}\n", "")
+                .replace("        - {session_id: C, seller_id: s1, category: electronics, quantity: 4, start_price: 80.0,  condition_grade: fair, current_bid_t10: 90.0,  sold: 1, final_price: 95.0,  session_time: \"2025-01-20T10:00:00Z\"}\n", "");
+        final TestPipeline second = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> reused = MPipeline.apply(second, Config.load(subset + config));
+        PAssert.that(reused.get("features").getCollection()).satisfies(rows -> {
+            int n = 0;
+            for (final MElement row : rows) {
+                n++;
+                if ("s1".equals(row.getAsString("seller_id"))) Assertions.assertEquals(expected, row.getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            }
+            Assertions.assertEquals(4, n);
+            return null;
+        });
+        second.run();
+    }
+
+    /**
+     * {@code estimator: joint} with an offset on the logit scale solves the ridge over each cell's log-odds ratio
+     * against its mean baseline: the estimate is the additive term (finite, ordered like the cells' own terms),
+     * and the artifact manifest records the offset.
+     */
+    @Test
+    public void testJointEstimatorOffsetOnLogitScale() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String config = jointConfig(dir, "static")
+                .replace("shrinkage: {estimator: joint, scale: identity, priorWeight: 1, output: [composed, deviations, effectiveN]}",
+                        "offset: market\n          shrinkage: {estimator: joint, scale: logit, priorWeight: 1, output: [composed, deviations, effectiveN]}");
+        Assertions.assertTrue(config.contains("offset: market"), config);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            final double s1 = byKey.get("A/s1").getAsDouble("f_enc__seller_id__e1__mean");
+            final double s2 = byKey.get("A/s2").getAsDouble("f_enc__seller_id__e1__mean");
+            Assertions.assertTrue(Double.isFinite(s1) && Double.isFinite(s2));
+            // s1 sells 3/4 against a mean baseline of ~0.69 (positive term), s2 1/2 against ~0.62 (negative term)
+            final double z1 = logit(0.75) - logit((MARKET_A1 + MARKET_B1 + MARKET_C1 + MARKET_D1) / 4);
+            final double z2 = logit(0.5) - logit((MARKET_A2 + MARKET_C2) / 2);
+            Assertions.assertTrue(z1 > 0 && z2 < 0);
+            Assertions.assertTrue(s1 > s2, s1 + " > " + s2);
+            // the ridge pulls both terms toward the intercept, which lies between them
+            Assertions.assertTrue(s1 < z1 && s2 > z2, s1 + " / " + s2);
+            Assertions.assertEquals(s1, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e1__mean"), 1e-12, "static: every row of the key reads the same term");
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        final String manifest = java.nio.file.Files.readString(new java.io.File(files[0], "enc__seller_id__e1.joint.manifest.json").toPath());
+        Assertions.assertTrue(manifest.contains("\"offset\":true"), manifest);
+        Assertions.assertTrue(manifest.contains("\"scale\":\"logit\""), manifest);
+    }
+
     /** A map-valued column as String → Double (the coder round trip yields CharSequence keys). */
     private static Map<String, Double> distribution(final MElement row, final String column) {
         final Map<?, ?> value = (Map<?, ?>) row.getPrimitiveValue(column);

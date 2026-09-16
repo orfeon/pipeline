@@ -44,7 +44,8 @@ public final class FitArtifact {
                {"name": "key", "type": "string"},
                {"name": "n", "type": "double"},
                {"name": "sum", "type": "double"},
-               {"name": "sumSq", "type": "double"}
+               {"name": "sumSq", "type": "double"},
+               {"name": "sumOff", "type": "double", "default": 0.0}
              ]}
             """);
 
@@ -118,6 +119,7 @@ public final class FitArtifact {
                     record.put("n", s.n);
                     record.put("sum", s.sum);
                     record.put("sumSq", s.sumSq);
+                    record.put("sumOff", s.sumOff);
                     writer.append(record);
                 }
             }
@@ -153,6 +155,9 @@ public final class FitArtifact {
                 s.n = (Double) record.get("n");
                 s.sum = (Double) record.get("sum");
                 s.sumSq = (Double) record.get("sumSq");
+                // absent in artifacts written before the offset sum existed: the reader schema's default fills 0
+                final Object sumOff = record.get("sumOff");
+                s.sumOff = sumOff == null ? 0d : (Double) sumOff;
                 stats.put(entryKey(record.get("level").toString(), record.get("key").toString()), s);
             }
         } catch (final IOException e) {

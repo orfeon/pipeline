@@ -386,7 +386,13 @@ Notes:
   4. A block referencing an offset must have `computeAt = predictAt` (a market baseline is only final
      right before the event). The default is `predictAt`; an explicit different `computeAt` is an error.
   5. `offset` is an additive term on the `shrinkage.scale`: `logit(p) = logit(baseline) + δ` on logit,
-     `target − baseline` on identity.
+     `target − baseline` on identity. Each lattice level estimates its own δ from sufficient statistics as
+     `t(ȳ) − t(b̄)` — the level's observed statistic against the mean baseline of the same rows (the
+     observed-over-expected log-odds ratio on logit, the exact Poisson-offset MLE `log(Σy / Σb)` on log,
+     the mean residual on identity), so the levels keep `Σb` next to `Σ(y − b)`; shrinkage pulls a level's δ
+     toward its parent's, and the composed value **is δ** (the residual effect on the scale), not
+     `t⁻¹(t(baseline) + δ)` — the consumer adds it to its own baseline term or feeds it to a model as the
+     market-orthogonal component.
 - **computeAt**: a block may declare `computeAt` (default `predictAt`). "When the prediction runs" and
   "when this feature is computed" differ in general — columns computable in the morning coexist with
   columns computed at the last minute after market data arrives. The check is

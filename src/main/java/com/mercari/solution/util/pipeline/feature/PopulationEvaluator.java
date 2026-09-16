@@ -26,12 +26,15 @@ public class PopulationEvaluator extends SequenceEvaluator {
         super(columns, forceScan);
     }
 
+    /** Hidden statistic of an offset block on a logit / log scale: Σ baseline over the rows counted by the level's {@code sum}. */
+    public static final String SUM_OFFSET = "sumoff";
+
     /**
      * Stats the expanding (per-key replay) engine can serve: every catalog stat except {@code share} (a row
-     * composition of two hidden counts) plus the hidden {@code sum} of the lattice levels.
+     * composition of two hidden counts) plus the hidden {@code sum} / {@code sumoff} of the lattice levels.
      */
     public static boolean isSupported(final String stat) {
-        if ("sum".equals(stat)) return true;
+        if ("sum".equals(stat) || SUM_OFFSET.equals(stat)) return true;
         final OperatorCatalog.Stat s = OperatorCatalog.stat(stat);
         return s != null && !"share".equals(stat);
     }
@@ -66,6 +69,11 @@ public class PopulationEvaluator extends SequenceEvaluator {
         final Double v = numericTarget(plan, p.values());
         if (v == null) return;
         acc.n += sign;
+        if (SUM_OFFSET.equals(plan.stat)) {
+            // the baseline of the same rows the level's sum counts (numericTarget is null unless target and baseline are present)
+            acc.sum += sign * baseline(plan, p.values());
+            return;
+        }
         if (plan.quantile != null) {
             if (acc.order == null) acc.order = new OrderStatistics();
             if (sign > 0) acc.order.add(v);
@@ -74,6 +82,13 @@ public class PopulationEvaluator extends SequenceEvaluator {
         }
         acc.sum += sign * v;
         acc.sumSq += sign * v * v;
+    }
+
+    /** The row's baseline value under an offset (0 without one); callers check {@link #numericTarget} first. */
+    private static double baseline(final ColumnPlan plan, final Map<String, Object> values) {
+        if (plan.offset == null) return 0d;
+        final Double b = FeatureValues.toDouble(values.get(plan.offset));
+        return b == null ? 0d : b;
     }
 
     /** The numeric target of a past row (minus its baseline offset), or null when missing — NaN counts as missing. */
@@ -90,7 +105,7 @@ public class PopulationEvaluator extends SequenceEvaluator {
         final double n = acc == null ? 0 : acc.n;
         return switch (plan.stat) {
             case "count" -> (long) n;
-            case "sum" -> acc == null || acc.n == 0 ? 0d : acc.sum;
+            case "sum", SUM_OFFSET -> acc == null || acc.n == 0 ? 0d : acc.sum;
             case "mean", "rate" -> n == 0 ? null : acc.sum / n;
             case "std" -> {
                 if (n < 2) yield null;
@@ -146,16 +161,18 @@ public class PopulationEvaluator extends SequenceEvaluator {
             java.util.Arrays.sort(values, 0, n);
             return OrderStatistics.quantile(plan.quantile, values, n);
         }
-        double n = 0, sum = 0, sumSq = 0;
+        double n = 0, sum = 0, sumSq = 0, sumOff = 0;
         for (final Past p : window) {
             final Double v = numericTarget(plan, p.values());
             if (v == null) continue;
             n++;
             sum += v;
             sumSq += v * v;
+            sumOff += baseline(plan, p.values());
         }
         return switch (stat) {
             case "sum" -> sum;
+            case SUM_OFFSET -> sumOff;
             case "mean", "rate" -> n == 0 ? null : sum / n;
             case "std" -> {
                 if (n < 2) yield null;

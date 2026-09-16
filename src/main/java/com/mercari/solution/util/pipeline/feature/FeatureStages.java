@@ -571,8 +571,11 @@ public final class FeatureStages {
     // fit / apply (fit.mode static)
     // ------------------------------------------------------------------------------------------
 
-    /** One fitted lattice level of a static block: hidden columns it fills and how its statistics are keyed. */
-    record FitLevel(String block, String id, String sumColumn, String sumSqColumn, List<String> keys, String field,
+    /**
+     * One fitted lattice level of a static block: hidden columns it fills ({@code n}, {@code sum}, {@code sumsq} and,
+     * for an offset block on a logit / log scale, {@code sumoff} = Σ baseline) and how its statistics are keyed.
+     */
+    record FitLevel(String block, String id, String sumColumn, String sumSqColumn, String offSumColumn, List<String> keys, String field,
                     String offsetColumn, String artifactUri, boolean refit, List<String> foldKeys, int folds,
                     Forward forward) implements Serializable {
         VarianceComponents.LevelSpec spec() {
@@ -620,6 +623,7 @@ public final class FeatureStages {
             levels.put(id, new FitLevel(c.getBlock(), id,
                     names.contains(base + "__sum") ? base + "__sum" : null,
                     names.contains(base + "__sumsq") ? base + "__sumsq" : null,
+                    names.contains(base + "__" + PopulationEvaluator.SUM_OFFSET) ? base + "__" + PopulationEvaluator.SUM_OFFSET : null,
                     keys.isEmpty() ? List.of() : List.of(keys.split(",")),
                     c.getCoordinates().get("field"), offset,
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
@@ -1278,7 +1282,7 @@ public final class FeatureStages {
 
         @Override
         public JointFit readArtifact(final String planHash) {
-            return JointFit.read(artifactUri, planHash, id, levels, scale);
+            return JointFit.read(artifactUri, planHash, id, levels, scale, offsetColumn != null);
         }
 
         @Override
@@ -1295,14 +1299,14 @@ public final class FeatureStages {
             final String prefix = label + "_Joint_" + id;
             return fitInput
                     .apply(prefix + "_Cells", ParDo.of(new ExtractCellsDoFn(this)))
-                    .setCoder(KvCoder.of(StringUtf8Coder.of(), DoubleCoder.of()))
+                    .setCoder(KvCoder.of(StringUtf8Coder.of(), VarianceComponents.valueCoder()))
                     .apply(prefix + "_PerCell", Combine.perKey(new VarianceComponents.KeyStatsFn()))
                     .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(VarianceComponents.KeyStats.class)))
                     .apply(prefix + "_Entries", ParDo.of(new DoFn<KV<String, VarianceComponents.KeyStats>, JointFit.Cell>() {
                         @ProcessElement
                         public void processElement(final ProcessContext c) {
                             final VarianceComponents.KeyStats s = c.element().getValue();
-                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq));
+                            c.output(new JointFit.Cell(c.element().getKey(), s.n, s.sum, s.sumSq, s.sumOff));
                         }
                     }))
                     .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(JointFit.Cell.class))
@@ -1362,8 +1366,8 @@ public final class FeatureStages {
         return specs;
     }
 
-    /** One (cell, y) per row — plus the fold-tagged part under fold, or keyed by the row's block under forward. */
-    static class ExtractCellsDoFn extends DoFn<MElement, KV<String, Double>> {
+    /** One (cell, (y − b, b)) per row — plus the fold-tagged part under fold, or keyed by the row's block under forward. */
+    static class ExtractCellsDoFn extends DoFn<MElement, KV<String, KV<Double, Double>>> {
         private final JointSpec spec;
         private final List<String> cellKeys;
         /** The leaf level's key fields: a row without them has no estimate, so it has no cell either. */
@@ -1383,11 +1387,13 @@ public final class FeatureStages {
             final Map<String, Object> row = element.asPrimitiveMap();
             Double y = FeatureValues.toDouble(row.get(spec.field()));
             if (y == null || y.isNaN()) return;
+            Double b = null;
             if (spec.offsetColumn() != null) {
-                final Double b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
+                b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
                 if (b == null || b.isNaN()) return;
                 y -= b;
             }
+            final KV<Double, Double> value = KV.of(y, b);
             // the leaf key must be present (as at apply time); a null coarser key leaves the row in the cells of the
             // levels it has and out of that level's contexts — the same per-level rule as the other estimators
             if (FeatureValues.key(row, leafKeys) == null) return;
@@ -1395,13 +1401,13 @@ public final class FeatureStages {
             if (spec.forward() != null) {
                 final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
                 if (millis == null) return;
-                c.output(KV.of(JointFit.blockEntry(cell, spec.forward().blocks().indexOf(millis)), y));
+                c.output(KV.of(JointFit.blockEntry(cell, spec.forward().blocks().indexOf(millis)), value));
                 return;
             }
-            c.output(KV.of(cell, y));
+            c.output(KV.of(cell, value));
             if (spec.foldKeys() != null) {
                 final String unit = FeatureValues.key(row, spec.foldKeys());
-                if (unit != null) c.output(KV.of(JointFit.foldEntry(VarianceComponents.foldOf(unit, spec.folds()), cell), y));
+                if (unit != null) c.output(KV.of(JointFit.foldEntry(VarianceComponents.foldOf(unit, spec.folds()), cell), value));
             }
         }
     }
@@ -1419,7 +1425,7 @@ public final class FeatureStages {
         public void processElement(final ProcessContext c) {
             final ArrayList<JointFit.Cell> entries = c.element();
             LOG.info("joint {}: solving {} on {} aggregation entries", spec.id(), JointFit.encodeLevels(spec.levels()), entries.size());
-            final JointFit model = JointFit.fit(spec.levels(), spec.scale(), spec.weights(), spec.priorWeight(), entries,
+            final JointFit model = JointFit.fit(spec.levels(), spec.scale(), spec.offsetColumn() != null, spec.weights(), spec.priorWeight(), entries,
                     spec.foldKeys() == null ? 0 : spec.folds(), spec.forward() != null, spec.forward() == null ? 0 : spec.forward().windowBlocks());
             // fold / forward re-fit every run but write the whole-input solution once (refit: true overwrites)
             if (spec.artifactUri() != null && (spec.refit() || !JointFit.exists(spec.artifactUri(), planHash, spec.id()))) {
@@ -1762,6 +1768,7 @@ public final class FeatureStages {
                     values.put(level.id(), stats == null ? 0d : stats.n);
                     if (level.sumColumn() != null) values.put(level.sumColumn(), stats == null ? 0d : stats.sum);
                     if (level.sumSqColumn() != null) values.put(level.sumSqColumn(), stats == null ? 0d : stats.sumSq);
+                    if (level.offSumColumn() != null) values.put(level.offSumColumn(), stats == null ? 0d : stats.sumOff);
                 }
                 if (rowLambdas != null) evaluator.setLambdas(rowLambdas); // the λ of the row's usable block, per forward level
                 for (final StaticFitBlock<?> block : blocks) apply(block, model(c, block), values);
