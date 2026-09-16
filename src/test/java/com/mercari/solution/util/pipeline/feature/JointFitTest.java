@@ -24,6 +24,25 @@ public class JointFitTest {
         return row;
     }
 
+    /**
+     * Under an offset a cell whose mean baseline is outside the scale (Σb = 0 on log) has no term and is left out of
+     * the solve like an empty cell — its rows do not count and the clamp constant never enters the ridge; on the
+     * identity scale the same cell stays (the residual is defined).
+     */
+    @Test
+    public void testOffsetCellWithUndefinedBaselineIsSkipped() {
+        final List<JointFit.Cell> cells = List.of(
+                new JointFit.Cell(FeatureValues.keyOf(List.of("a1", "b1")), 10, 2, 4, 5),
+                new JointFit.Cell(FeatureValues.keyOf(List.of("a2", "b1")), 10, -1, 3, 6),
+                new JointFit.Cell(FeatureValues.keyOf(List.of("a1", "b2")), 5, 3, 9, 0));
+        final JointFit.Solution log = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.log, true, "fixed", 1);
+        Assertions.assertEquals(20, log.rows, 0d, "the Σb = 0 cell's rows are not fitted");
+        Assertions.assertNull(log.effects.get(0).get(FeatureValues.keyOf(List.of("a1", "b2"))));
+        Assertions.assertTrue(Math.abs(log.mu) < 5, "no clamp constant (−27.6) in the intercept: " + log.mu);
+        final JointFit.Solution identity = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, true, "fixed", 1);
+        Assertions.assertEquals(25, identity.rows, 0d);
+    }
+
     @Test
     public void testBalancedDesignRecoversAnovaDecomposition() {
         // cell means μ + α_a + β_b + γ_ab with Σα = Σβ = Σγ (per row / column) = 0; a negligible ridge leaves the
@@ -32,14 +51,14 @@ public class JointFitTest {
         final List<JointFit.Cell> cells = List.of(
                 cell("a1", "b1", 10, mu + alpha + beta + gamma), cell("a1", "b2", 10, mu + alpha - beta - gamma),
                 cell("a2", "b1", 10, mu - alpha + beta - gamma), cell("a2", "b2", 10, mu - alpha - beta + gamma));
-        final JointFit.Solution s = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, "fixed", 1e-9);
+        final JointFit.Solution s = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, false, "fixed", 1e-9);
         Assertions.assertEquals(mu, s.mu, 1e-6);
         Assertions.assertEquals(alpha, s.effects.get(1).get(FeatureValues.keyOf(List.of("a1"))), 1e-6);
         Assertions.assertEquals(-alpha, s.effects.get(1).get(FeatureValues.keyOf(List.of("a2"))), 1e-6);
         Assertions.assertEquals(beta, s.effects.get(2).get(FeatureValues.keyOf(List.of("b1"))), 1e-6);
         Assertions.assertEquals(gamma, s.effects.get(0).get(FeatureValues.keyOf(List.of("a1", "b1"))), 1e-6);
         Assertions.assertEquals(-gamma, s.effects.get(0).get(FeatureValues.keyOf(List.of("a1", "b2"))), 1e-6);
-        final JointFit fit = new JointFit(LEVELS, Shrinkage.Scale.identity, s, null, null, null);
+        final JointFit fit = new JointFit(LEVELS, Shrinkage.Scale.identity, false, s, null, null, null);
         Assertions.assertEquals(mu + alpha + beta + gamma, fit.estimate(s, row("a1", "b1")), 1e-6);
         // an unseen context contributes 0: a new b falls back to the a main effect, an unseen everything to the intercept
         Assertions.assertEquals(mu + alpha, fit.estimate(s, row("a1", "b3")), 1e-6);
@@ -112,7 +131,7 @@ public class JointFitTest {
             }
         }
         final double priorWeight = 3.5;
-        final JointFit.Solution s = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, "fixed", priorWeight);
+        final JointFit.Solution s = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, false, "fixed", priorWeight);
         final Map<String, Integer>[] dictionaries = new Map[3];
         for (int l = 0; l < 3; l++) {
             dictionaries[l] = new TreeMap<>();
@@ -138,7 +157,7 @@ public class JointFitTest {
                 cell("a1", "b2", 3, 1.0), cell("a2", "b1", 3, 0.0));
         final List<JointFit.Level> mains = List.of(
                 new JointFit.Level("a", List.of("a")), new JointFit.Level("b", List.of("b")), new JointFit.Level(Shrinkage.GLOBAL, List.of()));
-        final JointFit.Solution s = JointFit.solve(mains, JointFit.cellKeysOf(mains), cells, Shrinkage.Scale.identity, "fixed", 0.01);
+        final JointFit.Solution s = JointFit.solve(mains, JointFit.cellKeysOf(mains), cells, Shrinkage.Scale.identity, false, "fixed", 0.01);
         final double a = s.effects.get(0).get(FeatureValues.keyOf(List.of("a1"))) - s.effects.get(0).get(FeatureValues.keyOf(List.of("a2")));
         final double b = s.effects.get(1).get(FeatureValues.keyOf(List.of("b1"))) - s.effects.get(1).get(FeatureValues.keyOf(List.of("b2")));
         Assertions.assertEquals(1.0, a, 1e-2);
@@ -153,7 +172,7 @@ public class JointFitTest {
         final List<JointFit.Cell> cells = List.of(
                 cell("a1", "b1", 20, 0.8), cell("a1", "b2", 20, 0.8),
                 cell("a2", "b1", 20, 0.2), cell("a2", "b2", 20, 0.2));
-        final JointFit.Solution s = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, "varianceComponents", 5);
+        final JointFit.Solution s = JointFit.solve(LEVELS, JointFit.cellKeysOf(LEVELS), cells, Shrinkage.Scale.identity, false, "varianceComponents", 5);
         Assertions.assertTrue(Double.isInfinite(s.lambdas[2]), Arrays.toString(s.lambdas));
         Assertions.assertEquals(0.0, s.effects.get(2).get(FeatureValues.keyOf(List.of("b1"))), 0.0);
         Assertions.assertTrue(s.effects.get(1).get(FeatureValues.keyOf(List.of("a1"))) > 0.2, s.effects.toString());
@@ -163,8 +182,8 @@ public class JointFitTest {
     public void testLogitScaleUsesDeltaMethodWeights() {
         final List<JointFit.Cell> cells = List.of(cell("a1", "b1", 50, 0.9), cell("a2", "b1", 50, 0.5));
         final List<JointFit.Level> level = List.of(new JointFit.Level("a", List.of("a")), new JointFit.Level(Shrinkage.GLOBAL, List.of()));
-        final JointFit.Solution s = JointFit.solve(level, List.of("a", "b"), cells, Shrinkage.Scale.logit, "fixed", 1e-9);
-        final JointFit fit = new JointFit(level, Shrinkage.Scale.logit, s, null, null, null);
+        final JointFit.Solution s = JointFit.solve(level, List.of("a", "b"), cells, Shrinkage.Scale.logit, false, "fixed", 1e-9);
+        final JointFit fit = new JointFit(level, Shrinkage.Scale.logit, false, s, null, null, null);
         // with a negligible ridge every cell is reproduced on the original scale, whatever the weights
         Assertions.assertEquals(0.9, fit.estimate(s, row("a1", "b1")), 1e-6);
         Assertions.assertEquals(0.5, fit.estimate(s, row("a2", "b1")), 1e-6);
@@ -182,13 +201,13 @@ public class JointFitTest {
         for (final double p : new double[]{0.1, 0.5}) {
             // a2 anchors the intercept with a huge, near-unshrinkable cell so μ ≈ logit(0.3)
             final List<JointFit.Cell> cells = List.of(cell("a1", "b1", n, p), cell("a2", "b1", 1e9, 0.3));
-            final JointFit.Solution s = JointFit.solve(level, List.of("a", "b"), cells, Shrinkage.Scale.logit, "fixed", lambda);
+            final JointFit.Solution s = JointFit.solve(level, List.of("a", "b"), cells, Shrinkage.Scale.logit, false, "fixed", lambda);
             final double expected = n / (n + lambda) * (Shrinkage.transform(Shrinkage.Scale.logit, p) - s.mu);
             Assertions.assertEquals(expected, s.effects.get(0).get(FeatureValues.keyOf(List.of("a1"))), 1e-6, "p = " + p);
         }
         // identity: a plain ridge, the same closed form with v̄ = 1
         final List<JointFit.Cell> cells = List.of(cell("a1", "b1", n, 2.0), cell("a2", "b1", 1e9, 1.0));
-        final JointFit.Solution s = JointFit.solve(level, List.of("a", "b"), cells, Shrinkage.Scale.identity, "fixed", lambda);
+        final JointFit.Solution s = JointFit.solve(level, List.of("a", "b"), cells, Shrinkage.Scale.identity, false, "fixed", lambda);
         Assertions.assertEquals(0.5 * (2.0 - s.mu), s.effects.get(0).get(FeatureValues.keyOf(List.of("a1"))), 1e-6);
     }
 
@@ -204,7 +223,7 @@ public class JointFitTest {
         final List<JointFit.Cell> cells = List.of(
                 cell("a1", "b1", 10, 1.0), new JointFit.Cell(nullCell, 30, 30 * 1.0, 30 * 1.0),
                 cell("a2", "b1", 10, 0.0), cell("a2", "b2", 10, 0.0));
-        final JointFit.Solution s = JointFit.solve(chain, JointFit.cellKeysOf(chain), cells, Shrinkage.Scale.identity, "fixed", 1e-9);
+        final JointFit.Solution s = JointFit.solve(chain, JointFit.cellKeysOf(chain), cells, Shrinkage.Scale.identity, false, "fixed", 1e-9);
         Assertions.assertEquals(60.0, s.rows, 1e-9, "the null-b rows count");
         Assertions.assertEquals(2.0 / 3, s.mu, 1e-6, "μ over every row, the null-b ones included");
         Assertions.assertEquals(1.0 / 3, s.effects.get(1).get(FeatureValues.keyOf(List.of("a1"))), 1e-6, "a1 fitted on 40 rows");
@@ -212,7 +231,7 @@ public class JointFitTest {
                 s.effects.get(0).keySet(), "no leaf context for a null b");
         Assertions.assertEquals(10.0, s.leafN.get(FeatureValues.keyOf(List.of("a1", "b1"))), 1e-9);
         Assertions.assertFalse(s.leafN.containsKey(nullCell), "no leaf context without the leaf key");
-        final JointFit fit = new JointFit(chain, Shrinkage.Scale.identity, s, null, null, null);
+        final JointFit fit = new JointFit(chain, Shrinkage.Scale.identity, false, s, null, null, null);
         // the leaf (a, b) is null for such a row at apply time too → no estimate; a row of a1 with a fresh b reads μ + e_a1
         Assertions.assertNull(fit.estimate(s, nullB));
         Assertions.assertEquals(1.0, fit.estimate(s, row("a1", "b9")), 1e-6);
@@ -226,7 +245,7 @@ public class JointFitTest {
         final List<JointFit.Cell> entries = List.of(
                 new JointFit.Cell(x, 10, 10, 10), new JointFit.Cell(JointFit.foldEntry(0, x), 10, 10, 10),
                 new JointFit.Cell(y, 10, 0, 0), new JointFit.Cell(JointFit.foldEntry(1, y), 10, 0, 0));
-        final JointFit fold = JointFit.fit(LEVELS, Shrinkage.Scale.identity, "fixed", 1, entries, 2, false, 0);
+        final JointFit fold = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "fixed", 1, entries, 2, false, 0);
         Assertions.assertEquals(2, fold.folds.length);
         // out of fold 0 only cell y remains: its intercept is y's mean and x is unseen (0 effects) → a fold-0 row of x reads y's mean
         Assertions.assertEquals(0.0, fold.estimate(fold.solutionFor(0, null, 1), row("a1", "b1")), 1e-9);
@@ -237,7 +256,7 @@ public class JointFitTest {
 
         // forward: block 1 holds x, block 2 holds y; the block-2 solution is cumulative, windowBlocks 1 keeps the current block only
         final List<JointFit.Cell> blocks = List.of(new JointFit.Cell(JointFit.blockEntry(x, 1), 10, 10, 10), new JointFit.Cell(JointFit.blockEntry(y, 2), 10, 0, 0));
-        final JointFit forward = JointFit.fit(LEVELS, Shrinkage.Scale.identity, "fixed", 1, blocks, 0, true, 0);
+        final JointFit forward = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "fixed", 1, blocks, 0, true, 0);
         Assertions.assertEquals(Set.of(1L, 2L), forward.blocks.keySet());
         Assertions.assertNull(forward.solutionFor(null, 0L, 1), "nothing before the first block");
         Assertions.assertEquals(1.0, forward.estimate(forward.solutionFor(null, 1L, 1), row("a1", "b1")), 1e-9);
@@ -245,7 +264,7 @@ public class JointFitTest {
         Assertions.assertEquals(20.0, forward.solutionFor(null, 5L, 1).rows, 1e-9);
         Assertions.assertNull(forward.solutionFor(null, 1L, 2), "minBlocks 2 needs two solved blocks");
         Assertions.assertNotNull(forward.solutionFor(null, 2L, 2));
-        final JointFit windowed = JointFit.fit(LEVELS, Shrinkage.Scale.identity, "fixed", 1, blocks, 0, true, 1);
+        final JointFit windowed = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "fixed", 1, blocks, 0, true, 1);
         Assertions.assertEquals(10.0, windowed.solutionFor(null, 2L, 1).rows, 1e-9);
         // the window is anchored to the row's usable block, not to the last observed block: a row past the window of
         // every block reads nothing (the encoding path's rule), a row inside block 2's window reads block 2 only
@@ -255,7 +274,7 @@ public class JointFitTest {
         Assertions.assertNull(windowed.solutionFor(null, 7L, 1));
         Assertions.assertEquals(20.0, forward.solutionFor(null, 7L, 1).rows, 1e-9, "no window: cumulative");
         // W = 3 over blocks 1, 2: usable 4 reads block 2 only ((1, 4]), usable 5 reads nothing, minBlocks counts observed blocks
-        final JointFit wide = JointFit.fit(LEVELS, Shrinkage.Scale.identity, "fixed", 1, blocks, 0, true, 3);
+        final JointFit wide = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "fixed", 1, blocks, 0, true, 3);
         Assertions.assertEquals(20.0, wide.solutionFor(null, 3L, 1).rows, 1e-9);
         Assertions.assertEquals(10.0, wide.solutionFor(null, 4L, 1).rows, 1e-9);
         Assertions.assertEquals(0.0, wide.estimate(wide.solutionFor(null, 4L, 1), row("a2", "b1")), 1e-9);
@@ -266,11 +285,11 @@ public class JointFitTest {
     @Test
     public void testArtifactRoundTrip() {
         final List<JointFit.Cell> cells = List.of(cell("a1", "b1", 10, 0.9), cell("a1", "b2", 4, 0.3), cell("a2", "b1", 7, 0.5));
-        final JointFit fit = JointFit.fit(LEVELS, Shrinkage.Scale.logit, "varianceComponents", 2, cells, 0, false, 0);
+        final JointFit fit = JointFit.fit(LEVELS, Shrinkage.Scale.logit, false, "varianceComponents", 2, cells, 0, false, 0);
         final String dir = "target/feature-artifacts/" + UUID.randomUUID(); // relative: Beam FileSystems treats a Windows drive letter as a scheme
         JointFit.write(dir, "hash", "enc__a_b__e1", fit);
         Assertions.assertTrue(JointFit.exists(dir, "hash", "enc__a_b__e1"));
-        final JointFit back = JointFit.read(dir, "hash", "enc__a_b__e1", LEVELS, Shrinkage.Scale.logit);
+        final JointFit back = JointFit.read(dir, "hash", "enc__a_b__e1", LEVELS, Shrinkage.Scale.logit, false);
         for (final String[] r : new String[][]{{"a1", "b1"}, {"a1", "b2"}, {"a2", "b1"}, {"a2", "b2"}, {"a3", "b1"}}) {
             Assertions.assertEquals(fit.estimate(fit.total, row(r[0], r[1])), back.estimate(back.total, row(r[0], r[1])), 1e-12, Arrays.toString(r));
             Assertions.assertEquals(fit.effectiveN(fit.total, row(r[0], r[1])), back.effectiveN(back.total, row(r[0], r[1])), 1e-12);
@@ -281,14 +300,14 @@ public class JointFitTest {
         Assertions.assertTrue(manifest.contains("\"lambdas\""), manifest);
         // a fully shrunk level (λ = ∞) must not leave a bare Infinity token: the manifest stays strict JSON
         final List<JointFit.Cell> flat = List.of(cell("a1", "b1", 20, 0.8), cell("a1", "b2", 20, 0.8), cell("a2", "b1", 20, 0.2), cell("a2", "b2", 20, 0.2));
-        final JointFit infinite = JointFit.fit(LEVELS, Shrinkage.Scale.identity, "varianceComponents", 5, flat, 0, false, 0);
+        final JointFit infinite = JointFit.fit(LEVELS, Shrinkage.Scale.identity, false, "varianceComponents", 5, flat, 0, false, 0);
         Assertions.assertTrue(Double.isInfinite(infinite.total.lambdas[2]));
         JointFit.write(dir, "hash", "enc__a_b__e2", infinite);
         final String strict = new String(com.mercari.solution.util.domain.file.ResourceUtil.readBytes(JointFit.manifestPath(dir, "hash", "enc__a_b__e2")), java.nio.charset.StandardCharsets.UTF_8);
         final com.google.gson.stream.JsonReader reader = new com.google.gson.stream.JsonReader(new java.io.StringReader(strict));
         reader.setStrictness(com.google.gson.Strictness.STRICT);
         Assertions.assertEquals("Infinity", com.google.gson.JsonParser.parseReader(reader).getAsJsonObject().getAsJsonObject("lambdas").get("b").getAsString(), strict);
-        Assertions.assertTrue(Double.isInfinite(JointFit.read(dir, "hash", "enc__a_b__e2", LEVELS, Shrinkage.Scale.identity).total.lambdas[2]), "the avro artifact keeps the double");
+        Assertions.assertTrue(Double.isInfinite(JointFit.read(dir, "hash", "enc__a_b__e2", LEVELS, Shrinkage.Scale.identity, false).total.lambdas[2]), "the avro artifact keeps the double");
     }
 
     @Test

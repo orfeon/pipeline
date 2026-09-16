@@ -111,11 +111,6 @@ public final class JointFit implements Serializable {
     /** fit.mode forward: the block indices that carried data (minBlocks counts these, not the change points). */
     public final TreeSet<Long> observedBlocks;
 
-    JointFit(final List<Level> levels, final Shrinkage.Scale scale, final Solution total,
-             final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks) {
-        this(levels, scale, false, total, folds, blocks, observedBlocks);
-    }
-
     JointFit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final Solution total,
              final Solution[] folds, final TreeMap<Long, Solution> blocks, final TreeSet<Long> observedBlocks) {
         this.levels = levels;
@@ -158,13 +153,9 @@ public final class JointFit implements Serializable {
      * Fits the model from the gathered aggregation entries: plain cell keys (static / fold totals),
      * {@link #foldEntry fold-tagged} parts ({@code folds > 1}) and {@link #blockEntry block-tagged} parts
      * ({@code forward}).
+     *
+     * @param offset the target is offset by a baseline: cells carry Σb and the solve fits the additive term (see {@link #solve})
      */
-    public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final String weights, final double priorWeight,
-                               final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks) {
-        return fit(levels, scale, false, weights, priorWeight, entries, folds, forward, windowBlocks);
-    }
-
-    /** @param offset the target is offset by a baseline: cells carry Σb and the solve fits the additive term (see {@link #solve}) */
     public static JointFit fit(final List<Level> levels, final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight,
                                final Collection<Cell> entries, final int folds, final boolean forward, final int windowBlocks) {
         final List<String> cellKeys = cellKeysOf(levels);
@@ -270,17 +261,11 @@ public final class JointFit implements Serializable {
      * for cells of equal weight, and the identity scale ({@code v = 1}) is the plain ridge. A cell whose key
      * is null on a level (see {@link FeatureValues#keyWithNulls}) carries no indicator for that level: it
      * still informs the intercept and the levels whose keys it has.
-     */
-    public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
-                                 final Shrinkage.Scale scale, final String weights, final double priorWeight) {
-        return solve(levels, cellKeys, input, scale, false, weights, priorWeight);
-    }
-
-    /**
+     *
      * @param offset the cells' targets are offset by a baseline: {@code z_c = t(ȳ_c) − t(b̄_c)} with
      *               {@code ȳ_c = (Σ(y − b) + Σb) / n} the observed statistic and {@code b̄_c = Σb / n} the mean baseline
-     *               (spec §3 rule 5: the additive term on the scale; on identity the mean residual as before), weighted by
-     *               the observed statistic's delta-method factor
+     *               ({@link Shrinkage#own}: the additive term on the scale, spec §3 rule 5; on identity the mean
+     *               residual as before), weighted by the observed statistic's delta-method factor
      */
     public static Solution solve(final List<Level> levels, final List<String> cellKeys, final Collection<Cell> input,
                                  final Shrinkage.Scale scale, final boolean offset, final String weights, final double priorWeight) {
@@ -291,7 +276,8 @@ public final class JointFit implements Serializable {
         solution.effects = new ArrayList<>();
         for (int l = 0; l < L; l++) solution.effects.add(new HashMap<>());
         final List<Cell> cells = new ArrayList<>();
-        for (final Cell c : input) if (c.n() > 0) cells.add(c);
+        // a cell without rows — or, under an offset, whose mean baseline is outside the scale's domain — has no term
+        for (final Cell c : input) if (c.n() > 0 && (!offset || Shrinkage.baselineDefined(scale, c.n(), c.sumOff()))) cells.add(c);
         if (cells.isEmpty()) return solution;
         cells.sort(Comparator.comparing(Cell::key));
         final int m = cells.size();
@@ -299,15 +285,10 @@ public final class JointFit implements Serializable {
         double maxZ = 0, rows = 0;
         for (int i = 0; i < m; i++) {
             final Cell c = cells.get(i);
-            final double mean = c.sum() / c.n();
-            if (offset && scale != Shrinkage.Scale.identity) {
-                final double observed = (c.sum() + c.sumOff()) / c.n();
-                z[i] = Shrinkage.transform(scale, observed) - Shrinkage.transform(scale, c.sumOff() / c.n());
-                w[i] = c.n() * varianceFactor(scale, observed);
-            } else {
-                z[i] = Shrinkage.transform(scale, mean);
-                w[i] = c.n() * varianceFactor(scale, mean);
-            }
+            // the observed statistic (Σy / n: the residual plus the baseline under an offset) sets the delta-method weight
+            final double observed = (c.sum() + (offset ? c.sumOff() : 0)) / c.n();
+            z[i] = Shrinkage.own(scale, c.n(), c.sum(), c.sumOff(), offset);
+            w[i] = c.n() * varianceFactor(scale, observed);
             maxZ = Math.max(maxZ, Math.abs(z[i]));
             rows += c.n();
         }
@@ -469,7 +450,7 @@ public final class JointFit implements Serializable {
             final Double e = effect(s, l, row);
             if (e != null) eta += e;
         }
-        return offset && scale != Shrinkage.Scale.identity ? eta : Shrinkage.inverse(scale, eta);
+        return Shrinkage.output(scale, eta, offset);
     }
 
     /** The effect of one level for the row (transform scale): 0 for an unseen context, null without a key. */
@@ -602,10 +583,6 @@ public final class JointFit implements Serializable {
     }
 
     /** Loads the whole-input solution written by {@link #write} (the geometry comes from the column coordinates). */
-    public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels, final Shrinkage.Scale scale) {
-        return read(artifactUri, planHash, id, levels, scale, false);
-    }
-
     public static JointFit read(final String artifactUri, final String planHash, final String id, final List<Level> levels,
                                 final Shrinkage.Scale scale, final boolean offset) {
         final String path = artifactPath(artifactUri, planHash, id);

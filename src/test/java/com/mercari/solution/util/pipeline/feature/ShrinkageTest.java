@@ -100,6 +100,36 @@ public class ShrinkageTest {
     }
 
     /**
+     * A level whose mean baseline is outside the scale's domain (Σb = 0 here) has no term: it defers to its parent
+     * with a zero deviation instead of leaking the transform's clamp (log(1e-12) = −27.6) into the composed value;
+     * with every level undefined there is no estimate at all. The identity scale never has an undefined baseline.
+     */
+    @Test
+    public void testOffsetTermWithUndefinedBaselineDefersToParent() {
+        final Shrinkage log = Shrinkage.of(Shrinkage.Scale.log, 2, true);
+        final List<Shrinkage.Level> levels = List.of(
+                new Shrinkage.Level("seller", "s_n", "s_sum", "s_off", null),
+                new Shrinkage.Level(Shrinkage.GLOBAL, "g_n", "g_sum", "g_off", null));
+        // leaf: n = 4, Σ(y − b) = 2, Σb = 0 (cold-start baseline); global without the leaf: n = 6, Σ(y − b) = −1, Σb = 8
+        final Map<String, Object> row = Map.of("s_n", 4.0, "s_sum", 2.0, "s_off", 0.0, "g_n", 10.0, "g_sum", 1.0, "g_off", 8.0);
+        final Shrinkage.Composition c = log.compose(row, levels, null);
+        Assertions.assertEquals(Math.log(7.0 / 6) - Math.log(8.0 / 6), c.value(), 1e-12, "the parent's term log(Σy / Σb)");
+        Assertions.assertEquals(0d, c.deviations()[0], 0d);
+        Assertions.assertNull(log.compose(Map.of("s_n", 4.0, "s_sum", 2.0, "s_off", 0.0, "g_n", 4.0, "g_sum", 2.0, "g_off", 0.0), levels, null).value());
+        Assertions.assertFalse(Shrinkage.baselineDefined(Shrinkage.Scale.logit, 4, 4), "a mean baseline of 1 is outside logit");
+        Assertions.assertTrue(Shrinkage.baselineDefined(Shrinkage.Scale.identity, 4, 0));
+        Assertions.assertEquals(0.5, Shrinkage.own(Shrinkage.Scale.identity, 4, 2, 0, true), 0d);
+
+        // the rows a level counts and sums: target and (under an offset) baseline present, NaN missing; a target-less
+        // statistic counts every row without consulting the baseline
+        Assertions.assertEquals(org.apache.beam.sdk.values.KV.of(0.25, 0.5), FeatureValues.offsetTarget(Map.of("y", 0.75, "b", 0.5), "y", "b"));
+        Assertions.assertNull(FeatureValues.offsetTarget(Map.of("y", 0.75), "y", "b"), "a row without a baseline is outside every statistic");
+        Assertions.assertNull(FeatureValues.offsetTarget(Map.of("y", 0.75, "b", Double.NaN), "y", "b"));
+        Assertions.assertEquals(org.apache.beam.sdk.values.KV.of(0.75, null), FeatureValues.offsetTarget(Map.of("y", 0.75), "y", null));
+        Assertions.assertEquals(org.apache.beam.sdk.values.KV.of(0d, null), FeatureValues.offsetTarget(Map.of("y", 0.75), null, "b"));
+    }
+
+    /**
      * The one-way moment estimator λ = σ²/τ² equals Kleinman's Beta-Binomial moment estimator m = (1 − ρ) / ρ with
      * ρ = (BMS − WMS) / (BMS + (n₀ − 1) WMS) on 0/1 data — the reason a declared betaBinomial family changes
      * neither the pseudo-count nor the point estimate of a rate.

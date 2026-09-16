@@ -392,7 +392,9 @@ Notes:
      the mean residual on identity), so the levels keep `Σb` next to `Σ(y − b)`; shrinkage pulls a level's δ
      toward its parent's, and the composed value **is δ** (the residual effect on the scale), not
      `t⁻¹(t(baseline) + δ)` — the consumer adds it to its own baseline term or feeds it to a model as the
-     market-orthogonal component.
+     market-orthogonal component. A row without a baseline has no residual and is outside every statistic of
+     the block (its `count` too); a level whose mean baseline is outside the scale's domain (`Σb ≤ 0`, or
+     `Σb ≥ n` on logit) has no δ of its own and defers to its parent, like a level with no rows.
 - **computeAt**: a block may declare `computeAt` (default `predictAt`). "When the prediction runs" and
   "when this feature is computed" differ in general — columns computable in the morning coexist with
   columns computed at the last minute after market data arrives. The check is

@@ -277,19 +277,13 @@ public final class VarianceComponents {
             if (element == null) return;
             final Map<String, Object> row = element.asPrimitiveMap();
             for (final ForwardSpec spec : specs) {
-                Double y = spec.field() == null ? Double.valueOf(0d) : FeatureValues.toDouble(row.get(spec.field()));
-                if (y == null) continue;
-                Double b = null;
-                if (spec.offsetColumn() != null) {
-                    b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-                    if (b == null) continue;
-                    y -= b;
-                }
+                final KV<Double, Double> value = FeatureValues.offsetTarget(row, spec.field(), spec.offsetColumn());
+                if (value == null) continue;
                 final String key = FeatureValues.key(row, spec.keys());
                 if (key == null) continue;
                 final Long millis = FeatureValues.toEpochMillis(row.get(spec.timeField()), spec.timeFieldType());
                 if (millis == null) continue;
-                c.output(KV.of(spec.id() + SEPARATOR + key + SEPARATOR + spec.blocks().indexOf(millis), KV.of(y, b)));
+                c.output(KV.of(spec.id() + SEPARATOR + key + SEPARATOR + spec.blocks().indexOf(millis), value));
             }
         }
     }
@@ -421,19 +415,12 @@ public final class VarianceComponents {
             if (element == null) return;
             final Map<String, Object> row = element.asPrimitiveMap();
             for (final LevelSpec spec : specs) {
-                // a level without a target counts rows: contribute y = 0 so n is tracked
-                Double y = spec.field() == null ? Double.valueOf(0d) : FeatureValues.toDouble(row.get(spec.field())); // boxed: a primitive branch would unbox a null target
-                if (y == null) continue;
-                Double b = null;
-                if (spec.offsetColumn() != null) {
-                    b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-                    if (b == null) continue;
-                    y -= b;
-                }
+                // a level without a target counts rows (y = 0 so n is tracked); otherwise (y − b, b) or nothing
+                final KV<Double, Double> value = FeatureValues.offsetTarget(row, spec.field(), spec.offsetColumn());
+                if (value == null) continue;
                 final String key = FeatureValues.key(row, spec.keys());
                 if (key == null) continue;
                 final String entry = spec.id() + SEPARATOR + key;
-                final KV<Double, Double> value = KV.of(y, b);
                 c.output(KV.of(entry, value));
                 if (spec.foldKeys() != null) {
                     // the row's own fold, subtracted at apply time (rows with a null fold unit are not tagged)

@@ -322,22 +322,45 @@ public final class Shrinkage implements Serializable {
         final double leafOff = leaf.offColumn() == null ? 0 : n(row, leaf.offColumn());
         final double[] effectiveN = new double[1];
         final Double est = estimate(row, levels, 0, leafN, leafSum, leafOff, deviations, effectiveN, lambdas, false);
-        // with a baseline offset the composed value IS the additive term on the shrinkage scale (spec §3 rule 5:
-        // logit(p) = logit(baseline) + δ); without one the shrunk transformed statistic maps back to the original scale
-        final boolean offset = leaf.offColumn() != null && scale != Scale.identity;
-        return new Composition(est == null ? null : offset ? est : inverse(est), deviations, est == null ? null : effectiveN[0]);
+        return new Composition(est == null ? null : output(scale, est, leaf.offColumn() != null), deviations, est == null ? null : effectiveN[0]);
     }
 
     /**
-     * A level's own estimate on the transform scale: {@code t(Σy / n)} — or, for an offset block, the additive term
-     * {@code t(ȳ) − t(b̄)} with {@code ȳ = (Σ(y − b) + Σb) / n} the observed statistic and {@code b̄ = Σb / n} the mean
-     * baseline of the level's rows (the observed-over-expected log-odds ratio on logit, the exact Poisson-offset
-     * MLE {@code log(Σy / Σb)} on log). On the identity scale both forms are {@code Σ(y − b) / n}, so the hidden sum
-     * alone decides there.
+     * A level's (or a joint cell's) own estimate on the transform scale: {@code t(Σy / n)} — or, under a baseline
+     * offset, the additive term {@code t(ȳ) − t(b̄)} with {@code ȳ = (Σ(y − b) + Σb) / n} the observed statistic and
+     * {@code b̄ = Σb / n} the mean baseline of the same rows (the observed-over-expected log-odds ratio on logit, the
+     * exact Poisson-offset MLE {@code log(Σy / Σb)} on log). On the identity scale both forms are {@code Σ(y − b) / n},
+     * so the hidden sum alone decides there. Null — no estimate, as for {@code n = 0} — when the mean baseline lies
+     * outside the open domain of the transform ({@link #baselineDefined}): the term is undefined there, and the
+     * transform's clamp would otherwise leak its constant (±13.8 on logit, −27.6 on log) into the term.
+     *
+     * @param n      the rows of the level (> 0)
+     * @param sum    Σ(y − b) of those rows (Σy without an offset)
+     * @param sumOff Σb of the same rows (ignored without an offset)
+     * @param offset whether the target is offset by a baseline
      */
-    private double own(final double n, final double s, final double off, final boolean hasOffset) {
-        if (!hasOffset || scale == Scale.identity) return transform(s / n);
-        return transform((s + off) / n) - transform(off / n);
+    static Double own(final Scale scale, final double n, final double sum, final double sumOff, final boolean offset) {
+        if (!offset || scale == Scale.identity) return transform(scale, sum / n);
+        if (!baselineDefined(scale, n, sumOff)) return null;
+        return transform(scale, (sum + sumOff) / n) - transform(scale, sumOff / n);
+    }
+
+    /** Whether the mean baseline {@code Σb / n} lies in the open domain of the scale: (0, ∞) on log, (0, 1) on logit. */
+    static boolean baselineDefined(final Scale scale, final double n, final double sumOff) {
+        return switch (scale) {
+            case identity -> true;
+            case log -> sumOff > 0;
+            case logit -> sumOff > 0 && sumOff < n;
+        };
+    }
+
+    /**
+     * The composed value of a shrunk estimate {@code eta} on the transform scale: mapped back to the original scale —
+     * or, under a baseline offset on a logit / log scale, the additive term itself (spec §3 rule 5:
+     * {@code logit(p) = logit(baseline) + δ}, and the value is δ — a log-odds / log-rate ratio, not a probability / rate).
+     */
+    static double output(final Scale scale, final double eta, final boolean offset) {
+        return offset && scale != Scale.identity ? eta : inverse(scale, eta);
     }
 
     private double lambda(final Level level, final Map<String, Double> lambdas) {
@@ -375,7 +398,7 @@ public final class Shrinkage implements Serializable {
             s -= looSum;
             off -= looOff;
         }
-        final Double own = n > 0 ? own(n, s, off, hasOffset) : null;
+        final Double own = n > 0 ? own(scale, n, s, off, hasOffset) : null;
         if (index == levels.size() - 1) {
             effectiveN[0] = n;
             return own;

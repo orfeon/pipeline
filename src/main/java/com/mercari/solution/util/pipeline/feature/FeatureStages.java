@@ -1385,15 +1385,8 @@ public final class FeatureStages {
             final MElement element = c.element();
             if (element == null) return;
             final Map<String, Object> row = element.asPrimitiveMap();
-            Double y = FeatureValues.toDouble(row.get(spec.field()));
-            if (y == null || y.isNaN()) return;
-            Double b = null;
-            if (spec.offsetColumn() != null) {
-                b = FeatureValues.toDouble(row.get(spec.offsetColumn()));
-                if (b == null || b.isNaN()) return;
-                y -= b;
-            }
-            final KV<Double, Double> value = KV.of(y, b);
+            final KV<Double, Double> value = FeatureValues.offsetTarget(row, spec.field(), spec.offsetColumn());
+            if (value == null) return;
             // the leaf key must be present (as at apply time); a null coarser key leaves the row in the cells of the
             // levels it has and out of that level's contexts — the same per-level rule as the other estimators
             if (FeatureValues.key(row, leafKeys) == null) return;

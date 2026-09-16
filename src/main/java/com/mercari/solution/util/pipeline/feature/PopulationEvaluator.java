@@ -1,5 +1,7 @@
 package com.mercari.solution.util.pipeline.feature;
 
+import org.apache.beam.sdk.values.KV;
+
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,8 +56,8 @@ public class PopulationEvaluator extends SequenceEvaluator {
             return;
         }
         if ("count".equals(plan.stat)) {
-            // count matches the scan path: non-null target values, regardless of type or offset
-            if (p.values().get(plan.field) != null) acc.n += sign;
+            // count matches the scan path: non-null target values, regardless of type
+            if (counted(plan, p.values())) acc.n += sign;
             return;
         }
         if ("distribution".equals(plan.stat)) {
@@ -66,14 +68,15 @@ public class PopulationEvaluator extends SequenceEvaluator {
             acc.n += sign;
             return;
         }
-        final Double v = numericTarget(plan, p.values());
-        if (v == null) return;
+        final KV<Double, Double> t = FeatureValues.offsetTarget(p.values(), plan.field, plan.offset);
+        if (t == null) return;
         acc.n += sign;
         if (SUM_OFFSET.equals(plan.stat)) {
-            // the baseline of the same rows the level's sum counts (numericTarget is null unless target and baseline are present)
-            acc.sum += sign * baseline(plan, p.values());
+            // Σ baseline of the same rows the level's sum counts (the pair is null unless target and baseline are present)
+            acc.sum += sign * baseline(t);
             return;
         }
+        final double v = t.getKey();
         if (plan.quantile != null) {
             if (acc.order == null) acc.order = new OrderStatistics();
             if (sign > 0) acc.order.add(v);
@@ -84,20 +87,19 @@ public class PopulationEvaluator extends SequenceEvaluator {
         acc.sumSq += sign * v * v;
     }
 
-    /** The row's baseline value under an offset (0 without one); callers check {@link #numericTarget} first. */
-    private static double baseline(final ColumnPlan plan, final Map<String, Object> values) {
-        if (plan.offset == null) return 0d;
+    /**
+     * Whether a past row is counted: a non-null target of any type and, under an offset, a baseline — the rows the
+     * level's Σ(y − b) is taken over, so {@code n} and the sums agree (and match the static / fold / forward fits).
+     */
+    private static boolean counted(final ColumnPlan plan, final Map<String, Object> values) {
+        if (values.get(plan.field) == null) return false;
+        if (plan.offset == null) return true;
         final Double b = FeatureValues.toDouble(values.get(plan.offset));
-        return b == null ? 0d : b;
+        return b != null && !b.isNaN();
     }
 
-    /** The numeric target of a past row (minus its baseline offset), or null when missing — NaN counts as missing. */
-    private static Double numericTarget(final ColumnPlan plan, final Map<String, Object> values) {
-        final Double v = FeatureValues.toDouble(values.get(plan.field));
-        if (v == null || v.isNaN()) return null;
-        if (plan.offset == null) return v;
-        final Double b = FeatureValues.toDouble(values.get(plan.offset));
-        return b == null || b.isNaN() ? null : v - b;
+    private static double baseline(final KV<Double, Double> target) {
+        return target.getValue() == null ? 0d : target.getValue();
     }
 
     @Override
@@ -135,7 +137,7 @@ public class PopulationEvaluator extends SequenceEvaluator {
         if ("count".equals(stat)) {
             if (plan.field == null) return (long) window.size();
             long n = 0;
-            for (final Past p : window) if (p.values().get(plan.field) != null) n++;
+            for (final Past p : window) if (counted(plan, p.values())) n++;
             return n;
         }
         if ("distribution".equals(stat)) {
@@ -154,21 +156,26 @@ public class PopulationEvaluator extends SequenceEvaluator {
             final double[] values = new double[window.size()];
             int n = 0;
             for (final Past p : window) {
-                final Double v = numericTarget(plan, p.values());
-                if (v != null) values[n++] = v;
+                final KV<Double, Double> t = FeatureValues.offsetTarget(p.values(), plan.field, plan.offset);
+                if (t != null) values[n++] = t.getKey();
             }
             if (n == 0) return null;
             java.util.Arrays.sort(values, 0, n);
             return OrderStatistics.quantile(plan.quantile, values, n);
         }
+        final boolean offsetSum = SUM_OFFSET.equals(stat);
         double n = 0, sum = 0, sumSq = 0, sumOff = 0;
         for (final Past p : window) {
-            final Double v = numericTarget(plan, p.values());
-            if (v == null) continue;
+            final KV<Double, Double> t = FeatureValues.offsetTarget(p.values(), plan.field, plan.offset);
+            if (t == null) continue;
             n++;
+            if (offsetSum) {
+                sumOff += baseline(t);
+                continue;
+            }
+            final double v = t.getKey();
             sum += v;
             sumSq += v * v;
-            sumOff += baseline(plan, p.values());
         }
         return switch (stat) {
             case "sum" -> sum;

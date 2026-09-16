@@ -193,14 +193,20 @@ without `distribution` is an error (`encoding.target.values`).
 `encoding.offset.computeAt`). The offset is an additive term on the shrinkage scale:
 
 - `scale: identity` (default) — every statistic is taken over `target − baseline`: `mean` / `rate` are the
-  key's mean residual (shrunk toward the parent's), `std` the residual spread.
+  key's mean residual (shrunk toward the parent's), `std` the residual spread. A past row whose baseline is
+  missing (or NaN) has no residual: it is left out of every statistic of the block, `count` included, in the
+  expanding replay and in the static / fold / forward fits alike.
 - `scale: logit` / `log` — each level's own term is `t(observed) − t(mean baseline)` over the level's rows
   (the observed-over-expected **log-odds ratio** on logit, the Poisson-offset MLE `log(Σy / Σb)` on log),
   the leaf shrinks that term toward the parent's term, and the **composed value is the term itself** — a
   residual on the scale, *not* a probability or rate — with `deviations` on the same scale (info
   `encoding.offset.additive`). The levels keep a hidden `Σ baseline` (`<level>__sumoff`) next to
   `Σ(y − b)`, in the expanding replay and in the static / fold / forward artifacts alike; `std` and the
-  quantiles stay statistics of the identity residual. `estimator: joint` fits the same per-cell terms.
+  quantiles stay statistics of the identity residual. A level whose mean baseline is outside the scale
+  (`Σ baseline ≤ 0`, or `≥ n` on logit — e.g. a baseline that is 0 for every row of a cold-start key) has
+  no term of its own and falls back to its parent, as an unseen level does. `estimator: joint` fits the
+  same per-cell terms (such a cell is skipped). A keySet with its own identity-scale or disabled `shrinkage`
+  stays on the residual statistics above.
 
 ### Static fits and artifacts (fit.mode static)
 
