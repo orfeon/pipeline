@@ -136,10 +136,13 @@ public class EvaluationTransformTest {
                         - {type: reliability, by: divergence, bins: 5}
                         - {type: reliability, by: field, field: start_price, edges: [80, 120]}
                         - {type: edge, thresholds: [1.0, 1.5]}
+                        - {type: temperature, fitOn: valid, of: [truth], grid: [0.5, 2.0, 31]}
+                        - {type: blend, fitOn: valid, of: [truth, scored]}
                       slices:
                         - {field: track}
                         - {field: session_time, bucket: quarter}
                       utility: {field: payoff}
+                      output: {calibration: target/evaluation-test/calibration.json}
                 """;
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(config));
         Assertions.assertNotNull(outputs.get("eval"));
@@ -152,9 +155,18 @@ public class EvaluationTransformTest {
         PAssert.that(outputs.get("eval").getCollection()).satisfies(rows -> {
             final Map<String, MElement> records = new HashMap<>();
             for (final MElement r : rows) records.put(key(r), r);
-            // per split: overall cell = baseline + 3 predictions + 3 pairs = 7; track A / B = 14; two quarters
-            // per split (sessions every two days cover the whole year: 4 quarters) = 28 → 49 per split
-            Assertions.assertEquals(2 * (7 + 14 + 28), records.size(), records.keySet().toString());
+            // per split: overall cell = baseline + 6 sets (3 declared + truth@T, truth@blend, scored@blend) + 15 pairs
+            // = 22; track A / B = 44; four quarters per split (sessions every two days cover the year) = 88 → 154
+            Assertions.assertEquals(2 * (22 + 44 + 88), records.size(), records.keySet().toString());
+            // the derived sets: a temperature near 1 leaves the true model about as good; the blend of the score set
+            // with the baseline is informative; the derived sets compare on the same units
+            final MElement truthT = records.get("test/truth@T/null/null/null");
+            final MElement scoredBlend = records.get("test/scored@blend/null/null/null");
+            Assertions.assertEquals(testUnits, truthT.getAsLong("n_units"));
+            Assertions.assertTrue(truthT.getAsDouble("excessLogScore") > 0.05, "excess of truth@T: " + truthT.getAsDouble("excessLogScore"));
+            Assertions.assertTrue(scoredBlend.getAsDouble("excessLogScore") > 0.05, "excess of scored@blend: " + scoredBlend.getAsDouble("excessLogScore"));
+            Assertions.assertNotNull(records.get("test/truth/truth@T/null/null"));
+            Assertions.assertNotNull(records.get("test/scored/scored@blend/null/null"));
             final MElement truth = records.get("test/truth/null/null/null");
             final MElement copy = records.get("test/copy/null/null/null");
             final MElement baseline = records.get("test/baseline/null/null/null");
@@ -196,8 +208,8 @@ public class EvaluationTransformTest {
         PAssert.that(outputs.get("eval.calibration").getCollection()).satisfies(rows -> {
             final List<MElement> list = new ArrayList<>();
             rows.forEach(list::add);
-            // 2 splits x 3 predictions x (5 + 5 + 3 + 2) bins
-            Assertions.assertEquals(2 * 3 * 15, list.size());
+            // 2 splits x 6 sets (derived included) x (5 + 5 + 3 + 2) bins
+            Assertions.assertEquals(2 * 6 * 15, list.size());
             long n = 0;
             double positives = 0;
             for (final MElement r : list) {
@@ -232,7 +244,7 @@ public class EvaluationTransformTest {
         PAssert.that(outputs.get("eval.units").getCollection()).satisfies(rows -> {
             final List<MElement> list = new ArrayList<>();
             rows.forEach(list::add);
-            Assertions.assertEquals((validUnits + testUnits) * 4, list.size());
+            Assertions.assertEquals((validUnits + testUnits) * 7, list.size());
             final MElement one = list.stream().filter(r -> "truth".equals(r.getAsString("prediction")) && "test".equals(r.getAsString("split"))).findFirst().orElseThrow();
             Assertions.assertEquals(4L, one.getAsLong("n_rows"));
             Assertions.assertNotNull(one.getPrimitiveValue("time"));
@@ -259,9 +271,40 @@ public class EvaluationTransformTest {
             final List<?> splits = (List<?>) summary.getPrimitiveValue("splits");
             Assertions.assertEquals(2, splits.size());
             Assertions.assertEquals(List.of(), summary.getPrimitiveValue("notes"));
+            // the fits: the true model needs no temperature (T ≈ 1) and no re-weighting (a ≈ 1, b ≈ 0); the score
+            // set blends with the baseline at coefficients near 1
+            final List<?> fits = (List<?>) summary.getPrimitiveValue("fits");
+            Assertions.assertEquals(3, fits.size());
+            final Map<?, ?> temperature = (Map<?, ?>) fits.get(0);
+            Assertions.assertEquals("truth@T", temperature.get("derived"));
+            Assertions.assertEquals("valid", temperature.get("fitOn"));
+            Assertions.assertEquals(Boolean.TRUE, temperature.get("fitted"));
+            final double t = (Double) temperature.get("temperature");
+            Assertions.assertTrue(t > 0.8 && t < 1.3, "temperature: " + t);
+            Assertions.assertNotNull(temperature.get("gainPerUnit"));
+            final Map<?, ?> blendTruth = (Map<?, ?>) fits.get(1);
+            Assertions.assertEquals("truth@blend", blendTruth.get("derived"));
+            Assertions.assertEquals(Boolean.TRUE, blendTruth.get("fitted"));
+            Assertions.assertEquals(Boolean.TRUE, blendTruth.get("converged"));
+            final double a = (Double) blendTruth.get("a"), b = (Double) blendTruth.get("b");
+            Assertions.assertTrue(a > 0.7 && a < 1.3, "a of truth: " + a);
+            Assertions.assertTrue(Math.abs(b) < 0.35, "b of truth: " + b);
+            Assertions.assertTrue((Double) blendTruth.get("se_a") < 0.3);
+            Assertions.assertTrue((Double) blendTruth.get("z_a") > 3);
+            final Map<?, ?> blendScored = (Map<?, ?>) fits.get(2);
+            Assertions.assertEquals("scored@blend", blendScored.get("derived"));
+            final double a2 = (Double) blendScored.get("a"), b2 = (Double) blendScored.get("b");
+            Assertions.assertTrue(a2 > 0.6 && a2 < 1.4, "a of scored: " + a2);
+            Assertions.assertTrue(b2 > 0.6 && b2 < 1.4, "b of scored: " + b2);
             return null;
         });
         pipeline.run();
+        // the fitted parameters are written as JSON
+        final String json = java.nio.file.Files.readString(java.nio.file.Path.of("target/evaluation-test/calibration.json"));
+        final com.google.gson.JsonObject calibration = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+        Assertions.assertEquals(3, calibration.getAsJsonArray("fits").size());
+        Assertions.assertEquals("truth@T", calibration.getAsJsonArray("fits").get(0).getAsJsonObject().get("derived").getAsString());
+        Assertions.assertTrue(calibration.getAsJsonArray("fits").get(1).getAsJsonObject().get("a").getAsDouble() > 0.7);
     }
 
     @Test

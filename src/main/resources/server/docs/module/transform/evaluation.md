@@ -1,7 +1,7 @@
 ---
 type: Transform Module
 title: Evaluation Transform Module
-description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); the per-unit loss decomposition as an output. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
+description: Prediction verification after training, against a baseline. Matches one or more prediction sets (probability columns, or a raw score softmaxed within the group on top of an offset) with the outcome on time splits that carry a selection / report role, and reports the excess log score over the baseline as the first-class metric, with a Poisson bootstrap confidence interval (paired between prediction sets, cluster-able by a declared unit), next to logloss, hit@1 and Brier; per declared slice and calendar bucket; calibration tables (reliability by prediction quantile / divergence / declared field bands, edge groups above a ratio to the baseline, Wilson intervals, flat return per bin from a utility column); calibration fits (temperature by grid search, blend a·f + b·offset by Newton with standard errors) estimated on a selection split and compared as derived prediction sets, written to a JSON file; the per-unit loss decomposition as an output. Families groupedMultinomial (mutually exclusive samples within a group) and binomial; role defaults and lineage from the feature transform manifest. Batch only.
 tags: [transform, evaluation, machine-learning, statistics, calibration, bootstrap, batch]
 timestamp: 2026-09-13T00:00:00Z
 ---
@@ -115,6 +115,36 @@ the flat return of taking every row of the bin at unit stake).
 
 Quantile boundaries are sketch approximations (rank error under 1%); `edges` are exact.
 
+### Calibration fits
+
+```yaml
+calibration:
+  - {type: temperature, fitOn: valid, of: [candidate], grid: [0.5, 3.0, 51]}
+  - {type: blend, fitOn: valid, of: [scored]}
+output:
+  calibration: gs://bucket/eval/${args.version}/calibration.json
+```
+
+A fit is a small model, so it is estimated on a `selection` split only (`fitOn`; a `report` split is an
+assembly error) and its result enters the run as a **derived prediction set** — `<name>@T` / `<name>@blend`
+— compared on every split like a declared set: metrics with intervals, pair records against its base set,
+slices, calibration tables, units. `of` names the base sets (default: every declared set).
+
+Each base set has two fit inputs per row: f — a score set's score, a probability set's log share (grouped) /
+logit (binomial) — and o — the score set's own offset on the log scale, else the baseline's log share /
+logit. A row the base set gives mass 0 (a zero prob-scale offset, a zero share) enters the fit at the log
+floor (log 1e-12) and keeps mass 0 in the derived set. `weight` acts as a frequency weight, so the fits'
+standard errors scale with its magnitude.
+
+| type | model | estimate | reading |
+|---|---|---|---|
+| `temperature` | η = o + f / T (a probability set: q ∝ q^(1/T) within the group) | the grid value (`grid: [min, max, count]`, default 0.25 … 4 in 76 steps) maximising the log score; one pass | T > 1: the set is over-confident; a boundary optimum is flagged in `note` |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`l2`, `maxIter`, `tol` as the screen transform's conditioning), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline) | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
+
+The fit records (estimates, standard errors, `logScore`, `logScoreAtIdentity` and `gainPerUnit` over the
+declared set, iterations, convergence — a blend whose every step was rejected is reported as not converged
+with a note) are the summary's `fits`; `output.calibration` also writes them as JSON.
+
 ## Input contract
 
 | role | description |
@@ -163,7 +193,8 @@ the time partition.
 | rowId | optional | Array<String\> | Fields identifying a row. Default: every field value (a 128-bit hash travels). |
 | utility | optional | String or Object | The realised value of a positive row; `utility` in the calibration records. |
 | bootstrap | optional | Object or false | `samples` (default 1000, 0 or `false` disables, at most 10000), `seed` (default 0), `unit` (a field whose value is the resampling unit; default the group / the row identity). Every accumulator holds 6 × samples doubles. |
-| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`. |
+| calibration | optional | Array<Object\> | The tables (see [Calibration tables](#calibration-tables)): `{type: reliability, by: prediction \| divergence, bins}` (default by `prediction`, 10 bins), `{type: reliability, by: field, field, edges}`, `{type: edge, thresholds}`; and the fits (see [Calibration fits](#calibration-fits)): `{type: temperature, fitOn, of, grid}`, `{type: blend, fitOn, of, l2, maxIter, tol}`. |
+| output | optional | Object | `calibration`: URI / path of the fitted-parameters JSON written at the end of the run. |
 | slices | optional | Array | `{field}` (one record per distinct value) or `{field, bucket}` with bucket `year` / `quarter` / `month` / `week` / `day` (UTC) on a timestamp / date field (`field` defaults to `time.field`). A plain string is a field. For `groupedMultinomial` a slice field is a group-level attribute (the same value on every row of the group): a unit takes the slice values of its earliest row. Meant for low-cardinality dimensions (see Limits). |
 | manifest | optional | String | The upstream feature manifest URI (role defaults). |
 
@@ -211,9 +242,12 @@ binomial prior mode), `rate`, `rate_lo`, `rate_hi` (Wilson), `utility`.
 `splits` (ARRAY<STRUCT<name, role, from, to, minTime, maxTime, nUnits, nUnitsSkipped, nRows\>\> — the declared
 and observed range of each split), `nRows`, `nRowsInvalid` (null label / group / weight), `nRowsUnassigned`
 (in no split), `nUnits`, `nUnitsSkipped` (no positive label, an invalid baseline or prediction value),
-`bootstrapSamples`, `bootstrapSeed`, `bootstrapUnit`, `nCalibrationTables`, `slices`, `parametersHash` (the
-SHA-256, 16 hex characters, of the canonical parameters without `manifest`), `planHash` / `outputHash` (of
-the feature manifest when given), `notes` (role defaults applied, prior mode, overlapping split ranges).
+`bootstrapSamples`, `bootstrapSeed`, `bootstrapUnit`, `nCalibrationTables`, `fits` (ARRAY<STRUCT<prediction,
+derived, type, fitOn, fitted, temperature, a, b, intercept, se_a, se_b, se_intercept, z_a, nUnits, logScore,
+logScoreAtIdentity, gainPerUnit, iterations, rejectedSteps, converged, note\>\>), `slices`,
+`parametersHash` (the SHA-256, 16 hex characters, of the canonical parameters without `manifest` and
+`output`), `planHash` / `outputHash` (of the feature manifest when given), `notes` (role defaults applied,
+prior mode, overlapping split ranges, a fit without an estimate).
 
 ## Examples
 
@@ -247,9 +281,13 @@ transforms:
         - {type: reliability, by: prediction, bins: 10}
         - {type: reliability, by: divergence, bins: 10}
         - {type: edge, thresholds: [1.0, 1.25, 1.5, 2.0]}
+        - {type: temperature, fitOn: valid, of: [candidate]}
+        - {type: blend, fitOn: valid, of: [scored]}
       slices:
         - {field: session_time, bucket: month}
         - {field: category}
+      output:
+        calibration: gs://bucket/eval/${args.job}/calibration.json
 sinks:
   - name: metrics
     module: bigquery
@@ -273,7 +311,9 @@ sinks:
 
 The report split's `candidate` record answers the question: `excessLogScore` with `excessLogScore_lo` above 0
 means the candidate carries information the current model lacks; the pair record `candidate` − `scored`
-compares the two ways of using the candidate score on the same sessions.
+compares the two ways of using the candidate score on the same sessions. `candidate@T` is the candidate
+re-tempered on the selection split, `scored@blend` the score blended with the current model at the fitted
+coefficients; their pair records against the base sets say what the calibration bought on the report split.
 
 ### Example 2: replacing an incumbent scorer (independent rows)
 
@@ -350,5 +390,7 @@ parameters:
   accumulators of 6 × `bootstrap.samples` doubles (about 48 KB each at the default 1000), all gathered on one
   worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a
   high-cardinality field (an id) belongs in a coarser bucket, not in `slices`.
-- Batch, global window only. Calibration fits (temperature / blend), slice discovery, the gaussian / ranking
-  families and the HTML report are the next stages (see `docs/design/evaluation-dsl.md` §11).
+- A calibration fit is a small model: estimated on the selection split, reported on the report split; taking
+  its parameters to production is the user's call.
+- Batch, global window only. Slice discovery, the gaussian / ranking families and the HTML report are the
+  next stages (see `docs/design/evaluation-dsl.md` §11).

@@ -7,12 +7,15 @@ import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Module;
 import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.pipeline.feature.FeatureValues;
+import com.mercari.solution.util.domain.file.ResourceUtil;
+import com.mercari.solution.util.pipeline.glm.FitState;
 import com.mercari.solution.util.pipeline.glm.GatherFn;
 import com.mercari.solution.util.pipeline.glm.StatMath;
 import com.mercari.solution.util.pipeline.glm.VectorAccumulator;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
+import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
@@ -33,6 +36,7 @@ import org.apache.beam.sdk.values.PCollectionTuple;
 import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
+import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -95,11 +99,16 @@ public final class EvaluationStages {
                 ? rows.apply("Group", GroupByKey.create())
                 : rows.apply("Units", ParDo.of(new SingletonUnitDoFn())).setCoder(unitCoder);
 
+        // calibration fits on the selection split: a grid pass per temperature fit, unrolled Newton passes per
+        // blend and base set; collected into one FitResults singleton the align and finalize steps read
+        final PCollectionView<FitResults> fitView = fits(input, units, spec);
+
         final TupleTag<KV<String, MetricAccumulator>> scoredTag = new TupleTag<>() {};
         final TupleTag<MElement> unitRecordTag = new TupleTag<>() {};
         final TupleTag<AlignedRow> alignedTag = new TupleTag<>() {};
         final PCollectionTuple aligned = units.apply("Align", ParDo
-                .of(new AlignDoFn(spec, scoredTag, unitRecordTag, alignedTag))
+                .of(new AlignDoFn(spec, scoredTag, unitRecordTag, alignedTag, fitView))
+                .withSideInputs(fitView)
                 .withOutputTags(scoredTag, TupleTagList.of(unitRecordTag).and(alignedTag)));
         final PCollection<KV<String, MetricAccumulator>> scored = aligned.get(scoredTag).setCoder(accumulatorCoder);
         final PCollection<MElement> unitRecords = aligned.get(unitRecordTag);
@@ -113,7 +122,7 @@ public final class EvaluationStages {
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final PCollectionTuple finalized = combined
                 .apply("Gather", Combine.globally(new GatherFn<>(accumulatorCoder)))
-                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, metricsTag, summaryTag)).withOutputTags(metricsTag, TupleTagList.of(summaryTag)));
+                .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, metricsTag, summaryTag, fitView)).withSideInputs(fitView).withOutputTags(metricsTag, TupleTagList.of(summaryTag)));
 
         // calibration tables
         final PCollection<MElement> calibration;
@@ -137,6 +146,298 @@ public final class EvaluationStages {
                     .apply("Bins_Finalize", ParDo.of(new CalibrationDoFn(spec, sketchView)).withSideInputs(sketchView));
         }
         return new Outputs(finalized.get(metricsTag), calibration, unitRecords, finalized.get(summaryTag), prepared.get(failureTag));
+    }
+
+    /**
+     * The calibration fits (design §7.1). A temperature fit is one pass over the selection split's units (every
+     * grid value's log score into one vector, {@code Combine.globally}); a blend fit is {@code maxIter} unrolled
+     * Newton passes per base set (the screen transform's controller: {@link FitState} as a singleton view chained
+     * pass to pass). One collect step turns every fit's result into the {@link FitResults} singleton.
+     */
+    static PCollectionView<FitResults> fits(final PCollection<MElement> input, final PCollection<KV<String, Iterable<EvaluationRow>>> units, final EvaluationSpec spec) {
+        final List<PCollectionView<?>> views = new ArrayList<>();
+        final Map<String, PCollectionView<VectorAccumulator>> temperatureViews = new HashMap<>();
+        final Map<String, PCollectionView<FitState>> blendViews = new HashMap<>();
+        for (int i = 0; i < spec.fits.size(); i++) {
+            final EvaluationSpec.Fit fit = spec.fits.get(i);
+            if (fit.isTemperature()) {
+                final PCollectionView<VectorAccumulator> view = units
+                        .apply("Temperature" + i, ParDo.of(new TemperaturePassDoFn(spec, i)))
+                        .setCoder(VectorAccumulator.CODER)
+                        .apply("Temperature" + i + "_Combine", Combine.globally(new VectorAccumulator.Fn()))
+                        .apply("Temperature" + i + "_View", View.asSingleton());
+                temperatureViews.put("t" + i, view);
+                views.add(view);
+                continue;
+            }
+            for (final int set : spec.derivedOf(i)) {
+                final EvaluationSpec.Derived dv = spec.derived.get(set - spec.predictions.size());
+                final String tag = "Blend" + i + "_" + dv.base;
+                PCollectionView<FitState> state = input.getPipeline()
+                        .apply(tag + "_Init", Create.of(dv.base))
+                        .apply(tag + "_State", ParDo.of(new BlendInitDoFn(spec)))
+                        .setCoder(SerializableCoder.of(FitState.class))
+                        .apply(tag + "_InitView", View.asSingleton());
+                for (int it = 1; it <= fit.maxIter; it++) {
+                    final PCollection<VectorAccumulator> evaluation = units
+                            .apply(tag + "_Fit" + it, ParDo.of(new BlendPassDoFn(spec, i, dv.base, state)).withSideInputs(state))
+                            .setCoder(VectorAccumulator.CODER)
+                            .apply(tag + "_Fit" + it + "_Combine", Combine.globally(new VectorAccumulator.Fn()));
+                    state = evaluation
+                            .apply(tag + "_Fit" + it + "_Advance", ParDo.of(new BlendAdvanceDoFn(fit, state)).withSideInputs(state))
+                            .setCoder(SerializableCoder.of(FitState.class))
+                            .apply(tag + "_Fit" + it + "_View", View.asSingleton());
+                }
+                blendViews.put("b" + i + "_" + dv.base, state);
+                views.add(state);
+            }
+        }
+        return input.getPipeline()
+                .apply("Fits", Create.of(0))
+                .apply("Fits_Collect", ParDo.of(new CollectFitsDoFn(spec, temperatureViews, blendViews)).withSideInputs(views))
+                .setCoder(SerializableCoder.of(FitResults.class))
+                .apply("Fits_View", View.asSingleton());
+    }
+
+    /** One temperature fit's grid log scores over the selection split's units, bundle-local. */
+    static class TemperaturePassDoFn extends DoFn<KV<String, Iterable<EvaluationRow>>, VectorAccumulator> {
+        private final EvaluationSpec spec;
+        private final int fit;
+        private transient EvaluationScorer scorer;
+        private transient VectorAccumulator partial;
+
+        TemperaturePassDoFn(final EvaluationSpec spec, final int fit) {
+            this.spec = spec;
+            this.fit = fit;
+        }
+
+        @Setup
+        public void setup() {
+            scorer = new EvaluationScorer(spec);
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partial = new VectorAccumulator();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final EvaluationScorer.Unit unit = unit(scorer, c.element(), spec.fits.get(fit).fitOn);
+            if (unit == null) return;
+            partial.add(scorer.temperatureLogLikelihoods(unit, fit));
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            if (!partial.isEmpty()) c.output(partial, GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            partial = new VectorAccumulator();
+        }
+    }
+
+    /**
+     * A prepared, scorable unit of the named split (null otherwise). The split is the key's prefix
+     * ({@code split + SEP + group}), so a unit of another split is dropped before its rows are read.
+     */
+    static EvaluationScorer.Unit unit(final EvaluationScorer scorer, final KV<String, Iterable<EvaluationRow>> element, final String split) {
+        if (!element.getKey().startsWith(split + SEP)) return null;
+        final List<EvaluationRow> rows = new ArrayList<>();
+        for (final EvaluationRow r : element.getValue()) rows.add(r);
+        if (rows.isEmpty()) return null;
+        final String key = element.getKey().substring(split.length() + SEP.length());
+        final EvaluationScorer.Unit unit = scorer.prepare(rows, key);
+        return unit.skip == EvaluationScorer.Skip.NONE ? unit : null;
+    }
+
+    /** The state before the first blend pass of a base set (the element): the set as declared, see {@link EvaluationScorer#blendStart}. */
+    static class BlendInitDoFn extends DoFn<Integer, FitState> {
+        private final EvaluationSpec spec;
+
+        BlendInitDoFn(final EvaluationSpec spec) {
+            this.spec = spec;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final EvaluationScorer scorer = new EvaluationScorer(spec);
+            c.output(FitState.initial(scorer.blendK(), scorer.blendStart(c.element())));
+        }
+    }
+
+    /** One Newton pass of a blend fit over the selection split's units at the state's proposal (nothing once converged). */
+    static class BlendPassDoFn extends DoFn<KV<String, Iterable<EvaluationRow>>, VectorAccumulator> {
+        private final EvaluationSpec spec;
+        private final int fit;
+        private final int base;
+        private final PCollectionView<FitState> stateView;
+        private transient EvaluationScorer scorer;
+        private transient VectorAccumulator partial;
+
+        BlendPassDoFn(final EvaluationSpec spec, final int fit, final int base, final PCollectionView<FitState> stateView) {
+            this.spec = spec;
+            this.fit = fit;
+            this.base = base;
+            this.stateView = stateView;
+        }
+
+        @Setup
+        public void setup() {
+            scorer = new EvaluationScorer(spec);
+        }
+
+        @StartBundle
+        public void startBundle() {
+            partial = new VectorAccumulator();
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final FitState state = c.sideInput(stateView);
+            if (state.converged) return;
+            final EvaluationScorer.Unit unit = unit(scorer, c.element(), spec.fits.get(fit).fitOn);
+            if (unit == null) return;
+            partial.add(scorer.blendEvaluate(unit, base, state.proposal));
+        }
+
+        @FinishBundle
+        public void finishBundle(final FinishBundleContext c) {
+            if (!partial.isEmpty()) c.output(partial, GlobalWindow.INSTANCE.maxTimestamp(), GlobalWindow.INSTANCE);
+            partial = new VectorAccumulator();
+        }
+    }
+
+    /** The Newton controller of a blend: previous state + the pass evaluation → next state. */
+    static class BlendAdvanceDoFn extends DoFn<VectorAccumulator, FitState> {
+        private final EvaluationSpec.Fit fit;
+        private final PCollectionView<FitState> stateView;
+
+        BlendAdvanceDoFn(final EvaluationSpec.Fit fit, final PCollectionView<FitState> stateView) {
+            this.fit = fit;
+            this.stateView = stateView;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final FitState next = SerializableUtils.clone(c.sideInput(stateView)).advance(c.element().getValues(), fit.l2, fit.tol);
+            LOG.info("evaluation blend iteration {}: objective {} converged={} rejected={}", next.iteration,
+                    next.objectiveHistory.isEmpty() ? null : next.objectiveHistory.get(next.objectiveHistory.size() - 1), next.converged, next.rejected);
+            c.output(next);
+        }
+    }
+
+    /** Turns every fit's view into the {@link FitResults} singleton: the derived sets' parameters and the fit records. */
+    static class CollectFitsDoFn extends DoFn<Integer, FitResults> {
+        private final EvaluationSpec spec;
+        private final Map<String, PCollectionView<VectorAccumulator>> temperatureViews;
+        private final Map<String, PCollectionView<FitState>> blendViews;
+
+        CollectFitsDoFn(final EvaluationSpec spec, final Map<String, PCollectionView<VectorAccumulator>> temperatureViews, final Map<String, PCollectionView<FitState>> blendViews) {
+            this.spec = spec;
+            this.temperatureViews = temperatureViews;
+            this.blendViews = blendViews;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final FitResults results = new FitResults();
+            for (int i = 0; i < spec.fits.size(); i++) {
+                final EvaluationSpec.Fit fit = spec.fits.get(i);
+                final List<Integer> derivedSets = spec.derivedOf(i);
+                if (fit.isTemperature()) {
+                    final double[] v = c.sideInput(temperatureViews.get("t" + i)).getValues();
+                    final double[] grid = fit.grid();
+                    for (int s = 0; s < derivedSets.size(); s++) {
+                        final EvaluationSpec.Derived dv = spec.derived.get(derivedSets.get(s) - spec.predictions.size());
+                        final Map<String, Object> r = fitRecord(dv, fit);
+                        final double mass = v.length == 0 ? 0 : v[v.length - 1];
+                        if (!(mass > 0)) {
+                            r.put("fitted", false);
+                            r.put("note", "no scored unit in split " + fit.fitOn);
+                            results.records.add(r);
+                            continue;
+                        }
+                        int best = -1;
+                        double bestLl = Double.NEGATIVE_INFINITY;
+                        int identity = -1;
+                        for (int g = 0; g < grid.length; g++) {
+                            final double ll = v[s * fit.gridSize + g];
+                            if (Double.isFinite(ll) && ll > bestLl) {
+                                bestLl = ll;
+                                best = g;
+                            }
+                            if (identity < 0 || Math.abs(grid[g] - 1d) < Math.abs(grid[identity] - 1d)) identity = g;
+                        }
+                        if (best < 0) {
+                            r.put("fitted", false);
+                            r.put("note", "no finite log score on the grid");
+                            results.records.add(r);
+                            continue;
+                        }
+                        results.parameters.put(dv.name, new double[]{grid[best]});
+                        r.put("fitted", true);
+                        r.put("temperature", grid[best]);
+                        r.put("nUnits", mass);
+                        r.put("logScore", EvaluationReport.finiteOrNull(bestLl / mass));
+                        final boolean hasIdentity = Math.abs(grid[identity] - 1d) < 1e-9;
+                        r.put("logScoreAtIdentity", hasIdentity ? EvaluationReport.finiteOrNull(v[s * fit.gridSize + identity] / mass) : null);
+                        r.put("gainPerUnit", hasIdentity ? EvaluationReport.finiteOrNull((bestLl - v[s * fit.gridSize + identity]) / mass) : null);
+                        r.put("converged", best > 0 && best < grid.length - 1);
+                        r.put("note", best == 0 || best == grid.length - 1 ? "the optimum is at the grid boundary; widen grid" : null);
+                        results.records.add(r);
+                    }
+                    continue;
+                }
+                for (final int set : derivedSets) {
+                    final EvaluationSpec.Derived dv = spec.derived.get(set - spec.predictions.size());
+                    final FitState state = c.sideInput(blendViews.get("b" + i + "_" + dv.base));
+                    final Map<String, Object> r = fitRecord(dv, fit);
+                    r.put("iterations", (long) state.iteration);
+                    r.put("rejectedSteps", (long) state.rejected);
+                    // a stall (every step from the best point rejected down to the step floor) ends the chain like a
+                    // convergence but is not one: the best point may still be the start with a large gradient
+                    final boolean converged = state.converged && state.hasBest && !state.stalled;
+                    r.put("converged", converged);
+                    if (!state.hasBest) {
+                        r.put("fitted", false);
+                        r.put("note", state.iteration == 0 ? "no scored unit in split " + fit.fitOn : "the log likelihood is not finite at the starting point");
+                        results.records.add(r);
+                        continue;
+                    }
+                    final double[] theta = state.bestTheta;
+                    final double[] se = EvaluationScorer.standardErrors(state);
+                    results.parameters.put(dv.name, theta.clone());
+                    r.put("fitted", true);
+                    r.put("a", EvaluationReport.finiteOrNull(theta[0]));
+                    r.put("b", EvaluationReport.finiteOrNull(theta[1]));
+                    r.put("intercept", theta.length > 2 ? EvaluationReport.finiteOrNull(theta[2]) : null);
+                    r.put("se_a", EvaluationReport.finiteOrNull(se[0]));
+                    r.put("se_b", EvaluationReport.finiteOrNull(se[1]));
+                    r.put("se_intercept", theta.length > 2 ? EvaluationReport.finiteOrNull(se[2]) : null);
+                    r.put("z_a", se[0] > 0 ? EvaluationReport.finiteOrNull(theta[0] / se[0]) : null);
+                    r.put("nUnits", state.nUnits);
+                    r.put("logScore", state.nUnits > 0 ? EvaluationReport.finiteOrNull(state.bestLl / state.nUnits) : null);
+                    r.put("logScoreAtIdentity", state.nUnits > 0 && !Double.isNaN(state.ll0) ? EvaluationReport.finiteOrNull(state.ll0 / state.nUnits) : null);
+                    r.put("gainPerUnit", EvaluationReport.finiteOrNull(state.gainPerUnit()));
+                    r.put("note", converged ? null : state.stalled
+                            ? "the fit stalled: every Newton step from the best point was rejected (" + state.rejected + " rejected steps); the estimate may be the starting point"
+                            : "not converged within maxIter passes");
+                    results.records.add(r);
+                }
+            }
+            c.output(results);
+        }
+
+        /** The record template of a derived set: the identity fields set, every other field of {@link EvaluationReport#fitSchema} null. */
+        private Map<String, Object> fitRecord(final EvaluationSpec.Derived dv, final EvaluationSpec.Fit fit) {
+            final Map<String, Object> r = new java.util.LinkedHashMap<>();
+            for (final com.mercari.solution.module.Schema.Field field : EvaluationReport.fitSchema().getFields()) r.put(field.getName(), null);
+            r.put("prediction", spec.predictions.get(dv.base).name);
+            r.put("derived", dv.name);
+            r.put("type", fit.type);
+            r.put("fitOn", fit.fitOn);
+            r.put("fitted", false);
+            return r;
+        }
     }
 
     /** Reads one element into an {@link EvaluationRow}: split assignment, validity, identity, slice values. */
@@ -309,14 +610,17 @@ public final class EvaluationStages {
         private final TupleTag<KV<String, MetricAccumulator>> scoredTag;
         private final TupleTag<MElement> unitRecordTag;
         private final TupleTag<AlignedRow> alignedTag;
+        private final PCollectionView<FitResults> fitView;
         private transient EvaluationScorer scorer;
         private transient Map<String, MetricAccumulator> partials;
 
-        AlignDoFn(final EvaluationSpec spec, final TupleTag<KV<String, MetricAccumulator>> scoredTag, final TupleTag<MElement> unitRecordTag, final TupleTag<AlignedRow> alignedTag) {
+        AlignDoFn(final EvaluationSpec spec, final TupleTag<KV<String, MetricAccumulator>> scoredTag, final TupleTag<MElement> unitRecordTag,
+                  final TupleTag<AlignedRow> alignedTag, final PCollectionView<FitResults> fitView) {
             this.spec = spec;
             this.scoredTag = scoredTag;
             this.unitRecordTag = unitRecordTag;
             this.alignedTag = alignedTag;
+            this.fitView = fitView;
         }
 
         @Setup
@@ -341,6 +645,7 @@ public final class EvaluationStages {
                 scorer.skipped(unit, partials);
                 return;
             }
+            scorer.derive(unit, c.sideInput(fitView));
             final EvaluationScorer.Metrics m = scorer.score(unit);
             scorer.accumulate(unit, m, partials);
             for (final Map<String, Object> record : scorer.unitRecords(unit, m)) {
@@ -364,20 +669,29 @@ public final class EvaluationStages {
         private final EvaluationSpec spec;
         private final TupleTag<MElement> metricsTag;
         private final TupleTag<MElement> summaryTag;
+        private final PCollectionView<FitResults> fitView;
+        private static final com.google.gson.Gson JSON = new com.google.gson.GsonBuilder().setPrettyPrinting().serializeNulls().create();
 
-        FinalizeDoFn(final EvaluationSpec spec, final TupleTag<MElement> metricsTag, final TupleTag<MElement> summaryTag) {
+        FinalizeDoFn(final EvaluationSpec spec, final TupleTag<MElement> metricsTag, final TupleTag<MElement> summaryTag, final PCollectionView<FitResults> fitView) {
             this.spec = spec;
             this.metricsTag = metricsTag;
             this.summaryTag = summaryTag;
+            this.fitView = fitView;
         }
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final Map<String, MetricAccumulator> accumulators = new HashMap<>();
             for (final KV<String, MetricAccumulator> kv : c.element()) accumulators.merge(kv.getKey(), kv.getValue(), MetricAccumulator::merge);
-            final EvaluationReport.Result result = EvaluationReport.build(spec, accumulators);
+            final FitResults fits = c.sideInput(fitView);
+            final EvaluationReport.Result result = EvaluationReport.build(spec, accumulators, fits);
             for (final Map<String, Object> record : result.records()) c.output(metricsTag, MElement.of(record, c.timestamp()));
             c.output(summaryTag, MElement.of(result.summary(), c.timestamp()));
+            if (spec.calibrationUri != null) {
+                // the fitted parameters are a deliverable: a write failure fails the step
+                ResourceUtil.writeString(spec.calibrationUri, JSON.toJson(EvaluationReport.calibrationJson(spec, fits)));
+                LOG.info("evaluation calibration written to {}: {} fits", spec.calibrationUri, fits.records.size());
+            }
             LOG.info("evaluation finalized: {} metric records, summary {}", result.records().size(), result.summary());
         }
     }
@@ -442,6 +756,8 @@ public final class EvaluationStages {
             final AlignedRow row = c.element();
             for (int j = 0; j < row.predictions.length; j++) {
                 final double q = row.predictions[j];
+                // a derived set without parameters (its fit produced none) has no prediction to bin
+                if (Double.isNaN(q)) continue;
                 for (int t = 0; t < spec.tables.size(); t++) {
                     final EvaluationSpec.Table table = spec.tables.get(t);
                     if (table.isEdge()) {

@@ -51,6 +51,13 @@ public final class EvaluationSpec implements Serializable {
     public static final String TABLE_RELIABILITY = "reliability";
     public static final String TABLE_EDGE = "edge";
     public static final List<String> TABLE_TYPES = List.of(TABLE_RELIABILITY, TABLE_EDGE);
+    public static final String FIT_TEMPERATURE = "temperature";
+    public static final String FIT_BLEND = "blend";
+    public static final List<String> FIT_TYPES = List.of(FIT_TEMPERATURE, FIT_BLEND);
+    public static final List<String> CALIBRATION_TYPES = List.of(TABLE_RELIABILITY, TABLE_EDGE, FIT_TEMPERATURE, FIT_BLEND);
+    /** derived prediction set suffixes */
+    public static final String SUFFIX_TEMPERATURE = "@T";
+    public static final String SUFFIX_BLEND = "@blend";
     public static final String BY_PREDICTION = "prediction";
     public static final String BY_DIVERGENCE = "divergence";
     public static final String BY_FIELD = "field";
@@ -133,6 +140,52 @@ public final class EvaluationSpec implements Serializable {
         }
     }
 
+    /**
+     * A calibration fit (design §7.1): estimated on a selection split, applied as a derived prediction set.
+     * {@code temperature}: η = o + f / T over a grid of T; {@code blend}: η = a·f + b·o (+ an intercept for the
+     * binomial family) by Newton's method, with f the set's score (or log / logit of its probability) and o its
+     * offset (or the baseline's log share / logit).
+     */
+    public static final class Fit implements Serializable {
+        public String type;
+        public String fitOn;
+        /** the prediction sets the fit applies to (names); empty = every declared set */
+        public List<String> of = new ArrayList<>();
+        /** temperature grid: min, max, count (linear) */
+        public double gridMin = 0.25;
+        public double gridMax = 4d;
+        public int gridSize = 76;
+        public double l2 = 1e-4;
+        public int maxIter = 10;
+        public double tol = 1e-8;
+
+        public boolean isTemperature() {
+            return FIT_TEMPERATURE.equals(type);
+        }
+
+        /** The grid values (linear between min and max; {@code gridSize >= 2} by validation). */
+        public double[] grid() {
+            final double[] g = new double[gridSize];
+            for (int i = 0; i < gridSize; i++) g[i] = gridMin + (gridMax - gridMin) * i / (gridSize - 1);
+            return g;
+        }
+    }
+
+    /** A derived prediction set: a base set under a fitted calibration. */
+    public static final class Derived implements Serializable {
+        public String name;
+        /** index into {@link #predictions} */
+        public int base;
+        /** index into {@link #fits} */
+        public int fit;
+
+        public Derived(final String name, final int base, final int fit) {
+            this.name = name;
+            this.base = base;
+            this.fit = fit;
+        }
+    }
+
     public String family;
     public String group;
     public String labelField;
@@ -155,8 +208,13 @@ public final class EvaluationSpec implements Serializable {
     public long bootstrapSeed = 0L;
     public String bootstrapUnit;
     public List<Table> tables = new ArrayList<>();
+    public List<Fit> fits = new ArrayList<>();
+    /** the derived prediction sets, in (fit, base set) order; fixed by {@link #resolve} */
+    public List<Derived> derived = new ArrayList<>();
+    /** output.calibration: URI / path of the fitted-parameters JSON (null = not written) */
+    public String calibrationUri;
     public List<Slice> slices = new ArrayList<>();
-    /** SHA-256 (16 hex, the feature plan hash width) of the canonical parameters without the manifest location */
+    /** SHA-256 (16 hex, the feature plan hash width) of the canonical parameters without the file locations (manifest, output) */
     public String parametersHash;
     public String manifestPlanHash;
     public String manifestOutputHash;
@@ -218,12 +276,29 @@ public final class EvaluationSpec implements Serializable {
         return null;
     }
 
-    /** Prediction names, the baseline first (its index is 0 in every per-unit array). */
+    /** Prediction names, the baseline first (its index is 0 in every per-unit array), the derived sets last. */
     public List<String> predictionNames() {
         final List<String> names = new ArrayList<>();
         names.add(BASELINE_NAME);
         for (final Prediction p : predictions) names.add(p.name);
+        for (final Derived d : derived) names.add(d.name);
         return names;
+    }
+
+    /** Number of compared sets: the declared prediction sets plus the derived ones (the baseline not counted). */
+    public int setCount() {
+        return predictions.size() + derived.size();
+    }
+
+    public boolean hasFits() {
+        return !fits.isEmpty();
+    }
+
+    /** The derived sets of a fit, with their positions among the compared sets (declared sets first). */
+    public List<Integer> derivedOf(final int fit) {
+        final List<Integer> out = new ArrayList<>();
+        for (int i = 0; i < derived.size(); i++) if (derived.get(i).fit == fit) out.add(predictions.size() + i);
+        return out;
     }
 
     // ---- parsing -------------------------------------------------------------------------------------------
@@ -439,11 +514,44 @@ public final class EvaluationSpec implements Serializable {
                         continue;
                     }
                     final JsonObject o = e.getAsJsonObject();
+                    final String declaredType = string(o, "type");
+                    final String type = declaredType == null ? TABLE_RELIABILITY : declaredType;
+                    if (FIT_TYPES.contains(type)) {
+                        final Fit f = new Fit();
+                        f.type = type;
+                        f.fitOn = string(o, "fitOn");
+                        if (f.fitOn == null) errors.add(at + ".fitOn is required for type " + type + " (the selection split the fit is estimated on)");
+                        f.of = strings(o, "of", errors);
+                        if (f.isTemperature()) {
+                            final double[] grid = numbers(o, "grid", at + ".grid", errors);
+                            if (grid != null) {
+                                if (grid.length != 3) {
+                                    errors.add(at + ".grid must be [min, max, count]");
+                                } else {
+                                    f.gridMin = grid[0];
+                                    f.gridMax = grid[1];
+                                    f.gridSize = (int) grid[2];
+                                    if (!(f.gridMin > 0) || !(f.gridMax > f.gridMin) || grid[2] != f.gridSize || f.gridSize < 2 || f.gridSize > 10_000) errors.add(at + ".grid must be [min > 0, max > min, an integer count in 2..10000]");
+                                }
+                            }
+                        } else {
+                            final Double l2 = number(o, "l2");
+                            if (l2 != null) f.l2 = l2;
+                            final Integer maxIter = integer(o, "maxIter");
+                            if (maxIter != null) f.maxIter = maxIter;
+                            final Double tol = number(o, "tol");
+                            if (tol != null) f.tol = tol;
+                            if (f.l2 < 0) errors.add(at + ".l2 must be >= 0");
+                            if (f.maxIter < 1 || f.maxIter > 100) errors.add(at + ".maxIter must be in [1, 100] (every iteration is one pass over the selection split)");
+                            if (f.tol <= 0) errors.add(at + ".tol must be > 0");
+                        }
+                        s.fits.add(f);
+                        continue;
+                    }
                     final Table t = new Table();
-                    t.type = string(o, "type");
-                    if (t.type == null) t.type = TABLE_RELIABILITY;
+                    t.type = type;
                     if (!TABLE_TYPES.contains(t.type)) {
-                        errors.add(at + ".type '" + t.type + "' is unknown (available: " + TABLE_TYPES + ")");
+                        errors.add(at + ".type '" + t.type + "' is unknown (available: " + CALIBRATION_TYPES + ")");
                         continue;
                     }
                     if (t.isEdge()) {
@@ -498,8 +606,20 @@ public final class EvaluationSpec implements Serializable {
             }
         }
 
+        final JsonElement output = p.get("output");
+        if (output != null && !output.isJsonNull()) {
+            if (output.isJsonObject()) {
+                final JsonObject o = output.getAsJsonObject();
+                s.calibrationUri = string(o, "calibration");
+                if (o.has("calibration") && (s.calibrationUri == null || s.calibrationUri.isBlank())) errors.add("output.calibration must be a URI or path of the fitted-parameters file to write");
+            } else {
+                errors.add("output must be an object {calibration: <uri>}");
+            }
+        }
+
         final JsonObject canonical = p.deepCopy();
         canonical.remove("manifest");
+        canonical.remove("output");
         s.parametersHash = FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(canonical));
         if (!errors.isEmpty()) throw new IllegalArgumentException(String.join("; ", errors));
         return s;
@@ -626,6 +746,41 @@ public final class EvaluationSpec implements Serializable {
         if (labelExpr != null) {
             for (final String v : ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames()) {
                 if (!fields.containsKey(v)) errors.add("label.expr variable '" + v + "' is not an input field");
+            }
+        }
+
+        // calibration fits: estimated on a selection split, applied to the named (or every) prediction set
+        derived = new ArrayList<>();
+        // the derived names share the declared sets' namespace: a declared set may not be named like a derived one
+        final Set<String> declaredNames = new HashSet<>();
+        for (final Prediction p : predictions) declaredNames.add(p.name);
+        final Set<String> derivedNames = new HashSet<>();
+        for (int i = 0; i < fits.size(); i++) {
+            final Fit f = fits.get(i);
+            final String at = "calibration (" + f.type + " #" + i + ")";
+            final Split on = f.fitOn == null ? null : split(f.fitOn);
+            if (f.fitOn != null && on == null) errors.add(at + ".fitOn '" + f.fitOn + "' is not a declared split (available: " + splitNames() + ")");
+            else if (on != null && !on.isSelection()) errors.add(at + ".fitOn '" + f.fitOn + "' has role " + on.role + ": a calibration is fitted on a selection split only, never on the report split");
+            final List<Integer> bases = new ArrayList<>();
+            if (f.of.isEmpty()) {
+                for (int j = 0; j < predictions.size(); j++) bases.add(j);
+            } else {
+                for (final String name : f.of) {
+                    int found = -1;
+                    for (int j = 0; j < predictions.size(); j++) if (predictions.get(j).name.equals(name)) found = j;
+                    if (found < 0) errors.add(at + ".of '" + name + "' is not a declared prediction set");
+                    else bases.add(found);
+                }
+            }
+            for (final int j : bases) {
+                final Prediction d = predictions.get(j);
+                if (!f.isTemperature() && !hasBaseline() && !(d.isScore() && d.offsetField != null)) {
+                    errors.add(at + " on '" + d.name + "': a blend needs an offset (the set's own, or the baseline) as its second column");
+                }
+                final String name = d.name + (f.isTemperature() ? SUFFIX_TEMPERATURE : SUFFIX_BLEND);
+                if (declaredNames.contains(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' collides with a declared prediction set of that name");
+                else if (!derivedNames.add(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' is declared twice (one " + f.type + " fit per prediction set)");
+                derived.add(new Derived(name, j, i));
             }
         }
 

@@ -74,8 +74,13 @@ public final class EvaluationReport {
     }
 
     public static Result build(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators) {
+        return build(spec, accumulators, null);
+    }
+
+    /** @param fits the calibration fit results (null without fits): the summary's {@code fits} records */
+    public static Result build(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits) {
         final List<String> names = spec.predictionNames();
-        final int k = spec.predictions.size();
+        final int k = spec.setCount();
         final Map<String, String> roles = spec.roles();
         // (split, slice, value) → prediction index → accumulator
         final Map<String, Map<Integer, MetricAccumulator>> cells = new LinkedHashMap<>();
@@ -173,7 +178,7 @@ public final class EvaluationReport {
                 }
             }
         }
-        return new Result(records, summary(spec, accumulators));
+        return new Result(records, summary(spec, accumulators, fits));
     }
 
     private static void putCounts(final Map<String, Object> r, final MetricAccumulator acc) {
@@ -186,7 +191,7 @@ public final class EvaluationReport {
 
     // ---- summary -------------------------------------------------------------------------------------------
 
-    static Map<String, Object> summary(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators) {
+    static Map<String, Object> summary(final EvaluationSpec spec, final Map<String, MetricAccumulator> accumulators, final FitResults fits) {
         final Map<String, Object> s = new LinkedHashMap<>();
         final MetricAccumulator rows = accumulators.getOrDefault(MetricAccumulator.ROWS_KEY, new MetricAccumulator());
         final List<String> notes = new ArrayList<>(spec.notes);
@@ -240,6 +245,14 @@ public final class EvaluationReport {
         s.put("bootstrapSeed", spec.bootstrapSeed);
         s.put("bootstrapUnit", spec.bootstrapUnit);
         s.put("nCalibrationTables", (long) spec.tables.size());
+        final List<Map<String, Object>> fitRecords = new ArrayList<>();
+        if (fits != null) {
+            for (final Map<String, Object> r : fits.records) {
+                fitRecords.add(new LinkedHashMap<>(r));
+                if (Boolean.FALSE.equals(r.get("fitted"))) notes.add("calibration " + r.get("type") + " on " + r.get("prediction") + " produced no estimate" + (r.get("note") != null ? ": " + r.get("note") : ""));
+            }
+        }
+        s.put("fits", fitRecords);
         final List<String> slices = new ArrayList<>();
         for (final EvaluationSpec.Slice sl : spec.slices) slices.add(sl.name());
         s.put("slices", slices);
@@ -429,6 +442,54 @@ public final class EvaluationReport {
                 .build();
     }
 
+    /** One calibration fit record (the summary's {@code fits}, the {@code output.calibration} file). */
+    public static Schema fitSchema() {
+        return Schema.builder()
+                .withField("prediction", Schema.FieldType.STRING)
+                .withField("derived", Schema.FieldType.STRING)
+                .withField("type", Schema.FieldType.STRING)
+                .withField("fitOn", Schema.FieldType.STRING)
+                .withField("fitted", Schema.FieldType.BOOLEAN)
+                .withField("temperature", Schema.FieldType.FLOAT64)
+                .withField("a", Schema.FieldType.FLOAT64)
+                .withField("b", Schema.FieldType.FLOAT64)
+                .withField("intercept", Schema.FieldType.FLOAT64)
+                .withField("se_a", Schema.FieldType.FLOAT64)
+                .withField("se_b", Schema.FieldType.FLOAT64)
+                .withField("se_intercept", Schema.FieldType.FLOAT64)
+                .withField("z_a", Schema.FieldType.FLOAT64)
+                .withField("nUnits", Schema.FieldType.FLOAT64)
+                .withField("logScore", Schema.FieldType.FLOAT64)
+                .withField("logScoreAtIdentity", Schema.FieldType.FLOAT64)
+                .withField("gainPerUnit", Schema.FieldType.FLOAT64)
+                .withField("iterations", Schema.FieldType.INT64)
+                .withField("rejectedSteps", Schema.FieldType.INT64)
+                .withField("converged", Schema.FieldType.BOOLEAN)
+                .withField("note", Schema.FieldType.STRING)
+                .build();
+    }
+
+    /** The {@code output.calibration} document: the fit records with the run's identity. */
+    public static com.google.gson.JsonObject calibrationJson(final EvaluationSpec spec, final FitResults fits) {
+        final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        o.addProperty("version", 1);
+        o.addProperty("family", spec.family);
+        o.addProperty("group", spec.group);
+        o.addProperty("baseline", spec.baselineField);
+        o.addProperty("baselineForm", spec.hasBaseline() ? spec.baselineForm : null);
+        o.addProperty("parametersHash", spec.parametersHash);
+        o.addProperty("planHash", spec.manifestPlanHash);
+        o.addProperty("outputHash", spec.manifestOutputHash);
+        o.addProperty("createdAt", java.time.Instant.now().toString());
+        // the records' numbers are finite or null (normalised where they are built), so they serialise as is
+        final com.google.gson.JsonArray array = new com.google.gson.JsonArray();
+        if (fits != null) {
+            for (final Map<String, Object> r : fits.records) array.add(com.mercari.solution.util.schema.converter.MapToJsonConverter.convertObject(r));
+        }
+        o.add("fits", array);
+        return o;
+    }
+
     public static Schema summarySchema() {
         final Schema split = Schema.builder()
                 .withField("name", Schema.FieldType.STRING)
@@ -461,6 +522,7 @@ public final class EvaluationReport {
                 .withField("bootstrapSeed", Schema.FieldType.INT64)
                 .withField("bootstrapUnit", Schema.FieldType.STRING)
                 .withField("nCalibrationTables", Schema.FieldType.INT64)
+                .withField("fits", Schema.FieldType.array(Schema.FieldType.element(fitSchema())))
                 .withField("slices", Schema.FieldType.array(Schema.FieldType.STRING))
                 .withField("parametersHash", Schema.FieldType.STRING)
                 .withField("planHash", Schema.FieldType.STRING)
@@ -486,6 +548,16 @@ public final class EvaluationReport {
         if (spec.weightField != null) parts.add("weight=" + spec.weightField);
         parts.add("bootstrap=" + spec.bootstrapSamples + " seed=" + spec.bootstrapSeed + (spec.bootstrapUnit != null ? " unit=" + spec.bootstrapUnit : ""));
         if (!spec.tables.isEmpty()) parts.add("calibration=" + spec.tables.size() + " tables" + (spec.hasQuantileTables() ? " (+1 sketch pass)" : ""));
+        if (spec.hasFits()) {
+            final List<String> fits = new ArrayList<>();
+            for (int i = 0; i < spec.fits.size(); i++) {
+                final EvaluationSpec.Fit f = spec.fits.get(i);
+                final List<String> names = new ArrayList<>();
+                for (final int d : spec.derivedOf(i)) names.add(spec.derived.get(d - spec.predictions.size()).name);
+                fits.add(f.type + " on " + f.fitOn + " -> " + names + (f.isTemperature() ? " (grid " + f.gridSize + ", 1 pass)" : " (Newton, " + f.maxIter + " passes)"));
+            }
+            parts.add("fits=" + fits);
+        }
         if (!spec.slices.isEmpty()) {
             final List<String> slices = new ArrayList<>();
             for (final EvaluationSpec.Slice sl : spec.slices) slices.add(sl.name());
