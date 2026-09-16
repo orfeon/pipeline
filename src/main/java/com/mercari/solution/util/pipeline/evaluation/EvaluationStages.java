@@ -156,7 +156,6 @@ public final class EvaluationStages {
      */
     static PCollectionView<FitResults> fits(final PCollection<MElement> input, final PCollection<KV<String, Iterable<EvaluationRow>>> units, final EvaluationSpec spec) {
         final List<PCollectionView<?>> views = new ArrayList<>();
-        final List<String> viewKeys = new ArrayList<>();
         final Map<String, PCollectionView<VectorAccumulator>> temperatureViews = new HashMap<>();
         final Map<String, PCollectionView<FitState>> blendViews = new HashMap<>();
         for (int i = 0; i < spec.fits.size(); i++) {
@@ -169,7 +168,6 @@ public final class EvaluationStages {
                         .apply("Temperature" + i + "_View", View.asSingleton());
                 temperatureViews.put("t" + i, view);
                 views.add(view);
-                viewKeys.add("t" + i);
                 continue;
             }
             for (final int set : spec.derivedOf(i)) {
@@ -192,7 +190,6 @@ public final class EvaluationStages {
                 }
                 blendViews.put("b" + i + "_" + dv.base, state);
                 views.add(state);
-                viewKeys.add("b" + i + "_" + dv.base);
             }
         }
         return input.getPipeline()
@@ -238,17 +235,21 @@ public final class EvaluationStages {
         }
     }
 
-    /** A prepared, scorable unit of the named split (null otherwise). */
+    /**
+     * A prepared, scorable unit of the named split (null otherwise). The split is the key's prefix
+     * ({@code split + SEP + group}), so a unit of another split is dropped before its rows are read.
+     */
     static EvaluationScorer.Unit unit(final EvaluationScorer scorer, final KV<String, Iterable<EvaluationRow>> element, final String split) {
+        if (!element.getKey().startsWith(split + SEP)) return null;
         final List<EvaluationRow> rows = new ArrayList<>();
         for (final EvaluationRow r : element.getValue()) rows.add(r);
-        if (rows.isEmpty() || !rows.get(0).split.equals(split)) return null;
-        final String key = element.getKey().substring(element.getKey().indexOf(SEP) + 1);
+        if (rows.isEmpty()) return null;
+        final String key = element.getKey().substring(split.length() + SEP.length());
         final EvaluationScorer.Unit unit = scorer.prepare(rows, key);
         return unit.skip == EvaluationScorer.Skip.NONE ? unit : null;
     }
 
-    /** The state before the first blend pass: a = 1, b = 1 (the declared combination). */
+    /** The state before the first blend pass of a base set (the element): the set as declared, see {@link EvaluationScorer#blendStart}. */
     static class BlendInitDoFn extends DoFn<Integer, FitState> {
         private final EvaluationSpec spec;
 
@@ -259,7 +260,7 @@ public final class EvaluationStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final EvaluationScorer scorer = new EvaluationScorer(spec);
-            c.output(FitState.initial(scorer.blendK(), scorer.blendStart()));
+            c.output(FitState.initial(scorer.blendK(), scorer.blendStart(c.element())));
         }
     }
 
@@ -376,10 +377,10 @@ public final class EvaluationStages {
                         r.put("fitted", true);
                         r.put("temperature", grid[best]);
                         r.put("nUnits", mass);
-                        r.put("logScore", bestLl / mass);
+                        r.put("logScore", EvaluationReport.finiteOrNull(bestLl / mass));
                         final boolean hasIdentity = Math.abs(grid[identity] - 1d) < 1e-9;
-                        r.put("logScoreAtIdentity", hasIdentity ? v[s * fit.gridSize + identity] / mass : null);
-                        r.put("gainPerUnit", hasIdentity ? (bestLl - v[s * fit.gridSize + identity]) / mass : null);
+                        r.put("logScoreAtIdentity", hasIdentity ? EvaluationReport.finiteOrNull(v[s * fit.gridSize + identity] / mass) : null);
+                        r.put("gainPerUnit", hasIdentity ? EvaluationReport.finiteOrNull((bestLl - v[s * fit.gridSize + identity]) / mass) : null);
                         r.put("converged", best > 0 && best < grid.length - 1);
                         r.put("note", best == 0 || best == grid.length - 1 ? "the optimum is at the grid boundary; widen grid" : null);
                         results.records.add(r);
@@ -392,7 +393,10 @@ public final class EvaluationStages {
                     final Map<String, Object> r = fitRecord(dv, fit);
                     r.put("iterations", (long) state.iteration);
                     r.put("rejectedSteps", (long) state.rejected);
-                    r.put("converged", state.converged && state.hasBest);
+                    // a stall (every step from the best point rejected down to the step floor) ends the chain like a
+                    // convergence but is not one: the best point may still be the start with a large gradient
+                    final boolean converged = state.converged && state.hasBest && !state.stalled;
+                    r.put("converged", converged);
                     if (!state.hasBest) {
                         r.put("fitted", false);
                         r.put("note", state.iteration == 0 ? "no scored unit in split " + fit.fitOn : "the log likelihood is not finite at the starting point");
@@ -403,52 +407,36 @@ public final class EvaluationStages {
                     final double[] se = EvaluationScorer.standardErrors(state);
                     results.parameters.put(dv.name, theta.clone());
                     r.put("fitted", true);
-                    r.put("a", theta[0]);
-                    r.put("b", theta[1]);
-                    r.put("intercept", theta.length > 2 ? theta[2] : null);
-                    r.put("se_a", finite(se[0]));
-                    r.put("se_b", finite(se[1]));
-                    r.put("se_intercept", theta.length > 2 ? finite(se[2]) : null);
-                    r.put("z_a", se[0] > 0 ? theta[0] / se[0] : null);
+                    r.put("a", EvaluationReport.finiteOrNull(theta[0]));
+                    r.put("b", EvaluationReport.finiteOrNull(theta[1]));
+                    r.put("intercept", theta.length > 2 ? EvaluationReport.finiteOrNull(theta[2]) : null);
+                    r.put("se_a", EvaluationReport.finiteOrNull(se[0]));
+                    r.put("se_b", EvaluationReport.finiteOrNull(se[1]));
+                    r.put("se_intercept", theta.length > 2 ? EvaluationReport.finiteOrNull(se[2]) : null);
+                    r.put("z_a", se[0] > 0 ? EvaluationReport.finiteOrNull(theta[0] / se[0]) : null);
                     r.put("nUnits", state.nUnits);
-                    r.put("logScore", state.nUnits > 0 ? state.bestLl / state.nUnits : null);
-                    r.put("logScoreAtIdentity", state.nUnits > 0 && !Double.isNaN(state.ll0) ? state.ll0 / state.nUnits : null);
-                    r.put("gainPerUnit", finite(state.gainPerUnit()));
-                    r.put("note", state.converged ? null : "not converged within maxIter passes");
+                    r.put("logScore", state.nUnits > 0 ? EvaluationReport.finiteOrNull(state.bestLl / state.nUnits) : null);
+                    r.put("logScoreAtIdentity", state.nUnits > 0 && !Double.isNaN(state.ll0) ? EvaluationReport.finiteOrNull(state.ll0 / state.nUnits) : null);
+                    r.put("gainPerUnit", EvaluationReport.finiteOrNull(state.gainPerUnit()));
+                    r.put("note", converged ? null : state.stalled
+                            ? "the fit stalled: every Newton step from the best point was rejected (" + state.rejected + " rejected steps); the estimate may be the starting point"
+                            : "not converged within maxIter passes");
                     results.records.add(r);
                 }
             }
             c.output(results);
         }
 
-        private static Map<String, Object> fitRecord(final EvaluationSpec.Derived dv, final EvaluationSpec.Fit fit) {
+        /** The record template of a derived set: the identity fields set, every other field of {@link EvaluationReport#fitSchema} null. */
+        private Map<String, Object> fitRecord(final EvaluationSpec.Derived dv, final EvaluationSpec.Fit fit) {
             final Map<String, Object> r = new java.util.LinkedHashMap<>();
-            r.put("prediction", dv.name.substring(0, dv.name.lastIndexOf('@')));
+            for (final com.mercari.solution.module.Schema.Field field : EvaluationReport.fitSchema().getFields()) r.put(field.getName(), null);
+            r.put("prediction", spec.predictions.get(dv.base).name);
             r.put("derived", dv.name);
             r.put("type", fit.type);
             r.put("fitOn", fit.fitOn);
             r.put("fitted", false);
-            r.put("temperature", null);
-            r.put("a", null);
-            r.put("b", null);
-            r.put("intercept", null);
-            r.put("se_a", null);
-            r.put("se_b", null);
-            r.put("se_intercept", null);
-            r.put("z_a", null);
-            r.put("nUnits", null);
-            r.put("logScore", null);
-            r.put("logScoreAtIdentity", null);
-            r.put("gainPerUnit", null);
-            r.put("iterations", null);
-            r.put("rejectedSteps", null);
-            r.put("converged", null);
-            r.put("note", null);
             return r;
-        }
-
-        private static Double finite(final double v) {
-            return Double.isNaN(v) || Double.isInfinite(v) ? null : v;
         }
     }
 
@@ -768,6 +756,8 @@ public final class EvaluationStages {
             final AlignedRow row = c.element();
             for (int j = 0; j < row.predictions.length; j++) {
                 final double q = row.predictions[j];
+                // a derived set without parameters (its fit produced none) has no prediction to bin
+                if (Double.isNaN(q)) continue;
                 for (int t = 0; t < spec.tables.size(); t++) {
                     final EvaluationSpec.Table table = spec.tables.get(t);
                     if (table.isEdge()) {

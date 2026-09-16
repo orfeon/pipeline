@@ -144,6 +144,10 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, of: [Z]}]}")).contains("not a declared prediction set"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid}, {type: blend, fitOn: valid}]}")).contains("declared twice"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, grid: [0, 2, 4]}]}")).contains("grid must be"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, grid: [1, 1, 4]}]}")).contains("grid must be"));
+        Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: temperature, fitOn: valid, grid: [0.5, 2, 3.5]}]}")).contains("grid must be"));
+        // a declared set may not take a derived set's name
+        Assertions.assertTrue(error("{group: g, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}, {name: 'A@T', prob: qb}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: temperature, fitOn: valid, of: [A]}]}").contains("collides with a declared prediction set"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, calibration: [{type: blend, fitOn: valid, maxIter: 0}]}")).contains("maxIter"));
         // a blend needs an offset: the baseline, or the score set's own
         Assertions.assertTrue(error("{group: g, label: y, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", calibration: [{type: blend, fitOn: valid}]}").contains("needs an offset"));

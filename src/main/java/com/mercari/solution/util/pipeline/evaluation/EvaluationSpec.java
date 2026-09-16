@@ -163,10 +163,10 @@ public final class EvaluationSpec implements Serializable {
             return FIT_TEMPERATURE.equals(type);
         }
 
-        /** The grid values (linear between min and max). */
+        /** The grid values (linear between min and max; {@code gridSize >= 2} by validation). */
         public double[] grid() {
             final double[] g = new double[gridSize];
-            for (int i = 0; i < gridSize; i++) g[i] = gridSize == 1 ? gridMin : gridMin + (gridMax - gridMin) * i / (gridSize - 1);
+            for (int i = 0; i < gridSize; i++) g[i] = gridMin + (gridMax - gridMin) * i / (gridSize - 1);
             return g;
         }
     }
@@ -514,7 +514,8 @@ public final class EvaluationSpec implements Serializable {
                         continue;
                     }
                     final JsonObject o = e.getAsJsonObject();
-                    final String type = string(o, "type") == null ? TABLE_RELIABILITY : string(o, "type");
+                    final String declaredType = string(o, "type");
+                    final String type = declaredType == null ? TABLE_RELIABILITY : declaredType;
                     if (FIT_TYPES.contains(type)) {
                         final Fit f = new Fit();
                         f.type = type;
@@ -530,7 +531,7 @@ public final class EvaluationSpec implements Serializable {
                                     f.gridMin = grid[0];
                                     f.gridMax = grid[1];
                                     f.gridSize = (int) grid[2];
-                                    if (!(f.gridMin > 0) || !(f.gridMax >= f.gridMin) || f.gridSize < 2 || f.gridSize > 10_000) errors.add(at + ".grid must be [min > 0, max >= min, 2 <= count <= 10000]");
+                                    if (!(f.gridMin > 0) || !(f.gridMax > f.gridMin) || grid[2] != f.gridSize || f.gridSize < 2 || f.gridSize > 10_000) errors.add(at + ".grid must be [min > 0, max > min, an integer count in 2..10000]");
                                 }
                             }
                         } else {
@@ -750,6 +751,9 @@ public final class EvaluationSpec implements Serializable {
 
         // calibration fits: estimated on a selection split, applied to the named (or every) prediction set
         derived = new ArrayList<>();
+        // the derived names share the declared sets' namespace: a declared set may not be named like a derived one
+        final Set<String> declaredNames = new HashSet<>();
+        for (final Prediction p : predictions) declaredNames.add(p.name);
         final Set<String> derivedNames = new HashSet<>();
         for (int i = 0; i < fits.size(); i++) {
             final Fit f = fits.get(i);
@@ -774,7 +778,8 @@ public final class EvaluationSpec implements Serializable {
                     errors.add(at + " on '" + d.name + "': a blend needs an offset (the set's own, or the baseline) as its second column");
                 }
                 final String name = d.name + (f.isTemperature() ? SUFFIX_TEMPERATURE : SUFFIX_BLEND);
-                if (!derivedNames.add(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' is declared twice (one " + f.type + " fit per prediction set)");
+                if (declaredNames.contains(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' collides with a declared prediction set of that name");
+                else if (!derivedNames.add(name)) errors.add(at + " on '" + d.name + "': the derived set '" + name + "' is declared twice (one " + f.type + " fit per prediction set)");
                 derived.add(new Derived(name, j, i));
             }
         }

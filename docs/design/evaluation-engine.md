@@ -72,7 +72,7 @@ report derives the reference (also per replicate, so the excess interval is righ
 
 ```
 units ─ Temperature<i> (grid log scores per bundle, selection split only) ─ Combine.globally ─ singleton view ─┐
-Create(base) ─ Blend<i>_<base>_Init (θ = (1, 1[, 0])) ─ view = state₀                                        │
+Create(base) ─ Blend<i>_<base>_Init (θ = (1, 1|0[, 0]): the set as declared) ─ view = state₀                 │
 for it in 1..maxIter: units ─ Blend<i>_<base>_Fit<it> [side: state_{it-1}] ─ Combine.globally ─ Advance ─ view │
 Create(0) ─ Fits_Collect [side: every fit view] ─ FitResults singleton ─► Align (derive), Finalize (summary, JSON)
 ```

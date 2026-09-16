@@ -132,15 +132,18 @@ slices, calibration tables, units. `of` names the base sets (default: every decl
 
 Each base set has two fit inputs per row: f — a score set's score, a probability set's log share (grouped) /
 logit (binomial) — and o — the score set's own offset on the log scale, else the baseline's log share /
-logit.
+logit. A row the base set gives mass 0 (a zero prob-scale offset, a zero share) enters the fit at the log
+floor (log 1e-12) and keeps mass 0 in the derived set. `weight` acts as a frequency weight, so the fits'
+standard errors scale with its magnitude.
 
 | type | model | estimate | reading |
 |---|---|---|---|
 | `temperature` | η = o + f / T (a probability set: q ∝ q^(1/T) within the group) | the grid value (`grid: [min, max, count]`, default 0.25 … 4 in 76 steps) maximising the log score; one pass | T > 1: the set is over-confident; a boundary optimum is flagged in `note` |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`l2`, `maxIter`, `tol` as the screen transform's conditioning), starting at a = b = 1 | a ≈ 1, b ≈ 1: the declared combination is calibrated; a < 1: shrink the score; `z_a` tests whether the set carries information orthogonal to its offset |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`) | the conditional logit / logistic MLE by unrolled Newton passes (`l2`, `maxIter`, `tol` as the screen transform's conditioning), starting at the set as declared (a = 1; b = 1 for a score set with its own offset, b = 0 when o is the baseline) | a ≈ 1, b ≈ its start: the declared set is calibrated; a < 1: shrink the score; b > 0 with a baseline offset: the baseline adds information; `z_a` tests whether the set carries information orthogonal to its offset |
 
-The fit records (estimates, standard errors, `logScore`, `gainPerUnit` over the start, iterations,
-convergence) are the summary's `fits`; `output.calibration` also writes them as JSON.
+The fit records (estimates, standard errors, `logScore`, `logScoreAtIdentity` and `gainPerUnit` over the
+declared set, iterations, convergence — a blend whose every step was rejected is reported as not converged
+with a note) are the summary's `fits`; `output.calibration` also writes them as JSON.
 
 ## Input contract
 

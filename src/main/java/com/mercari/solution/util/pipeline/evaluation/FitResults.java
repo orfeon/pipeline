@@ -18,10 +18,6 @@ public final class FitResults implements Serializable {
     /** one record per derived set: prediction, derived, type, fitOn, the estimates, standard errors, diagnostics */
     public final List<Map<String, Object>> records = new ArrayList<>();
 
-    public static FitResults empty() {
-        return new FitResults();
-    }
-
     public double[] parameters(final String derived) {
         return parameters.get(derived);
     }

@@ -481,19 +481,10 @@ public final class EvaluationReport {
         o.addProperty("planHash", spec.manifestPlanHash);
         o.addProperty("outputHash", spec.manifestOutputHash);
         o.addProperty("createdAt", java.time.Instant.now().toString());
+        // the records' numbers are finite or null (normalised where they are built), so they serialise as is
         final com.google.gson.JsonArray array = new com.google.gson.JsonArray();
         if (fits != null) {
-            for (final Map<String, Object> r : fits.records) {
-                final com.google.gson.JsonObject f = new com.google.gson.JsonObject();
-                for (final Map.Entry<String, Object> e : r.entrySet()) {
-                    final Object v = e.getValue();
-                    if (v == null) f.add(e.getKey(), com.google.gson.JsonNull.INSTANCE);
-                    else if (v instanceof Number n) f.addProperty(e.getKey(), Double.isFinite(n.doubleValue()) ? n : null);
-                    else if (v instanceof Boolean b) f.addProperty(e.getKey(), b);
-                    else f.addProperty(e.getKey(), String.valueOf(v));
-                }
-                array.add(f);
-            }
+            for (final Map<String, Object> r : fits.records) array.add(com.mercari.solution.util.schema.converter.MapToJsonConverter.convertObject(r));
         }
         o.add("fits", array);
         return o;

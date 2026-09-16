@@ -214,13 +214,16 @@ tables, units). `of` names the base sets (default: every declared set; one fit o
 Every base set has two fit inputs per row: f — a score set's score (over its declared temperature), a
 probability set's log share (grouped) / logit (binomial) — and o — the score set's own offset on the log
 scale, else the baseline's log share / logit (a blend without either is an assembly error).
+A row the base set gives mass exactly 0 (a zero prob-scale offset, a zero share) enters the fit inputs at the
+log floor (log 1e-12) and keeps mass 0 in the derived set. The weights are frequency weights: the fits'
+standard errors scale with the magnitude of the `weight` column.
 
 | type | model | estimation | record |
 |---|---|---|---|
 | `temperature` | η = o + f / T (o only for a score set with its own offset: a probability set's log share is the whole predictor, so q ∝ q^(1/T)) | the grid value maximising the weighted log score over the selection split's units: one pass with `grid` accumulators (`[min, max, count]`, linear; default 0.25 … 4 in 76 steps) | `temperature`, `logScore` at it, `logScoreAtIdentity` and `gainPerUnit` when the grid holds 1, `converged` false with a note when the optimum sits on the grid boundary |
-| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, L2 on the average log likelihood, `maxIter` unrolled passes, a rejected step halves the step), starting at (a, b) = (1, 1) — the declared combination | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit), `z_a`, `logScore`, `logScoreAtIdentity` (at the start), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` |
+| `blend` | η = a·f + b·o (+ an intercept for `binomial`): the conditional logit / logistic MLE of the two columns | the shared Newton controller (`GlmFit` / `FitState`, L2 on the average log likelihood, `maxIter` unrolled passes, a rejected step halves the step), starting at the set as declared — (a, b) = (1, 1) for a score set with its own offset, (1, 0) when o is the baseline (a probability set's log share / logit, or a score set without an offset, is the whole declared predictor) | `a`, `b`, `intercept`, their standard errors (the inverse Fisher information at the fit; NaN when it is not positive definite), `z_a`, `logScore`, `logScoreAtIdentity` (at the start = the declared set), `gainPerUnit`, `iterations`, `rejectedSteps`, `converged` (false with a note when the chain stalled: every step from the best point rejected) |
 
-Reading a blend: a ≈ 1, b ≈ 1 says the declared combination is calibrated; a < 1 says the score needs
+Reading a blend: a ≈ 1 and b at its start says the declared set is calibrated; a < 1 says the score needs
 shrinking; a's z-value tests whether the set carries information orthogonal to its offset (the Benter
 regression). The records are the summary's `fits` and, with `output.calibration`, a JSON document
 (`{version, family, group, baseline, baselineForm, parametersHash, planHash, outputHash, createdAt, fits}`).

@@ -228,7 +228,9 @@ public final class EvaluationScorer implements Serializable {
     /**
      * Fills the derived sets' means from the fitted parameters: temperature η = o + f / T (o only for a score
      * set with its own offset: a probability set's log share / logit is the whole predictor); blend η = a·f +
-     * b·o (+ c). A derived set without parameters (a fit that produced none) stays NaN.
+     * b·o (+ c). A derived set without parameters (a fit that produced none) stays NaN. A row the base set
+     * excludes (mean exactly 0: a zero prob-scale offset, a zero share) keeps mass 0 in the derived set — the fit
+     * inputs floor its log at {@link #LOG_FLOOR}, which would otherwise leak a small mass onto it.
      */
     public void derive(final Unit unit, final FitResults fits) {
         if (fits == null || unit.skip != Skip.NONE) return;
@@ -246,8 +248,15 @@ public final class EvaluationScorer implements Serializable {
             } else {
                 for (int r = 0; r < n; r++) eta[r] = params[0] * fo[0][r] + params[1] * fo[1][r] + (params.length > 2 ? params[2] : 0d);
             }
+            excludeZeroMass(unit, dv.base, eta);
             unit.means[1 + k + i] = GlmFit.means(family, eta);
         }
+    }
+
+    /** η = −∞ on the rows the base set gives mass exactly 0, so a derived set never puts mass where its base has none. */
+    private void excludeZeroMass(final Unit unit, final int base, final double[] eta) {
+        final double[] means = unit.means[1 + base];
+        for (int r = 0; r < eta.length; r++) if (means[r] == 0d) eta[r] = Double.NEGATIVE_INFINITY;
     }
 
     /** Layout of a temperature fit's pass vector: per base set, the grid's weighted log scores; then the unit mass. */
@@ -272,6 +281,7 @@ public final class EvaluationScorer implements Serializable {
             final double[] eta = new double[n];
             for (int g = 0; g < grid.length; g++) {
                 for (int r = 0; r < n; r++) eta[r] = (own ? fo[1][r] : 0d) + fo[0][r] / grid[g];
+                excludeZeroMass(unit, dv.base, eta);
                 out[s * fit.gridSize + g] = unit.unitWeight * logScore(GlmFit.means(family, eta), unit);
             }
         }
@@ -311,25 +321,30 @@ public final class EvaluationScorer implements Serializable {
         return GlmFit.evaluate(family, unit.y, mu, unit.w, unit.unitWeight, f, theta.length);
     }
 
-    /** The starting point of a blend: a = 1, b = 1 (the set and its offset as declared), intercept 0. */
-    public double[] blendStart() {
+    /**
+     * The starting point of a blend of a base set: the set as declared, so the fit's identity log score is the
+     * declared set's — a = 1; b = 1 for a score set with its own offset (η = f + o), b = 0 otherwise (a
+     * probability set's log share / logit, or a score set without an offset, is the whole predictor and the
+     * baseline enters only through the fit); intercept 0.
+     */
+    public double[] blendStart(final int base) {
         final double[] theta = new double[blendK()];
         theta[0] = 1d;
-        theta[1] = 1d;
+        theta[1] = ownOffset(base) ? 1d : 0d;
         return theta;
     }
 
-    /** Standard errors of a fitted blend: the square roots of the inverse Fisher information's diagonal. */
+    /**
+     * Standard errors of a fitted blend: the square roots of the inverse Fisher information's diagonal; NaN
+     * when the information matrix is not positive definite (the parameters are not identified).
+     */
     public static double[] standardErrors(final FitState state) {
         final double[] se = new double[state.k];
         Arrays.fill(se, Double.NaN);
         if (!state.hasBest || state.bestG == null) return se;
-        try {
-            final double[][] inverse = MatrixOps.inverse(state.bestG);
-            for (int i = 0; i < state.k; i++) se[i] = inverse[i][i] > 0 ? Math.sqrt(inverse[i][i]) : Double.NaN;
-        } catch (final RuntimeException e) {
-            // a singular information matrix: no standard error
-        }
+        final double[][] inverse = MatrixOps.inverseSpd(state.bestG);
+        if (inverse == null) return se;
+        for (int i = 0; i < state.k; i++) se[i] = inverse[i][i] > 0 ? Math.sqrt(inverse[i][i]) : Double.NaN;
         return se;
     }
 

@@ -274,7 +274,8 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(List.of("baseline", "S", "S@blend"), spec.predictionNames());
         final EvaluationScorer scorer = new EvaluationScorer(spec);
         Assertions.assertEquals(2, scorer.blendK());
-        Assertions.assertArrayEquals(new double[]{1, 1}, scorer.blendStart(), 0d);
+        // the start is the declared set: a score set without its own offset is the score alone (b = 0)
+        Assertions.assertArrayEquals(new double[]{1, 0}, scorer.blendStart(0), 0d);
         final EvaluationScorer.Unit unit = scorer.prepare(List.of(row("valid", "g1", 1, 0.5, null, 1.0), row("valid", "g1", 0, 0.3, null, 0.0), row("valid", "g1", 0, 0.2, null, -1.0)), "g1");
         final double[][] fo = scorer.fitInputs(unit, 0);
         Assertions.assertArrayEquals(new double[]{1, 0, -1}, fo[0], 1e-12);
@@ -286,7 +287,7 @@ public class EvaluationScorerTest {
         Assertions.assertEquals(1 - pf, eval[2], 1e-12);                       // g_a = Σ (ỹ − p) f
         Assertions.assertEquals(0.5 + 0.2 - pf * pf, eval[4], 1e-12);          // G_aa = Σ p f² − (Σ p f)²
         // a Newton chain on this one unit moves a upward (the winner has the largest score)
-        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(2, scorer.blendStart());
+        com.mercari.solution.util.pipeline.glm.FitState state = com.mercari.solution.util.pipeline.glm.FitState.initial(2, scorer.blendStart(0));
         for (int it = 0; it < 6; it++) state = state.advance(scorer.blendEvaluate(unit, 0, state.proposal), 1e-4, 1e-10);
         Assertions.assertTrue(state.hasBest);
         Assertions.assertTrue(state.bestTheta[0] > 1d, "a: " + state.bestTheta[0]);
@@ -317,5 +318,31 @@ public class EvaluationScorerTest {
         scorer.derive(unit, fits);
         Assertions.assertEquals(0.8, unit.means[2][0], 1e-12);
         Assertions.assertEquals(1d / (1 + Math.exp(-Math.log(4) / 2)), unit.means[3][0], 1e-12);
+    }
+
+    @Test
+    public void testDerivedSetKeepsZeroMassRows() {
+        // a score set with a prob-scale offset of 0 on a row gives that row mass 0; the fit inputs floor its log, but
+        // the derived sets (blend and temperature) keep the row at mass 0 instead of leaking the floor's mass onto it
+        final EvaluationSpec spec = spec("{family: groupedMultinomial, group: g, label: y, baseline: b, time: t, predictions: [{name: S, score: s, offset: u}], " + SPLITS
+                + ", bootstrap: false, calibration: [{type: blend, fitOn: valid}, {type: temperature, fitOn: valid}]}");
+        Assertions.assertEquals(List.of("baseline", "S", "S@blend", "S@T"), spec.predictionNames());
+        final EvaluationScorer scorer = new EvaluationScorer(spec);
+        final EvaluationScorer.Unit unit = scorer.prepare(List.of(
+                row("valid", "g1", 1, 0.5, null, 1.0, 0.6), row("valid", "g1", 0, 0.3, null, 0.0, 0.4), row("valid", "g1", 0, 0.2, null, -1.0, 0.0)), "g1");
+        Assertions.assertEquals(EvaluationScorer.Skip.NONE, unit.skip);
+        Assertions.assertEquals(0d, unit.means[1][2]);
+        Assertions.assertEquals(Math.log(1e-12), scorer.fitInputs(unit, 0)[1][2], 1e-12);
+        final FitResults fits = new FitResults();
+        fits.parameters.put("S@blend", new double[]{1, 0.3});
+        fits.parameters.put("S@T", new double[]{2});
+        scorer.derive(unit, fits);
+        for (final int j : new int[]{2, 3}) {
+            Assertions.assertEquals(0d, unit.means[j][2], "set " + j);
+            Assertions.assertEquals(1d, unit.means[j][0] + unit.means[j][1], 1e-12, "set " + j);
+            Assertions.assertTrue(unit.means[j][0] > unit.means[j][1], "set " + j);
+        }
+        // the temperature pass scores the same exclusion (the winner has mass, so every grid value is finite)
+        for (final double ll : scorer.temperatureLogLikelihoods(unit, 1)) Assertions.assertTrue(Double.isFinite(ll));
     }
 }
