@@ -141,6 +141,47 @@ public final class Svd implements Serializable {
         }
     }
 
+    /**
+     * The moments as a {@link Summary} family (contributions are {@code double[]} vectors): a monoid — one
+     * {@code Combine} per block of a forward fit, merged over the blocks a row reads ({@link BlockSeries}) — that
+     * is not invertible (the anchored sums are not meant to be subtracted vector by vector).
+     */
+    public static final Summary<Svd.Moments> SUMMARY = new MomentsSummary();
+
+    static final class MomentsSummary implements Summary<Svd.Moments> {
+        @Override
+        public Svd.Moments create() {
+            return new Svd.Moments();
+        }
+
+        @Override
+        public void update(final Svd.Moments state, final Object contribution, final int sign) {
+            if (sign < 0) throw new UnsupportedOperationException("svd moments are not invertible");
+            state.add((double[]) contribution);
+        }
+
+        @Override
+        public boolean invertible() {
+            return false;
+        }
+
+        @Override
+        public void merge(final Svd.Moments into, final Svd.Moments other) {
+            into.merge(other);
+        }
+
+        @Override
+        public Object read(final Svd.Moments state, final Readout readout) {
+            if ("count".equals(readout.name())) return state.n;
+            throw new IllegalArgumentException("svd moments are fitted, not read: " + readout.name());
+        }
+
+        @Override
+        public double count(final Svd.Moments state) {
+            return state.n;
+        }
+    }
+
     /** Fits the leading {@code rank} components (capped at the dimension) from the moments. */
     public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize) {
         final int d = m.dimension;

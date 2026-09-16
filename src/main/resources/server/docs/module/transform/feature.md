@@ -237,6 +237,8 @@ filesystems (`gs://`, `s3://`, relative local paths).
     mode: forward
     blocks: {size: P90D}                          # or {bucket: year | quarter | month | week | day}; default P90D
     minBlocks: 1                                  # rows with fewer preceding blocks (with data for the key) read nothing
+    minHistory: P180D                             # alternative to minBlocks: the minimum history, rounded up to blocks
+    window: P2Y                                   # optional: a row reads the blocks within this range only (rounded up to blocks)
     artifact: {uri: "gs://bucket/features"}       # optional: the whole-input totals, for a static serving run
 ```
 
@@ -248,14 +250,17 @@ stage of an expanding lattice disappears (`encoding.globalKey`), and unlike `fol
 into the statistics. Per level, a block is usable when its end is at or before `predictAt(row) − lag`,
 `lag` being the target's availability delay after its event (settlement + ingestion; an attribute-only
 level has none), so a fresh outcome never enters a block early. `minBlocks` makes rows with a short
-history read nothing (`count` reads 0, the other statistics null). Windows: `maxAge` is rounded up to
-whole blocks (`fit.mode.forward.window`), `maxEvents` / `filter` are ignored (`fit.mode.forward.windowIgnored`).
+history read nothing (`count` reads 0, the other statistics null); `minHistory` says the same as a duration
+(rounded up to blocks; an explicit `minBlocks` wins). Windows: a keySet's `maxAge` is rounded up to
+whole blocks (`fit.mode.forward.window`), `maxEvents` / `filter` are ignored (`fit.mode.forward.windowIgnored`);
+`fit.window` is the block-level default range for keySets that declare no `maxAge` (a rolling fit —
+the usual choice under drift, where `expanding` statistics go stale) and the range of a forward `svd`.
 Sufficient statistics only (count / sum / mean / rate / std; `quantile` / `distribution` are expanding
 only, `encoding.stat.static`). With `weights: varianceComponents` the pseudo-count λ is estimated per
 block from the keys' statistics up to that block, and recorded per block in the artifact manifest
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
-(UTC). The `blocks` / `minBlocks` settings are part of the plan hash. Batch only.
+(UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -380,7 +385,7 @@ participates in the plan hash — the warning `quantileTransform.clip` asks you 
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
     standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
-    fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
+    fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static (default) or forward (below)
 ```
 
 The "Compress" step of the sequence frame: the vector is centred (and optionally standardised) with the
@@ -400,6 +405,15 @@ vector assembled from features uses `inputs`. A fit with fewer than two vectors 
 null everywhere (a serving run that loads such an artifact logs a warning). The artifact is
 `<planHash>/<block>.svd.json` (mean, scale, components, per-component variances, total variance, n) — the
 explained-variance ratio is `variances[k] / totalVariance`.
+
+**Forward fit (`fit: {mode: forward, blocks, window, minBlocks | minHistory}`).** A static svd places every row in
+a distribution that includes the test period (no label leak, but a drifting field is placed where it could not
+have been placed at the time). Under `forward` the moments are accumulated per time block (one `Combine` per
+block) and the components are re-solved for every block window a row may read — the complete blocks within
+`window` (all preceding blocks when absent) whose inputs are known at predictAt, the row's own block excluded
+(`fit.mode.forward` info) — so training and serving see the same walk-forward components; rows with fewer than
+`minBlocks` (or `minHistory`) preceding blocks read null, as does a window whose blocks hold fewer than two
+vectors. The artifact still holds the whole-input components, for a static serving run.
 
 ### Shrinkage and key lattices (population)
 
@@ -773,8 +787,9 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
   `factorization` / `discretize` / `quantileTransform` / `svd` (`spectralEmbedding`, `transitionStats`) are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
-  and non-static fits. Discretize, quantileTransform and svd: non-static fits (`fit.cadence / window /
-  warmStart` are accepted and ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
+  and non-static fits. Discretize and quantileTransform: non-static fits (`fit.cadence / window /
+  warmStart` are accepted and ignored); svd: `fold` (`static` and `forward` are implemented, `fit.cadence /
+  warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
   `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
   `weights: heldOut` is rejected;

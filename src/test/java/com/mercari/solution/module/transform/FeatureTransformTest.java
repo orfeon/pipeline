@@ -1445,6 +1445,116 @@ public class FeatureTransformTest {
         Assertions.assertTrue(manifest.contains("\"scale\":\"logit\""), manifest);
     }
 
+    /** The row vectors [start_price, current_bid_t10] of the auction rows. */
+    private static final double[] VEC_A1 = {100, 120}, VEC_A2 = {50, 55}, VEC_B1 = {200, 210}, VEC_C1 = {80, 90}, VEC_C2 = {60, 70}, VEC_D1 = {120, 130};
+
+    /** The svd scores of {@code x} fitted on {@code vectors} (rank 2, centred), as the engine computes them. */
+    private static double[] svdScores(final double[] x, final double[]... vectors) {
+        final com.mercari.solution.util.pipeline.feature.Svd.Moments m = new com.mercari.solution.util.pipeline.feature.Svd.Moments();
+        for (final double[] v : vectors) m.add(v);
+        return com.mercari.solution.util.pipeline.feature.Svd.fit(m, 2, true, false).transform(x);
+    }
+
+    private static String svdForwardConfig(final String dir, final String extra) {
+        final String blocks = """
+                    - name: pc
+                      scope: population
+                      type: svd
+                      inputs: [start_price, current_bid_t10]
+                      rank: 2
+                      fit: {mode: forward, blocks: {size: P7D}%s, artifact: {uri: "%s"}}
+                """.formatted(extra, dir);
+        return FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+    }
+
+    private static void assertScores(final MElement row, final double[] expected) {
+        if (expected == null) {
+            Assertions.assertNull(row.getPrimitiveValue("f_pc_0"), row::toString);
+            Assertions.assertNull(row.getPrimitiveValue("f_pc_1"), row::toString);
+            return;
+        }
+        Assertions.assertEquals(expected[0], row.getAsDouble("f_pc_0"), 1e-9, row::toString);
+        Assertions.assertEquals(expected[1], row.getAsDouble("f_pc_1"), 1e-9, row::toString);
+    }
+
+    /**
+     * svd under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874): every row is
+     * projected with the components fitted on the vectors of the complete preceding blocks — A reads nothing, B the
+     * two vectors of A's block, C the three of blocks 2869–2870, D the five of 2869–2872 — and the artifact holds the
+     * whole-input components. A window of two blocks limits C to block 2870 (one vector: nothing fitted) and D to
+     * block 2872 (C's two vectors); {@code minBlocks: 2} blanks B.
+     */
+    @Test
+    public void testSvdForwardFit() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + svdForwardConfig(dir, "")));
+        Assertions.assertEquals("forward", outputs.get("features").getSchema().getField("f_pc_0").getOptions().get("feature.coord.fit"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            assertScores(byKey.get("A/s1"), null);
+            assertScores(byKey.get("A/s2"), null);
+            assertScores(byKey.get("B/s1"), svdScores(VEC_B1, VEC_A1, VEC_A2));
+            assertScores(byKey.get("C/s1"), svdScores(VEC_C1, VEC_A1, VEC_A2, VEC_B1));
+            assertScores(byKey.get("C/s2"), svdScores(VEC_C2, VEC_A1, VEC_A2, VEC_B1));
+            assertScores(byKey.get("D/s1"), svdScores(VEC_D1, VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2));
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final java.io.File artifact = new java.io.File(dirs[0], "pc.svd.json");
+        Assertions.assertTrue(artifact.exists(), "the whole-input components are persisted for a static serving run");
+        Assertions.assertEquals(6, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject().get("n").getAsLong());
+
+        // window: P14D → two blocks
+        final TestPipeline windowed = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> windowedOut = MPipeline.apply(windowed, Config.load(SOURCE_CONFIG + svdForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", window: P14D")));
+        PAssert.that(windowedOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            assertScores(byKey.get("B/s1"), svdScores(VEC_B1, VEC_A1, VEC_A2));
+            assertScores(byKey.get("C/s1"), null);                                   // (2869, 2871]: block 2870 alone has one vector
+            assertScores(byKey.get("D/s1"), svdScores(VEC_D1, VEC_C1, VEC_C2));    // (2871, 2873]: block 2872
+            return null;
+        });
+        windowed.run();
+
+        // minBlocks: 2 → B (one preceding block) reads nothing, C (two) reads the same components as above
+        final TestPipeline min = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> minOut = MPipeline.apply(min, Config.load(SOURCE_CONFIG + svdForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", minBlocks: 2")));
+        PAssert.that(minOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            assertScores(byKey.get("B/s1"), null);
+            assertScores(byKey.get("C/s1"), svdScores(VEC_C1, VEC_A1, VEC_A2, VEC_B1));
+            return null;
+        });
+        min.run();
+    }
+
+    /**
+     * {@code fit.window} on an encoding's forward fit bounds the blocks a keySet without {@code maxAge} reads: with two
+     * weekly blocks C (Jan 20) reads blocks 2870–2871 for its row count (B only) and 2869–2870 for the lagged outcome
+     * (A, B); D (Feb 1) reads 2872–2873 (C) and 2871–2872 (C).
+     */
+    @Test
+    public void testForwardFitWindow() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + forwardConfig(dir, ", window: P14D")));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(1L, ((Number) byKey.get("C/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(0.5, byKey.get("C/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(1L, ((Number) byKey.get("D/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(1.0, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
     /** A map-valued column as String → Double (the coder round trip yields CharSequence keys). */
     private static Map<String, Double> distribution(final MElement row, final String column) {
         final Map<?, ?> value = (Map<?, ?>) row.getPrimitiveValue(column);

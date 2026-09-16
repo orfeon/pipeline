@@ -1101,21 +1101,34 @@ public final class FeatureStages {
      * One svd block of a fit stage (all its score columns), rebuilt from the columns' coordinates: the vector is
      * the listed numeric {@code fields} or one array-typed {@code arrayField}.
      */
+    /**
+     * The fitted svd of a block: the whole-input components ({@code total}, what the artifact holds) and, under
+     * {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed blocks
+     * (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
+     */
+    record SvdModel(Svd total, TreeMap<Long, Svd> byBlock, TreeSet<Long> observed) implements Serializable {}
+
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
-                   String artifactUri, boolean refit, List<OutputColumn> columns, int[] components) implements StaticFitBlock<Svd> {
+                   String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
+                   Forward forward, long predictOffsetMillis) implements StaticFitBlock<SvdModel> {
         @Override
         public String artifactPath(final String planHash) {
             return Svd.artifactPath(artifactUri, planHash, block);
         }
 
+        /** A forward fit is always re-fitted (the artifact holds the whole-input components only, for a static serving run). */
         @Override
         public boolean artifactExists(final String planHash) {
-            return Svd.exists(artifactUri, planHash, block);
+            return forward == null && Svd.exists(artifactUri, planHash, block);
         }
 
         @Override
-        public Svd readArtifact(final String planHash) {
-            return Svd.read(artifactUri, planHash, block);
+        public SvdModel readArtifact(final String planHash) {
+            return new SvdModel(Svd.read(artifactUri, planHash, block), null, null);
+        }
+
+        Svd fit(final Svd.Moments moments) {
+            return Svd.fit(moments, rank, center, standardize);
         }
 
         @Override
@@ -1146,26 +1159,83 @@ public final class FeatureStages {
             return x;
         }
 
-        /** Sufficient statistics (n, Σx, Σxxᵀ) in one Combine — no vector leaves the workers — then the eigendecomposition on one worker. */
+        /**
+         * Sufficient statistics (n, Σx, Σxxᵀ) per block in one {@code Combine.perKey} — no vector leaves the workers —
+         * gathered into a {@link BlockSeries} and solved on one worker: once for a static fit (a single block), once
+         * per change point under forward.
+         */
         @Override
-        public PCollectionView<List<Svd>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+        public PCollectionView<List<SvdModel>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            final String prefix = label + "_Svd_" + block;
             return fitInput
-                    .apply(label + "_Svd_" + block + "_Vectors", ParDo.of(new ExtractVectorsDoFn(this)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(double[].class))
-                    .apply(label + "_Svd_" + block + "_Moments", Combine.globally(new VectorMomentsFn()))
-                    .apply(label + "_Svd_" + block + "_Fit", ParDo.of(new FitSvdDoFn(this, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(Svd.class))
-                    .apply(label + "_Svd_" + block + "_View", View.asList());
+                    .apply(prefix + "_Vectors", ParDo.of(new ExtractVectorsDoFn(this)))
+                    .setCoder(KvCoder.of(org.apache.beam.sdk.coders.VarLongCoder.of(), org.apache.beam.sdk.coders.SerializableCoder.of(double[].class)))
+                    .apply(prefix + "_Moments", Combine.perKey(new SummaryFn<>(Svd.SUMMARY, Svd.Moments.class)))
+                    .apply(prefix + "_Gather", Combine.globally(new GatherFn<KV<Long, Svd.Moments>>()).withoutDefaults())
+                    .apply(prefix + "_Fit", ParDo.of(new FitSvdDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(SvdModel.class))
+                    .apply(prefix + "_View", View.asList());
+        }
+
+        /** The components a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
+        Svd svdFor(final SvdModel model, final Map<String, Object> values) {
+            if (model == null) return null;
+            if (forward == null) return model.total();
+            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
+            if (eventMillis == null) return null;
+            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
+            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
         }
 
         /** {@code columns.get(i)} carries score {@code components[i]} (resolved once in {@link #svdSpecs}, never parsed per row). */
         @Override
-        public void apply(final Svd svd, final Map<String, Object> values) {
+        public void apply(final SvdModel model, final Map<String, Object> values) {
+            final Svd svd = svdFor(model, values);
             final double[] scores = svd == null ? null : svd.transform(vector(values));
             for (int i = 0; i < components.length; i++) {
                 final int k = components[i];
                 values.put(columns.get(i).getCanonicalName(), scores == null || k >= scores.length ? null : scores[k]);
             }
+        }
+    }
+
+    /** A {@link Summary} family as a Beam {@code CombineFn}: the per-block (or whole-input) state of a fit. */
+    static class SummaryFn<T, S extends Serializable> extends Combine.CombineFn<T, S, S> {
+        private final Summary<S> family;
+        private final Class<S> stateClass;
+
+        SummaryFn(final Summary<S> family, final Class<S> stateClass) {
+            this.family = family;
+            this.stateClass = stateClass;
+        }
+
+        @Override
+        public S createAccumulator() { return family.create(); }
+
+        @Override
+        public S addInput(final S acc, final T contribution) {
+            family.update(acc, contribution, 1);
+            return acc;
+        }
+
+        @Override
+        public S mergeAccumulators(final Iterable<S> accs) {
+            final S out = family.create();
+            for (final S a : accs) family.merge(out, a);
+            return out;
+        }
+
+        @Override
+        public S extractOutput(final S acc) { return acc; }
+
+        @Override
+        public Coder<S> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<T> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(stateClass);
+        }
+
+        @Override
+        public Coder<S> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<T> inputCoder) {
+            return org.apache.beam.sdk.coders.SerializableCoder.of(stateClass);
         }
     }
 
@@ -1181,12 +1251,14 @@ public final class FeatureStages {
             for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
-                    Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components));
+                    Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
+                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }
 
-    static class ExtractVectorsDoFn extends DoFn<MElement, double[]> {
+    /** One (block, vector) per row: block 0 for a static fit, the row's time block under forward. */
+    static class ExtractVectorsDoFn extends DoFn<MElement, KV<Long, double[]>> {
         private final SvdSpec spec;
 
         ExtractVectorsDoFn(final SvdSpec spec) {
@@ -1197,43 +1269,21 @@ public final class FeatureStages {
         public void processElement(final ProcessContext c) {
             final MElement element = c.element();
             if (element == null) return;
-            final double[] x = spec.vector(element.asPrimitiveMap());
-            if (x != null) c.output(x);
+            final Map<String, Object> row = element.asPrimitiveMap();
+            final double[] x = spec.vector(row);
+            if (x == null) return;
+            long block = 0L;
+            if (spec.forward() != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
+                if (millis == null) return;
+                block = spec.forward().blocks().indexOf(millis);
+            }
+            c.output(KV.of(block, x));
         }
     }
 
-    static class VectorMomentsFn extends Combine.CombineFn<double[], Svd.Moments, Svd.Moments> {
-        @Override
-        public Svd.Moments createAccumulator() { return new Svd.Moments(); }
-
-        @Override
-        public Svd.Moments addInput(final Svd.Moments acc, final double[] x) {
-            acc.add(x);
-            return acc;
-        }
-
-        @Override
-        public Svd.Moments mergeAccumulators(final Iterable<Svd.Moments> accs) {
-            final Svd.Moments out = new Svd.Moments();
-            for (final Svd.Moments a : accs) out.merge(a);
-            return out;
-        }
-
-        @Override
-        public Svd.Moments extractOutput(final Svd.Moments acc) { return acc; }
-
-        @Override
-        public Coder<Svd.Moments> getAccumulatorCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<double[]> inputCoder) {
-            return org.apache.beam.sdk.coders.SerializableCoder.of(Svd.Moments.class);
-        }
-
-        @Override
-        public Coder<Svd.Moments> getDefaultOutputCoder(final org.apache.beam.sdk.coders.CoderRegistry registry, final Coder<double[]> inputCoder) {
-            return org.apache.beam.sdk.coders.SerializableCoder.of(Svd.Moments.class);
-        }
-    }
-
-    static class FitSvdDoFn extends DoFn<Svd.Moments, Svd> {
+    /** Solves the gathered per-block moments: the whole-input components, plus one fit per change point under forward. */
+    static class FitSvdDoFn extends DoFn<ArrayList<KV<Long, Svd.Moments>>, SvdModel> {
         private final SvdSpec spec;
         private final String planHash;
 
@@ -1244,12 +1294,24 @@ public final class FeatureStages {
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final Svd.Moments m = c.element();
-            final Svd svd = Svd.fit(m, spec.rank(), spec.center(), spec.standardize());
+            final Map<Long, Svd.Moments> parts = new HashMap<>();
+            for (final KV<Long, Svd.Moments> e : c.element()) parts.merge(e.getKey(), e.getValue(), (a, b) -> { a.merge(b); return a; });
+            final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
+            final Svd.Moments all = series.total();
+            final Svd.Moments m = all == null ? new Svd.Moments() : all;
+            final Svd total = spec.fit(m);
             LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
-                    spec.block(), svd.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
-            if (spec.artifactUri() != null) Svd.write(spec.artifactUri(), planHash, spec.block(), svd);
-            c.output(svd);
+                    spec.block(), total.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
+            TreeMap<Long, Svd> byBlock = null;
+            if (spec.forward() != null) {
+                byBlock = series.models(spec.forward().windowBlocks(), spec::fit);
+                LOG.info("svd {}: forward fit over {} block(s), {} change point(s)", spec.block(), parts.size(), byBlock.size());
+            }
+            // a forward fit re-fits every run but writes the whole-input components once (refit: true overwrites)
+            if (spec.artifactUri() != null && (spec.refit() || !Svd.exists(spec.artifactUri(), planHash, spec.block()))) {
+                Svd.write(spec.artifactUri(), planHash, spec.block(), total);
+            }
+            c.output(new SvdModel(total, byBlock, spec.forward() == null ? null : series.observed()));
         }
     }
 

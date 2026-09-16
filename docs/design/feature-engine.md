@@ -617,15 +617,31 @@ roughly linear in the input).
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
 sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
-array field); factorization `variant: bayesian` and `fit.cadence / window / warmStart`; `fit.mode: forward` for
-quantileTransform / svd (both are static-only today, so the fit sees the test period too — no label leak, but a
-drifting field is placed in a distribution it could not have been placed in at the time; svd's moments are
-block-additive and would follow `VarianceComponents.forwardSeries` directly, quantileTransform needs the
-per-block value sets merged as a prefix on one worker); the run-time availability
+array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; `fit.mode: forward` for
+quantileTransform (static-only today, so the fit sees the test period too — no label leak, but a drifting field
+is placed in a distribution it could not have been placed in at the time; svd has it through `BlockSeries`, see
+below, quantileTransform needs a per-block summary of the value sets — sorted arrays merged on one worker, or a
+sketch); the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
 sequence / population stages as fold-in merge targets (composite sorter key, §9.4.3); the prefix-scan
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries
-(spec §7 — whether sources should carry physical table references is undecided); `fit.minHistory`.
+(spec §7 — whether sources should carry physical table references is undecided).
+
+**Block series and the forward svd** (proposal-feature-unification §2.2). `BlockSeries<S>` holds one `Summary`
+state per observed time block of a fit and merges the blocks a row may read on demand — `(usable − windowBlocks,
+usable]`, every block up to `usable` without a window — so a statistic written once as a `Summary` family is
+served under `static` (one block), `forward` (a prefix) and a `window` (a range) by the monoid law alone (a
+non-invertible family is merged over the range instead of a prefix difference). A model that has to be solved
+from the state is fitted once per *change point* (every observed block and, under a window, the index at which a
+block leaves — the rule `JointFit` already used for its per-block solutions) and read by floor lookup with
+`minBlocks`. The first user is `type: svd` under `fit.mode: forward`: `Svd.SUMMARY` wraps the anchored moments,
+`SvdSpec.fit` runs one `Combine.perKey` over the blocks (`SummaryFn`, a `Summary` as a Beam `CombineFn`),
+gathers the parts and solves the components per change point (`SvdModel`); the artifact keeps the whole-input
+components for a static serving run and a forward fit is re-fitted every run, like the joint estimator. The fit
+block gains `window` (the range of blocks; for encodings the default of keySets without `maxAge`) and `minHistory`
+(`minBlocks` as a duration), both in the plan hash. The encoding levels keep their own `ForwardBlocks.Series`
+(prefix arrays + the per-block λ) for now; moving them onto `BlockSeries<Moments>` is the next step of this
+line, after which one Combine per summary family serves every block kind of a fit stage (the fan-out item above).
 
 **Fit-stage fan-out (performance, not correctness)**: every static-fit block is its own
 `Extract → Combine.globally → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expands
