@@ -310,10 +310,10 @@ public final class EvaluationReport {
         for (final Map.Entry<String, MetricAccumulator> e : accumulators.entrySet()) {
             if (!e.getKey().startsWith(DISCOVERY_PREFIX)) continue;
             final String[] parts = EvaluationScorer.parseDiscoveryKey(e.getKey().substring(DISCOVERY_PREFIX.length()));
+            if (parts == null) continue;
             final double[] t = e.getValue().getTotal();
             cells.computeIfAbsent(parts[0] + SEP + parts[1], k -> new LinkedHashMap<>()).put(parts[2] + SEP + parts[3], new double[]{t[0], t[1], t[2]});
         }
-        final double z95 = Z95;
         for (final int set : d.sets) {
             final String name = names.get(1 + set);
             final Map<String, double[]> discover = cells.getOrDefault(d.discoverOn + SEP + set, Map.of());
@@ -332,15 +332,22 @@ public final class EvaluationReport {
                 out.summary.add(sr);
                 continue;
             }
-            // candidates: the cells with enough support that are a proper subset of the split
+            // candidates: the well-formed cells with enough support that are a proper subset of the split
             final List<Map.Entry<String, double[]>> candidates = new ArrayList<>();
             for (final Map.Entry<String, double[]> e : discover.entrySet()) {
                 if (e.getKey().equals(SEP)) continue;
+                final String[] parts = e.getKey().split(SEP, -1);
+                // a categorical value carrying the value separator desynchronises dimensions and values: not a slice
+                if (parts[0].split(",").length != parts[1].split(String.valueOf((char) 2), -1).length) continue;
                 if (e.getValue()[0] >= d.minSupport && e.getValue()[0] < all[0]) candidates.add(e);
             }
             String note = null;
             if (candidates.size() > d.maxCandidates) {
-                candidates.sort((a, b) -> Double.compare(b.getValue()[0], a.getValue()[0]));
+                // support descending, ties by key: the kept set does not depend on the accumulators' arrival order
+                candidates.sort((a, b) -> {
+                    final int c = Double.compare(b.getValue()[0], a.getValue()[0]);
+                    return c != 0 ? c : a.getKey().compareTo(b.getKey());
+                });
                 note = candidates.size() + " candidate slices exceed maxCandidates " + d.maxCandidates + ": the " + d.maxCandidates + " best supported were kept";
                 candidates.subList(d.maxCandidates, candidates.size()).clear();
             }
@@ -356,7 +363,7 @@ public final class EvaluationReport {
                 final boolean pass = Double.isFinite(z) && Math.abs(z) > threshold;
                 final double[] cc = confirm.get(e.getKey());
                 final double zc = cc == null || allConfirm == null ? Double.NaN : discoveryZ(cc[0], cc[1], allConfirm[0], allConfirm[1], allConfirm[2]);
-                final boolean confirm2 = pass && Double.isFinite(zc) && Math.signum(zc) == Math.signum(z) && Math.abs(zc) > z95;
+                final boolean confirm2 = pass && Double.isFinite(zc) && Math.signum(zc) == Math.signum(z) && Math.abs(zc) > Z95;
                 if (pass) passed++;
                 if (confirm2) confirmed++;
                 if (!pass && EvaluationSpec.DISCOVERY_OUTPUT_PASSED.equals(d.output)) continue;

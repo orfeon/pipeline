@@ -919,6 +919,9 @@ public final class EvaluationSpec implements Serializable {
             if (!hasBaseline() && !isGrouped() && "excessLogScore".equals(discovery.metric)) {
                 errors.add("sliceDiscovery.metric excessLogScore needs a baseline for family binomial (the prior reference is not a per-unit value); use logScore");
             }
+            if (!isGrouped() && "hitAt1".equals(discovery.metric)) {
+                errors.add("sliceDiscovery.metric hitAt1 needs family " + Family.GROUPED_MULTINOMIAL.id() + " (a binomial unit has no top-1 pick); use logScore or brier");
+            }
             final Set<String> seen = new HashSet<>();
             for (int i = 0; i < discovery.dimensions.size(); i++) {
                 final Dimension dim = discovery.dimensions.get(i);
@@ -956,7 +959,7 @@ public final class EvaluationSpec implements Serializable {
         }
         for (final Table t : tables) if (t.field != null) t.fieldIndex = column(t.field);
         if (utilityField != null) utilityIndex = column(utilityField);
-        if (discovery != null) for (final Dimension dim : discovery.dimensions) if (dim.isNumeric() && dim.field != null && fields.containsKey(dim.field)) dim.index = column(dim.field);
+        if (discovery != null) for (final Dimension dim : discovery.dimensions) if (dim.isNumeric() && dim.field != null && fields.containsKey(dim.field) && FeatureLineage.isNumeric(fields.get(dim.field))) dim.index = column(dim.field);
         for (final String c : rowColumns) {
             if (fields.containsKey(c) && !FeatureLineage.isNumeric(fields.get(c))) {
                 errors.add("column '" + c + "' must be numeric (" + fields.get(c).getFieldType().getType() + ")");

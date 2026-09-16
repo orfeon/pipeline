@@ -20,6 +20,7 @@ import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.Filter;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -129,6 +130,7 @@ public final class EvaluationStages {
         final TupleTag<MElement> summaryTag = new TupleTag<>() {};
         final TupleTag<MElement> slicesTag = new TupleTag<>() {};
         final PCollectionTuple finalized = combined
+                .apply("PruneDiscovery", Filter.by(kv -> keepForGather(spec, kv)))
                 .apply("Gather", Combine.globally(new GatherFn<>(accumulatorCoder)))
                 .apply("Finalize", ParDo.of(new FinalizeDoFn(spec, metricsTag, summaryTag, slicesTag, fitView)).withSideInputs(fitView).withOutputTags(metricsTag, TupleTagList.of(summaryTag).and(slicesTag)));
 
@@ -446,6 +448,20 @@ public final class EvaluationStages {
             r.put("fitted", false);
             return r;
         }
+    }
+
+    /**
+     * Whether a combined accumulator reaches the gather onto one worker. Discovery cells of the discovery split
+     * whose support is below {@code minSupport} can never be candidates and are dropped here, where their counts
+     * are final; the split's overall cell and the confirmation split's cells (read for any passed candidate) stay.
+     * Bounds the gathered map by the dimensions' cardinality above minSupport instead of their raw cardinality.
+     */
+    static boolean keepForGather(final EvaluationSpec spec, final KV<String, MetricAccumulator> kv) {
+        if (!spec.hasDiscovery() || !kv.getKey().startsWith(EvaluationReport.DISCOVERY_PREFIX)) return true;
+        final String[] parts = EvaluationScorer.parseDiscoveryKey(kv.getKey().substring(EvaluationReport.DISCOVERY_PREFIX.length()));
+        if (parts == null) return false;
+        if (!parts[0].equals(spec.discovery.discoverOn) || parts[2].isEmpty()) return true;
+        return kv.getValue().getTotal()[0] >= spec.discovery.minSupport;
     }
 
     /** The KLL sketches of the numeric discovery dimensions over the discovery split's units, keyed by dimension index. */

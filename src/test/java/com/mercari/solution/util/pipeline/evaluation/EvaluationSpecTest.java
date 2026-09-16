@@ -176,5 +176,8 @@ public class EvaluationSpecTest {
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, maxDepth: 4}}")).contains("maxDepth"));
         Assertions.assertTrue(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: auc}}")).contains("metric 'auc'"));
         Assertions.assertTrue(error("{family: binomial, label: y, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test}}").contains("needs a baseline"));
+        Assertions.assertTrue(error("{family: binomial, label: y, baseline: b, time: t, predictions: [{name: A, prob: qa}], " + EvaluationScorerTest.SPLITS + ", sliceDiscovery: {dimensions: [region], discoverOn: valid, confirmOn: test, metric: hitAt1}}").contains("hitAt1 needs family"));
+        // a mis-typed numeric dimension is reported once, not again as a non-numeric column
+        Assertions.assertFalse(error(OK.replace("}}}", "}}, sliceDiscovery: {dimensions: [{field: region, bins: 3}], discoverOn: valid, confirmOn: test}}")).contains("must be numeric"));
     }
 }

@@ -337,8 +337,12 @@ public class EvaluationTransformTest {
             Assertions.assertEquals(trackA.getAsLong("n_discover") + trackB.getAsLong("n_discover"), validUnits);
             // on track B the mixed set is the baseline: its excess is exactly zero there
             Assertions.assertEquals(0d, trackB.getAsDouble("mean_confirm"), 1e-12);
-            final MElement price = list.stream().filter(r -> "mixed".equals(r.getAsString("prediction")) && List.of("start_price/q3").equals(r.getPrimitiveValue("dimensions"))).findFirst().orElseThrow();
-            Assertions.assertTrue(price.getAsString("values") != null || price.getPrimitiveValue("values") != null);
+            // the numeric dimension: the three tertile bins of start_price, labelled q0..q2, partition the discovery split
+            final List<MElement> price = list.stream().filter(r -> "mixed".equals(r.getAsString("prediction")) && List.of("start_price/q3").equals(r.getPrimitiveValue("dimensions"))).toList();
+            Assertions.assertEquals(3, price.size(), price.toString());
+            Assertions.assertEquals(java.util.Set.of(List.of("q0"), List.of("q1"), List.of("q2")), price.stream().map(r -> r.getPrimitiveValue("values")).collect(java.util.stream.Collectors.toSet()));
+            for (final MElement r : price) Assertions.assertTrue(r.getAsLong("n_discover") >= 20, r.toString());
+            Assertions.assertEquals(validUnits, price.stream().mapToLong(r -> r.getAsLong("n_discover")).sum());
             return null;
         });
         pipeline.run();

@@ -165,8 +165,10 @@ mean under the random-subset null — z = (mean_s − mean) / (σ √((1/n)(1 �
 maximum over the K candidates (`quantile`, default 0.99). A passed slice is re-read on `confirmOn` and
 `confirmed` when the sign agrees and |z| > 1.96 there. **Report the confirmation window's number**; the
 discovery window's is a reference column. Even a confirmed slice is a candidate for operational use — ask for
-a third window. The candidate cells share the metrics Combine (no extra pass); a numeric dimension adds one
-sketch pass.
+a third window. The statistic is the **unweighted** per-unit mean (`weight` does not enter; n counts units), so
+`mean_discover` of a cell can differ from the weighted `excessLogScore` of the same cell declared under
+`slices`. Dimensions are for low-cardinality fields (see Limits). The candidate cells share the metrics Combine
+(no extra pass); a numeric dimension adds one sketch pass.
 
 ## Input contract
 
@@ -435,7 +437,12 @@ parameters:
 - Slices are for low-cardinality dimensions: every distinct value costs splits × (1 + prediction sets)
   accumulators of 6 × `bootstrap.samples` doubles (about 48 KB each at the default 1000), all gathered on one
   worker for the final report. Keep distinct values in the hundreds (or lower `bootstrap.samples`); a
-  high-cardinality field (an id) belongs in `sliceDiscovery` dimensions or a coarser bucket, not in `slices`.
+  high-cardinality field (an id) belongs in a coarser bucket, not in `slices`.
+- `sliceDiscovery` dimensions are low-cardinality too: every distinct value combination (up to `maxDepth`) of
+  the discovery and confirmation splits is a cell of three doubles per prediction set, gathered on one worker
+  before `minSupport` / `maxCandidates` trim the report. Discovery-split cells below `minSupport` are dropped
+  before the gather, but the confirmation split's are not — an id-like dimension still means millions of cells.
+  Bin a numeric id-like field (`bins`) or bucket a categorical one upstream.
 - A calibration fit is a small model: estimated on the selection split, reported on the report split; taking
   its parameters to production is the user's call.
 - Slice discovery is a multiple-comparison device: the threshold treats the candidates as independent

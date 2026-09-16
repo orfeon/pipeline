@@ -256,8 +256,11 @@ reported number is the confirmation window's.
   subset of it. `dimensions` may use any input field: categorical (string / bool / integer) as its text,
   numeric with `bins`. Above `maxCandidates` the best-supported candidates are kept and the summary says so.
 - **Statistic.** Per unit the `metric` (`excessLogScore` default, or `logScore` / `hitAt1` / `brier`; the
-  binomial prior mode has no per-unit excess, use `logScore`). For a candidate s with n units of the N in the
-  split, under the **random-subset null** (the slice is an exchangeable subset of the split's units):
+  binomial prior mode has no per-unit excess, use `logScore`; `hitAt1` needs `groupedMultinomial`). The means
+  are **unweighted** over units — the null is formulated in unit counts and `weight` (§4.2) does not enter — so
+  a cell's `mean_discover` is not the weighted metric of the same cell declared under `slices`. For a
+  candidate s with n units of the N in the split, under the **random-subset null** (the slice is an
+  exchangeable subset of the split's units):
 
   ```
   z_s = (mean_s − mean) / (σ · √((1 / n)(1 − n / N)))       σ² = the unit-level variance over the split
@@ -273,7 +276,10 @@ reported number is the confirmation window's.
   candidates were chosen elsewhere). A slice confirmed twice is still a candidate: operational use wants a
   third window.
 - **Cost.** The candidate cells ride the metrics Combine as `[n, Σd, Σd²]` under their own keys (bundle-local
-  first): no extra pass; a numeric dimension adds one sketch pass over the discovery split's units.
+  first): no extra pass; a numeric dimension adds one sketch pass over the discovery split's units. Discovery-
+  split cells below `minSupport` are dropped after the Combine, before the gather onto one worker; the
+  confirmation split's cells are kept whole (any passed candidate may read one), so the dimensions'
+  cardinality — not `maxCandidates` — bounds the gathered map. Dimensions are low-cardinality by contract.
 
 ## 8. Outputs
 

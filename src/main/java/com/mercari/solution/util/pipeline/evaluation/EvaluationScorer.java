@@ -534,7 +534,9 @@ public final class EvaluationScorer implements Serializable {
 
     /** The parts of a discovery key: {@code [split, set, dims csv, values]} (values joined by \u0002). */
     public static String[] parseDiscoveryKey(final String key) {
-        return key.split(SEP, -1);
+        // exactly four parts, like parseKey: a categorical value carrying the separator is not a cell
+        final String[] parts = key.split(SEP, -1);
+        return parts.length == 4 ? parts : null;
     }
 
     /**
