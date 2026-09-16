@@ -1098,16 +1098,16 @@ public final class FeatureStages {
     // --- svd ------------------------------------------------------------------------------------------
 
     /**
-     * One svd block of a fit stage (all its score columns), rebuilt from the columns' coordinates: the vector is
-     * the listed numeric {@code fields} or one array-typed {@code arrayField}.
-     */
-    /**
      * The fitted svd of a block: the whole-input components ({@code total}, what the artifact holds) and, under
      * {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed blocks
      * (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
      */
     record SvdModel(Svd total, TreeMap<Long, Svd> byBlock, TreeSet<Long> observed) implements Serializable {}
 
+    /**
+     * One svd block of a fit stage (all its score columns), rebuilt from the columns' coordinates: the vector is
+     * the listed numeric {@code fields} or one array-typed {@code arrayField}.
+     */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
                    String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
                    Forward forward, long predictOffsetMillis) implements StaticFitBlock<SvdModel> {
@@ -1128,7 +1128,12 @@ public final class FeatureStages {
         }
 
         Svd fit(final Svd.Moments moments) {
-            return Svd.fit(moments, rank, center, standardize);
+            return Svd.fit(moments, rank, center, standardize, true);
+        }
+
+        /** A per-change-point fit: an empty / short window is normal under forward, so it is not reported. */
+        Svd fitQuietly(final Svd.Moments moments) {
+            return Svd.fit(moments, rank, center, standardize, false);
         }
 
         @Override
@@ -1295,7 +1300,8 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final Map<Long, Svd.Moments> parts = new HashMap<>();
-            for (final KV<Long, Svd.Moments> e : c.element()) parts.merge(e.getKey(), e.getValue(), (a, b) -> { a.merge(b); return a; });
+            // Combine.perKey yields one part per block; merge into a fresh state rather than mutating the input element
+            for (final KV<Long, Svd.Moments> e : c.element()) parts.computeIfAbsent(e.getKey(), k -> new Svd.Moments()).merge(e.getValue());
             final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
             final Svd.Moments all = series.total();
             final Svd.Moments m = all == null ? new Svd.Moments() : all;
@@ -1304,7 +1310,7 @@ public final class FeatureStages {
                     spec.block(), total.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
             TreeMap<Long, Svd> byBlock = null;
             if (spec.forward() != null) {
-                byBlock = series.models(spec.forward().windowBlocks(), spec::fit);
+                byBlock = series.models(spec.forward().windowBlocks(), spec::fitQuietly);
                 LOG.info("svd {}: forward fit over {} block(s), {} change point(s)", spec.block(), parts.size(), byBlock.size());
             }
             // a forward fit re-fits every run but writes the whole-input components once (refit: true overwrites)

@@ -438,7 +438,7 @@ public class FeatureSpec implements Serializable {
             final JsonObject fit = parameters.getAsJsonObject("fit");
             spec.fit.orderBy = Json.string(fit, "orderBy");
             spec.fit.mode = parseFitMode(Json.string(fit, "mode"), diagnostics, "fit");
-            spec.fit.minHistory = Json.duration(fit, "minHistory", null, diagnostics, "fit");
+            // minHistory / window / blocks / minBlocks are parsed (and validated) by parseForward below
             spec.fit.groupBy = Json.string(fit, "groupBy");
             if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
             FitSpec.parseArtifact(fit, spec.fit);

@@ -286,7 +286,9 @@ public final class FeaturePlanCompiler {
             diagnostics.error("fit.orderBy", "fit", "fit.orderBy must equal time.field (" + spec.timeField + ")");
         }
         if (spec.fit.minHistory != null) {
-            diagnostics.warning("fit.minHistory", "fit", "fit.minHistory is not implemented yet and ignored");
+            // implemented for fit.mode forward (FitSpec.minBlocksOf rounds it up to whole blocks); the other modes have no blocks to count
+            diagnostics.info("fit.minHistory", "fit", "fit.minHistory is the minimum history of a fit.mode forward block, rounded up to whole blocks"
+                    + " (an explicit minBlocks wins); expanding / static / fold fits have no blocks and ignore it");
         }
         if (spec.fit.groupBy != null && !entities.containsKey(spec.fit.groupBy)) {
             diagnostics.error("fit.groupBy", "fit", "fit.groupBy must reference an entity: " + spec.fit.groupBy);
@@ -1560,6 +1562,12 @@ public final class FeaturePlanCompiler {
             FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
             if (mode == FitMode.statik && defFit != null && defFit.has("window")) {
                 diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
+            }
+            if (mode == FitMode.statik && spec.fit.mode == FitMode.forward) {
+                // the top-level mode is not inherited (its default, expanding, is not available here): say so, or the
+                // block silently fits on the whole input while the encodings of the same spec walk forward
+                diagnostics.info(codePrefix + ".fit.mode.static", loc, def.type + " does not inherit the top-level fit.mode forward and "
+                        + fitted + " on the whole input; declare fit: {mode: forward} on the block to walk it forward too");
             }
         } else if (defFit != null && defFit.has("window")) {
             diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");

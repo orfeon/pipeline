@@ -52,7 +52,7 @@ not expand because another block failed).
 | `fit.orderBy` | error | must equal `time.field` |
 | `fit.groupBy` | error | must name an entity |
 | `fit.folds` | error | at least 2 |
-| `fit.minHistory` | warning | accepted, not implemented |
+| `fit.minHistory` | info | the minimum history of a `fit.mode: forward` block, rounded up to whole blocks (`minBlocks` wins); ignored by the other modes |
 | `engine.rowId` | error | every `rowId` field must be an input field |
 | `engine.spill.memoryMB` | error | integer ≥ 1 |
 | `input.reserved` | error | an input field is named `__rowId` or `__partial`; rename it upstream |
