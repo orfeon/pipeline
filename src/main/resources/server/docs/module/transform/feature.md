@@ -261,6 +261,8 @@ block from the keys' statistics up to that block, and recorded per block in the 
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
 (UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
+A `type: svd` block inherits this `mode` unless it declares its own (see *SVD / PCA*); the other population
+types (factorization / discretize / quantileTransform) are always static and are unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -385,7 +387,7 @@ participates in the plan hash — the warning `quantileTransform.clip` asks you 
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
     standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
-    fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static (default) or forward (below)
+    fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static, forward (below), or inherited from the top-level fit
 ```
 
 The "Compress" step of the sequence frame: the vector is centred (and optionally standardised) with the
@@ -413,7 +415,9 @@ block) and the components are re-solved for every block window a row may read �
 `window` (all preceding blocks when absent) whose inputs are known at predictAt, the row's own block excluded
 (`fit.mode.forward` info) — so training and serving see the same walk-forward components; rows with fewer than
 `minBlocks` (or `minHistory`) preceding blocks read null, as does a window whose blocks hold fewer than two
-vectors. The artifact still holds the whole-input components, for a static serving run.
+vectors. A block that declares no `fit.mode` of its own inherits a top-level `fit: {mode: forward}` (geometry
+included), so the whole spec walks forward together; `fit: {mode: static}` on the block opts it out and says so
+(`svd.fit.mode.static` info). The artifact still holds the whole-input components, for a static serving run.
 
 ### Shrinkage and key lattices (population)
 

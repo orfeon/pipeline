@@ -1538,6 +1538,8 @@ public final class FeaturePlanCompiler {
      * by default, {@code forward} when the type supports per-block fits ({@code forwardAllowed}: the block's
      * {@code fit.blocks} / {@code minBlocks} / {@code window} / {@code minHistory} inherit the top-level fit and are
      * read into the returned spec, whose {@code mode} records the choice); the artifact settings as for encodings.
+     * A block that declares no {@code mode} inherits a top-level {@code forward} (the other top-level modes have no
+     * lookup-fit counterpart and leave the block static), so the whole spec walks forward together.
      */
     private FeatureSpec.FitSpec parseLookupFit(final FeatureDef def, final String codePrefix, final String fitted, final String why, final boolean forwardAllowed) {
         final String loc = def.location();
@@ -1546,14 +1548,21 @@ public final class FeaturePlanCompiler {
         fitSpec.artifactUri = spec.fit.artifactUri;
         fitSpec.refit = spec.fit.refit;
         FitMode mode = FitMode.statik;
+        boolean modeDeclared = false;
         if (defFit != null) {
-            if (SourceContract.Json.string(defFit, "mode") != null) mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
+            if (SourceContract.Json.string(defFit, "mode") != null) {
+                mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
+                modeDeclared = true;
+            }
             FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
             for (final String key : List.of("cadence", "warmStart")) {
                 if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " is not implemented yet and ignored (" + fitted + " on the whole input)");
             }
         }
         if (forwardAllowed) {
+            // a block without its own mode follows the top-level fit when the top level walks forward; the other
+            // top-level modes (expanding / fold) have no lookup-fit counterpart and leave the block static
+            if (!modeDeclared && spec.fit.mode == FitMode.forward) mode = FitMode.forward;
             fitSpec.blockBucket = spec.fit.blockBucket;
             fitSpec.blockSize = spec.fit.blockSize;
             fitSpec.minBlocks = spec.fit.minBlocks;
@@ -1564,10 +1573,10 @@ public final class FeaturePlanCompiler {
                 diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
             }
             if (mode == FitMode.statik && spec.fit.mode == FitMode.forward) {
-                // the top-level mode is not inherited (its default, expanding, is not available here): say so, or the
-                // block silently fits on the whole input while the encodings of the same spec walk forward
-                diagnostics.info(codePrefix + ".fit.mode.static", loc, def.type + " does not inherit the top-level fit.mode forward and "
-                        + fitted + " on the whole input; declare fit: {mode: forward} on the block to walk it forward too");
+                // an explicit static under a forward spec: the block alone sees the whole input, including the
+                // test period, while the encodings around it walk forward
+                diagnostics.info(codePrefix + ".fit.mode.static", loc, def.type + " declares fit.mode static while the top-level fit is forward, so "
+                        + fitted + " on the whole input; drop the block's fit.mode to walk it forward with the rest of the spec");
             }
         } else if (defFit != null && defFit.has("window")) {
             diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");

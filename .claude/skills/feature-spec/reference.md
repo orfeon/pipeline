@@ -219,7 +219,9 @@ extreme rows do not become outliers. `clip` changes the plan hash (the artifact 
 
 `inputs: [numeric fields]` (the vector) or `input: <array field>` (an input field declared
 `type: array<float64>` in the sources contract — no feature op produces an array; then `rank` is required), `rank`
-(default min(d, 8)), `center` (default true), `standardize` (default false), `fit: {artifact}`. Output
+(default min(d, 8)), `center` (default true), `standardize` (default false),
+`fit: {artifact}` and, for the walk-forward fit, `fit: {mode: forward, blocks, window, minBlocks | minHistory}` —
+a block with no `fit.mode` of its own inherits a top-level `fit: {mode: forward}`. Output
 float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained variance. A vector with a missing
 component → null scores. An array input must have one length (other lengths are skipped, read null and are
 warned about at run time; `rank` above the array length is capped with a warning and the surplus columns read

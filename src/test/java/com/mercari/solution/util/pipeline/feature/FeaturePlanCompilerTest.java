@@ -523,6 +523,26 @@ public class FeaturePlanCompilerTest {
         // the plan hash covers the fit window
         Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, svd.replace("window: P10D", "window: P30D")).getHash());
 
+        // a block with no fit.mode of its own follows a top-level forward fit, geometry included
+        final String blockFit = "    fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\n";
+        final String topFit = "fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\noutput:\n  prefix: f_";
+        final String inherited = svd.replace(blockFit, "").replace("output:\n  prefix: f_", topFit);
+        final FeaturePlan inheritedPlan = compile(SOURCES, inherited);
+        Assertions.assertFalse(inheritedPlan.getDiagnostics().hasErrors(), inheritedPlan::describe);
+        final OutputColumn ic = column(inheritedPlan, "pc_0");
+        Assertions.assertEquals("forward", ic.getCoordinates().get("fit"), inheritedPlan::describe);
+        Assertions.assertEquals("2", ic.getCoordinates().get("windowBlocks"));
+        Assertions.assertEquals("3", ic.getCoordinates().get("minBlocks"));
+        Assertions.assertFalse(hasCode(inheritedPlan, "svd.fit.mode.static"), inheritedPlan::describe);
+        // an explicit static opts the block out of the spec's forward walk, with an info naming the whole-input fit
+        final FeaturePlan optedOut = compile(SOURCES, inherited.replace("    type: svd", "    type: svd\n    fit: {mode: static}"));
+        Assertions.assertEquals("static", column(optedOut, "pc_0").getCoordinates().get("fit"));
+        Assertions.assertTrue(hasCode(optedOut, "svd.fit.mode.static"), optedOut::describe);
+        // the other top-level modes have no lookup-fit counterpart: the block stays static and says nothing
+        final FeaturePlan expanding = compile(SOURCES, inherited.replace("mode: forward,", "mode: expanding,"));
+        Assertions.assertEquals("static", column(expanding, "pc_0").getCoordinates().get("fit"));
+        Assertions.assertFalse(hasCode(expanding, "svd.fit.mode.static"), expanding::describe);
+
         // encoding: fit.window / minHistory at the top level apply where a keySet declares no maxAge
         final String enc = SPEC.replace("output:\n  prefix: f_", "fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\noutput:\n  prefix: f_");
         final FeaturePlan encPlan = compile(SOURCES, enc);

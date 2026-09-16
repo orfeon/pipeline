@@ -195,8 +195,10 @@ not expand because another block failed).
 | `fit.fold.identity` | warning | fold by `time.field` alone (no `groupBy`, no tie-break): rows sharing a timestamp share a fold — declare `orderTieBreak` |
 | `fit.groupBy.required` | error | a key derives from a past target and `fit.mode: fold` needs entity-level folds: set `fit.groupBy` |
 | `factorization.fields` / `.latentDim` / `.task` / `.outputs` / `.offset` / `.variant` / `.als` | error | ≥ 2 categorical fields; latentDim ≥ 1; `task.target` or `task.expr`; outputs as `pair` / `embedding` / `sum` naming the block's fields; offset names a baseline; variant `fm \| fwfm`; numeric ALS settings |
-| `factorization.fit.mode` / `discretize.fit.mode` / `quantileTransform.fit.mode` / `svd.fit.mode` | error | these types are always `static` |
-| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `window` / `warmStart` not implemented |
+| `factorization.fit.mode` / `discretize.fit.mode` / `quantileTransform.fit.mode` | error | these types are always `static` |
+| `svd.fit.mode` | error | `static` \| `forward` only (`expanding` / `fold` are rejected) |
+| `svd.fit.mode.static` | info | the block declares `fit.mode: static` while the top-level fit is `forward`, so it alone is fitted on the whole input; drop the block's `fit.mode` to inherit the forward walk |
+| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `warmStart` not implemented; `window` applies to a forward `svd` only |
 | `discretize.input` / `.bins` / `.minSamplesPerBin` / `.method` / `.target` | error / warning | numeric input; bins ≥ 2; minSamplesPerBin ≥ 1; only `quantile`; `target` is ignored by `quantile` |
 | `quantileTransform.input` / `.bins` / `.distribution` | error | numeric input; bins ≥ 2; `uniform \| normal` |
 | `quantileTransform.clip` | error / warning | error: `clip` must be a probability in `(0, 0.5)` (default `1e-6`); warning: `clip` with `distribution: uniform` has no effect on the output but still changes the plan hash — remove it or switch to `normal` |
