@@ -484,6 +484,77 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("market", column(joint, "enc__seller_id__e2__mean").getCoordinates().get("offset"));
     }
 
+    /**
+     * svd accepts {@code fit.mode: forward}: the score columns carry the block geometry, the window / minimum history
+     * rounded to blocks, the inputs' availability lag and the predictAt offset; the other lookup modes stay rejected.
+     * An encoding's forward fit takes {@code fit.window} / {@code fit.minHistory} as block-level defaults.
+     */
+    @Test
+    public void testForwardFitWindowAndMinHistory() {
+        final String svd = SPEC.replace("output:\n  prefix: f_", """
+                  - name: pc
+                    scope: population
+                    type: svd
+                    inputs: [start_price, current_bid_t10]
+                    rank: 2
+                    fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}
+                output:
+                  prefix: f_""".replaceAll("(?m)^                ", ""));
+        final FeaturePlan plan = compile(SOURCES, svd);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.forward"), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.forward.window"), plan::describe);
+        final OutputColumn c = column(plan, "pc_0");
+        Assertions.assertEquals("forward", c.getCoordinates().get("fit"));
+        Assertions.assertEquals(Long.toString(7 * 86_400_000L), c.getCoordinates().get("blockSizeMillis"));
+        Assertions.assertEquals("2", c.getCoordinates().get("windowBlocks"), "P10D rounds up to 2 weekly blocks");
+        Assertions.assertEquals("3", c.getCoordinates().get("minBlocks"), "P21D = 3 weekly blocks");
+        Assertions.assertEquals("0", c.getCoordinates().get("forwardLagMillis"), "attribute / pre-event market inputs have no lag");
+        Assertions.assertEquals(Long.toString(-8 * 60_000L), c.getCoordinates().get("predictOffsetMillis"));
+        Assertions.assertEquals("session_time", c.getCoordinates().get("blockField"));
+        // an explicit minBlocks wins over minHistory; a static fit warns that window is forward-only; fold stays rejected
+        Assertions.assertEquals("5", column(compile(SOURCES, svd.replace("minHistory: P21D", "minHistory: P21D, minBlocks: 5")), "pc_0").getCoordinates().get("minBlocks"));
+        final FeaturePlan statik = compile(SOURCES, svd.replace("mode: forward, ", ""));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertEquals("static", column(statik, "pc_0").getCoordinates().get("fit"));
+        Assertions.assertNull(column(statik, "pc_0").getCoordinates().get("windowBlocks"));
+        Assertions.assertTrue(hasCode(statik, "svd.fit.window"), statik::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, svd.replace("mode: forward", "mode: fold")), "svd.fit.mode"));
+        // the plan hash covers the fit window
+        Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, svd.replace("window: P10D", "window: P30D")).getHash());
+
+        // a block with no fit.mode of its own follows a top-level forward fit, geometry included
+        final String blockFit = "    fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\n";
+        final String topFit = "fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\noutput:\n  prefix: f_";
+        final String inherited = svd.replace(blockFit, "").replace("output:\n  prefix: f_", topFit);
+        final FeaturePlan inheritedPlan = compile(SOURCES, inherited);
+        Assertions.assertFalse(inheritedPlan.getDiagnostics().hasErrors(), inheritedPlan::describe);
+        final OutputColumn ic = column(inheritedPlan, "pc_0");
+        Assertions.assertEquals("forward", ic.getCoordinates().get("fit"), inheritedPlan::describe);
+        Assertions.assertEquals("2", ic.getCoordinates().get("windowBlocks"));
+        Assertions.assertEquals("3", ic.getCoordinates().get("minBlocks"));
+        Assertions.assertFalse(hasCode(inheritedPlan, "svd.fit.mode.static"), inheritedPlan::describe);
+        // an explicit static opts the block out of the spec's forward walk, with an info naming the whole-input fit
+        final FeaturePlan optedOut = compile(SOURCES, inherited.replace("    type: svd", "    type: svd\n    fit: {mode: static}"));
+        Assertions.assertEquals("static", column(optedOut, "pc_0").getCoordinates().get("fit"));
+        Assertions.assertTrue(hasCode(optedOut, "svd.fit.mode.static"), optedOut::describe);
+        // the other top-level modes have no lookup-fit counterpart: the block stays static and says nothing
+        final FeaturePlan expanding = compile(SOURCES, inherited.replace("mode: forward,", "mode: expanding,"));
+        Assertions.assertEquals("static", column(expanding, "pc_0").getCoordinates().get("fit"));
+        Assertions.assertFalse(hasCode(expanding, "svd.fit.mode.static"), expanding::describe);
+
+        // encoding: fit.window / minHistory at the top level apply where a keySet declares no maxAge
+        final String enc = SPEC.replace("output:\n  prefix: f_", "fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\noutput:\n  prefix: f_");
+        final FeaturePlan encPlan = compile(SOURCES, enc);
+        Assertions.assertFalse(encPlan.getDiagnostics().hasErrors(), encPlan::describe);
+        final OutputColumn sellerN = column(encPlan, "enc__seller_id__e2__n");
+        Assertions.assertEquals("2", sellerN.getCoordinates().get("windowBlocks"), "fit.window fills in for a keySet without maxAge");
+        Assertions.assertEquals("3", sellerN.getCoordinates().get("minBlocks"));
+        // a keySet's own maxAge (P365D) takes precedence over fit.window
+        Assertions.assertEquals("53", column(encPlan, "enc__category__365d__e2__n").getCoordinates().get("windowBlocks"), "the unshrunk stat's hidden level keeps the keySet window under forward");
+        Assertions.assertEquals("53", column(encPlan, "enc__category__365d__n").getCoordinates().get("windowBlocks"));
+    }
+
     private static final String LATTICE_ENC = """
                   - name: enc
                     scope: population

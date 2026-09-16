@@ -286,7 +286,9 @@ public final class FeaturePlanCompiler {
             diagnostics.error("fit.orderBy", "fit", "fit.orderBy must equal time.field (" + spec.timeField + ")");
         }
         if (spec.fit.minHistory != null) {
-            diagnostics.warning("fit.minHistory", "fit", "fit.minHistory is not implemented yet and ignored");
+            // implemented for fit.mode forward (FitSpec.minBlocksOf rounds it up to whole blocks); the other modes have no blocks to count
+            diagnostics.info("fit.minHistory", "fit", "fit.minHistory is the minimum history of a fit.mode forward block, rounded up to whole blocks"
+                    + " (an explicit minBlocks wins); expanding / static / fold fits have no blocks and ignore it");
         }
         if (spec.fit.groupBy != null && !entities.containsKey(spec.fit.groupBy)) {
             diagnostics.error("fit.groupBy", "fit", "fit.groupBy must reference an entity: " + spec.fit.groupBy);
@@ -1425,21 +1427,36 @@ public final class FeaturePlanCompiler {
             diagnostics.info("svd.rank", loc, "rank " + rank + " cannot be checked against the array length at compile time; if the vectors are shorter, the fit caps the components at their length and the surplus score columns read null (see the run-time svd warning)");
         }
         final boolean center = def.center == null || def.center;
-        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "svd", "the components are fitted", "covariance eigendecomposition on the whole input");
+        final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "svd", "the components are fitted", "covariance eigendecomposition on the whole input", true);
+        final boolean forward = fitSpec.mode == FitMode.forward;
+        final List<String> inputs = arrayField != null ? List.of(arrayField) : fields;
         boolean outcome = false;
-        for (final String f : arrayField != null ? List.of(arrayField) : fields) {
+        for (final String f : inputs) {
             final Ref ref = resolve(f);
             if (ref != null && isOutcomeLike(ref)) outcome = true;
         }
-        diagnostics.info("fit.mode.static", loc, "svd fits " + rank + " component(s) of " + (dimension == null ? "the vector" : dimension + " inputs")
-                + " from (n, Σx, Σxxᵀ) over the whole input" + (center ? "" : ", uncentred") + (def.standardize ? ", standardised" : "") + artifactPhrase(fitSpec)
-                + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the components (static-fit caveat)" : ""));
+        final String what = "svd fits " + rank + " component(s) of " + (dimension == null ? "the vector" : dimension + " inputs")
+                + " from (n, Σx, Σxxᵀ)" + (center ? "" : ", uncentred") + (def.standardize ? ", standardised" : "");
+        if (forward) {
+            final ForwardBlocks blocks = fitSpec.forwardBlocks();
+            diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves them over the complete blocks"
+                    + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose inputs are known at predictAt (the row's own block excluded)"
+                    + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input components are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+        } else {
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
+                    + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the components (static-fit caveat)" : ""));
+        }
 
         int produced = 0;
         for (int k = 0; k < rank; k++) {
             final OutputColumn c = newColumn(def.name, Scope.population, "svd", def.name + "_" + k, Schema.FieldType.FLOAT64, computeAt);
             c.fitted = true;
-            c.coordinates.put("fit", "static");
+            c.coordinates.put("fit", forward ? "forward" : "static");
+            if (forward) {
+                forwardCoordinates(c, null, inputs, def, fitSpec);
+                c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+            }
             if (arrayField != null) c.coordinates.put("arrayField", canonicalOf(arrayField));
             else c.coordinates.put("fields", String.join(",", fields.stream().map(this::canonicalOf).toList()));
             c.coordinates.put("rank", Integer.toString(rank));
@@ -1448,7 +1465,7 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("standardize", Boolean.toString(def.standardize));
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
-            for (final String f : arrayField != null ? List.of(arrayField) : fields) {
+            for (final String f : inputs) {
                 addSelfInput(c, f);
                 addPastInput(c, f);
             }
@@ -1513,22 +1530,63 @@ public final class FeaturePlanCompiler {
      * are accepted but ignored until fit boundaries are implemented.
      */
     private FeatureSpec.FitSpec parseStaticOnlyFit(final FeatureDef def, final String codePrefix, final String fitted, final String why) {
+        return parseLookupFit(def, codePrefix, fitted, why, false);
+    }
+
+    /**
+     * The fit block of a lookup-fitted population type (svd / quantileTransform / discretize / factorization): static
+     * by default, {@code forward} when the type supports per-block fits ({@code forwardAllowed}: the block's
+     * {@code fit.blocks} / {@code minBlocks} / {@code window} / {@code minHistory} inherit the top-level fit and are
+     * read into the returned spec, whose {@code mode} records the choice); the artifact settings as for encodings.
+     * A block that declares no {@code mode} inherits a top-level {@code forward} (the other top-level modes have no
+     * lookup-fit counterpart and leave the block static), so the whole spec walks forward together.
+     */
+    private FeatureSpec.FitSpec parseLookupFit(final FeatureDef def, final String codePrefix, final String fitted, final String why, final boolean forwardAllowed) {
         final String loc = def.location();
         final JsonObject defFit = parseJsonObject(def.fitJson);
         final FeatureSpec.FitSpec fitSpec = new FeatureSpec.FitSpec();
         fitSpec.artifactUri = spec.fit.artifactUri;
         fitSpec.refit = spec.fit.refit;
         FitMode mode = FitMode.statik;
+        boolean modeDeclared = false;
         if (defFit != null) {
-            if (SourceContract.Json.string(defFit, "mode") != null) mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
+            if (SourceContract.Json.string(defFit, "mode") != null) {
+                mode = FeatureSpec.parseFitMode(SourceContract.Json.string(defFit, "mode"), diagnostics, loc);
+                modeDeclared = true;
+            }
             FeatureSpec.FitSpec.parseArtifact(defFit, fitSpec);
-            for (final String key : List.of("cadence", "window", "warmStart")) {
+            for (final String key : List.of("cadence", "warmStart")) {
                 if (defFit.has(key)) diagnostics.warning(codePrefix + ".fit." + key, loc, "fit." + key + " is not implemented yet and ignored (" + fitted + " on the whole input)");
             }
         }
-        if (mode != FitMode.statik) {
-            diagnostics.error(codePrefix + ".fit.mode", loc, def.type + " requires fit.mode static (" + why + "); expanding / fold are not available");
+        if (forwardAllowed) {
+            // a block without its own mode follows the top-level fit when the top level walks forward; the other
+            // top-level modes (expanding / fold) have no lookup-fit counterpart and leave the block static
+            if (!modeDeclared && spec.fit.mode == FitMode.forward) mode = FitMode.forward;
+            fitSpec.blockBucket = spec.fit.blockBucket;
+            fitSpec.blockSize = spec.fit.blockSize;
+            fitSpec.minBlocks = spec.fit.minBlocks;
+            fitSpec.window = spec.fit.window;
+            fitSpec.minHistory = spec.fit.minHistory;
+            FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+            if (mode == FitMode.statik && defFit != null && defFit.has("window")) {
+                diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
+            }
+            if (mode == FitMode.statik && spec.fit.mode == FitMode.forward) {
+                // an explicit static under a forward spec: the block alone sees the whole input, including the
+                // test period, while the encodings around it walk forward
+                diagnostics.info(codePrefix + ".fit.mode.static", loc, def.type + " declares fit.mode static while the top-level fit is forward, so "
+                        + fitted + " on the whole input; drop the block's fit.mode to walk it forward with the rest of the spec");
+            }
+        } else if (defFit != null && defFit.has("window")) {
+            diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");
         }
+        if (mode != FitMode.statik && !(forwardAllowed && mode == FitMode.forward)) {
+            diagnostics.error(codePrefix + ".fit.mode", loc, def.type + " requires fit.mode static" + (forwardAllowed ? " | forward" : "") + " (" + why + "); "
+                    + (forwardAllowed ? "expanding / fold" : "expanding / fold / forward") + " are not available");
+            mode = FitMode.statik;
+        }
+        fitSpec.mode = mode;
         return fitSpec;
     }
 
@@ -1684,6 +1742,8 @@ public final class FeaturePlanCompiler {
         fitSpec.blockBucket = spec.fit.blockBucket;
         fitSpec.blockSize = spec.fit.blockSize;
         fitSpec.minBlocks = spec.fit.minBlocks;
+        fitSpec.window = spec.fit.window;
+        fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
@@ -1712,7 +1772,8 @@ public final class FeaturePlanCompiler {
             final ForwardBlocks blocks = fitSpec.forwardBlocks();
             diagnostics.info("fit.mode.forward", loc, "fit.mode forward reads, per row, the statistics of the complete time blocks (" + blocks.describe()
                     + ") whose targets are known at predictAt — a stepwise expanding fit computed as a parallel Combine per (key, block); the row's own block is never included"
-                    + (fitSpec.minBlocks == null || fitSpec.minBlocks <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocks + " preceding blocks read null")
+                    + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + (fitSpec.window == null ? "" : "; fit.window " + fitSpec.window + " bounds the blocks a row reads where a keySet declares no maxAge")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         }
         if (mode != FitMode.forward && isStatic && def.keySets.stream().anyMatch(ks -> !ks.windows.isEmpty())) {
@@ -1939,7 +2000,8 @@ public final class FeaturePlanCompiler {
                             continue;
                         }
                         // unshrunk: the statistic is read straight from the leaf's (n, Σy, Σy²), never as an offset term
-                        final Shrinkage.Level leaf = levelStats(def, ks.keys, null, target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, false);
+                        // static / fold: no window (lookupWindow is null); forward: the keySet's maxAge rounded to blocks
+                        final Shrinkage.Level leaf = levelStats(def, ks.keys, window, target.name, target.reference, offsetColumn, false, computeAt, mode, fitSpec, false);
                         final OutputColumn c = newColumn(def.name, Scope.row, "fitStat", canonical, s.output(), computeAt);
                         c.fitted = true;
                         c.coordinates.put("keys", String.join(",", ks.keys));
@@ -2356,16 +2418,30 @@ public final class FeaturePlanCompiler {
      */
     private void forwardCoordinates(final OutputColumn c, final Window window, final String targetReference, final String offsetColumn,
                                     final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
+        final List<String> references = new ArrayList<>();
+        if (targetReference != null) references.add(targetReference);
+        if (offsetColumn != null) references.add(offsetColumn);
+        forwardCoordinates(c, window, references, def, fitSpec);
+    }
+
+    /**
+     * @param window     the keySet window (its {@code maxAge} bounds the blocks a row reads), or null — then
+     *                   {@code fit.window} does, when declared
+     * @param references the fields the fit reads from a past row (target / offset / the vector inputs): the lag
+     *                   is the largest post-event availability among them
+     */
+    private void forwardCoordinates(final OutputColumn c, final Window window, final List<String> references,
+                                    final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
         final String loc = def.location();
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
         if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
         else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
-        c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocks == null ? 1 : fitSpec.minBlocks));
+        c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocksOf(blocks)));
         c.coordinates.put("blockField", spec.timeField);
         final FieldContract time = inputFields.get(spec.timeField);
         c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
         long lag = 0;
-        for (final String reference : new String[]{targetReference, offsetColumn}) {
+        for (final String reference : references) {
             if (reference == null) continue;
             final Ref ref = resolve(reference);
             if (ref == null) continue;
@@ -2378,11 +2454,14 @@ public final class FeaturePlanCompiler {
             lag = Math.max(lag, at.getOffset().toMillis());
         }
         c.coordinates.put("forwardLagMillis", Long.toString(lag));
-        if (window != null && window.maxAge != null) {
-            final int k = blocks.windowBlocks(window.maxAge);
+        // the blocks a row reads: the keySet's maxAge, else the block-level fit.window
+        final Duration maxAge = window != null && window.maxAge != null ? window.maxAge : fitSpec.window;
+        if (maxAge != null) {
+            final int k = blocks.windowBlocks(maxAge);
             c.coordinates.put("windowBlocks", Integer.toString(k));
             if (hintedBlocks.add(def.name + "#forwardWindow")) {
-                diagnostics.info("fit.mode.forward.window", loc, "maxAge " + window.maxAge + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
+                diagnostics.info("fit.mode.forward.window", loc, (window != null && window.maxAge != null ? "maxAge " : "fit.window ") + maxAge
+                        + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
             }
         }
     }

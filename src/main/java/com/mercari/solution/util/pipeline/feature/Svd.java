@@ -141,14 +141,64 @@ public final class Svd implements Serializable {
         }
     }
 
+    /**
+     * The moments as a {@link Summary} family (contributions are {@code double[]} vectors): a monoid — one
+     * {@code Combine} per block of a forward fit, merged over the blocks a row reads ({@link BlockSeries}) — that
+     * is not invertible (the anchored sums are not meant to be subtracted vector by vector).
+     */
+    public static final Summary<Svd.Moments> SUMMARY = new MomentsSummary();
+
+    static final class MomentsSummary implements Summary<Svd.Moments> {
+        @Override
+        public Svd.Moments create() {
+            return new Svd.Moments();
+        }
+
+        @Override
+        public void update(final Svd.Moments state, final Object contribution, final int sign) {
+            if (sign < 0) throw new UnsupportedOperationException("svd moments are not invertible");
+            state.add((double[]) contribution);
+        }
+
+        @Override
+        public boolean invertible() {
+            return false;
+        }
+
+        @Override
+        public void merge(final Svd.Moments into, final Svd.Moments other) {
+            into.merge(other);
+        }
+
+        @Override
+        public Object read(final Svd.Moments state, final Readout readout) {
+            if ("count".equals(readout.name())) return state.n;
+            throw new IllegalArgumentException("svd moments are fitted, not read: " + readout.name());
+        }
+
+        @Override
+        public double count(final Svd.Moments state) {
+            return state.n;
+        }
+    }
+
     /** Fits the leading {@code rank} components (capped at the dimension) from the moments. */
     public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize) {
+        return fit(m, rank, center, standardize, true);
+    }
+
+    /**
+     * @param warn whether a short / mixed-length fit is reported: a forward fit solves one model per change point
+     *             ({@link BlockSeries#models}), and an empty window at a leave point is normal — only the
+     *             whole-input fit reports.
+     */
+    public static Svd fit(final Moments m, final int rank, final boolean center, final boolean standardize, final boolean warn) {
         final int d = m.dimension;
-        if (m.mismatched > 0) {
+        if (warn && m.mismatched > 0) {
             LOG.warn("svd: {} vector(s) of a length other than the fitted {} were skipped; the fitted length is whichever was seen first, so normalise the array length upstream", m.mismatched, d);
         }
         if (m.n < 2 || d == 0) {
-            LOG.warn("svd: {} vector(s) to fit (dimension {}); no components, every vector maps to null", m.n, d);
+            if (warn) LOG.warn("svd: {} vector(s) to fit (dimension {}); no components, every vector maps to null", m.n, d);
             return new Svd(d, new double[d], ones(d), new double[0][], new double[0], 0, m.n);
         }
         final double n = m.n;
@@ -173,7 +223,7 @@ public final class Svd implements Serializable {
         for (int i = 0; i < d; i++) trace += c[i][i];
         final double[][] eigen = jacobi(c);
         final int k = Math.min(rank, d);
-        if (k < rank) LOG.warn("svd: rank {} exceeds the vector dimension {}; fitting {} component(s), the remaining score columns are null", rank, d, k);
+        if (warn && k < rank) LOG.warn("svd: rank {} exceeds the vector dimension {}; fitting {} component(s), the remaining score columns are null", rank, d, k);
         final double[][] components = new double[k][];
         final double[] variances = new double[k];
         for (int r = 0; r < k; r++) {

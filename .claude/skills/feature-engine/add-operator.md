@@ -107,7 +107,13 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
 4. `FeaturePlanCompiler.expandPopulation`: dispatch to a new `expand<Type>(def, computeAt)`:
    - resolve and type-check the input(s) (`discretize.input` style codes), validate parameters;
    - `parseStaticOnlyFit(def, "<type>", "the ... is fitted", "<why static>")` — inherits the top-level
-     artifact settings, requires `fit.mode static`, warns on `cadence / window / warmStart`;
+     artifact settings, requires `fit.mode static`, warns on `cadence / window / warmStart`. A type whose
+     fit state is a `Summary` family (svd's moments) can use `parseLookupFit(..., forwardAllowed = true)`
+     instead: `fit.mode: forward` is then accepted (and inherited from a top-level `forward` fit when the
+     block declares no mode of its own), `blocks` / `minBlocks` / `minHistory` / `window` are
+     read into the spec, and the columns get the forward coordinates via `forwardCoordinates(c, null,
+     inputs, def, fitSpec)` plus `predictOffsetMillis` — the engine side is a `BlockSeries<S>` fitted per
+     change point (`SvdSpec.fit` / `FitSvdDoFn` is the template);
    - `diagnostics.info("fit.mode.static", loc, ...)` including `artifactPhrase(fitSpec)` and the
      outcome-like caveat when the input is an outcome;
    - `newColumn(...)`, `c.fitted = true`, coordinates `fit=static`, the parameters, `field`,

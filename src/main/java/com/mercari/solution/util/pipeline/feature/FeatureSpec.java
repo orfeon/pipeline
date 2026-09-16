@@ -200,6 +200,19 @@ public class FeatureSpec implements Serializable {
         public Duration blockSize;
         /** fit.mode forward: rows with fewer usable preceding blocks (with data for the key) read null. */
         public Integer minBlocks;
+        /**
+         * fit.mode forward: the range of blocks a row reads, {@code (usable − window, usable]}, rounded up to whole
+         * blocks — the block-level default of a keySet {@code window.maxAge}, and the window of a static-fit block
+         * (svd) that has no keySet. Null = every usable block.
+         */
+        public Duration window;
+
+        /** fit.mode forward: the minimum blocks a row must be able to read — {@code minBlocks}, else {@code minHistory} rounded up to blocks, else 1. */
+        public int minBlocksOf(final ForwardBlocks blocks) {
+            if (minBlocks != null) return minBlocks;
+            if (minHistory != null) return blocks.windowBlocks(minHistory);
+            return 1;
+        }
 
         /** The forward blocks of this spec (defaults applied). */
         public ForwardBlocks forwardBlocks() {
@@ -245,6 +258,23 @@ public class FeatureSpec implements Serializable {
             if (minBlocks != null) {
                 if (minBlocks < 1) diagnostics.error("fit.minBlocks", loc, "fit.minBlocks must be >= 1: " + minBlocks);
                 else spec.minBlocks = minBlocks;
+            }
+            // the fit window (a duration on the time axis; ISO-8601 like blocks.size) and the minimum history
+            if (fit.has("window") && !fit.get("window").isJsonNull()) {
+                if (fit.get("window").isJsonPrimitive()) {
+                    final Duration window = Json.duration(fit, "window", null, diagnostics, loc);
+                    if (window != null) {
+                        if (window.isZero() || window.isNegative()) diagnostics.error("fit.window", loc, "fit.window must be a positive duration: " + window);
+                        else spec.window = window;
+                    }
+                } else {
+                    diagnostics.error("fit.window", loc, "fit.window must be an ISO-8601 duration (the range of blocks a row reads, rounded up to whole blocks)");
+                }
+            }
+            final Duration minHistory = Json.duration(fit, "minHistory", null, diagnostics, loc);
+            if (minHistory != null) {
+                if (minHistory.isZero() || minHistory.isNegative()) diagnostics.error("fit.minHistory", loc, "fit.minHistory must be a positive duration: " + minHistory);
+                else spec.minHistory = minHistory;
             }
         }
 
@@ -408,7 +438,7 @@ public class FeatureSpec implements Serializable {
             final JsonObject fit = parameters.getAsJsonObject("fit");
             spec.fit.orderBy = Json.string(fit, "orderBy");
             spec.fit.mode = parseFitMode(Json.string(fit, "mode"), diagnostics, "fit");
-            spec.fit.minHistory = Json.duration(fit, "minHistory", null, diagnostics, "fit");
+            // minHistory / window / blocks / minBlocks are parsed (and validated) by parseForward below
             spec.fit.groupBy = Json.string(fit, "groupBy");
             if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
             FitSpec.parseArtifact(fit, spec.fit);

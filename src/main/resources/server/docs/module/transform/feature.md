@@ -66,7 +66,7 @@ time; warnings and hints from the compiler are part of that report.
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
 | baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
-| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) and `minBlocks` (default 1) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). `minHistory` is accepted but not implemented yet (warning). |
+| fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) `minBlocks` (default 1), `minHistory` (the same as a duration, rounded up to whole blocks; `minBlocks` wins) and `window` (the range of blocks a row reads) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
 | output     | optional | Object                         | `prefix` (output name prefix), `nullPolicy` (`keep` \| `fillZero` — missing numeric feature values become 0 \| `indicator` — adds `<name>_isnull` flags for sequence / population / validFor columns), `exclude` (a list of `<block>.*` (the whole block), exact canonical column names, block names, or lineage selectors `derivedFrom:market`, `evidence:declared`, `scope:population`, `block:<name>` — not globs or regular expressions; a pattern matching nothing is a warning `output.exclude.unmatched`), `groupBy` (context name), `parentFields` (input fields placed on the parent record), `childName` (field name of the child array, default `rows` — rename it when it collides with a reserved word downstream), `passThrough` (`all` (default) \| `keys` \| `none`: which input fields are copied to the output; input fields are not availability-checked, so `keys` — time.field, entity / context keys, tie-break and parentFields — makes the table safe to consume with `SELECT *`), `roles` (the data contract: `group` / `time` / `entity` / `label` / `baseline` / `weight` → an input field, a context / entity name or a baseline name; role fields always pass through and are recorded in the manifest so consumers never treat them as features), `include` (the output projection: a list of column names, or a URI / path to a JSON array / `{columns: [...]}` / one-name-per-line file such as a screening step's pass list; when declared it replaces `exclude`), `manifest` (URI of the assembly-time manifest, see [Output contract](#output-contract-roles-include-manifest)). |
 | audit      | optional | Object                         | `observedAt` (`count` (default) \| `fail` \| `off`): what the [observedAt audit](#observedat-audit-declaration-vs-data) does with a row whose observation time is after the declared availability — count it (metrics + run manifest), route it to the failure output, or skip the audit. |
@@ -237,6 +237,8 @@ filesystems (`gs://`, `s3://`, relative local paths).
     mode: forward
     blocks: {size: P90D}                          # or {bucket: year | quarter | month | week | day}; default P90D
     minBlocks: 1                                  # rows with fewer preceding blocks (with data for the key) read nothing
+    minHistory: P180D                             # alternative to minBlocks: the minimum history, rounded up to blocks
+    window: P2Y                                   # optional: a row reads the blocks within this range only (rounded up to blocks)
     artifact: {uri: "gs://bucket/features"}       # optional: the whole-input totals, for a static serving run
 ```
 
@@ -248,14 +250,19 @@ stage of an expanding lattice disappears (`encoding.globalKey`), and unlike `fol
 into the statistics. Per level, a block is usable when its end is at or before `predictAt(row) − lag`,
 `lag` being the target's availability delay after its event (settlement + ingestion; an attribute-only
 level has none), so a fresh outcome never enters a block early. `minBlocks` makes rows with a short
-history read nothing (`count` reads 0, the other statistics null). Windows: `maxAge` is rounded up to
-whole blocks (`fit.mode.forward.window`), `maxEvents` / `filter` are ignored (`fit.mode.forward.windowIgnored`).
+history read nothing (`count` reads 0, the other statistics null); `minHistory` says the same as a duration
+(rounded up to blocks; an explicit `minBlocks` wins). Windows: a keySet's `maxAge` is rounded up to
+whole blocks (`fit.mode.forward.window`), `maxEvents` / `filter` are ignored (`fit.mode.forward.windowIgnored`);
+`fit.window` is the block-level default range for keySets that declare no `maxAge` (a rolling fit —
+the usual choice under drift, where `expanding` statistics go stale) and the range of a forward `svd`.
 Sufficient statistics only (count / sum / mean / rate / std; `quantile` / `distribution` are expanding
 only, `encoding.stat.static`). With `weights: varianceComponents` the pseudo-count λ is estimated per
 block from the keys' statistics up to that block, and recorded per block in the artifact manifest
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
-(UTC). The `blocks` / `minBlocks` settings are part of the plan hash. Batch only.
+(UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
+A `type: svd` block inherits this `mode` unless it declares its own (see *SVD / PCA*); the other population
+types (factorization / discretize / quantileTransform) are always static and are unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -380,7 +387,7 @@ participates in the plan hash — the warning `quantileTransform.clip` asks you 
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
     standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
-    fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
+    fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static, forward (below), or inherited from the top-level fit
 ```
 
 The "Compress" step of the sequence frame: the vector is centred (and optionally standardised) with the
@@ -400,6 +407,17 @@ vector assembled from features uses `inputs`. A fit with fewer than two vectors 
 null everywhere (a serving run that loads such an artifact logs a warning). The artifact is
 `<planHash>/<block>.svd.json` (mean, scale, components, per-component variances, total variance, n) — the
 explained-variance ratio is `variances[k] / totalVariance`.
+
+**Forward fit (`fit: {mode: forward, blocks, window, minBlocks | minHistory}`).** A static svd places every row in
+a distribution that includes the test period (no label leak, but a drifting field is placed where it could not
+have been placed at the time). Under `forward` the moments are accumulated per time block (one `Combine` per
+block) and the components are re-solved for every block window a row may read — the complete blocks within
+`window` (all preceding blocks when absent) whose inputs are known at predictAt, the row's own block excluded
+(`fit.mode.forward` info) — so training and serving see the same walk-forward components; rows with fewer than
+`minBlocks` (or `minHistory`) preceding blocks read null, as does a window whose blocks hold fewer than two
+vectors. A block that declares no `fit.mode` of its own inherits a top-level `fit: {mode: forward}` (geometry
+included), so the whole spec walks forward together; `fit: {mode: static}` on the block opts it out and says so
+(`svd.fit.mode.static` info). The artifact still holds the whole-input components, for a static serving run.
 
 ### Shrinkage and key lattices (population)
 
@@ -773,8 +791,9 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
   `factorization` / `discretize` / `quantileTransform` / `svd` (`spectralEmbedding`, `transitionStats`) are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
-  and non-static fits. Discretize, quantileTransform and svd: non-static fits (`fit.cadence / window /
-  warmStart` are accepted and ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
+  and non-static fits. Discretize and quantileTransform: non-static fits (`fit.cadence / window /
+  warmStart` are accepted and ignored); svd: `fold` (`static` and `forward` are implemented, `fit.cadence /
+  warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
   `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
   `weights: heldOut` is rejected;

@@ -27,7 +27,7 @@ and review a spec quickly.
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
-| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` (forward), `artifact: {uri, refit, id}` or the URI string. `minHistory` accepted, ignored |
+| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd), `artifact: {uri, refit, id}` or the URI string |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
 | `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
 | `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
@@ -182,7 +182,7 @@ filters use the Filter grammar (`module/common/filter.md`); expressions are nume
     leaveNodeOut: true
     output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
   smoothing: {type: bayesian, priorWeight: N}    # legacy sugar for fixed weights
-  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, blocks: {size: P90D}, minBlocks: 1, artifact: {...}}
+  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
   maxFeatures: 200
 ```
 
@@ -215,11 +215,13 @@ of range clamps to 0 / 1) or its normal score. Missing → null. With the defaul
 maximum read ±4.75 whatever n; set `clip: 0.001` (±3.09) when the score feeds an `expr` or an `svd`, so the
 extreme rows do not become outliers. `clip` changes the plan hash (the artifact directory).
 
-### `type: svd` (always static)
+### `type: svd` (static, or forward per time block)
 
 `inputs: [numeric fields]` (the vector) or `input: <array field>` (an input field declared
 `type: array<float64>` in the sources contract — no feature op produces an array; then `rank` is required), `rank`
-(default min(d, 8)), `center` (default true), `standardize` (default false), `fit: {artifact}`. Output
+(default min(d, 8)), `center` (default true), `standardize` (default false),
+`fit: {artifact}` and, for the walk-forward fit, `fit: {mode: forward, blocks, window, minBlocks | minHistory}` —
+a block with no `fit.mode` of its own inherits a top-level `fit: {mode: forward}`. Output
 float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained variance. A vector with a missing
 component → null scores. An array input must have one length (other lengths are skipped, read null and are
 warned about at run time; `rank` above the array length is capped with a warning and the surplus columns read
