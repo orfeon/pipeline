@@ -28,6 +28,8 @@ util/pipeline/feature/
   FeaturePlan, OutputColumn              — the compiled plan and its columns (Serializable)
   RowEvaluator, ContextEvaluator, SequenceEvaluator, PopulationEvaluator, FeatureValues
                                          — Beam-free evaluators, one instance per stage DoFn
+  Summary                                — typed mergeable accumulators (moments / extrema / counts / order):
+                                           the state of the incremental path, declared per statistic in OperatorCatalog
   Shrinkage, VarianceComponents, Discretization, QuantileTransform, Svd, Factorization, OrderStatistics, FitArtifact
                                          — pure models shared by both layers
   FeatureStages                          — FeaturePlan → Beam transforms (stages, waves, fits, finalize)
@@ -237,12 +239,17 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `filter` is evaluated per row unless it is a same-field pre-event `$self` equality, which the compiler
   reduces to an **additional partition key** (`stageKeys`; hot entities split across workers, rows with a
   null filter value bypass the stage) — outcome-like fields stay filters because keying on them would leak.
-- **Incremental evaluation** (O(n) per key): `aggregate` statistics and encoding statistics keep running
-  sufficient statistics with monotone fold / evict pointers (`advance` / `contribute` /
-  `readStatistic`); per-`$self`-value accumulators serve equality filters. Operators that cannot be
-  incremental (lag / trend / ewma / predicates / `maxEvents` windows / general filters / max-min with
-  eviction) take the scan path over a sublist view. `SequenceIncrementalTest` checks the two paths
-  agree on random histories.
+- **Incremental evaluation** (O(n) per key): `aggregate` statistics and encoding statistics keep one
+  `Summary` state per column (per `$self` value under an equality filter) advanced by monotone fold /
+  evict pointers (`advance` / `contribution` / `readStatistic`). A `Summary` is a typed, mergeable
+  accumulator — `create` / `update(±1)` / `merge` / `read` — and the family a statistic runs on is
+  declared once in `OperatorCatalog.summary` (moments for count / sum / mean / std, extrema for max /
+  min, value counts for distribution, exact order statistics for quantiles). Its algebra decides the
+  path: every family is a monoid (summaries of disjoint row sets merge), an *invertible* family is a
+  group (a window can evict), so max / min run incrementally over an unbounded past but take the scan
+  path under `maxAge`. Operators without a family (lag / trend / ewma / predicates) and windows with
+  `maxEvents` or a general filter take the scan path over a sublist view. `SequenceIncrementalTest`
+  checks the two paths agree on random histories; `SummaryTest` checks the monoid / group laws.
 - **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
   (scan), or the near edge minus a bounded tail (`lag` / `trend` = k, `delta` = k + 1, unfiltered
   `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`
@@ -519,7 +526,8 @@ series holds four arrays over the blocks a key touches), which the artifact writ
 
 **Baseline offset on a logit / log scale** (spec §3 rule 5). An offset block whose shrinkage scale is not the
 identity registers one more hidden statistic per lattice level, `<level>__sumoff` = Σ baseline over the rows the
-level's `sum` counts (`PopulationEvaluator.SUM_OFFSET`, served by the incremental accumulator like `sum`); the
+level's `sum` counts (`PopulationEvaluator.SUM_OFFSET`, served incrementally by the same moments summary as
+`sum`, with the baseline as its contribution); the
 gate is per lattice (`FeaturePlanCompiler.offsetTerm`: offset block, shrinkage enabled, scale not identity —
 passed into `levelStats`), so an identity-scale or unshrunk lattice of the same block, and every identity-scale
 plan, is unchanged. `Shrinkage.Level` carries the column (`offColumn`, a fourth token in the `levels`

@@ -2,6 +2,7 @@ package com.mercari.solution.util.pipeline.feature;
 
 import org.apache.beam.sdk.values.KV;
 
+import java.io.Serializable;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,10 +14,12 @@ import java.util.TreeMap;
  * row at t only if {@code t' ≤ t − windowShift}, which is exactly the pending-contribution rule — the
  * target's value is unknown to the system until its effective availability time.
  *
- * <p>Statistics run on the incremental path of {@link SequenceEvaluator} (running sufficient statistics
- * advanced by monotonic fold / evict pointers), so a key's whole history is never re-scanned per row.
- * Phase 1 emits raw statistics (count / mean / rate / std / distribution); structured shrinkage lives in
- * the composed row columns.
+ * <p>Statistics run on the incremental path of {@link SequenceEvaluator} (a {@link Summary} state per column
+ * advanced by monotonic fold / evict pointers), so a key's whole history is never re-scanned per row. This
+ * evaluator only changes what a past row <em>contributes</em> (the target minus its baseline offset; a bare 0
+ * for the row counts of the target-less levels; the category of a distribution) and the null convention of the
+ * hidden sums. Phase 1 emits raw statistics (count / mean / rate / std / distribution); structured shrinkage
+ * lives in the composed row columns.
  */
 public class PopulationEvaluator extends SequenceEvaluator {
 
@@ -32,59 +35,44 @@ public class PopulationEvaluator extends SequenceEvaluator {
     public static final String SUM_OFFSET = "sumoff";
 
     /**
-     * Stats the expanding (per-key replay) engine can serve: every catalog stat except {@code share} (a row
-     * composition of two hidden counts) plus the hidden {@code sum} / {@code sumoff} of the lattice levels.
+     * Stats the expanding (per-key replay) engine can serve: every statistic with a summary family
+     * ({@link OperatorCatalog#summary}) — which excludes {@code share}, a row composition of two hidden counts —
+     * plus the hidden {@code sum} / {@code sumoff} of the lattice levels.
      */
     public static boolean isSupported(final String stat) {
-        if ("sum".equals(stat) || SUM_OFFSET.equals(stat)) return true;
-        final OperatorCatalog.Stat s = OperatorCatalog.stat(stat);
-        return s != null && !"share".equals(stat);
+        return summary(stat) != null;
+    }
+
+    /** Σ baseline accumulates like any other sum: the hidden statistic reads the sum of a moments summary. */
+    private static final Summary.Spec SUM_OFFSET_SUMMARY =
+            new Summary.Spec(Summary.Summaries.MOMENTS, Summary.Readout.of("sum"));
+
+    /** The summary family of an encoding stat: the catalog's, plus the hidden Σ baseline of an offset block. */
+    private static Summary.Spec summary(final String stat) {
+        return SUM_OFFSET.equals(stat) ? SUM_OFFSET_SUMMARY : OperatorCatalog.summary(stat);
     }
 
     @Override
-    String incrementalStat(final OutputColumn c) {
-        if (!"encoding".equals(c.getOperator())) return null;
-        final String stat = c.getCoordinates().get("stat");
-        return isSupported(stat) ? stat : null;
+    String statToken(final OutputColumn c) {
+        return "encoding".equals(c.getOperator()) ? c.getCoordinates().get("stat") : null;
     }
 
     @Override
-    void contribute(final ColumnPlan plan, final Accumulator acc, final Past p, final int sign) {
-        if (plan.field == null) {
-            // target-less statistics (count / share denominators) count every visible row
-            acc.n += sign;
-            return;
-        }
-        if ("count".equals(plan.stat)) {
-            // count matches the scan path: non-null target values, regardless of type
-            if (counted(plan, p.values())) acc.n += sign;
-            return;
-        }
-        if ("distribution".equals(plan.stat)) {
-            final Object v = p.values().get(plan.field);
-            if (v == null) return;
-            if (acc.valueCounts == null) acc.valueCounts = new TreeMap<>();
-            acc.valueCounts.merge(v.toString(), (long) sign, Long::sum);
-            acc.n += sign;
-            return;
-        }
+    Summary.Spec summaryOf(final OutputColumn c) {
+        return "encoding".equals(c.getOperator()) ? summary(c.getCoordinates().get("stat")) : null;
+    }
+
+    @Override
+    Object contribution(final ColumnPlan plan, final Past p) {
+        // target-less statistics (count / share denominators) count every visible row
+        if (plan.field == null) return 0d;
+        // count matches the scan path: the rows the level's sums are taken over, whatever the target type
+        if ("count".equals(plan.stat)) return counted(plan, p.values()) ? 0d : null;
+        if ("distribution".equals(plan.stat)) return p.values().get(plan.field);
         final KV<Double, Double> t = FeatureValues.offsetTarget(p.values(), plan.field, plan.offset);
-        if (t == null) return;
-        acc.n += sign;
-        if (SUM_OFFSET.equals(plan.stat)) {
-            // Σ baseline of the same rows the level's sum counts (the pair is null unless target and baseline are present)
-            acc.sum += sign * baseline(t);
-            return;
-        }
-        final double v = t.getKey();
-        if (plan.quantile != null) {
-            if (acc.order == null) acc.order = new OrderStatistics();
-            if (sign > 0) acc.order.add(v);
-            else acc.order.remove(v);
-            return;
-        }
-        acc.sum += sign * v;
-        acc.sumSq += sign * v * v;
+        if (t == null) return null;
+        // Σ baseline runs over the same rows the level's sum counts (the pair is null unless target and baseline are present)
+        return SUM_OFFSET.equals(plan.stat) ? baseline(t) : t.getKey();
     }
 
     /**
@@ -102,31 +90,11 @@ public class PopulationEvaluator extends SequenceEvaluator {
         return target.getValue() == null ? 0d : target.getValue();
     }
 
+    /** The hidden {@code sum} / {@code sumoff} of a level reads 0 (not null) when nothing contributed: the composition adds sums. */
     @Override
-    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Accumulator acc) {
-        final double n = acc == null ? 0 : acc.n;
-        return switch (plan.stat) {
-            case "count" -> (long) n;
-            case "sum", SUM_OFFSET -> acc == null || acc.n == 0 ? 0d : acc.sum;
-            case "mean", "rate" -> n == 0 ? null : acc.sum / n;
-            case "std" -> {
-                if (n < 2) yield null;
-                final double mean = acc.sum / n;
-                yield Math.sqrt(Math.max(0, acc.sumSq / n - mean * mean));
-            }
-            case "distribution" -> {
-                if (acc == null || acc.valueCounts == null || n == 0) yield null;
-                final Map<String, Object> dist = new LinkedHashMap<>();
-                for (final Map.Entry<String, Long> e : acc.valueCounts.entrySet()) {
-                    if (e.getValue() > 0) dist.put(e.getKey(), e.getValue() / n);
-                }
-                yield dist;
-            }
-            default -> {
-                if (plan.quantile == null) throw new IllegalStateException("unsupported encoding stat: " + plan.stat);
-                yield acc == null || acc.order == null ? null : acc.order.quantile(plan.quantile);
-            }
-        };
+    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state) {
+        final Object value = plan.summary.<Serializable>typed().read(state, plan.summary.readout());
+        return value == null && ("sum".equals(plan.stat) || SUM_OFFSET.equals(plan.stat)) ? 0d : value;
     }
 
     /** Scan fallback (equivalence testing and any non-incremental configuration). */
@@ -152,7 +120,8 @@ public class PopulationEvaluator extends SequenceEvaluator {
             for (final Map.Entry<String, Long> e : counts.entrySet()) dist.put(e.getKey(), e.getValue() / total);
             return dist;
         }
-        if (plan.quantile != null) {
+        final Double quantile = OperatorCatalog.quantileProbability(stat);
+        if (quantile != null) {
             final double[] values = new double[window.size()];
             int n = 0;
             for (final Past p : window) {
@@ -161,7 +130,7 @@ public class PopulationEvaluator extends SequenceEvaluator {
             }
             if (n == 0) return null;
             java.util.Arrays.sort(values, 0, n);
-            return OrderStatistics.quantile(plan.quantile, values, n);
+            return OrderStatistics.quantile(quantile, values, n);
         }
         final boolean offsetSum = SUM_OFFSET.equals(stat);
         double n = 0, sum = 0, sumSq = 0, sumOff = 0;

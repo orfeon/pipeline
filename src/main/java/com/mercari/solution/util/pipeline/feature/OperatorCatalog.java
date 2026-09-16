@@ -128,6 +128,27 @@ public final class OperatorCatalog {
         };
     }
 
+    /**
+     * The {@link Summary} family a statistic token runs on incrementally — the single place that decides which
+     * statistics the keyed replay can serve from running state (and, being monoids, which can be combined per
+     * block or per partition): {@code count / sum / mean / avg / rate / std} → moments, {@code max / min} →
+     * extrema (not invertible: scan under a window), {@code distribution} → value counts, the quantile tokens →
+     * exact order statistics. Null for a token without a family ({@code share}, {@code first} / {@code last}, an
+     * unknown token): such a statistic is scan-only.
+     */
+    public static Summary.Spec summary(final String stat) {
+        if (stat == null) return null;
+        return switch (stat) {
+            case "count", "sum", "mean", "avg", "rate", "std" -> new Summary.Spec(Summary.Summaries.MOMENTS, Summary.Readout.of(stat));
+            case "max", "min" -> new Summary.Spec(Summary.Summaries.EXTREMA, Summary.Readout.of(stat));
+            case "distribution" -> new Summary.Spec(Summary.Summaries.COUNTS, Summary.Readout.of(stat));
+            default -> {
+                final Double p = quantileProbability(stat);
+                yield p == null ? null : new Summary.Spec(Summary.Summaries.ORDER, Summary.Readout.of("quantile", p));
+            }
+        };
+    }
+
     private static final java.util.regex.Pattern QUANTILE = java.util.regex.Pattern.compile("^(?:quantile|q)(\\d{1,3})$");
 
     /**

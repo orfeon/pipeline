@@ -6,6 +6,7 @@
 |---|---|---|
 | `util/pipeline/feature/FeaturePlanCompilerTest` | compile (no Beam) | expansion / naming / coordinates, availability algebra, violation vs intermediate, lattice expansion, scheduling by key affinity, `dependsOn` / waves / DAG estimate, hot-key audit SQL, hash stability, every diagnostic code |
 | `SequenceIncrementalTest` | evaluators | randomized equivalence of the incremental and scan paths, trimmed vs untrimmed history, bounded tails, per-field trimming |
+| `SummaryTest` | pure units | the monoid / group laws of every `Summary` family (`assertMonoid`: merge in either order and with the identity equals one fold; `assertInvertible`: random adds / removes read like a fresh fold), the readouts against direct formulas, the catalog's stat → family map |
 | `ContextEvaluatorTest`, `OrderStatisticsTest`, `DiscretizationTest`, `FactorizationTest`, `KeyedSpillSorterTest` | pure units | operator maths, artifact round-trips, spill / merge / cleanup |
 | `FeatureStagesMergeTest` | engine unit | `coalesce` semantics (partials == branches, duplicate row ids, orphans, null-token keys) |
 | `module/transform/FeatureTransformTest` | e2e (DirectRunner) | values for all four scopes on the auction rows, shrinkage / share / variance components, static + fold fits and artifacts (write, reuse, fixed windows), factorization, discretize, quantile, grouped output, leak rejection at assembly, the five `testParallelWaves*` A/B cases |

@@ -15,13 +15,19 @@ import java.util.regex.Pattern;
  *
  * <p>Two evaluation paths share the same semantics:
  * <ul>
- *   <li><b>Incremental</b> (sufficient statistics): running (n, Σy, Σy², max, min, value counts) per column
- *       — and per filter value for single-equality {@code $self} filters — advanced by two monotonic
- *       pointers over the time-ordered history (fold in once visible, evict once older than maxAge).
- *       Used for {@code aggregate} / encoding statistics; turns the per-key cost from O(n²) into O(n).</li>
+ *   <li><b>Incremental</b>: a {@link Summary} state per column — and per filter value for single-equality
+ *       {@code $self} filters — advanced by two monotonic pointers over the time-ordered history (fold a
+ *       contribution in once its row is visible, evict it once older than maxAge). A column runs here when its
+ *       statistic has a summary family ({@link OperatorCatalog#summary}), the window has no {@code maxEvents} and
+ *       no general filter, and either has no {@code maxAge} or the family is {@link Summary#invertible}
+ *       (max / min cannot evict). Used for {@code aggregate} / encoding statistics; turns the per-key cost from
+ *       O(n²) into O(n).</li>
  *   <li><b>Scan</b>: binary-searched window bounds + a {@code subList} view (no copying) for everything
  *       else (lag / trend / ewma / predicates / maxEvents windows / general filters).</li>
  * </ul>
+ *
+ * <p>The evaluator owns the extraction — which value of a past row contributes ({@link #contribution}) and the
+ * null convention of its outputs ({@link #readStatistic}); the summary owns the arithmetic.
  */
 public class SequenceEvaluator implements Serializable {
 
@@ -44,26 +50,21 @@ public class SequenceEvaluator implements Serializable {
         String offset;
         boolean incremental;
         String field;
-        String stat; // aggregate func / encoding stat driving the incremental accumulator
-        Double quantile; // probability of a quantile encoding stat (resolved once here, not per row)
+        String stat; // aggregate func / encoding stat token (drives the extraction of a contribution)
+        /** The summary family and readout the statistic runs on incrementally, or null (scan only). */
+        Summary.Spec summary;
+        /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
+        Serializable empty;
     }
 
-    /** Running statistics of one column (per filter value; key "" without a filter). */
-    static final class Accumulator {
-        double n, sum, sumSq;
-        Double max, min;
-        Map<String, Long> valueCounts;
-        /** quantile statistics: the visible values as an order-statistic multiset (supports eviction) */
-        OrderStatistics order;
-    }
-
+    /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
     static final class ColumnState {
         int foldIndex;
         int evictIndex;
-        final Map<String, Accumulator> bySubkey = new HashMap<>();
+        final Map<String, Serializable> bySubkey = new HashMap<>();
 
-        Accumulator accumulator(final String subkey) {
-            return bySubkey.computeIfAbsent(subkey, k -> new Accumulator());
+        Serializable state(final String subkey, final ColumnPlan plan) {
+            return bySubkey.computeIfAbsent(subkey, k -> plan.summary.family().create());
         }
     }
 
@@ -358,22 +359,26 @@ public class SequenceEvaluator implements Serializable {
         }
         plan.field = c.coordinates.get("field");
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
-        plan.stat = incrementalStat(c);
-        plan.quantile = c.scope == FeatureSpec.Scope.population ? OperatorCatalog.quantileProbability(c.coordinates.get("stat")) : null;
+        plan.stat = statToken(c);
+        plan.summary = summaryOf(c);
+        plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.incremental = !forceScan
-                && plan.stat != null
+                && plan.summary != null
                 && plan.maxEvents == null
                 && (plan.filterText == null || plan.equality != null)
-                // max / min cannot be evicted from running statistics
-                && (plan.maxAgeMillis == null || !List.of("max", "min").contains(plan.stat));
+                // a window evicts: only a group (invertible family) can remove a contribution again
+                && (plan.maxAgeMillis == null || plan.summary.family().invertible());
         return plan;
     }
 
-    /** The statistic an incremental accumulator can serve for this column, or null. */
-    String incrementalStat(final OutputColumn c) {
-        if (!"aggregate".equals(c.operator)) return null;
-        final String func = c.coordinates.get("func");
-        return List.of("count", "sum", "mean", "avg", "rate", "std", "max", "min").contains(func) ? func : null;
+    /** The statistic token of the column ({@code aggregate} func); overridden for encoding stats. */
+    String statToken(final OutputColumn c) {
+        return "aggregate".equals(c.operator) ? c.coordinates.get("func") : null;
+    }
+
+    /** The summary family the column's statistic runs on incrementally, or null when it is scan-only. */
+    Summary.Spec summaryOf(final OutputColumn c) {
+        return "aggregate".equals(c.operator) ? OperatorCatalog.summary(c.coordinates.get("func")) : null;
     }
 
     public void evaluate(final Map<String, Object> row, final long nowMillis, final List<Past> history) {
@@ -386,16 +391,19 @@ public class SequenceEvaluator implements Serializable {
                           final List<Past> history, final KeyState state) {
         final ColumnPlan plan = plans.get(c.canonicalName);
         if (plan.incremental && state != null) {
-            final Accumulator acc = advance(c, plan, state, nowMillis, history, row);
-            return readStatistic(c, plan, acc);
+            final Serializable summary = advance(c, plan, state, nowMillis, history, row);
+            return readStatistic(c, plan, summary == null ? plan.empty : summary);
         }
         final List<Past> window = select(plan, row, nowMillis, history);
         return evaluateScan(c, plan, row, nowMillis, window);
     }
 
-    /** Advances the column's fold / evict pointers to {@code now} and returns the accumulator to read. */
-    final Accumulator advance(final OutputColumn c, final ColumnPlan plan, final KeyState state,
-                              final long nowMillis, final List<Past> history, final Map<String, Object> row) {
+    /**
+     * Advances the column's fold / evict pointers to {@code now} and returns the summary state to read: the one of
+     * the row's own filter value (null when that value has no visible contribution yet or the row's value is null).
+     */
+    final Serializable advance(final OutputColumn c, final ColumnPlan plan, final KeyState state,
+                               final long nowMillis, final List<Past> history, final Map<String, Object> row) {
         final ColumnState cs = state.column(c.canonicalName);
         final long nearEdge = nowMillis - plan.shiftMillis;
         while (cs.foldIndex < history.size() && history.get(cs.foldIndex).millis() <= nearEdge) {
@@ -416,43 +424,30 @@ public class SequenceEvaluator implements Serializable {
     private void apply(final ColumnPlan plan, final ColumnState cs, final Past p, final int sign) {
         final String subkey = plan.equality == null ? "" : FeatureValues.toText(p.values().get(plan.equality.pastField()));
         if (subkey == null) return;
-        final Accumulator acc = cs.accumulator(subkey);
-        contribute(plan, acc, p, sign);
+        final Object contribution = contribution(plan, p);
+        if (contribution == null) return;
+        plan.summary.<Serializable>typed().update(cs.state(subkey, plan), contribution, sign);
     }
 
-    /** How one past row changes the running statistics; overridden by the population evaluator. */
-    void contribute(final ColumnPlan plan, final Accumulator acc, final Past p, final int sign) {
-        if (plan.field == null) {
-            // field-less count: every visible past row counts, nulls included
-            acc.n += sign;
-            return;
-        }
-        final Double v = FeatureValues.toDouble(p.values().get(plan.field));
-        if (v == null) return;
-        acc.n += sign;
-        acc.sum += sign * v;
-        acc.sumSq += sign * v * v;
-        if (sign > 0) {
-            if (acc.max == null || v > acc.max) acc.max = v;
-            if (acc.min == null || v < acc.min) acc.min = v;
-        }
+    /**
+     * What one past row contributes to the column's summary, or null when it contributes nothing (a missing
+     * value); overridden by the population evaluator. A field-less count contributes a bare 0 (every visible row
+     * counts, nulls included); a field contributes its numeric value.
+     */
+    Object contribution(final ColumnPlan plan, final Past p) {
+        if (plan.field == null) return 0d;
+        return FeatureValues.toDouble(p.values().get(plan.field));
     }
 
-    /** Reads the column's value from the accumulator; overridden by the population evaluator. */
-    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Accumulator acc) {
-        final double n = acc == null ? 0 : acc.n;
+    /**
+     * Reads the column's value from a summary state (the family's empty state when the filter value has none);
+     * overridden by the population evaluator. Extrema are cast to the column type (they carry the input type).
+     */
+    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state) {
+        final Object value = plan.summary.<Serializable>typed().read(state, plan.summary.readout());
         return switch (plan.stat) {
-            case "count" -> (long) n;
-            case "sum" -> n == 0 ? null : acc.sum;
-            case "mean", "avg", "rate" -> n == 0 ? null : acc.sum / n;
-            case "std" -> {
-                if (n < 2) yield null;
-                final double mean = acc.sum / n;
-                yield Math.sqrt(Math.max(0, acc.sumSq / n - mean * mean));
-            }
-            case "max" -> acc == null || acc.max == null ? null : FeatureValues.cast(acc.max, c.fieldType);
-            case "min" -> acc == null || acc.min == null ? null : FeatureValues.cast(acc.min, c.fieldType);
-            default -> throw new IllegalStateException("unsupported incremental stat: " + plan.stat);
+            case "max", "min" -> value == null ? null : FeatureValues.cast((Double) value, c.fieldType);
+            default -> value;
         };
     }
 

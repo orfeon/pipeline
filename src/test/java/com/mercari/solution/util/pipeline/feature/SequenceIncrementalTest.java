@@ -36,6 +36,10 @@ public class SequenceIncrementalTest {
             predictAt: "event_time - PT10M"
             entities:
               - {name: seller, keys: [seller_id]}
+            contexts:
+              - {name: session, keys: [session_id]}
+            baselines:
+              - {name: market, context: session, expr: "share(1 / start_price)"}
             features:
               - name: seq
                 scope: sequence
@@ -62,6 +66,16 @@ public class SequenceIncrementalTest {
                   - {field: sold, stats: [mean, std]}
                   - {field: condition_grade, stats: [distribution, count]}
                   - {field: start_price, stats: [quantile, q25, quantile90]}
+              - name: off
+                scope: population
+                type: encoding
+                keySets:
+                  - keys: [seller_id]
+                    windows: [{maxAge: P60D}]
+                offset: market
+                shrinkage: {priorWeight: 1, scale: logit}
+                targets:
+                  - {field: sold, stats: [mean]}
             """;
 
     @Test
@@ -75,6 +89,10 @@ public class SequenceIncrementalTest {
                 .filter(c -> c.getScope() == FeatureSpec.Scope.sequence || c.getScope() == FeatureSpec.Scope.population)
                 .toList();
         Assertions.assertTrue(keyed.size() >= 12, () -> "columns: " + keyed);
+        // the offset lattice's hidden statistics (Σ baseline and the count / sums taken over the same rows)
+        Assertions.assertTrue(keyed.stream().anyMatch(c -> c.getCanonicalName().endsWith("__" + PopulationEvaluator.SUM_OFFSET)
+                        && "market".equals(c.getCoordinates().get("offset"))),
+                () -> "no offset statistic among " + keyed.stream().map(OutputColumn::getCanonicalName).toList());
         final SequenceEvaluator sequence = new SequenceEvaluator(keyed);
         final PopulationEvaluator population = new PopulationEvaluator(keyed);
         sequence.setup();
@@ -100,6 +118,12 @@ public class SequenceIncrementalTest {
             row.put("condition_grade", "g" + random.nextInt(3));
             row.put("start_price", random.nextInt(10) == 0 ? null : Math.round(random.nextDouble() * 1000) / 10.0);
             row.put("sold", random.nextInt(12) == 0 ? null : random.nextInt(2));
+            // the offset block's baseline, occasionally missing / NaN: such a row counts for no statistic of its level
+            row.put("__baseline_market", switch (random.nextInt(10)) {
+                case 0 -> null;
+                case 1 -> Double.NaN;
+                default -> 0.05 + random.nextDouble() * 0.9;
+            });
 
             if (millis != pendingMillis) {
                 history.addAll(pending);
