@@ -558,7 +558,8 @@ public class Config implements Serializable {
                     } catch (final Throwable ee) {
                         final String errorMessage = "Failed to parse config: " + configText;
                         LOG.error(errorMessage);
-                        throw new IllegalModuleException(errorMessage, e);
+                        // not json: report the yaml error (e.g. duplicate key), not the json syntax error
+                        throw new IllegalModuleException(errorMessage, ee);
                     }
                 } catch (final Throwable e) {
                     final String errorMessage = "Failed to parse config json: " + configText;
