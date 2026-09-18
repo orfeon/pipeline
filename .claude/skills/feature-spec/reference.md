@@ -89,7 +89,7 @@ sources:
 | `cross` | `inputs: [a, b, ...]` (≥ 2) | `<name>` string (`a\|b`) |
 | `indicator` | `input`, `values: [v1, v2]` | `<name>_<value>` int64 0/1 |
 | `equals` | `inputs: [a, b]` | `<name>` int64 0/1, null if either is null |
-| `residual` | `input`, `baseline: <baselines[].name>`, `on: identity \| logit \| log` | `<name>` float64 |
+| `residual` | `input`, `baseline: <baselines[].name>`, `on: identity \| logit \| log` (YAML 1.1 reads a bare `on` as a boolean key; the transform accepts it either way, quoted `"on"` works too) | `<name>` float64 |
 | `noise` | `distribution: normal \| uniform`, `seed` (required) | `<name>` float64 placebo: a pure function of `seed` and the row identity (`time.field` + `orderTieBreak`); pre-event |
 
 ## `scope: context`

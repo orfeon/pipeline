@@ -287,6 +287,30 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec), "sequence.self"));
     }
 
+    /**
+     * YAML 1.1 reads a bare {@code on} as the boolean true, so a YAML spec delivers the residual's scale under the key
+     * {@code "true"}: it must reach the column (it used to fall back to identity silently), like the JSON / quoted forms.
+     */
+    @Test
+    public void testResidualScaleFromYaml() {
+        Assertions.assertEquals("identity", column(compile(SOURCES, SPEC), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("logit", column(compile(SOURCES, SPEC.replace("on: identity", "on: logit")), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("log", column(compile(SOURCES, SPEC.replace("on: identity", "\"on\": log")), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("identity", column(compile(SOURCES, SPEC.replace("    on: identity\n", "")), "vs_market").getCoordinates().get("on"), "the default");
+        // a JSON spec keeps the key's name
+        final JsonObject specJson = Config.convertConfigJson(SPEC.replace("on: identity", "on: logit"), Config.Format.yaml);
+        for (final com.google.gson.JsonElement f : specJson.getAsJsonArray("features")) {
+            final JsonObject block = f.getAsJsonObject();
+            if (block.has("true")) block.add("on", block.remove("true"));
+        }
+        final FeaturePlan fromJson = FeaturePlanCompiler.compile(Config.convertConfigJson(SOURCES, Config.Format.yaml), specJson, null);
+        Assertions.assertEquals("logit", column(fromJson, "vs_market").getCoordinates().get("on"));
+        // an unknown scale is still rejected, whichever way the key arrived
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("on: identity", "on: probit")), "row.residual.on"));
+        // the plan hash sees the scale either way
+        Assertions.assertNotEquals(compile(SOURCES, SPEC).getHash(), compile(SOURCES, SPEC.replace("on: identity", "on: logit")).getHash());
+    }
+
     @Test
     public void testWindowFilterWithSelfIsAllowed() {
         final String spec = SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, filter: \"condition_grade = $self.condition_grade\"}");
