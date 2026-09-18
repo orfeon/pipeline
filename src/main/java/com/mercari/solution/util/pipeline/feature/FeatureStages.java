@@ -728,6 +728,8 @@ public final class FeatureStages {
         final List<StaticFitBlock<?>> blocks = staticFitBlocks(stageColumns);
         final Map<String, PCollectionView<?>> blockViews = new LinkedHashMap<>();
         final Set<String> blockLoad = new LinkedHashSet<>();
+        // blocks whose fit state is a Summary family share one Combine per family and one side input (fitSummaryBlocks)
+        final List<SummaryFitBlock<?, ?, ?>> summaryBlocks = new ArrayList<>();
         for (final StaticFitBlock<?> block : blocks) {
             if (block.artifactUri() != null && !block.refit() && block.artifactExists(planHash)) {
                 blockLoad.add(block.block());
@@ -738,9 +740,20 @@ public final class FeatureStages {
                 throw new IllegalStateException("fit.mode static block '" + block.block() + "' in streaming requires an existing artifact for plan " + planHash
                         + " (fit it with a batch run first)");
             }
+            if (block instanceof SummaryFitBlock<?, ?, ?> summaryBlock) {
+                summaryBlocks.add(summaryBlock);
+                continue;
+            }
             final PCollectionView<?> view = block.fit(fitInput, label, planHash);
             blockViews.put(block.block(), view);
             sideInputs.add(view);
+        }
+        PCollectionView<List<KV<String, Serializable>>> summaryModelsView = null;
+        final Set<String> summaryFitted = new LinkedHashSet<>();
+        if (!summaryBlocks.isEmpty()) {
+            summaryModelsView = fitSummaryBlocks(fitInput, summaryBlocks, label, planHash);
+            sideInputs.add(summaryModelsView);
+            for (final SummaryFitBlock<?, ?, ?> block : summaryBlocks) summaryFitted.add(block.block());
         }
 
         // fitted statistics are extracted from the stage INPUT: a target / offset / input produced by a column
@@ -762,7 +775,7 @@ public final class FeatureStages {
 
         return input.apply(label, ParDo
                 .of(new FitApplyDoFn(evaluator, levels, statsView, lambdasView, seriesView, needsLambdas ? forwardLambdasView : null, predictOffsetMillis, loadBlocks, planHash,
-                        blocks, blockViews, blockLoad, loggings, failFast, failureTag))
+                        blocks, blockViews, blockLoad, summaryModelsView, summaryFitted, loggings, failFast, failureTag))
                 .withSideInputs(sideInputs)
                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
     }
@@ -785,6 +798,154 @@ public final class FeatureStages {
         PCollectionView<List<M>> fit(PCollection<MElement> fitInput, String label, String planHash);
         /** Fills the block's output columns of one row; {@code model} is null when nothing could be fitted. */
         void apply(M model, Map<String, Object> values);
+    }
+
+    /**
+     * A static-fit block whose fit state is a {@link Summary} family (svd: the vector moments, quantileTransform:
+     * the gathered values): what a row contributes and how the model is solved from the per-time-block states is all
+     * the block declares, so every such block of a fit stage shares ONE extraction pass and ONE
+     * {@code Combine.perKey} per family — keyed by (block, time block) — instead of a chain of its own
+     * ({@link #fitSummaryBlocks}). A fit stage with a dozen blocks is then a handful of steps, not dozens.
+     *
+     * @param <T> a row's contribution to the family
+     * @param <S> the family's state
+     * @param <M> the solved model
+     */
+    interface SummaryFitBlock<T, S extends Serializable, M extends Serializable> extends StaticFitBlock<M> {
+        Summary<S> family();
+        /** Names the family in transform names ({@code <label>_Fit<FamilyName>_Combine}); blocks of one name share a Combine. */
+        String familyName();
+        Class<S> stateClass();
+        Coder<T> contributionCoder();
+        /** The row's contribution and the time block it belongs to (0 under a static fit), or null when the row has none. */
+        KV<Long, T> contribution(Map<String, Object> row);
+        /** Solves the model from the per-time-block states (and writes the artifact); {@code parts} is empty for an input without contributions. */
+        M solve(Map<Long, S> parts, String planHash);
+        /** Whether an input without a single contribution still yields a model (and its artifact) rather than none. */
+        boolean fitsEmptyInput();
+
+        /**
+         * The block on its own, as a list view like any other static-fit block (the {@link StaticFitBlock} contract).
+         * A fit stage does not call this: it fits its summary blocks together ({@link #fitSummaryBlocks}).
+         */
+        @Override
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        default PCollectionView<List<M>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            final String prefix = label + "_Fit" + familyName() + "_" + block();
+            final PCollection<KV<String, Serializable>> models = fitFamily(fitInput, (List) List.of(this), prefix, planHash);
+            return (PCollectionView) models
+                    .apply(prefix + "_Model", org.apache.beam.sdk.transforms.Values.create())
+                    .setCoder(SerializableCoder.of(Serializable.class))
+                    .apply(prefix + "_View", View.asList());
+        }
+    }
+
+    /** The time-block key of the marker that keeps a block's group alive on an input without contributions. */
+    private static final long EMPTY_MARKER = Long.MIN_VALUE;
+
+    /**
+     * Fits every {@link SummaryFitBlock} of a stage: per family one extraction pass over the rows, one
+     * {@code Combine.perKey} over (block, time block), a regrouping by block and one solve per block (in parallel
+     * across blocks); the models of all families reach the apply DoFn as ONE list side input of (block, model).
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static PCollectionView<List<KV<String, Serializable>>> fitSummaryBlocks(final PCollection<MElement> fitInput, final List<SummaryFitBlock<?, ?, ?>> blocks,
+                                                                            final String label, final String planHash) {
+        final Map<String, List<SummaryFitBlock<?, ?, ?>>> byFamily = new LinkedHashMap<>();
+        for (final SummaryFitBlock<?, ?, ?> block : blocks) byFamily.computeIfAbsent(block.familyName(), f -> new ArrayList<>()).add(block);
+        PCollectionList<KV<String, Serializable>> models = PCollectionList.empty(fitInput.getPipeline());
+        for (final Map.Entry<String, List<SummaryFitBlock<?, ?, ?>>> family : byFamily.entrySet()) {
+            models = models.and(fitFamily(fitInput, (List) family.getValue(), label + "_Fit" + family.getKey(), planHash));
+        }
+        return models
+                .apply(label + "_FitModels", Flatten.pCollections())
+                .apply(label + "_FitModelsView", View.asList());
+    }
+
+    private static <T, S extends Serializable> PCollection<KV<String, Serializable>> fitFamily(final PCollection<MElement> fitInput, final List<SummaryFitBlock<T, S, ?>> blocks,
+                                                                                                final String prefix, final String planHash) {
+        final SummaryFitBlock<T, S, ?> first = blocks.get(0);
+        final Coder<KV<String, KV<Long, S>>> partCoder = KvCoder.of(StringUtf8Coder.of(), KvCoder.of(org.apache.beam.sdk.coders.VarLongCoder.of(), SerializableCoder.of(first.stateClass())));
+        PCollection<KV<String, KV<Long, S>>> parts = fitInput
+                .apply(prefix + "_Extract", ParDo.of(new ExtractContributionsDoFn<>(blocks)))
+                .setCoder(KvCoder.of(KvCoder.of(StringUtf8Coder.of(), org.apache.beam.sdk.coders.VarLongCoder.of()), first.contributionCoder()))
+                .apply(prefix + "_Combine", Combine.perKey(new SummaryFn<>(first.family(), first.stateClass())))
+                .apply(prefix + "_ByBlock", ParDo.of(new ByBlockDoFn<S>()))
+                .setCoder(partCoder);
+        // a block that fits an empty input too gets an empty marker part, so its group (and model, and artifact) exists
+        final List<KV<String, KV<Long, S>>> markers = new ArrayList<>();
+        for (final SummaryFitBlock<T, S, ?> block : blocks) {
+            if (block.fitsEmptyInput()) markers.add(KV.of(block.block(), KV.of(EMPTY_MARKER, first.family().create())));
+        }
+        if (!markers.isEmpty()) {
+            final PCollection<KV<String, KV<Long, S>>> marked = fitInput.getPipeline().apply(prefix + "_Markers", Create.of(markers).withCoder(partCoder));
+            parts = PCollectionList.of(parts).and(marked).apply(prefix + "_WithMarkers", Flatten.pCollections());
+        }
+        return parts
+                .apply(prefix + "_Group", GroupByKey.create())
+                .apply(prefix + "_Solve", ParDo.of(new SolveSummaryBlocksDoFn<>(blocks, planHash)))
+                .setCoder(KvCoder.of(StringUtf8Coder.of(), SerializableCoder.of(Serializable.class)));
+    }
+
+    /** One pass over the rows for every block of a family: ((block, time block), contribution) per row and block. */
+    static class ExtractContributionsDoFn<T, S extends Serializable> extends DoFn<MElement, KV<KV<String, Long>, T>> {
+        private final List<SummaryFitBlock<T, S, ?>> blocks;
+
+        ExtractContributionsDoFn(final List<SummaryFitBlock<T, S, ?>> blocks) {
+            this.blocks = blocks;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Map<String, Object> row = element.asPrimitiveMap();
+            for (final SummaryFitBlock<T, S, ?> block : blocks) {
+                final KV<Long, T> contribution = block.contribution(row);
+                if (contribution != null) c.output(KV.of(KV.of(block.block(), contribution.getKey()), contribution.getValue()));
+            }
+        }
+    }
+
+    /** ((block, time block), state) → (block, (time block, state)): the regrouping key of the solve. */
+    static class ByBlockDoFn<S extends Serializable> extends DoFn<KV<KV<String, Long>, S>, KV<String, KV<Long, S>>> {
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            c.output(KV.of(c.element().getKey().getKey(), KV.of(c.element().getKey().getValue(), c.element().getValue())));
+        }
+    }
+
+    /** Solves one block per group from its per-time-block states (taken as is; the inputs are never mutated). */
+    static class SolveSummaryBlocksDoFn<T, S extends Serializable> extends DoFn<KV<String, Iterable<KV<Long, S>>>, KV<String, Serializable>> {
+        private final List<SummaryFitBlock<T, S, ?>> blocks;
+        private final String planHash;
+
+        SolveSummaryBlocksDoFn(final List<SummaryFitBlock<T, S, ?>> blocks, final String planHash) {
+            this.blocks = blocks;
+            this.planHash = planHash;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final String name = c.element().getKey();
+            final SummaryFitBlock<T, S, ?> block = blocks.stream().filter(b -> b.block().equals(name)).findFirst()
+                    .orElseThrow(() -> new IllegalStateException("no summary-fit block named " + name));
+            final Map<Long, S> parts = new HashMap<>();
+            // Combine.perKey yields one part per time block, taken as is (a quantileTransform state is the whole column:
+            // no copy); a repeated time block is merged into a fresh state rather than mutating the input element.
+            // Nothing in a solve mutates a part (BlockSeries merges into fresh states).
+            for (final KV<Long, S> part : c.element().getValue()) {
+                if (part.getKey() == EMPTY_MARKER) continue;
+                parts.merge(part.getKey(), part.getValue(), (a, b) -> {
+                    final S merged = block.family().create();
+                    block.family().merge(merged, a);
+                    block.family().merge(merged, b);
+                    return merged;
+                });
+            }
+            final Serializable model = block.solve(parts, planHash);
+            if (model != null) c.output(KV.of(name, model));
+        }
     }
 
     /** Gathers a block's training examples into one list (the fit runs in memory on one worker). */
@@ -1029,7 +1190,7 @@ public final class FeatureStages {
      * themselves ({@link QuantileTransform#VALUES}, exact), gathered per time block — one block for a static fit.
      */
     record QuantileTransformSpec(String block, String column, String field, int bins, String distribution, double clip,
-                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis) implements StaticFitBlock<QuantileModel> {
+                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis) implements SummaryFitBlock<Double, QuantileTransform.Values, QuantileModel> {
         @Override
         public String artifactPath(final String planHash) {
             return QuantileTransform.artifactPath(artifactUri, planHash, block);
@@ -1055,22 +1216,68 @@ public final class FeatureStages {
             return List.of(field);
         }
 
+        @Override
+        public Summary<QuantileTransform.Values> family() {
+            return QuantileTransform.VALUES;
+        }
+
+        @Override
+        public String familyName() {
+            return "Values";
+        }
+
+        @Override
+        public Class<QuantileTransform.Values> stateClass() {
+            return QuantileTransform.Values.class;
+        }
+
+        @Override
+        public Coder<Double> contributionCoder() {
+            return DoubleCoder.of();
+        }
+
+        /** The row's non-null value: time block 0 for a static fit, the row's time block under forward. */
+        @Override
+        public KV<Long, Double> contribution(final Map<String, Object> row) {
+            final Double v = FeatureValues.toDouble(row.get(field));
+            if (v == null || v.isNaN()) return null;
+            long timeBlock = 0L;
+            if (forward != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
+                if (millis == null) return null;
+                timeBlock = forward.blocks().indexOf(millis);
+            }
+            return KV.of(timeBlock, v);
+        }
+
+        /** An input without a single value still fits (n = 0: every value reads null) and writes its artifact. */
+        @Override
+        public boolean fitsEmptyInput() {
+            return true;
+        }
+
         /**
-         * Gathers the non-null values per block in one {@code Combine.perKey}, then every block on one worker (8 bytes
-         * per row, as the static fit always did) and fits the knots: once over everything, and under forward once per
-         * change point over the blocks readable there. An empty input still fits (n = 0).
+         * The values of every time block meet here (8 bytes per row, as the static fit always did): the whole-input
+         * knots, and under forward one fit per change point over the blocks readable there.
          */
         @Override
-        public PCollectionView<List<QuantileModel>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
-            final String prefix = label + "_Quantiles_" + block;
-            return fitInput
-                    .apply(prefix + "_Values", ParDo.of(new ExtractBlockValuesDoFn(field, forward)))
-                    .setCoder(KvCoder.of(org.apache.beam.sdk.coders.VarLongCoder.of(), DoubleCoder.of()))
-                    .apply(prefix + "_Blocks", Combine.perKey(new SummaryFn<>(QuantileTransform.VALUES, QuantileTransform.Values.class)))
-                    .apply(prefix + "_Gather", Combine.globally(new GatherFn<KV<Long, QuantileTransform.Values>>()))
-                    .apply(prefix + "_Fit", ParDo.of(new FitQuantileTransformDoFn(this, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(QuantileModel.class))
-                    .apply(prefix + "_View", View.asList());
+        public QuantileModel solve(final Map<Long, QuantileTransform.Values> parts, final String planHash) {
+            final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
+            // a static fit has one block: fit on it directly instead of a merged copy (fit copies before sorting)
+            final QuantileTransform.Values all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
+            final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
+            LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", block, bins, values.size());
+            final QuantileTransform total = QuantileTransform.fit(values, bins, distribution, clip, true);
+            TreeMap<Long, QuantileTransform> byBlock = null;
+            if (forward != null) {
+                byBlock = series.models(forward.windowBlocks(), v -> QuantileTransform.fit(v, bins, distribution, clip, false));
+                LOG.info("quantileTransform {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
+            }
+            // a forward fit re-fits every run but writes the whole-input knots once (refit: true overwrites)
+            if (artifactUri != null && (forward == null || refit || !QuantileTransform.exists(artifactUri, planHash, block))) {
+                QuantileTransform.write(artifactUri, planHash, block, total);
+            }
+            return new QuantileModel(total, byBlock, forward == null ? null : series.observed());
         }
 
         /** The knots a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
@@ -1105,75 +1312,6 @@ public final class FeatureStages {
         return specs;
     }
 
-    /** One (block, value) per non-null value: block 0 for a static fit, the time block of the row under forward. */
-    static class ExtractBlockValuesDoFn extends DoFn<MElement, KV<Long, Double>> {
-        private final String field;
-        private final Forward forward;
-
-        ExtractBlockValuesDoFn(final String field, final Forward forward) {
-            this.field = field;
-            this.forward = forward;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement element = c.element();
-            if (element == null) return;
-            final Map<String, Object> row = element.asPrimitiveMap();
-            final Double v = FeatureValues.toDouble(row.get(field));
-            if (v == null || v.isNaN()) return;
-            long block = 0L;
-            if (forward != null) {
-                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
-                if (millis == null) return;
-                block = forward.blocks().indexOf(millis);
-            }
-            c.output(KV.of(block, v));
-        }
-    }
-
-    /** Fits the gathered per-block values: the whole-input knots, plus one fit per change point under forward. */
-    static class FitQuantileTransformDoFn extends DoFn<ArrayList<KV<Long, QuantileTransform.Values>>, QuantileModel> {
-        private final QuantileTransformSpec spec;
-        private final String planHash;
-
-        FitQuantileTransformDoFn(final QuantileTransformSpec spec, final String planHash) {
-            this.spec = spec;
-            this.planHash = planHash;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final Map<Long, QuantileTransform.Values> parts = new HashMap<>();
-            // Combine.perKey yields one part per block, taken as is (the state is the whole column: no copy); a repeated
-            // block is merged into a fresh state rather than mutating the input element. Nothing below mutates a part.
-            for (final KV<Long, QuantileTransform.Values> e : c.element()) {
-                parts.merge(e.getKey(), e.getValue(), (a, b) -> {
-                    final QuantileTransform.Values merged = QuantileTransform.VALUES.create();
-                    QuantileTransform.VALUES.merge(merged, a);
-                    QuantileTransform.VALUES.merge(merged, b);
-                    return merged;
-                });
-            }
-            final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
-            // a static fit has one block: fit on it directly instead of a merged copy (fit copies before sorting)
-            final QuantileTransform.Values all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
-            final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
-            LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", spec.block(), spec.bins(), values.size());
-            final QuantileTransform total = QuantileTransform.fit(values, spec.bins(), spec.distribution(), spec.clip(), true);
-            TreeMap<Long, QuantileTransform> byBlock = null;
-            if (spec.forward() != null) {
-                byBlock = series.models(spec.forward().windowBlocks(), v -> QuantileTransform.fit(v, spec.bins(), spec.distribution(), spec.clip(), false));
-                LOG.info("quantileTransform {}: forward fit over {} block(s), {} change point(s)", spec.block(), parts.size(), byBlock.size());
-            }
-            // a forward fit re-fits every run but writes the whole-input knots once (refit: true overwrites)
-            if (spec.artifactUri() != null && (spec.forward() == null || spec.refit() || !QuantileTransform.exists(spec.artifactUri(), planHash, spec.block()))) {
-                QuantileTransform.write(spec.artifactUri(), planHash, spec.block(), total);
-            }
-            c.output(new QuantileModel(total, byBlock, spec.forward() == null ? null : series.observed()));
-        }
-    }
-
     // --- svd ------------------------------------------------------------------------------------------
 
     /**
@@ -1189,7 +1327,7 @@ public final class FeatureStages {
      */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
                    String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                   Forward forward, long predictOffsetMillis) implements StaticFitBlock<SvdModel> {
+                   Forward forward, long predictOffsetMillis) implements SummaryFitBlock<double[], Svd.Moments, SvdModel> {
         @Override
         public String artifactPath(final String planHash) {
             return Svd.artifactPath(artifactUri, planHash, block);
@@ -1232,22 +1370,68 @@ public final class FeatureStages {
             return x;
         }
 
+        @Override
+        public Summary<Svd.Moments> family() {
+            return Svd.SUMMARY;
+        }
+
+        @Override
+        public String familyName() {
+            return "Moments";
+        }
+
+        @Override
+        public Class<Svd.Moments> stateClass() {
+            return Svd.Moments.class;
+        }
+
+        @Override
+        public Coder<double[]> contributionCoder() {
+            return SerializableCoder.of(double[].class);
+        }
+
+        /** The row's vector: time block 0 for a static fit, the row's time block under forward. */
+        @Override
+        public KV<Long, double[]> contribution(final Map<String, Object> row) {
+            final double[] x = vector(row);
+            if (x == null) return null;
+            long timeBlock = 0L;
+            if (forward != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
+                if (millis == null) return null;
+                timeBlock = forward.blocks().indexOf(millis);
+            }
+            return KV.of(timeBlock, x);
+        }
+
+        /** An input without a single vector has no components: no model (every score reads null) and no artifact. */
+        @Override
+        public boolean fitsEmptyInput() {
+            return false;
+        }
+
         /**
-         * Sufficient statistics (n, Σx, Σxxᵀ) per block in one {@code Combine.perKey} — no vector leaves the workers —
-         * gathered into a {@link BlockSeries} and solved on one worker: once for a static fit (a single block), once
-         * per change point under forward.
+         * Solves the sufficient statistics (n, Σx, Σxxᵀ) of the time blocks — no vector leaves the workers — on one
+         * worker: the whole-input components (a static fit is a single block), plus one fit per change point under forward.
          */
         @Override
-        public PCollectionView<List<SvdModel>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
-            final String prefix = label + "_Svd_" + block;
-            return fitInput
-                    .apply(prefix + "_Vectors", ParDo.of(new ExtractVectorsDoFn(this)))
-                    .setCoder(KvCoder.of(org.apache.beam.sdk.coders.VarLongCoder.of(), org.apache.beam.sdk.coders.SerializableCoder.of(double[].class)))
-                    .apply(prefix + "_Moments", Combine.perKey(new SummaryFn<>(Svd.SUMMARY, Svd.Moments.class)))
-                    .apply(prefix + "_Gather", Combine.globally(new GatherFn<KV<Long, Svd.Moments>>()).withoutDefaults())
-                    .apply(prefix + "_Fit", ParDo.of(new FitSvdDoFn(this, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(SvdModel.class))
-                    .apply(prefix + "_View", View.asList());
+        public SvdModel solve(final Map<Long, Svd.Moments> parts, final String planHash) {
+            final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
+            final Svd.Moments all = series.total();
+            final Svd.Moments m = all == null ? new Svd.Moments() : all;
+            final Svd total = fit(m);
+            LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
+                    block, total.rank(), rank, m.n, m.dimension, m.skipped, m.mismatched);
+            TreeMap<Long, Svd> byBlock = null;
+            if (forward != null) {
+                byBlock = series.models(forward.windowBlocks(), this::fitQuietly);
+                LOG.info("svd {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
+            }
+            // a forward fit re-fits every run but writes the whole-input components once (refit: true overwrites)
+            if (artifactUri != null && (refit || !Svd.exists(artifactUri, planHash, block))) {
+                Svd.write(artifactUri, planHash, block, total);
+            }
+            return new SvdModel(total, byBlock, forward == null ? null : series.observed());
         }
 
         /** The components a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
@@ -1351,65 +1535,6 @@ public final class FeatureStages {
                     Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
-    }
-
-    /** One (block, vector) per row: block 0 for a static fit, the row's time block under forward. */
-    static class ExtractVectorsDoFn extends DoFn<MElement, KV<Long, double[]>> {
-        private final SvdSpec spec;
-
-        ExtractVectorsDoFn(final SvdSpec spec) {
-            this.spec = spec;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final MElement element = c.element();
-            if (element == null) return;
-            final Map<String, Object> row = element.asPrimitiveMap();
-            final double[] x = spec.vector(row);
-            if (x == null) return;
-            long block = 0L;
-            if (spec.forward() != null) {
-                final Long millis = FeatureValues.toEpochMillis(row.get(spec.forward().blockField()), spec.forward().blockFieldType());
-                if (millis == null) return;
-                block = spec.forward().blocks().indexOf(millis);
-            }
-            c.output(KV.of(block, x));
-        }
-    }
-
-    /** Solves the gathered per-block moments: the whole-input components, plus one fit per change point under forward. */
-    static class FitSvdDoFn extends DoFn<ArrayList<KV<Long, Svd.Moments>>, SvdModel> {
-        private final SvdSpec spec;
-        private final String planHash;
-
-        FitSvdDoFn(final SvdSpec spec, final String planHash) {
-            this.spec = spec;
-            this.planHash = planHash;
-        }
-
-        @ProcessElement
-        public void processElement(final ProcessContext c) {
-            final Map<Long, Svd.Moments> parts = new HashMap<>();
-            // Combine.perKey yields one part per block; merge into a fresh state rather than mutating the input element
-            for (final KV<Long, Svd.Moments> e : c.element()) parts.computeIfAbsent(e.getKey(), k -> new Svd.Moments()).merge(e.getValue());
-            final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
-            final Svd.Moments all = series.total();
-            final Svd.Moments m = all == null ? new Svd.Moments() : all;
-            final Svd total = spec.fit(m);
-            LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
-                    spec.block(), total.rank(), spec.rank(), m.n, m.dimension, m.skipped, m.mismatched);
-            TreeMap<Long, Svd> byBlock = null;
-            if (spec.forward() != null) {
-                byBlock = series.models(spec.forward().windowBlocks(), spec::fitQuietly);
-                LOG.info("svd {}: forward fit over {} block(s), {} change point(s)", spec.block(), parts.size(), byBlock.size());
-            }
-            // a forward fit re-fits every run but writes the whole-input components once (refit: true overwrites)
-            if (spec.artifactUri() != null && (spec.refit() || !Svd.exists(spec.artifactUri(), planHash, spec.block()))) {
-                Svd.write(spec.artifactUri(), planHash, spec.block(), total);
-            }
-            c.output(new SvdModel(total, byBlock, spec.forward() == null ? null : series.observed()));
-        }
     }
 
     // --- joint (estimator: joint) -----------------------------------------------------------------
@@ -1788,6 +1913,11 @@ public final class FeatureStages {
         private final List<StaticFitBlock<?>> blocks;
         private final Map<String, PCollectionView<?>> blockViews;
         private final Set<String> blockLoad;
+        /** The models of the stage's summary-fit blocks as one (block, model) list, and the blocks fitted that way. */
+        private final PCollectionView<List<KV<String, Serializable>>> summaryModelsView;
+        private final Set<String> summaryFitted;
+        /** Indexed once per DoFn instance (the list is immutable in a batch run; a block without contributions has no entry). */
+        private transient Map<String, Serializable> summaryModels;
         private transient Map<String, VarianceComponents.KeyStats> loaded;
         private transient Map<String, Double> loadedLambdas;
         private transient Map<String, Object> loadedModels;
@@ -1806,6 +1936,7 @@ public final class FeatureStages {
                      final PCollectionView<List<VarianceComponents.LevelLambdas>> forwardLambdasView, final long predictOffsetMillis,
                      final Map<String, String> loadBlocks, final String planHash,
                      final List<StaticFitBlock<?>> blocks, final Map<String, PCollectionView<?>> blockViews, final Set<String> blockLoad,
+                     final PCollectionView<List<KV<String, Serializable>>> summaryModelsView, final Set<String> summaryFitted,
                      final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.levels = levels;
@@ -1818,6 +1949,8 @@ public final class FeatureStages {
             this.blocks = blocks;
             this.blockViews = blockViews;
             this.blockLoad = blockLoad;
+            this.summaryModelsView = summaryModelsView;
+            this.summaryFitted = summaryFitted;
         }
 
         @Setup
@@ -1840,6 +1973,14 @@ public final class FeatureStages {
         private Object model(final ProcessContext c, final StaticFitBlock<?> block) {
             final Object loadedModel = loadedModels.get(block.block());
             if (loadedModel != null) return loadedModel;
+            if (summaryFitted.contains(block.block())) {
+                if (summaryModels == null) {
+                    final Map<String, Serializable> index = new HashMap<>();
+                    for (final KV<String, Serializable> e : c.sideInput(summaryModelsView)) index.put(e.getKey(), e.getValue());
+                    summaryModels = index;
+                }
+                return summaryModels.get(block.block());
+            }
             final PCollectionView<?> view = blockViews.get(block.block());
             if (view == null) throw new IllegalStateException("static fit block " + block.block() + " was neither fitted nor loaded");
             final List<?> models = (List<?>) c.sideInput(view);

@@ -115,7 +115,7 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
      block declares no mode of its own), `blocks` / `minBlocks` / `minHistory` / `window` are
      read into the spec, and the columns get the forward coordinates via `forwardCoordinates(c, null,
      inputs, def, fitSpec)` plus `predictOffsetMillis` — the engine side is a `BlockSeries<S>` fitted per
-     change point (`SvdSpec.fit` / `FitSvdDoFn` is the template);
+     change point (`SvdSpec` as a `SummaryFitBlock` — `contribution` / `solve` — is the template);
    - `diagnostics.info("fit.mode.static", loc, ...)` including `artifactPhrase(fitSpec)` and the
      outcome-like caveat when the input is an outcome;
    - `newColumn(...)`, `c.fitted = true`, coordinates `fit=static`, the parameters, `field`,
@@ -128,7 +128,13 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    label, planHash)` = extract → `Combine.globally(<gather fn with a default accumulator>)` →
    fit DoFn (writes the artifact when `artifactUri != null`) → `View.asList`; `fitInputs()` lists
    the fields read from the stage input (same-stage producers are rejected); `apply(model,
-   values)` fills the column (`model == null` → null). Register it once in `staticFitBlocks`
+   values)` fills the column (`model == null` → null). **When the fit state is a `Summary` family**
+   (svd's moments, quantileTransform's values) implement `SummaryFitBlock<T, S, M>` instead of `fit`:
+   `family()` / `familyName()` / `stateClass()` / `contributionCoder()`, `contribution(row)` → (time
+   block — 0 under static —, value) or null, `solve(parts, planHash)` (merge the per-time-block states
+   through a `BlockSeries`, fit, write the artifact) and `fitsEmptyInput()`. The stage then fits every
+   such block together — one extraction pass and one `Combine.perKey` per family, one side input for
+   all models (`fitSummaryBlocks`) — so a dozen blocks do not become a dozen chains. Register it once in `staticFitBlocks`
    (`blocks.addAll(<type>Specs(columns))`), which feeds both `applyFit` and the manifest's
    `artifactPaths` — `FitApplyDoFn` needs no change. Copy before
    sorting (DirectRunner immutability). The whole training set lands on one worker: state the
