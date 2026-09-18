@@ -270,6 +270,57 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(sources, SPEC), "sources.fields.observedAtField"));
     }
 
+    /**
+     * The two-series {@code regression} op (one column per func, both series projected into the history, the lagged
+     * pairing marked for the scan path) and {@code fracdiff} (d and k in the coordinates, a bounded tail).
+     */
+    @Test
+    public void testRegressionAndFracdiffExpansion() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        Assertions.assertTrue(SPEC.contains(plain));
+        final String spec = SPEC.replace(plain, plain
+                + "\n      - {type: regression, field: final_price, against: start_price, funcs: [beta, corr, r2]}"
+                + "\n      - {type: regression, field: final_price, against: start_price, lag: 1}"
+                + "\n      - {type: fracdiff, field: start_price, d: 0.4, k: 10}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn beta = column(plan, "recent_365d_final_price_vs_start_price_beta");
+        Assertions.assertEquals("regression", beta.getOperator());
+        Assertions.assertEquals(Schema.Type.float64, beta.getFieldType().getType());
+        Assertions.assertEquals("beta", beta.getCoordinates().get("func"));
+        Assertions.assertEquals("final_price", beta.getCoordinates().get("field"));
+        Assertions.assertEquals("start_price", beta.getCoordinates().get("against"));
+        Assertions.assertNull(beta.getCoordinates().get("lag"));
+        Assertions.assertEquals(Set.of("final_price", "start_price"), beta.getPastInputs());
+        // final_price is an outcome: the pair's window is shifted like an aggregate of it
+        Assertions.assertEquals(OutputColumn.Status.windowShift, beta.getStatus());
+        Assertions.assertNotNull(column(plan, "recent_n5_final_price_vs_start_price_r2"));
+        // the lagged pairing: default funcs, its own names, the lag in the coordinates (what sends it to the scan path)
+        final OutputColumn lagged = column(plan, "recent_365d_final_price_vs_start_price_lag1_corr");
+        Assertions.assertEquals("1", lagged.getCoordinates().get("lag"));
+        Assertions.assertNotNull(column(plan, "recent_365d_final_price_vs_start_price_lag1_beta"));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(beta));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(lagged), "bounded by maxAge");
+
+        final OutputColumn fracdiff = column(plan, "recent_n5_start_price_fracdiff0p4");
+        Assertions.assertEquals("0.4", fracdiff.getCoordinates().get("d"));
+        Assertions.assertEquals("10", fracdiff.getCoordinates().get("k"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, fracdiff.getStatus());
+
+        final String reg = "- {type: regression, field: final_price, against: start_price, funcs: [beta, corr, r2]}";
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, funcs: [beta]}")), "sequence.regression.against"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: condition_grade}")), "sequence.regression.against"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: condition_grade, against: start_price}")), "sequence.op.type"));
+        final FeaturePlan func = compile(SOURCES, spec.replace("funcs: [beta, corr, r2]", "funcs: [beta, mean]"));
+        Assertions.assertTrue(hasCode(func, "sequence.regression.func"));
+        Assertions.assertTrue(func.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("cov | corr | beta")));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("lag: 1}", "lag: -1}")), "sequence.regression.lag"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: nosuchfield}")), "reference.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4, k: 10", "k: 10")), "sequence.fracdiff.d"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4", "d: 2.5")), "sequence.fracdiff.d"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("k: 10}", "k: 1}")), "sequence.fracdiff.k"));
+    }
+
     @Test
     public void testUnresolvedReferenceAndCycle() {
         final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / nosuchfield\"");
@@ -1363,6 +1414,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNull(c.getCoordinates().get("fields"));
         Assertions.assertEquals(Schema.Type.array, plan.getInputFields().get("embedding").getType().getType());
         Assertions.assertEquals(Schema.Type.float64, plan.getInputFields().get("embedding").getType().getArrayValueType().getType());
+        // an array has no named dimensions: the per-input residual needs 'inputs', the residual norm does not
+        Assertions.assertTrue(spec.contains("\n    rank: 2\n"), spec);
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("    rank: 2\n", "    rank: 2\n    outputs: [residual]\n")), "svd.outputs"));
+        final FeaturePlan norm = compile(sources, spec.replace("    rank: 2\n", "    rank: 2\n    outputs: [scores, residualNorm]\n"));
+        Assertions.assertFalse(norm.getDiagnostics().hasErrors(), norm::describe);
+        Assertions.assertEquals("norm", column(norm, "emb_pc_residnorm").getCoordinates().get("residual"));
         // an array input needs rank; a non-numeric array is not a vector
         Assertions.assertTrue(hasCode(compile(sources, spec.replace("        rank: 2\n", "")), "svd.rank"));
         Assertions.assertTrue(hasCode(compile(sources.replace("array<float64>", "array<string>"), spec), "svd.input"));
@@ -1509,6 +1566,20 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan.Stage seller = plan.getStages().stream().filter(s -> s.columnNames().contains("recent_n5_start_price_lag1")).findFirst().orElseThrow();
         Assertions.assertTrue(seller.index() < fit.index(), plan::describe);
         Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("hist").endsWith("hist.svd.json"));
+        // outputs: the scores by default; residual = one column per input (in input units), residualNorm = their length
+        final FeaturePlan residual = compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", "        rank: 2\n        outputs: [residual, residualNorm]\n")));
+        Assertions.assertFalse(residual.getDiagnostics().hasErrors(), residual::describe);
+        Assertions.assertNull(residual.getColumn("hist_0"), "scores are not listed");
+        Assertions.assertEquals("2", column(residual, "hist_resid_start_price").getCoordinates().get("residual"));
+        Assertions.assertEquals("0", column(residual, "hist_resid_recent_n5_start_price_lag1").getCoordinates().get("residual"));
+        Assertions.assertNull(column(residual, "hist_resid_start_price").getCoordinates().get("component"));
+        Assertions.assertEquals("norm", column(residual, "hist_residnorm").getCoordinates().get("residual"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(residual, "hist_residnorm").getStatus());
+        final FeaturePlan.Stage residualFit = residual.getStages().stream().filter(st -> st.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(residualFit.columnNames().containsAll(List.of("hist_resid_start_price", "hist_residnorm")), residual::describe);
+        Assertions.assertNotEquals(plan.getHash(), residual.getHash());
+        Assertions.assertNotNull(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", "        rank: 2\n        outputs: [scores, residual]\n"))).getColumn("hist_1"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", "        rank: 2\n        outputs: [loadings]\n"))), "svd.outputs"));
         // defaults: rank = min(d, 8)
         Assertions.assertNotNull(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", ""))).getColumn("hist_2"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("rank: 2", "rank: 4"))), "svd.rank"));

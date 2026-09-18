@@ -155,6 +155,8 @@ not expand because another block failed).
 | `sequence.weightBy.scan` | info | a weighted aggregate has no running state and scans its window per row: give the window `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`) |
 | `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required; `decayBy` is `events` or `time` |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
+| `sequence.regression.against` / `.func` / `.lag` | error | `regression` needs a numeric `against` field (the key is `against`, a bare `on` is a YAML boolean); funcs are cov / corr / beta / intercept / r2; `lag` ≥ 0 (swap the fields for the other direction) |
+| `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
 | `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
