@@ -117,7 +117,10 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   contract, availability-time algebra, DAG expansion, leak checks, `describe()` = validate --expand) and
   `FeatureStages` (Beam wiring: row ParDo / context GBK / keyed time-ordered replay for sequence &
   population; stages run wave by wave — the independent stages of a wave branch in parallel and are merged
-  back by row id, `engine.parallelWaves: false` = linear chain). DSL spec in
+  back by row id, `engine.parallelWaves: false` = linear chain). Statistics are `Summary` families (typed,
+  mergeable accumulators registered in `OperatorCatalog`): the same family serves the keyed replay's
+  incremental path and the fit stage's per-time-block `Combine` (`BlockSeries`: static / forward / window
+  fits) — engine doc §9.6. DSL spec in
   [docs/design/feature-dsl.md](docs/design/feature-dsl.md), engine design and implementation status in
   [docs/design/feature-engine.md](docs/design/feature-engine.md). Keep examples/tests domain-neutral.
   Maintain via the **`feature-engine` skill** (`.claude/skills/feature-engine/`).
@@ -150,8 +153,8 @@ transform/sink consuming them via `inputs` gets an assembly-time warning (see
   UDF/UDAF registration, Calcite-internal value conventions, and the emulator IT patterns. Consult it before
   touching `util/pipeline/Query2.java` or `util/pipeline/lookup/`.
 - **`feature-engine`** (`.claude/skills/feature-engine/`) — the `feature` transform's compile layer and
-  Beam engine: adding row/context/sequence ops, encoding stats and population types (recipes with PR #100
-  as the worked example), the stage scheduler / waves / fan-out merge / static-fit invariants, diagnostic
+  Beam engine: adding row/context/sequence ops, encoding stats, `Summary` families and population types
+  (recipes with PR #100 as the worked example), the stage scheduler / waves / fan-out merge / static-fit invariants, diagnostic
   codes, test harnesses (parallel-vs-linear equality, incremental-vs-scan equivalence) and the Dataflow /
   prism measurement loop. Consult it before touching `util/pipeline/feature/` or
   `module/transform/FeatureTransform.java`.

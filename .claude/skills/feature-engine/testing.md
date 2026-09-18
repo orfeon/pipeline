@@ -33,8 +33,10 @@ mvn test -Pserver -Dtest=ValidateFeatureToolTest              # server-side expo
   `FeatureTransformTest`; `withEncoding` in the compiler test strips 4 more). A replace that
   matches nothing silently tests the old config — assert `assertNotEquals(BASE, modified)` or
   check the new column exists in the schema.
-- Large generated configs are JSON (SnakeYAML ~3 MB cap); artifact / spill directories are
-  relative `target/...` paths (Windows drive letters read as URI schemes).
+- Large generated configs are JSON; YAML is parsed as YAML 1.2 with duplicate keys rejected, so a replace
+  that would add a second `engine:` / `fit:` key must merge into the existing one
+  (`assertParallelMatchesLinear` does). Artifact / spill directories are relative `target/...` paths
+  (Windows drive letters read as URI schemes).
 - Assert diagnostics by **code** (`hasCode(plan, "discretize.bins")`), not by message text;
   pass `plan::describe` as the assertion message so a failure prints the whole report.
 - Expected values are hand-computed from the six auction rows and written in a comment next to
@@ -48,6 +50,18 @@ mvn test -Pserver -Dtest=ValidateFeatureToolTest              # server-side expo
 - Keyed-path changes: add the column to `SequenceIncrementalTest.SPEC`; the test replays one key
   exactly like `KeyedHistoryDoFn` (pending rows join when the timestamp advances) with
   `forceScan` on and off and asserts row-by-row equality.
+- Statistics: a `Summary` family is tested three ways (`SummaryTest` laws with hand values,
+  `SequenceIncrementalTest.SPEC` for incremental == scan and trimmed == untrimmed, an e2e value) and a fitted
+  block's forward model against the static fit on the readable blocks — see recipe G in
+  [add-operator.md](add-operator.md).
+- **Running the suites.** A full `mvn test` of the feature suites has repeatedly finished every test and then
+  never exited (the Maven and surefire JVMs stay alive, ~2 GB each, and no completion is reported). Run a
+  narrowed `-Dtest=...` list under a hard limit (`timeout 560 mvn test -q -Dtest='…' -Djacoco.skip=true
+  -Djib.skip=true`), judge the result from `target/surefire-reports/TEST-*.xml` (by modification time — `target/`
+  is not cleaned between branches, so reports and even compiled test classes of another branch linger and run),
+  and check for leftover `surefirebooter` / Maven `java` processes afterwards.
+- Independent branches that register in the same places (catalog, spec, `plan()`, the shared test fixtures): merge
+  them all onto a throwaway branch and run the affected tests there before opening the PR.
 - Log wording is part of the interface for the verifier's greps (`budget`, `keyed spill sorter`,
   `keeps`): when you change a line, say so in the PR (S6 changed `keeps` and greps went silent).
 
