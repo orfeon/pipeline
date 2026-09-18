@@ -346,8 +346,11 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
   `apply(model, values)` fills the block's columns. Adding a population type = one model class + one
   `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`). Two gather shapes:
-  discretize and quantileTransform gather the raw values (`Doubles`, 8 bytes per row) because quantiles need
-  the order statistics; svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ taken
+  discretize and quantileTransform gather the raw values (`Doubles` / `QuantileTransform.Values`, 8 bytes per
+  row) because quantiles need the order statistics — quantileTransform per time block, as a `Summary` family
+  that is a monoid without inverse (merge = concatenation), so a `BlockSeries` serves `static` (one block),
+  `forward` (a prefix) and a `window` (a range, merged rather than differenced) and the knots are re-fitted per
+  change point, exactly the static fit on the readable values (`QuantileModel`, the twin of `SvdModel`); svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ taken
   relative to the first accepted vector so a large offset does not cancel the covariance away; merging
   re-anchors exactly — one `Combine`, no row leaves the workers) and diagonalises the d × d matrix on the
   driver (cyclic Jacobi, convergence judged relative to the Frobenius norm).
@@ -645,11 +648,9 @@ roughly linear in the input).
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
 sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
-array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; `fit.mode: forward` for
-quantileTransform (static-only today, so the fit sees the test period too — no label leak, but a drifting field
-is placed in a distribution it could not have been placed in at the time; svd has it through `BlockSeries`, see
-below, quantileTransform needs a per-block summary of the value sets — sorted arrays merged on one worker, or a
-sketch); the run-time availability
+array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; a sketch-backed (approximate,
+bounded-size) fit state for quantileTransform and the per-key quantile / distribution stats in static / fold —
+the forward quantileTransform below keeps the exact values; the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
 sequence / population stages as fold-in merge targets (composite sorter key, §9.4.3); the prefix-scan
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries
@@ -677,11 +678,22 @@ only feed `type: svd`. It is a plain row op — no stage, no state, availability
 the first of the three supplies of the vector operators; the sequence-window and context-group supplies will
 call the same `VectorOps` readouts for the statistics that have no `Summary` family (scan).
 
-**Fit-stage fan-out (performance, not correctness)**: every static-fit block is its own
-`Extract → Combine.globally → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expands
-into ~34 Dataflow steps and the stage time grows with the block count (a consumer measured 13 → 20 min on 148k
-rows against the previous config). The fix is one keyed gather per block kind and stage (`KV<block, value>` →
-`Combine.perKey` → the models as one `View.asMap`), keeping the `StaticFitBlock` contract; not done yet.
+**Fit-stage fan-out (performance, not correctness)**: every static-fit block used to be its own
+`Extract → Combine → Gather → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expanded
+into ~34 Dataflow steps and the stage time grew with the block count (a consumer measured 13 → 20 min on 148k
+rows against the previous config). Blocks whose fit state is a `Summary` family now declare only what a row
+contributes and how the model is solved (`SummaryFitBlock`: `contribution(row)` → (time block, value),
+`solve(parts, planHash)`), and the stage fits them together (`fitSummaryBlocks`): per family ONE extraction pass
+over the rows (the row map is built once for every block, not once per block), ONE `Combine.perKey` keyed by
+(block, time block), a regrouping by block and one solve per block — the blocks solve in parallel, each on the
+worker its group lands on — and the models of every family reach `FitApplyDoFn` as ONE list side input of
+(block, model), indexed once per DoFn instance (a list, not a map view: a map side input is a state fetch per
+lookup on a portable runner). A block that fits an empty input too (quantileTransform: n = 0 is still an
+artifact) adds an empty marker part so its group exists; svd, which has no model without vectors, does not. On
+the test graph with eight blocks the stage's top-level transforms go 40 → 14 (289 → 38 nodes including composite
+internals) and no longer grow with the block count. svd (moments) and quantileTransform (values) are on it;
+discretize (the same gathered values) and the fm / joint fits keep their own chains. The Dataflow wall-clock
+measurement on the consumer's 13-block config is still to be recorded here.
 
 ### 9.3 S1: the keyed stages' own external sort (`KeyedSpillSorter`)
 

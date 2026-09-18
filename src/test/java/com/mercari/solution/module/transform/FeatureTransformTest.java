@@ -1380,6 +1380,159 @@ public class FeatureTransformTest {
         Assertions.assertFalse(new java.io.File(dirs[0], "price_z.quantiles.json").exists(), "no artifact URI for the second block");
     }
 
+    private static String quantileForwardConfig(final String dir, final String extra) {
+        final String blocks = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                      bins: 4
+                      fit: {mode: forward, blocks: {size: P7D}%s, artifact: {uri: "%s"}}
+                """.formatted(extra, dir);
+        return FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+    }
+
+    private static Map<String, MElement> byRow(final Iterable<MElement> rows) {
+        final Map<String, MElement> byKey = new HashMap<>();
+        for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+        return byKey;
+    }
+
+    /**
+     * quantileTransform under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874):
+     * every row is placed in the distribution of the complete preceding blocks. A reads nothing; B (200) lies above
+     * {50, 100} → 1; C reads {50, 100, 200}, knots (50, 75, 100, 150, 200): 80 → (1 + 5/25) / 4 = 0.3, 60 → (10/25) / 4
+     * = 0.1; D reads {50, 60, 80, 100, 200}, knots = the values: 120 → (3 + 20/100) / 4 = 0.8 (the static fit, which
+     * counts D itself, puts it at 0.76). The artifact holds the whole-input knots.
+     */
+    @Test
+    public void testQuantileTransformForwardFit() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + quantileForwardConfig(dir, "")));
+        Assertions.assertEquals("forward", outputs.get("features").getSchema().getField("f_price_q").getOptions().get("feature.coord.fit"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertEquals(6, byKey.size());
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_price_q"));
+            Assertions.assertNull(byKey.get("A/s2").getPrimitiveValue("f_price_q"));
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.3, byKey.get("C/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.1, byKey.get("C/s2").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.8, byKey.get("D/s1").getAsDouble("f_price_q"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final java.io.File artifact = new java.io.File(dirs[0], "price_q.quantiles.json");
+        Assertions.assertTrue(artifact.exists(), "the whole-input knots are persisted for a static serving run");
+        Assertions.assertEquals(6, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject().get("n").getAsLong());
+
+        // window: P14D → two blocks. C reads (2870, 2872) → block 2870 alone ({200}: 80 lies below it → 0);
+        // D reads block 2872 ({60, 80}: 120 lies above → 1)
+        final TestPipeline windowed = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> windowedOut = MPipeline.apply(windowed, Config.load(SOURCE_CONFIG + quantileForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", window: P14D")));
+        PAssert.that(windowedOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.0, byKey.get("C/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(1.0, byKey.get("D/s1").getAsDouble("f_price_q"), 1e-9);
+            return null;
+        });
+        windowed.run();
+
+        // minBlocks: 2 → B (one preceding block) reads nothing, C (two) reads the same knots as above
+        final TestPipeline min = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> minOut = MPipeline.apply(min, Config.load(SOURCE_CONFIG + quantileForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", minBlocks: 2")));
+        PAssert.that(minOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_price_q"));
+            Assertions.assertEquals(0.3, byKey.get("C/s1").getAsDouble("f_price_q"), 1e-9);
+            return null;
+        });
+        min.run();
+    }
+
+    /**
+     * A fit stage with many summary-fit blocks (five quantile transforms — static, forward, one over a field without a
+     * single value — and three svds, static and forward) shares ONE {@code Combine.perKey} per summary family and one
+     * side input, instead of a chain per block; the values are what each block gives on its own (duplicates agree, the
+     * forward blocks read the hand-computed values of their own tests), and the block without values still fits
+     * (n = 0: null everywhere) and writes its artifact.
+     */
+    @Test
+    public void testFitStageSharesOneCombinePerFamily() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - {name: q1, scope: population, type: quantileTransform, input: start_price, bins: 5, fit: {artifact: {uri: "%1$s"}}}
+                    - {name: q1_again, scope: population, type: quantileTransform, input: start_price, bins: 5}
+                    - {name: q_bid, scope: population, type: quantileTransform, input: current_bid_t10, bins: 5, distribution: normal}
+                    - {name: q_forward, scope: population, type: quantileTransform, input: start_price, bins: 4, fit: {mode: forward, blocks: {size: P7D}}}
+                    - {name: q_empty, scope: population, type: quantileTransform, input: reserve_price, bins: 5, fit: {artifact: {uri: "%1$s"}}}
+                    - {name: pc, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2}
+                    - {name: pc_again, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2, fit: {artifact: {uri: "%1$s"}}}
+                    - {name: pc_forward, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2, fit: {mode: forward, blocks: {size: P7D}}}
+                """.formatted(dir);
+        // reserve_price: declared, never present in a row
+        final String source = SOURCE_CONFIG.replace("        - {name: final_price, type: float64}\n",
+                "        - {name: final_price, type: float64}\n        - {name: reserve_price, type: float64}\n");
+        final String config = FEATURE_CONFIG
+                .replace("              - {name: start_price, type: float64, kind: attribute}\n",
+                        "              - {name: start_price, type: float64, kind: attribute}\n              - {name: reserve_price, type: float64, kind: attribute}\n")
+                .replace("start_price, condition_grade], from: listings}", "start_price, condition_grade, reserve_price], from: listings}")
+                .replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        Assertions.assertTrue(source.contains("reserve_price") && config.contains("reserve_price, type: float64, kind: attribute") && config.contains("condition_grade, reserve_price]"),
+                "the schema / contract / lineage lines must match the text blocks' runtime indentation");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(source + config));
+
+        // the graph: one Combine per family for the whole stage, no per-block chains
+        final Set<String> names = transformNames();
+        // eight blocks: the stage's top-level transforms stay a handful (a chain per block made it 40)
+        final long fitTransforms = names.stream().filter(n -> n.startsWith("features/") && n.contains("_fit_") && n.indexOf('/', "features/".length()) < 0).count();
+        Assertions.assertTrue(fitTransforms <= 16, "fit stage transforms: " + fitTransforms);
+        Assertions.assertEquals(1, names.stream().filter(n -> n.startsWith("features/") && n.endsWith("_FitValues_Combine")).count(), names::toString);
+        Assertions.assertEquals(1, names.stream().filter(n -> n.startsWith("features/") && n.endsWith("_FitMoments_Combine")).count(), names::toString);
+        Assertions.assertEquals(1, names.stream().filter(n -> n.startsWith("features/") && n.endsWith("_FitModelsView")).count(), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "_Quantiles_"), names::toString);
+        Assertions.assertFalse(hasTransform(names, "features", "_Svd_"), names::toString);
+
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertEquals(6, byKey.size());
+            double sum0 = 0;
+            for (final MElement row : byKey.values()) {
+                Assertions.assertEquals(row.getAsDouble("f_q1"), row.getAsDouble("f_q1_again"), 0, row::toString);
+                Assertions.assertNotNull(row.getPrimitiveValue("f_q_bid"), row::toString);
+                Assertions.assertNull(row.getPrimitiveValue("f_q_empty"), "no value was ever seen: " + row);
+                for (int k = 0; k < 2; k++) Assertions.assertEquals(row.getAsDouble("f_pc_" + k), row.getAsDouble("f_pc_again_" + k), 0, row::toString);
+                sum0 += row.getAsDouble("f_pc_0");
+            }
+            Assertions.assertEquals(0.0, sum0, 1e-9, "centred scores");
+            // the static transform of the cheapest / dearest listing, and the forward values of testQuantileTransformForwardFit
+            Assertions.assertEquals(0.0, byKey.get("A/s2").getAsDouble("f_q1"), 1e-9);
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_q1"), 1e-9);
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_q_forward"));
+            Assertions.assertEquals(0.3, byKey.get("C/s1").getAsDouble("f_q_forward"), 1e-9);
+            Assertions.assertEquals(0.8, byKey.get("D/s1").getAsDouble("f_q_forward"), 1e-9);
+            // and of testSvdForwardFit
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_pc_forward_0"));
+            final double[] d = svdScores(VEC_D1, VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2);
+            Assertions.assertEquals(d[0], byKey.get("D/s1").getAsDouble("f_pc_forward_0"), 1e-9);
+            Assertions.assertEquals(d[1], byKey.get("D/s1").getAsDouble("f_pc_forward_1"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        Assertions.assertTrue(new java.io.File(dirs[0], "q1.quantiles.json").exists());
+        Assertions.assertTrue(new java.io.File(dirs[0], "pc_again.svd.json").exists());
+        final java.io.File empty = new java.io.File(dirs[0], "q_empty.quantiles.json");
+        Assertions.assertTrue(empty.exists(), "a fit without a single value is still an artifact (n = 0)");
+        Assertions.assertEquals(0, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(empty.toPath())).getAsJsonObject().get("n").getAsLong());
+        Assertions.assertFalse(new java.io.File(dirs[0], "q1_again.quantiles.json").exists(), "no artifact URI, no artifact");
+    }
+
     /**
      * svd over (start_price, current_bid_t10): the bid tracks the price (+5..+10), so the first component carries
      * nearly all the variance and the scores are centred and uncorrelated; the artifact holds the fitted moments.
