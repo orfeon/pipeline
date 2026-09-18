@@ -683,6 +683,34 @@ public class FeaturePlanCompilerTest {
         return SPEC.substring(0, start) + encodingBlock.replaceAll("(?m)^    ", "") + SPEC.substring(end);
     }
 
+    /**
+     * The residual's scale is the key {@code on} — a boolean under YAML 1.1, where a YAML spec delivered it as
+     * {@code "true"} and the residual fell back to identity without a word. Configs are parsed as YAML 1.2 (core
+     * schema), so the key keeps its name: a bare and a quoted {@code on} both reach the column.
+     */
+    @Test
+    public void testResidualScaleFromYaml() {
+        Assertions.assertEquals("identity", column(compile(SOURCES, SPEC), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("logit", column(compile(SOURCES, SPEC.replace("on: identity", "on: logit")), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("log", column(compile(SOURCES, SPEC.replace("on: identity", "\"on\": log")), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("identity", column(compile(SOURCES, SPEC.replace("    on: identity\n", "")), "vs_market").getCoordinates().get("on"), "the default");
+        // the parsed document carries the key under its own name, never as the boolean's text
+        final JsonObject specJson = Config.convertConfigJson(SPEC.replace("on: identity", "on: logit"), Config.Format.yaml);
+        int residuals = 0;
+        for (final com.google.gson.JsonElement f : specJson.getAsJsonArray("features")) {
+            final JsonObject block = f.getAsJsonObject();
+            Assertions.assertFalse(block.has("true"), block::toString);
+            if (block.has("on")) {
+                Assertions.assertEquals("logit", block.get("on").getAsString());
+                residuals++;
+            }
+        }
+        Assertions.assertEquals(1, residuals);
+        // an unknown scale is rejected, and the plan hash sees the scale
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("on: identity", "on: probit")), "row.residual.on"));
+        Assertions.assertNotEquals(compile(SOURCES, SPEC).getHash(), compile(SOURCES, SPEC.replace("on: identity", "on: logit")).getHash());
+    }
+
     @Test
     public void testEngineRowIdMustBeInputFields() {
         final FeaturePlan bad = compile(SOURCES, SPEC.replace("output:\n", "engine: {rowId: [session_id, nope]}\noutput:\n"));
