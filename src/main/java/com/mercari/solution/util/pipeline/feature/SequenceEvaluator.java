@@ -486,18 +486,28 @@ public class SequenceEvaluator implements Serializable {
     /**
      * What one past row contributes to the column's summary, or null when it contributes nothing (a missing
      * value); overridden by the population evaluator. A field-less count contributes a bare 0 (every visible row
-     * counts, nulls included); a field contributes its numeric value.
+     * counts, nulls included); a field contributes its numeric value when it is {@link #finite}.
      */
     Object contribution(final ColumnPlan plan, final Past p) {
         if (plan.field == null) return 0d;
         if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
-        return FeatureValues.toDouble(p.values().get(plan.field));
+        return finite(p.values().get(plan.field));
     }
 
-    /** The (x, y) contribution of a regression, or null when either value is missing / NaN. */
+    /**
+     * A past value as a statistic of the window reads it: null when missing — null, non-numeric, NaN or ±∞. The
+     * incremental and the scan path share this rule; a non-finite contribution would also poison a running sum for
+     * good (NaN stays NaN, and evicting an ∞ leaves ∞ − ∞ = NaN), where the scan recovers once it leaves the window.
+     */
+    static Double finite(final Object value) {
+        final Double d = FeatureValues.toDouble(value);
+        return d == null || !Double.isFinite(d) ? null : d;
+    }
+
+    /** The (x, y) contribution of a regression, or null when either value is missing ({@link #finite}). */
     private static double[] pair(final Object x, final Object y) {
-        final Double dx = FeatureValues.toDouble(x), dy = FeatureValues.toDouble(y);
-        return dx == null || dy == null || dx.isNaN() || dy.isNaN() ? null : new double[]{dx, dy};
+        final Double dx = finite(x), dy = finite(y);
+        return dx == null || dy == null ? null : new double[]{dx, dy};
     }
 
     /**
@@ -660,13 +670,13 @@ public class SequenceEvaluator implements Serializable {
         return lo;
     }
 
-    /** The present (non-null, non-NaN) values of a field over the window, oldest first. */
+    /** The present ({@link #finite}) values of a field over the window, oldest first. */
     private static double[] series(final List<Past> window, final String field) {
         final double[] x = new double[window.size()];
         int n = 0;
         for (final Past p : window) {
-            final Double d = FeatureValues.toDouble(p.values().get(field));
-            if (d != null && !d.isNaN()) x[n++] = d;
+            final Double d = finite(p.values().get(field));
+            if (d != null) x[n++] = d;
         }
         return n == x.length ? x : Arrays.copyOf(x, n);
     }
@@ -682,7 +692,7 @@ public class SequenceEvaluator implements Serializable {
             if (v == null) continue;
             if (first == null) first = v;
             last = v;
-            final Double d = FeatureValues.toDouble(v);
+            final Double d = finite(v);
             if (d != null) values.add(d);
         }
         return switch (func) {
@@ -726,7 +736,7 @@ public class SequenceEvaluator implements Serializable {
         int n = 0;
         double sumW = 0, sumWx = 0;
         for (final Past p : window) {
-            final Double x = field == null ? Double.valueOf(0d) : FeatureValues.toDouble(p.values().get(field));
+            final Double x = field == null ? Double.valueOf(0d) : finite(p.values().get(field));
             if (x == null) continue;
             for (final String f : weight.pastFields()) variables.put(f, FeatureValues.toDouble(p.values().get(f)));
             final double w = weight.expression().evaluate(variables);

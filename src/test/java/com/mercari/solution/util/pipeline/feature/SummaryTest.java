@@ -95,6 +95,14 @@ public class SummaryTest {
         Assertions.assertNull(m.read(empty, Summary.Readout.of("mean")));
         Assertions.assertNull(m.read(fold(m, List.of(3.0)), Summary.Readout.of("std")));
         Assertions.assertThrows(IllegalArgumentException.class, () -> m.read(s, Summary.Readout.of("max")));
+        // an emptied window starts over: the evictions leave no residue behind for the next values
+        final Summary.Moments.State emptied = fold(m, List.of(0.1, 0.7, 1e8));
+        for (final double x : new double[]{0.1, 0.7, 1e8}) m.update(emptied, x, -1);
+        Assertions.assertEquals(0.0, emptied.sum);
+        Assertions.assertEquals(0.0, emptied.sumSq);
+        m.update(emptied, 2.0, 1);
+        m.update(emptied, 2.0, 1);
+        Assertions.assertEquals(0.0, (Double) m.read(emptied, Summary.Readout.of("std")));
         final Summary.Readout[] readouts = {COUNT, Summary.Readout.of("sum"), Summary.Readout.of("mean"), Summary.Readout.of("std")};
         assertMonoid(m, xs, readouts);
         final Random random = new Random(3);
