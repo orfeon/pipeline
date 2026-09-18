@@ -2,6 +2,10 @@
 
 Define the pipeline contents in YAML/JSON format and specify using the config parameter.
 
+YAML configs are parsed as YAML 1.2 (core schema), a superset of JSON: a YAML config means exactly the same as
+its JSON form. Unquoted `yes`/`no`/`on`/`off`, dates such as `2024-01-01` and `1:30` stay strings (only
+`true`/`false` are booleans, `null`/`~`/empty are null), and duplicate keys are an error.
+
 > This directory (`src/main/resources/server/docs/`) is the canonical documentation tree for both humans
 > and the Pipeline server's AI agent / MCP server / Pipeline Builder UI (the files are bundled on the
 > classpath and read at runtime). Keep each page self-contained.

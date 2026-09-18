@@ -763,7 +763,87 @@ public final class FeaturePlanCompiler {
                 for (final String f : rowIdentity()) addSelfInput(c, f);
                 finishRow(c, def);
             }
+            case "vector" -> expandVector(def, computeAt);
             default -> diagnostics.error("row.type", loc, "unsupported row type: " + type);
+        }
+    }
+
+    /** The highest {@code degree} of a vector polyfit: beyond it the Vandermonde system of a short array is ill-conditioned. */
+    private static final int MAX_VECTOR_DEGREE = 5;
+
+    /**
+     * Row {@code type: vector}: scalar readouts of a numeric array field. The steps run slice → diff → normalize,
+     * then each of {@code funcs} reads one column {@code <name>_<func>} ({@code polyfit}: one column
+     * {@code <name>_poly<k>} per coefficient). The columns inherit the array field's availability.
+     */
+    private void expandVector(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final String input = singleInput(def);
+        if (input == null) return;
+        final Ref ref = resolve(input);
+        if (ref == null || ref.type() == null || ref.type().getType() != Schema.Type.array || !OperatorCatalog.isNumeric(ref.type().getArrayValueType())) {
+            diagnostics.error("row.vector.input", loc, "vector input '" + input + "' must be an array of numbers (declare it as array<float64> in the sources contract)");
+            return;
+        }
+        if (def.funcs.isEmpty()) {
+            diagnostics.error("row.vector.funcs", loc, "vector requires 'funcs' (available: " + String.join(" | ", OperatorCatalog.VECTOR_FUNCS) + ")");
+            return;
+        }
+        boolean valid = true;
+        for (final String func : def.funcs) {
+            if (OperatorCatalog.vectorOutput(func) == null) {
+                diagnostics.error("row.vector.funcs", loc, "unknown vector func: " + func + " (available: " + String.join(" | ", OperatorCatalog.VECTOR_FUNCS) + ")");
+                valid = false;
+            }
+        }
+        if (new LinkedHashSet<>(def.funcs).size() != def.funcs.size()) {
+            diagnostics.error("row.vector.funcs", loc, "funcs lists a readout twice: " + def.funcs);
+            valid = false;
+        }
+        if (def.sliceMalformed) {
+            diagnostics.error("row.vector.slice", loc, "slice must be an object {from, to}: elements [from, to), a negative index counts from the end");
+            valid = false;
+        }
+        if (def.diff != null && def.diff < 0) {
+            diagnostics.error("row.vector.diff", loc, "diff must be >= 0 (the differencing order): " + def.diff);
+            valid = false;
+        }
+        if (def.normalize != null && !OperatorCatalog.VECTOR_NORMALIZATIONS.contains(def.normalize)) {
+            diagnostics.error("row.vector.normalize", loc, "normalize must be " + String.join(" | ", OperatorCatalog.VECTOR_NORMALIZATIONS) + ": " + def.normalize);
+            valid = false;
+        }
+        final String position = def.position == null ? "index" : def.position;
+        if (!List.of("index", "unit").contains(position)) {
+            diagnostics.error("row.vector.position", loc, "position must be index | unit: " + position);
+            valid = false;
+        }
+        final boolean polyfit = def.funcs.contains("polyfit");
+        final int degree = def.degree == null ? 2 : def.degree;
+        if (def.degree != null && !polyfit) {
+            diagnostics.warning("row.vector.degree", loc, "degree only applies to the polyfit readout, which funcs does not list");
+        } else if (polyfit && (degree < 1 || degree > MAX_VECTOR_DEGREE)) {
+            diagnostics.error("row.vector.degree", loc, "degree must be 1.." + MAX_VECTOR_DEGREE + ": " + degree);
+            valid = false;
+        }
+        if (!valid) return;
+        for (final String func : def.funcs) {
+            final int coefficients = "polyfit".equals(func) ? degree + 1 : 1;
+            for (int k = 0; k < coefficients; k++) {
+                final String name = def.name + "_" + ("polyfit".equals(func) ? "poly" + k : func);
+                final OutputColumn c = newColumn(def.name, Scope.row, "vector", name, OperatorCatalog.vectorOutput(func), computeAt);
+                c.coordinates.put("func", func);
+                if (def.sliceFrom != null) c.coordinates.put("sliceFrom", Integer.toString(def.sliceFrom));
+                if (def.sliceTo != null) c.coordinates.put("sliceTo", Integer.toString(def.sliceTo));
+                if (def.diff != null && def.diff > 0) c.coordinates.put("diff", Integer.toString(def.diff));
+                if (def.normalize != null) c.coordinates.put("normalize", def.normalize);
+                if ("slope".equals(func) || "polyfit".equals(func)) c.coordinates.put("position", position);
+                if ("polyfit".equals(func)) {
+                    c.coordinates.put("degree", Integer.toString(degree));
+                    c.coordinates.put("coefficient", Integer.toString(k));
+                }
+                addSelfInput(c, input);
+                finishRow(c, def);
+            }
         }
     }
 

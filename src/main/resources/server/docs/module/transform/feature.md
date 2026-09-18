@@ -19,7 +19,8 @@ model that cannot be served.
 Supports:
 
 - **row** scope — expressions, calendar decomposition (optionally cyclical sin/cos), fixed-edge binning,
-  categorical crosses, per-value indicators, field equality, residuals against a named baseline.
+  categorical crosses, per-value indicators, field equality, residuals against a named baseline, readouts
+  of a numeric array field (`type: vector`: slice / diff / normalize, then mean / slope / argmax / polyfit …).
 - **context** scope — statistics relative to the rows that co-occur in the same group (rank, z-score,
   share of total, gap to best, percentile, median difference, group size, value counts / ratios, entropy).
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
@@ -111,6 +112,7 @@ features:
   - {name: kept_grade, scope: row, type: equals, inputs: [condition_grade, recent_all_condition_grade_lag1]}  # 1/0, null if either side is null
   - {name: vs_market, scope: row, type: residual, input: share, baseline: market, on: identity}
   - {name: placebo_noise, scope: row, type: noise, distribution: normal, seed: 20260717}   # information-free column (see Placebos)
+  - {name: bids, scope: row, type: vector, input: bid_path, funcs: [mean, slope, argmax]}   # readouts of an array<float64> field (see Array readouts)
 
   - name: relative                  # context: inputs × ops, or ops with their own fields
     scope: context
@@ -561,6 +563,56 @@ column inherits its availability from the score and the offset, and the offset's
 price expires; so does the probability). With f = 0 and T = 1 the output equals the renormalised offset.
 `excludeSelf` has no effect. Row / context only, so the op works in streaming (an `onnx` → `feature`
 → sink serving chain).
+
+### Array readouts (row, `type: vector`)
+
+A numeric array field (`type: array<float64>` in the sources contract — the within-event series a row
+carries: the bids observed before a session, the split times of a run, the levels of an order book)
+becomes scalar columns: optional vector → vector **steps**, then one column per **readout**.
+
+```yaml
+- name: bid_step
+  scope: row
+  type: vector
+  input: bid_path            # array<float64> (any numeric element type)
+  slice: {from: -3}          # 1. elements [from, to); a negative index counts from the end; bounds are clamped
+  diff: 1                    # 2. differences of adjacent elements, applied <diff> times
+  normalize: mean            # 3. sum | mean | l2 | zscore — rescaled by the vector's own statistic
+  position: unit             # slope / polyfit positions: index (default: 0, 1, 2 …) | unit (index / (n − 1), in [0, 1])
+  funcs: [mean, slope, polyfit]
+  degree: 2                  # polyfit degree, 1..5 (default 2)
+```
+
+The steps always run in the order slice → diff → normalize; all three are optional. Readouts:
+
+| func | output | value |
+|---|---|---|
+| `length` | `<name>_length` int64 | number of elements after the steps (0 for an empty vector) |
+| `sum` / `mean` / `min` / `max` / `first` / `last` | `<name>_<func>` float64 | the usual meaning |
+| `std` | `<name>_std` float64 | population standard deviation (needs 2 elements — the convention of the sequence / encoding `std`) |
+| `argmin` / `argmax` | `<name>_<func>` int64 | index of the first minimum / maximum **within the vector the steps produced** (a slice re-bases it to 0) |
+| `norm` | `<name>_norm` float64 | Euclidean length |
+| `slope` | `<name>_slope` float64 | least-squares slope over the positions (needs 2 elements; with `position: index` the value of the sequence `trend`) |
+| `polyfit` | `<name>_poly0` … `<name>_poly<degree>` float64 | least-squares polynomial coefficients in ascending order, `c0 + c1·p + …` (needs `degree + 1` elements) |
+
+- **Positions.** `index` measures `slope` / `polyfit` per element; `unit` spreads the elements over [0, 1],
+  which makes the coefficients comparable between rows whose arrays differ in length.
+- **Nulls.** A null array, or an array holding a null / NaN / infinite element, reads null for every
+  readout (`length` included): a vector with a hole has no defined readout. A readout that is undefined on
+  the vector at hand — too few elements, a `normalize` whose denominator is 0, a non-finite result — is
+  null, never NaN. An empty vector (an empty array, or a slice beyond it) has `length` 0 and no other
+  readout. A `repeated` input field without a value arrives as the empty array, not as null.
+- **Availability and lineage** are the array field's own: the readouts are ordinary row columns, so an
+  `expr` composes them (`bids_last / bids_mean`), a context / sequence / encoding block consumes them, and
+  an array that is an outcome is rejected like any other outcome field (`availability.violation`).
+- Several views of one array are several blocks (the whole path and its last three elements, say); relate
+  them with an `expr`.
+- Diagnostics: `row.vector.input` (not an array of numbers), `row.vector.funcs` (missing / unknown /
+  listed twice), `row.vector.slice`, `row.vector.diff`, `row.vector.normalize`, `row.vector.position`,
+  `row.vector.degree` (out of 1..5; a warning when `degree` is set without `polyfit`).
+
+Every parameter is part of the plan hash. The array field itself still passes through to the output
+unless `output.passThrough` / `include` drops it, and `type: svd` takes the same kind of field as its vector.
 
 ### Placebos (`type: noise`, context op `shuffle`)
 

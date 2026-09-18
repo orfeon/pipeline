@@ -91,6 +91,7 @@ sources:
 | `equals` | `inputs: [a, b]` | `<name>` int64 0/1, null if either is null |
 | `residual` | `input`, `baseline: <baselines[].name>`, `on: identity \| logit \| log` | `<name>` float64 |
 | `noise` | `distribution: normal \| uniform`, `seed` (required) | `<name>` float64 placebo: a pure function of `seed` and the row identity (`time.field` + `orderTieBreak`); pre-event |
+| `vector` | `input` (an `array<float64>` field), `funcs: [length, sum, mean, std, min, max, argmin, argmax, first, last, slope, norm, polyfit]`; optional steps applied in this order: `slice: {from, to}` (negative = from the end, clamped), `diff: <order>`, `normalize: sum \| mean \| l2 \| zscore`; `position: index \| unit` (slope / polyfit), `degree: 1..5` (polyfit, default 2) | `<name>_<func>` (float64; `length` / `argmin` / `argmax` int64), `polyfit` → `<name>_poly0..poly<degree>`. Inherits the array field's availability. Null array or a null / NaN element → every readout null; an undefined readout (too few elements, zero denominator) → null; an empty vector has `length` 0 only. A `repeated` field without a value arrives as the empty array |
 
 ## `scope: context`
 

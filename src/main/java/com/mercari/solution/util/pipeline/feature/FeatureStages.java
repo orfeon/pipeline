@@ -1215,18 +1215,7 @@ public final class FeatureStages {
 
         /** The row's vector, or null when a component is missing (null / NaN) or the array is absent. */
         double[] vector(final Map<String, Object> values) {
-            if (arrayField != null) {
-                final Object v = values.get(arrayField);
-                if (v instanceof double[] a) return a;
-                if (!(v instanceof List<?> list)) return null;
-                final double[] x = new double[list.size()];
-                for (int i = 0; i < x.length; i++) {
-                    final Double d = FeatureValues.toDouble(list.get(i));
-                    if (d == null) return null;
-                    x[i] = d;
-                }
-                return x;
-            }
+            if (arrayField != null) return VectorOps.toVector(values.get(arrayField));
             final double[] x = new double[fields.size()];
             for (int i = 0; i < x.length; i++) {
                 final Double d = FeatureValues.toDouble(values.get(fields.get(i)));

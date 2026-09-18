@@ -197,6 +197,12 @@ convention). Therefore:
   `deviation`, `effectiveN`) are row operators too, as is `mapValue` — one listed category's share read
   from a `distribution` map column that `targets[].values` turned into an intermediate (the flat
   per-category FLOAT64 columns a sink or a model consumes, the `countByValue` / `values` rule).
+- `vector` reads scalar columns out of a numeric array field (`VectorOps`, pure functions over `double[]`):
+  the steps slice → diff → normalize, then one column per readout (`polyfit`: one per coefficient). Vector
+  outputs are always expanded into scalar columns — the svd scores' convention — because Avro round-trips
+  `array<double>` at float precision on this classpath and the consumers are tabular models. The readout
+  catalog is `OperatorCatalog.VECTOR_FUNCS`; a vector with a missing component has no readout (the rule
+  `SvdSpec.vector` applies to the same kind of field, now the shared `VectorOps.toVector`).
 - The spec's "expression AST shared with an optimisation transform" has no counterpart here; the
   shared component is `ExpressionUtil` (+ `Filter` for predicates and window filters, which are parsed and
   reserved-word-quoted at compile time by `conditionText`).
@@ -643,6 +649,12 @@ block gains `window` (the range of blocks; for encodings the default of keySets 
 (`minBlocks` as a duration), both in the plan hash. The encoding levels keep their own `ForwardBlocks.Series`
 (prefix arrays + the per-block λ) for now; moving them onto `BlockSeries<Moments>` is the next step of this
 line, after which one Combine per summary family serves every block kind of a fit stage (the fan-out item above).
+
+**Row vector op** (proposal-feature-unification §2.5, the row supply). `type: vector` turns an
+`array<float64>` input into scalar readout columns through `VectorOps` (§4.1); until then an array field could
+only feed `type: svd`. It is a plain row op — no stage, no state, availability inherited from the field — and
+the first of the three supplies of the vector operators; the sequence-window and context-group supplies will
+call the same `VectorOps` readouts for the statistics that have no `Summary` family (scan).
 
 **Fit-stage fan-out (performance, not correctness)**: every static-fit block is its own
 `Extract → Combine.globally → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expands

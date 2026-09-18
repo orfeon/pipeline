@@ -114,13 +114,20 @@ reads what the compile layer wrote into each column's `coordinates`.
   (fm / fwfm ALS + `<block>.fm.avro`), `OrderStatistics` (Fenwick-tree block multiset for
   quantiles with eviction), `FitArtifact` (`<uri>/<planHash>/<block>.avro` + manifest for encoding
   levels), `Durations` (ISO-8601 + calendar periods + column tokens; **kept separate** from
-  `outbound.Durations` by decision), `FeatureValues` (value coercion, keys, `keyWithNullTokens`).
+  `outbound.Durations` by decision), `FeatureValues` (value coercion, keys, `keyWithNullTokens`),
+  `VectorOps` (pure `double[]` functions: `toVector` — shared with `SvdSpec`, a hole = no vector —,
+  `slice` / `diff` / `normalize`, `read` / `polyfit`; the home of scan readouts over a vector, fed today by a
+  row's array field and meant to be fed by a sequence window and a context group too,
+  proposal-feature-unification §2.5).
 
 ### Evaluators (`Serializable`, Beam-free, one instance per stage DoFn)
 
 - `RowEvaluator.evaluateColumn` — `switch (c.operator)`: `expr` / `baseline` (Lucene expression
   engine, **doubles only**), `datetime`, `bin`, `cross`, `indicator`, `equals`, `residual`,
   `isnull`, `copy` (baselines[].emit), `noise` (murmur3 of seed + row identity → `SplittableRandom`),
+  `vector` (readouts of a numeric array field: a `VectorOps.Plan` per column resolved from the coordinates in
+  `setup()` — steps slice → diff → normalize, then a readout; the readout names live in
+  `OperatorCatalog.VECTOR_FUNCS`, `polyfit` expands to one column per coefficient),
   and the hidden-level readers of a lattice: `share`, `fitStat`, `compose` (a scalar, or a map when the
   `family` coordinate is `dirichletMultinomial`; `targets[].values` turns that map into an intermediate read
   by one `mapValue` row column per listed category — `expandDistributionValues`), `deviation`, `effectiveN` (λ from `setLambdas`, the

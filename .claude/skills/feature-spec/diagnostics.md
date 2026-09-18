@@ -109,7 +109,7 @@ not expand because another block failed).
 
 | code | level | meaning / fix |
 |---|---|---|
-| `row.type` | error | `expr` or `type: datetime \| bin \| cross \| indicator \| equals \| residual \| noise` |
+| `row.type` | error | `expr` or `type: datetime \| bin \| cross \| indicator \| equals \| residual \| noise \| vector` |
 | `row.input` | error | the type needs exactly one `input` |
 | `row.expr.type` | error | an operand is not numeric / bool — expressions are evaluated as doubles; use `cross` / `indicator` / `equals` for strings |
 | `row.self` | error | `$self` is only valid inside `window.filter` |
@@ -120,6 +120,10 @@ not expand because another block failed).
 | `row.residual.baseline` / `row.residual.on` | error | `baseline` must name a baseline; `on` is identity / logit / log |
 | `row.noise.seed` / `row.noise.distribution` | error | `noise` needs an integer `seed`; `distribution` is normal / uniform |
 | `row.noise.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp get the same draw; declare a tie-break |
+| `row.vector.input` | error | `vector` needs one `input` that is an array of numbers — declare the field as `array<float64>` in the sources contract |
+| `row.vector.funcs` | error | `funcs` is missing, lists an unknown readout (the message lists the available ones) or lists one twice |
+| `row.vector.slice` / `row.vector.diff` / `row.vector.normalize` / `row.vector.position` | error | `slice` is an object `{from, to}`; `diff` ≥ 0; `normalize` is sum / mean / l2 / zscore; `position` is index / unit |
+| `row.vector.degree` | error / warning | polyfit `degree` must be 1..5; a warning when `degree` is set but `funcs` has no `polyfit` |
 | `baselines.emit.duplicate` | error | `emit` name collides with a column or input field |
 
 ## Context
