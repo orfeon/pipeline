@@ -270,23 +270,6 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(sources, SPEC), "sources.fields.observedAtField"));
     }
 
-    @Test
-    public void testUnresolvedReferenceAndCycle() {
-        final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / nosuchfield\"");
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "reference.unresolved"));
-
-        final String cyclic = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / vs_market\"");
-        final FeaturePlan plan = compile(SOURCES, cyclic);
-        Assertions.assertTrue(hasCode(plan, "reference.cycle"), plan::describe);
-        Assertions.assertTrue(plan.getDiagnostics().hasErrors());
-    }
-
-    @Test
-    public void testSelfInOpExpressionIsRejected() {
-        final String spec = SPEC.replace("expr: \"sold >= 1\", halflife: [5]", "expr: \"start_price - $self.start_price\", halflife: [5]");
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "sequence.self"));
-    }
-
     /**
      * The two-series {@code regression} op (one column per func, both series projected into the history, the lagged
      * pairing marked for the scan path) and {@code fracdiff} (d and k in the coordinates, a bounded tail).
@@ -336,6 +319,23 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4, k: 10", "k: 10")), "sequence.fracdiff.d"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4", "d: 2.5")), "sequence.fracdiff.d"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("k: 10}", "k: 1}")), "sequence.fracdiff.k"));
+    }
+
+    @Test
+    public void testUnresolvedReferenceAndCycle() {
+        final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / nosuchfield\"");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "reference.unresolved"));
+
+        final String cyclic = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / vs_market\"");
+        final FeaturePlan plan = compile(SOURCES, cyclic);
+        Assertions.assertTrue(hasCode(plan, "reference.cycle"), plan::describe);
+        Assertions.assertTrue(plan.getDiagnostics().hasErrors());
+    }
+
+    @Test
+    public void testSelfInOpExpressionIsRejected() {
+        final String spec = SPEC.replace("expr: \"sold >= 1\", halflife: [5]", "expr: \"start_price - $self.start_price\", halflife: [5]");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec), "sequence.self"));
     }
 
     @Test

@@ -56,7 +56,6 @@ public class SequenceIncrementalTest {
                 entity: seller
                 ops:
                   - {type: aggregate, field: start_price, funcs: [max, min, count]}
-                  - {type: regression, field: sold, against: start_price, funcs: [beta]}
               - name: enc
                 scope: population
                 type: encoding
@@ -146,75 +145,6 @@ public class SequenceIncrementalTest {
     }
 
     /**
-     * Hand-checked values of the two-series and the fractional-difference ops on a short history (x = 1..6,
-     * y = 2x + 1 with y of the third event missing): the same-event regression is the exact line, the lagged one pairs
-     * y with x two events earlier, fracdiff applies (1 − B)^d truncated to k terms — d = 1 is the first difference.
-     */
-    @Test
-    public void testRegressionAndFracdiffValues() {
-        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
-        final String spec = """
-                lineage:
-                  - {fields: [session_id, seller_id, condition_grade, start_price, sold], from: listings}
-                time: {field: session_time}
-                predictAt: "event_time - PT10M"
-                entities:
-                  - {name: seller, keys: [seller_id]}
-                features:
-                  - name: pair
-                    scope: sequence
-                    entity: seller
-                    ops:
-                      - {type: regression, field: sold, against: start_price, funcs: [cov, corr, beta, intercept, r2]}
-                      - {type: regression, field: sold, against: start_price, lag: 2, funcs: [beta, intercept]}
-                      - {type: fracdiff, field: start_price, d: 1, k: 3}
-                      - {type: fracdiff, field: start_price, d: 0.5, k: 4}
-                """;
-        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(spec, Config.Format.yaml), null);
-        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
-        final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
-        final SequenceEvaluator evaluator = new SequenceEvaluator(columns);
-        evaluator.setup();
-        // sold's window shift does not matter here: the row is evaluated far after the history
-        final List<SequenceEvaluator.Past> history = new ArrayList<>();
-        final long base = 1_700_000_000_000L;
-        for (int i = 1; i <= 6; i++) {
-            final Map<String, Object> values = new HashMap<>();
-            values.put("start_price", (double) i);
-            values.put("sold", i == 3 ? null : 2.0 * i + 1);
-            history.add(new SequenceEvaluator.Past(base + i * 1000L, values));
-        }
-        final long now = base + 100L * 86_400_000L;
-        final Map<String, Object> row = new HashMap<>(Map.of("seller_id", "s1"));
-        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState();
-        final java.util.function.Function<String, Object> read = name -> evaluator.evaluateColumn(plan.getColumn(name), row, now, history, state);
-        // x ∈ {1, 2, 4, 5, 6}: mean 3.6, var = 3.44; y = 2x + 1 exactly
-        assertSame("cov", 2 * 3.44, read.apply("pair_all_sold_vs_start_price_cov"));
-        assertSame("beta", 2.0, read.apply("pair_all_sold_vs_start_price_beta"));
-        assertSame("intercept", 1.0, read.apply("pair_all_sold_vs_start_price_intercept"));
-        assertSame("corr", 1.0, read.apply("pair_all_sold_vs_start_price_corr"));
-        assertSame("r2", 1.0, read.apply("pair_all_sold_vs_start_price_r2"));
-        // lag 2: (x_{i−2}, y_i) for i = 4, 5, 6 (i = 3 has no y) → x = 2, 3, 4 and y = 9, 11, 13 = 2x + 5
-        assertSame("lag beta", 2.0, read.apply("pair_all_sold_vs_start_price_lag2_beta"));
-        assertSame("lag intercept", 5.0, read.apply("pair_all_sold_vs_start_price_lag2_intercept"));
-        // d = 1: x_6 − x_5 (the third weight is 0); d = 0.5: w = (1, −0.5, −0.125, −0.0625) over x = 6, 5, 4, 3
-        assertSame("diff", 1.0, read.apply("pair_all_start_price_fracdiff1"));
-        assertSame("fracdiff", 6 - 0.5 * 5 - 0.125 * 4 - 0.0625 * 3, read.apply("pair_all_start_price_fracdiff0p5"));
-        Assertions.assertArrayEquals(new double[]{1, -0.5, -0.125, -0.0625}, SequenceEvaluator.fracdiffWeights(0.5, 4), 1e-15);
-        // the scan path gives the same numbers, and a history shorter than k (or with a hole in it) has no fracdiff
-        assertSame("scan beta", 2.0, evaluator.evaluateColumn(plan.getColumn("pair_all_sold_vs_start_price_beta"), row, now, history, null));
-        Assertions.assertNull(evaluator.evaluateColumn(plan.getColumn("pair_all_start_price_fracdiff0p5"), row, now, history.subList(0, 3), null));
-        history.get(4).values().put("start_price", null);
-        Assertions.assertNull(evaluator.evaluateColumn(plan.getColumn("pair_all_start_price_fracdiff0p5"), row, now, history, null));
-
-        // the same-event regression folds incrementally (bounded without a window); the lagged pairing scans, its tail
-        // is bounded by maxEvents only; fracdiff reads its last k events
-        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan.getColumn("pair_all_sold_vs_start_price_beta")));
-        Assertions.assertNotNull(SequenceEvaluator.unboundedReason(plan.getColumn("pair_all_sold_vs_start_price_lag2_beta")));
-        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan.getColumn("pair_all_start_price_fracdiff0p5")));
-    }
-
-    /**
      * The keyed stage trims the history behind every column's fold / evict pointer (or maxAge far edge).
      * Replaying with trimming must give the same values as the untrimmed list, and must actually drop rows.
      */
@@ -288,6 +218,75 @@ public class SequenceIncrementalTest {
         final int retainedPeak = maxRetained;
         Assertions.assertTrue(retainedPeak < full.size() / 2, () -> "retained " + retainedPeak + " of " + full.size());
         Assertions.assertThrows(IndexOutOfBoundsException.class, () -> trimmed.get(0));
+    }
+
+    /**
+     * Hand-checked values of the two-series and the fractional-difference ops on a short history (x = 1..6,
+     * y = 2x + 1 with y of the third event missing): the same-event regression is the exact line, the lagged one pairs
+     * y with x two events earlier, fracdiff applies (1 − B)^d truncated to k terms — d = 1 is the first difference.
+     */
+    @Test
+    public void testRegressionAndFracdiffValues() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final String spec = """
+                lineage:
+                  - {fields: [session_id, seller_id, condition_grade, start_price, sold], from: listings}
+                time: {field: session_time}
+                predictAt: "event_time - PT10M"
+                entities:
+                  - {name: seller, keys: [seller_id]}
+                features:
+                  - name: pair
+                    scope: sequence
+                    entity: seller
+                    ops:
+                      - {type: regression, field: sold, against: start_price, funcs: [cov, corr, beta, intercept, r2]}
+                      - {type: regression, field: sold, against: start_price, lag: 2, funcs: [beta, intercept]}
+                      - {type: fracdiff, field: start_price, d: 1, k: 3}
+                      - {type: fracdiff, field: start_price, d: 0.5, k: 4}
+                """;
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(spec, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
+        final SequenceEvaluator evaluator = new SequenceEvaluator(columns);
+        evaluator.setup();
+        // sold's window shift does not matter here: the row is evaluated far after the history
+        final List<SequenceEvaluator.Past> history = new ArrayList<>();
+        final long base = 1_700_000_000_000L;
+        for (int i = 1; i <= 6; i++) {
+            final Map<String, Object> values = new HashMap<>();
+            values.put("start_price", (double) i);
+            values.put("sold", i == 3 ? null : 2.0 * i + 1);
+            history.add(new SequenceEvaluator.Past(base + i * 1000L, values));
+        }
+        final long now = base + 100L * 86_400_000L;
+        final Map<String, Object> row = new HashMap<>(Map.of("seller_id", "s1"));
+        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState();
+        final java.util.function.Function<String, Object> read = name -> evaluator.evaluateColumn(plan.getColumn(name), row, now, history, state);
+        // x ∈ {1, 2, 4, 5, 6}: mean 3.6, var = 3.44; y = 2x + 1 exactly
+        assertSame("cov", 2 * 3.44, read.apply("pair_all_sold_vs_start_price_cov"));
+        assertSame("beta", 2.0, read.apply("pair_all_sold_vs_start_price_beta"));
+        assertSame("intercept", 1.0, read.apply("pair_all_sold_vs_start_price_intercept"));
+        assertSame("corr", 1.0, read.apply("pair_all_sold_vs_start_price_corr"));
+        assertSame("r2", 1.0, read.apply("pair_all_sold_vs_start_price_r2"));
+        // lag 2: (x_{i−2}, y_i) for i = 4, 5, 6 (i = 3 has no y) → x = 2, 3, 4 and y = 9, 11, 13 = 2x + 5
+        assertSame("lag beta", 2.0, read.apply("pair_all_sold_vs_start_price_lag2_beta"));
+        assertSame("lag intercept", 5.0, read.apply("pair_all_sold_vs_start_price_lag2_intercept"));
+        // d = 1: x_6 − x_5 (the third weight is 0); d = 0.5: w = (1, −0.5, −0.125, −0.0625) over x = 6, 5, 4, 3
+        assertSame("diff", 1.0, read.apply("pair_all_start_price_fracdiff1"));
+        assertSame("fracdiff", 6 - 0.5 * 5 - 0.125 * 4 - 0.0625 * 3, read.apply("pair_all_start_price_fracdiff0p5"));
+        Assertions.assertArrayEquals(new double[]{1, -0.5, -0.125, -0.0625}, SequenceEvaluator.fracdiffWeights(0.5, 4), 1e-15);
+        // the scan path gives the same numbers, and a history shorter than k (or with a hole in it) has no fracdiff
+        assertSame("scan beta", 2.0, evaluator.evaluateColumn(plan.getColumn("pair_all_sold_vs_start_price_beta"), row, now, history, null));
+        Assertions.assertNull(evaluator.evaluateColumn(plan.getColumn("pair_all_start_price_fracdiff0p5"), row, now, history.subList(0, 3), null));
+        history.get(4).values().put("start_price", null);
+        Assertions.assertNull(evaluator.evaluateColumn(plan.getColumn("pair_all_start_price_fracdiff0p5"), row, now, history, null));
+
+        // the same-event regression folds incrementally (bounded without a window); the lagged pairing scans, its tail
+        // is bounded by maxEvents only; fracdiff reads its last k events
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan.getColumn("pair_all_sold_vs_start_price_beta")));
+        Assertions.assertNotNull(SequenceEvaluator.unboundedReason(plan.getColumn("pair_all_sold_vs_start_price_lag2_beta")));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan.getColumn("pair_all_start_price_fracdiff0p5")));
     }
 
     /**
