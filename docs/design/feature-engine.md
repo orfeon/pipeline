@@ -265,7 +265,10 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   construction, which `OperatorCatalog.summary(stat, weighted)` declares (`weightedAggregate`: Σw, Σw·x and
   a second pass for the deviation; the compiled expression and its `$self` / event variable split are
   resolved once in `setup()`). A weighted aggregate is bounded by `maxAge` or `maxEvents` like any scan
-  column and unbounded without them. `SequenceIncrementalTest`
+  column and unbounded without them. Both paths read a past value through one rule
+  (`SequenceEvaluator.finite`): null, non-numeric, NaN and ±∞ are missing and contribute to no statistic,
+  `count` included — a non-finite value folded into a running sum would stay there (NaN for good; ∞ − ∞ = NaN
+  once evicted) while the scan recovers when it leaves the window. `SequenceIncrementalTest`
   checks the two paths agree on random histories; `SummaryTest` checks the monoid / group laws.
 - **Scalar summaries of the window** (`aggregate` funcs). `skew` / `kurt` are sums of per-event contributions —
   `Summary.Shape`, (n, Σx..Σx⁴) about an anchor, invertible — so they take the incremental path like the moments;

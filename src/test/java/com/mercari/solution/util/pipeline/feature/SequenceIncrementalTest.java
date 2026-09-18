@@ -163,7 +163,72 @@ public class SequenceIncrementalTest {
     }
 
     /**
-     * {@code weightBy}: a weight of 1 reproduces the plain aggregate over the same window, a similarity kernel on the
+     * A NaN or ±∞ value is missing for every sequence aggregate, like null: it contributes to no statistic and no
+     * count on either path. Folded into a running sum it would stay there — NaN for good, and ∞ − ∞ = NaN once
+     * evicted — while the scan recovers as soon as it leaves the window.
+     */
+    @Test
+    public void testNonFiniteValuesAreMissing() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(SPEC, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
+        final SequenceEvaluator evaluator = new SequenceEvaluator(columns);
+        evaluator.setup();
+
+        final Random random = new Random(29);
+        long millis = 1_700_000_000_000L;
+        final List<SequenceEvaluator.Past> history = new ArrayList<>();
+        final List<SequenceEvaluator.Past> pending = new ArrayList<>();
+        long pendingMillis = Long.MIN_VALUE;
+        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState();
+        int nonFinite = 0, present = 0;
+        for (int i = 0; i < 400; i++) {
+            if (random.nextDouble() > 0.15) millis += (long) (Math.pow(10, 4 + random.nextDouble() * 5));
+            final Map<String, Object> row = new HashMap<>();
+            row.put("seller_id", "s1");
+            row.put("condition_grade", "g" + random.nextInt(3));
+            row.put("start_price", switch (random.nextInt(16)) {
+                case 0 -> null;
+                case 1 -> Double.NaN;
+                case 2 -> Double.POSITIVE_INFINITY;
+                case 3 -> Double.NEGATIVE_INFINITY;
+                default -> Math.round(random.nextDouble() * 1000) / 10.0;
+            });
+            row.put("sold", random.nextInt(12) == 0 ? null : random.nextInt(2));
+            if (millis != pendingMillis) {
+                history.addAll(pending);
+                pending.clear();
+                pendingMillis = millis;
+            }
+            for (final OutputColumn c : columns) {
+                final Object incremental = evaluator.evaluateColumn(c, row, millis, history, state);
+                final Object scan = evaluator.evaluateColumn(c, row, millis, history, null);
+                assertSame(c.getCanonicalName() + "@" + i, scan, incremental);
+                if (scan instanceof Double d) {
+                    Assertions.assertTrue(Double.isFinite(d), c.getCanonicalName() + "@" + i + " reads " + d);
+                    present++;
+                }
+            }
+            if (row.get("start_price") instanceof Double d && !Double.isFinite(d)) nonFinite++;
+            pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
+        }
+        Assertions.assertTrue(nonFinite > 50 && present > 1000, "nonFinite=" + nonFinite + " present=" + present);
+
+        // the plain aggregate over a window with a non-finite value reads the finite values only
+        final List<SequenceEvaluator.Past> window = List.of(
+                new SequenceEvaluator.Past(1L, Map.of("start_price", 1.0)),
+                new SequenceEvaluator.Past(2L, Map.of("start_price", Double.NaN)),
+                new SequenceEvaluator.Past(3L, Map.of("start_price", Double.POSITIVE_INFINITY)),
+                new SequenceEvaluator.Past(4L, Map.of("start_price", 3.0)));
+        final OutputColumn mean = plan.getColumn("seq_30d_start_price_mean");
+        Assertions.assertEquals(2L, SequenceEvaluator.aggregate("count", window, "start_price", mean));
+        Assertions.assertEquals(2.0, SequenceEvaluator.aggregate("mean", window, "start_price", mean));
+        Assertions.assertEquals(1.0, SequenceEvaluator.aggregate("std", window, "start_price", mean));
+    }
+
+    /**
+     * {@code weightBy}:a weight of 1 reproduces the plain aggregate over the same window, a similarity kernel on the
      * current row matches a direct computation, and the weighted aggregate never runs on a running state — the
      * catalog declares it scan-only, so without a window it keeps the whole history (the unbounded hint).
      */

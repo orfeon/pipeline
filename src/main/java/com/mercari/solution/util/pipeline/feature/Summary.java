@@ -115,6 +115,8 @@ public interface Summary<S extends Serializable> extends Serializable {
             s.n += sign;
             s.sum += sign * v;
             s.sumSq += sign * v * v;
+            // an emptied window starts over: no rounding residue left by the evictions
+            if (s.n == 0) s.sum = s.sumSq = 0;
         }
 
         @Override
@@ -155,13 +157,21 @@ public interface Summary<S extends Serializable> extends Serializable {
      * (n, Σx, Σx², Σx³, Σx⁴) — the sufficient statistics of the third and fourth standardised moments. The sums are
      * taken relative to an anchor (the first value folded in; merging re-anchors {@code other} by the binomial
      * shift), because a central moment of order four formed from raw power sums of a value with an offset cancels
-     * away. Kept apart from {@link Moments} so that the statistics every encoding level carries stay three numbers.
+     * away. A window sliding along a trend would leave that anchor behind, so it follows the mean once the mean is
+     * far from it. Kept apart from {@link Moments} so that the statistics every encoding level carries stay three
+     * numbers.
      */
     final class Shape implements Summary<Shape.State> {
         public static final class State implements Serializable {
             public double n, s1, s2, s3, s4;
             public double anchor;
             public boolean anchored;
+            /**
+             * Σx² of every contribution folded in or out since the state was last empty: the scale of the rounding
+             * residue an eviction leaves in {@code s2} (the current sums alone cannot tell it from spread when the
+             * values left behind sit on the anchor).
+             */
+            public double mass;
         }
 
         @Override
@@ -182,11 +192,27 @@ public interface Summary<S extends Serializable> extends Serializable {
             s.s2 += sign * x2;
             s.s3 += sign * x2 * x;
             s.s4 += sign * x2 * x2;
+            s.mass += x2;
             // an emptied window starts over: no rounding residue, and the next value re-anchors
             if (s.n == 0) {
-                s.s1 = s.s2 = s.s3 = s.s4 = 0;
+                s.s1 = s.s2 = s.s3 = s.s4 = s.mass = 0;
                 s.anchored = false;
+                return;
             }
+            // a window sliding along a trend leaves its anchor behind, and power sums about a distant anchor lose the
+            // fourth moment to cancellation: once the mean is more than 32 deviations away, move the anchor onto it
+            final double m = s.s1 / s.n;
+            if (m * m > 1024 * (s.s2 / s.n - m * m)) shift(s, -m);
+        }
+
+        /** Re-expresses the sums about {@code anchor − d} (x − a = (x − b) + d with d = b − a, b the current anchor). */
+        private static void shift(final State s, final double d) {
+            final double d2 = d * d;
+            s.s4 += 4 * d * s.s3 + 6 * d2 * s.s2 + 4 * d2 * d * s.s1 + s.n * d2 * d2;
+            s.s3 += 3 * d * s.s2 + 3 * d2 * s.s1 + s.n * d2 * d;
+            s.s2 += 2 * d * s.s1 + s.n * d2;
+            s.s1 += s.n * d;
+            s.anchor -= d;
         }
 
         @Override
@@ -208,6 +234,7 @@ public interface Summary<S extends Serializable> extends Serializable {
             into.s2 += other.s2 + 2 * d * other.s1 + other.n * d2;
             into.s1 += other.s1 + other.n * d;
             into.n += other.n;
+            into.mass += other.mass + other.n * d2;
         }
 
         @Override
@@ -218,7 +245,8 @@ public interface Summary<S extends Serializable> extends Serializable {
         /**
          * Population moments (the convention of {@code std}): {@code skew} = m₃ / m₂^1.5 (three values at least),
          * {@code kurt} = m₄ / m₂² − 3, the excess kurtosis (four at least). Null on a series without spread — m₂ not
-         * above the rounding floor of the sums it is formed from, where the ratio would be noise.
+         * above the rounding floor of the sums it is formed from (including what evicted values left in them), where
+         * the ratio would be noise.
          */
         @Override
         public Object read(final State s, final Readout readout) {
@@ -231,7 +259,7 @@ public interface Summary<S extends Serializable> extends Serializable {
             if (s.n < required) return null;
             final double m = s.s1 / s.n, r2 = s.s2 / s.n, r3 = s.s3 / s.n, r4 = s.s4 / s.n;
             final double m2 = r2 - m * m;
-            if (!(m2 > 1e-14 * r2)) return null;
+            if (!(m2 > 1e-14 * Math.max(r2, s.mass / s.n))) return null;
             if ("skew".equals(readout.name())) {
                 final double m3 = r3 - 3 * m * r2 + 2 * m * m * m;
                 return m3 / Math.pow(m2, 1.5);
@@ -429,7 +457,7 @@ public interface Summary<S extends Serializable> extends Serializable {
             if ("count".equals(readout.name())) return (long) s.n;
             if (s.n < 2) return null;
             final double mx = s.sx / s.n, my = s.sy / s.n;
-            final double vx = Math.max(0, s.sxx / s.n - mx * mx), vy = Math.max(0, s.syy / s.n - my * my);
+            final double vx = variance(s.sxx / s.n, mx), vy = variance(s.syy / s.n, my);
             final double cov = s.sxy / s.n - mx * my;
             return switch (readout.name()) {
                 case "cov" -> cov;
@@ -443,6 +471,17 @@ public interface Summary<S extends Serializable> extends Serializable {
                 case "intercept" -> vx == 0 ? null : (my + s.ay) - cov / vx * (mx + s.ax);
                 default -> throw new IllegalArgumentException("regression cannot read " + readout.name());
             };
+        }
+
+        /**
+         * E[x²] − E[x]², snapped to 0 within rounding of E[x²]: once the anchor pair is evicted a constant series sits
+         * at a non-zero offset from the anchor, and the running sums leave a residue (~1e-16 relative) that would
+         * otherwise turn a constant x into a spurious beta / corr instead of null (the scan path anchors inside the
+         * window and gets an exact 0).
+         */
+        private static double variance(final double secondMoment, final double mean) {
+            final double v = secondMoment - mean * mean;
+            return v <= 1e-12 * secondMoment ? 0d : v;
         }
 
         private static double clamp(final double r) {

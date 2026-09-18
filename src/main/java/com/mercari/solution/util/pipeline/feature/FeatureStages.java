@@ -915,7 +915,7 @@ public final class FeatureStages {
         }
     }
 
-    /** Solves one block per group from its per-time-block states (merged into fresh states: the inputs are never mutated). */
+    /** Solves one block per group from its per-time-block states (taken as is; the inputs are never mutated). */
     static class SolveSummaryBlocksDoFn<T, S extends Serializable> extends DoFn<KV<String, Iterable<KV<Long, S>>>, KV<String, Serializable>> {
         private final List<SummaryFitBlock<T, S, ?>> blocks;
         private final String planHash;
@@ -931,9 +931,17 @@ public final class FeatureStages {
             final SummaryFitBlock<T, S, ?> block = blocks.stream().filter(b -> b.block().equals(name)).findFirst()
                     .orElseThrow(() -> new IllegalStateException("no summary-fit block named " + name));
             final Map<Long, S> parts = new HashMap<>();
+            // Combine.perKey yields one part per time block, taken as is (a quantileTransform state is the whole column:
+            // no copy); a repeated time block is merged into a fresh state rather than mutating the input element.
+            // Nothing in a solve mutates a part (BlockSeries merges into fresh states).
             for (final KV<Long, S> part : c.element().getValue()) {
                 if (part.getKey() == EMPTY_MARKER) continue;
-                block.family().merge(parts.computeIfAbsent(part.getKey(), k -> block.family().create()), part.getValue());
+                parts.merge(part.getKey(), part.getValue(), (a, b) -> {
+                    final S merged = block.family().create();
+                    block.family().merge(merged, a);
+                    block.family().merge(merged, b);
+                    return merged;
+                });
             }
             final Serializable model = block.solve(parts, planHash);
             if (model != null) c.output(KV.of(name, model));
@@ -1255,7 +1263,8 @@ public final class FeatureStages {
         @Override
         public QuantileModel solve(final Map<Long, QuantileTransform.Values> parts, final String planHash) {
             final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
-            final QuantileTransform.Values all = series.total();
+            // a static fit has one block: fit on it directly instead of a merged copy (fit copies before sorting)
+            final QuantileTransform.Values all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
             final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
             LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", block, bins, values.size());
             final QuantileTransform total = QuantileTransform.fit(values, bins, distribution, clip, true);

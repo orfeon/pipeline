@@ -207,6 +207,21 @@ public class QuantileTransformTest {
         family.update(back, 9.0, 1); // a deserialized state can still grow
         Assertions.assertArrayEquals(QuantileTransform.fit(new double[]{3, 1, 2, 9}, 4, 2, QuantileTransform.UNIFORM).knots,
                 QuantileTransform.fit(back, 2, QuantileTransform.UNIFORM, QuantileTransform.DEFAULT_CLIP, true).knots, 0);
+
+        // an empty state serializes to a zero-length buffer; it can still grow afterwards
+        final QuantileTransform.Values empty = family.create();
+        final java.io.ByteArrayOutputStream emptyBytes = new java.io.ByteArrayOutputStream();
+        try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(emptyBytes)) {
+            out.writeObject(empty);
+        }
+        final QuantileTransform.Values emptyBack;
+        try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(emptyBytes.toByteArray()))) {
+            emptyBack = (QuantileTransform.Values) in.readObject();
+        }
+        family.update(emptyBack, 5.0, 1);
+        family.update(empty, 5.0, 1);
+        Assertions.assertEquals(1, emptyBack.size());
+        Assertions.assertEquals(1, empty.size());
     }
 
 }

@@ -95,6 +95,14 @@ public class SummaryTest {
         Assertions.assertNull(m.read(empty, Summary.Readout.of("mean")));
         Assertions.assertNull(m.read(fold(m, List.of(3.0)), Summary.Readout.of("std")));
         Assertions.assertThrows(IllegalArgumentException.class, () -> m.read(s, Summary.Readout.of("max")));
+        // an emptied window starts over: the evictions leave no residue behind for the next values
+        final Summary.Moments.State emptied = fold(m, List.of(0.1, 0.7, 1e8));
+        for (final double x : new double[]{0.1, 0.7, 1e8}) m.update(emptied, x, -1);
+        Assertions.assertEquals(0.0, emptied.sum);
+        Assertions.assertEquals(0.0, emptied.sumSq);
+        m.update(emptied, 2.0, 1);
+        m.update(emptied, 2.0, 1);
+        Assertions.assertEquals(0.0, (Double) m.read(emptied, Summary.Readout.of("std")));
         final Summary.Readout[] readouts = {COUNT, Summary.Readout.of("sum"), Summary.Readout.of("mean"), Summary.Readout.of("std")};
         assertMonoid(m, xs, readouts);
         final Random random = new Random(3);
@@ -122,6 +130,24 @@ public class SummaryTest {
         final Summary.Shape.State constant = fold(h, List.of(5.0, 0.1, 0.1, 0.1, 0.1));
         h.update(constant, 5.0, -1);
         Assertions.assertNull(h.read(constant, kurt), "the evicted 5.0 leaves a constant series: no spread, not noise");
+        // the constant left behind may sit on the anchor itself: the sums then hold nothing but the evictions' residue
+        final Summary.Shape.State onAnchor = fold(h, List.of(3.3, 1.7, 9.1, 2.2, 3.3, 3.3, 3.3, 3.3));
+        for (final double x : new double[]{3.3, 1.7, 9.1, 2.2}) h.update(onAnchor, x, -1);
+        Assertions.assertNull(h.read(onAnchor, skew), "a constant on the anchor: residue, not spread");
+        Assertions.assertNull(h.read(onAnchor, kurt), "a constant on the anchor: residue, not spread");
+        // a window sliding along a trend: the anchor follows (left at the first value, 10⁴ away by the end, the running
+        // fourth power sum is off by ~0.08 in kurt), so the running state keeps agreeing with a fresh fold up to rounding
+        final Random drift = new Random(3);
+        final double[] trend = new double[20_000];
+        for (int i = 0; i < trend.length; i++) trend[i] = i * 0.5 + drift.nextGaussian();
+        final Summary.Shape.State sliding = h.create();
+        for (int i = 0; i < trend.length; i++) {
+            h.update(sliding, trend[i], 1);
+            if (i >= 30) h.update(sliding, trend[i - 30], -1);
+        }
+        final Summary.Shape.State fresh = fold(h, java.util.Arrays.stream(trend, trend.length - 30, trend.length).boxed().toList());
+        Assertions.assertEquals((Double) h.read(fresh, kurt), (Double) h.read(sliding, kurt), 1e-2);
+        Assertions.assertEquals((Double) h.read(fresh, skew), (Double) h.read(sliding, skew), 1e-2);
         Assertions.assertThrows(IllegalArgumentException.class, () -> h.read(s, Summary.Readout.of("mean")));
         // the anchor keeps a level offset out of the fourth powers
         final List<Double> offset = xs.stream().map(x -> x + 1e6).toList();
@@ -242,6 +268,17 @@ public class SummaryTest {
         Assertions.assertEquals(0, g.count(emptied), 0);
         Assertions.assertFalse(emptied.anchored);
         Assertions.assertEquals(0.0, emptied.sxy, 0);
+        // the anchor pair evicted, a constant x sits at an offset from the anchor: still no slope (no rounding residue)
+        for (int trial = 0; trial < 200; trial++) {
+            final Summary.Regression.State drifted = g.create();
+            final double[] anchor = {Math.round(random.nextDouble() * 10000) / 100.0, 5};
+            final double constantX = Math.round(random.nextDouble() * 10000) / 100.0;
+            g.update(drifted, anchor, 1);
+            for (int i = 0; i < 2 + random.nextInt(28); i++) g.update(drifted, new double[]{constantX, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            g.update(drifted, anchor, -1);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("beta")), "x " + constantX + " anchored at " + anchor[0]);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("corr")));
+        }
     }
 
     @Test
