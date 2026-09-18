@@ -11,13 +11,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Evaluates row-scope columns (expr / datetime / bin / cross / residual / row baselines / null indicators)
+ * Evaluates row-scope columns (expr / datetime / bin / cross / residual / vector / row baselines / null indicators)
  * in place on a primitive row map. Stateless; compiled expressions are rebuilt in {@link #setup()}.
  */
 public class RowEvaluator implements Serializable {
 
     private final List<OutputColumn> columns;
     private transient Map<String, ExpressionUtil.Expression> expressions;
+    private transient Map<String, VectorOps.Plan> vectors;
 
     public RowEvaluator(final List<OutputColumn> columns) {
         this.columns = columns;
@@ -62,7 +63,9 @@ public class RowEvaluator implements Serializable {
         expressions = new HashMap<>();
         lattices = new HashMap<>();
         shrinkages = new HashMap<>();
+        vectors = new HashMap<>();
         for (final OutputColumn c : columns) {
+            if ("vector".equals(c.operator)) vectors.put(c.canonicalName, VectorOps.Plan.of(c.coordinates));
             final String expr = c.coordinates.get("expr");
             if (expr != null && ("expr".equals(c.operator) || "baseline".equals(c.operator))) {
                 expressions.put(c.canonicalName, ExpressionUtil.createDefaultExpression(expr));
@@ -133,6 +136,7 @@ public class RowEvaluator implements Serializable {
             case "isnull" -> row.get(c.coordinates.get("indicatorOf")) == null;
             case "copy" -> FeatureValues.toDouble(row.get(inputs.get(0)));
             case "noise" -> noise(c, row);
+            case "vector" -> vectors.get(c.canonicalName).evaluate(row.get(inputs.get(0)));
             case "share" -> {
                 final List<Shrinkage.Level> levels = lattices.get(c.canonicalName);
                 final Double leaf = FeatureValues.toDouble(row.get(levels.get(0).nColumn()));

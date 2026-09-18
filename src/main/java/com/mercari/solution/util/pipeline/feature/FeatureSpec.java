@@ -133,6 +133,21 @@ public class FeatureSpec implements Serializable {
         public String on;
         /** noise: {@code normal} (default) | {@code uniform}; the draw's seed is the shared {@code seed} field. */
         public String distribution;
+        /** vector: the readouts to emit (one column each; {@code polyfit} one per coefficient up to {@code degree}). */
+        public List<String> funcs = new ArrayList<>();
+        /** vector: {@code slice: {from, to}} — elements [from, to), negative = from the end, null = open. */
+        public Integer sliceFrom;
+        public Integer sliceTo;
+        /** vector: {@code slice} was declared in a form other than an object (a compile error). */
+        public boolean sliceMalformed;
+        /** vector: differencing order applied after the slice (null = none). */
+        public Integer diff;
+        /** vector: rescaling applied after the differencing ({@code sum | mean | l2 | zscore}; null = none). */
+        public String normalize;
+        /** vector: element positions for {@code slope} / {@code polyfit}: {@code index} (default) | {@code unit}. */
+        public String position;
+        /** vector: polynomial degree of the {@code polyfit} readout (null = 2). */
+        public Integer degree;
 
         // context / sequence
         public String context;
@@ -584,8 +599,21 @@ public class FeatureSpec implements Serializable {
         def.on = Json.string(o, "on");
         def.distribution = Json.string(o, "distribution");
         def.seed = longOf(o, "seed", diagnostics, loc);
+        def.funcs = Json.strings(o, "funcs");
+        if (o.has("slice") && !o.get("slice").isJsonNull()) {
+            if (o.get("slice").isJsonObject()) {
+                def.sliceFrom = Json.integer(o.getAsJsonObject("slice"), "from");
+                def.sliceTo = Json.integer(o.getAsJsonObject("slice"), "to");
+            } else {
+                def.sliceMalformed = true;
+            }
+        }
+        def.diff = Json.integer(o, "diff");
+        def.normalize = Json.string(o, "normalize");
+        def.position = Json.string(o, "position");
+        def.degree = Json.integer(o, "degree");
 
-        def.context = Json.string(o, "context");
+        def.context =Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
         def.entity = Json.string(o, "entity");
         def.windows = parseWindows(o, diagnostics, loc);

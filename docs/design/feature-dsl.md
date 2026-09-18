@@ -481,6 +481,26 @@ market column into the expression:
   on: logit                      # identity | logit | log
 ```
 
+A row may carry a series of its own — an `array<float64>` field holding the values observed *within* the
+event (the bids before a session). `type: vector` reads scalar columns out of it: vector → vector steps in
+a fixed order (slice → diff → normalize), then one column per readout. It is the row-side supply of the
+vector operators (the other two supplies are a sequence window's lifted history and a context group's
+collected values, §4.3 / §4.2); the availability is the array field's own, and a vector output is always
+expanded into scalar columns.
+
+```yaml
+- name: bid_step
+  scope: row
+  type: vector
+  input: bid_path                # array<float64>
+  slice: {from: -3}              # [from, to), negative = from the end
+  diff: 1                        # differencing order
+  normalize: mean                # sum | mean | l2 | zscore
+  position: unit                 # slope / polyfit positions: index | unit ([0, 1])
+  funcs: [mean, slope, polyfit]  # length | sum | mean | std | min | max | argmin | argmax | first | last | slope | norm | polyfit
+  degree: 2                      # polyfit → bid_step_poly0 .. poly2
+```
+
 ### 4.2 context — transforms within a co-occurrence group
 
 ```yaml
