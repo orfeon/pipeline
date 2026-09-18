@@ -263,6 +263,69 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * {@code weightBy}: the seller's past sessions weighed by how close their start price was to this listing's,
+     * w = exp(−|Δprice| / 50). {@code sold} reaches the system 6 days after a session, so B/s1 (two days after A) sees
+     * nothing yet; C/s1 (price 80) sees A (100, sold) and B (200, unsold); D/s1 (120) sees A, B and C (80, sold).
+     */
+    @Test
+    public void testSequenceWeightBy() throws java.io.IOException {
+        final String blocks = """
+                    - name: similar
+                      scope: sequence
+                      entity: seller
+                      ops:
+                        - {type: aggregate, field: sold, funcs: [count, mean], weightBy: "exp(-abs(start_price - $self.start_price) / 50)"}
+                        - {type: aggregate, field: sold, funcs: [count, mean], as: plain}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_similar_all_sold_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_similar_all_plain_count").getFieldType().getType());
+        Assertions.assertEquals("windowShift", output.getSchema().getField("f_similar_all_sold_mean").getOptions().get("feature.status"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final double a, b, c;
+                switch (id) {
+                    case "A/s1", "A/s2", "B/s1" -> {
+                        Assertions.assertEquals(0L, row.getAsLong("f_similar_all_plain_count"), id);
+                        Assertions.assertEquals(0.0, row.getAsDouble("f_similar_all_sold_count"), 1e-12, id);
+                        Assertions.assertNull(row.getPrimitiveValue("f_similar_all_sold_mean"), id);
+                    }
+                    case "C/s1" -> {
+                        a = Math.exp(-20 / 50d);
+                        b = Math.exp(-120 / 50d);
+                        Assertions.assertEquals(2L, row.getAsLong("f_similar_all_plain_count"));
+                        Assertions.assertEquals(0.5, row.getAsDouble("f_similar_all_plain_mean"), 1e-12);
+                        Assertions.assertEquals(a + b, row.getAsDouble("f_similar_all_sold_count"), 1e-12);
+                        Assertions.assertEquals(a / (a + b), row.getAsDouble("f_similar_all_sold_mean"), 1e-12, "the similar listing (sold) dominates the distant one");
+                    }
+                    case "C/s2" -> {
+                        Assertions.assertEquals(Math.exp(-10 / 50d), row.getAsDouble("f_similar_all_sold_count"), 1e-12);
+                        Assertions.assertEquals(0.0, row.getAsDouble("f_similar_all_sold_mean"), 1e-12);
+                    }
+                    case "D/s1" -> {
+                        a = Math.exp(-20 / 50d);
+                        b = Math.exp(-80 / 50d);
+                        c = Math.exp(-40 / 50d);
+                        Assertions.assertEquals(3L, row.getAsLong("f_similar_all_plain_count"));
+                        Assertions.assertEquals(a + b + c, row.getAsDouble("f_similar_all_sold_count"), 1e-12);
+                        Assertions.assertEquals((a + c) / (a + b + c), row.getAsDouble("f_similar_all_sold_mean"), 1e-12);
+                        Assertions.assertTrue(row.getAsDouble("f_similar_all_sold_mean") > row.getAsDouble("f_similar_all_plain_mean"));
+                    }
+                    default -> Assertions.fail("unexpected row " + id);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testShrinkageAndShare() throws java.io.IOException {
         // seller-level mean of (sold >= 1) shrunk toward the global mean (leave-node-out), plus share = n_seller / n_global
@@ -1229,69 +1292,6 @@ public class FeatureTransformTest {
                 count++;
                 for (int k = 0; k < 2; k++) {
                     Assertions.assertEquals(row.getAsDouble("f_price_pc_" + k), row.getAsDouble("f_vec_pc_" + k), 1e-9, row.getAsString("session_id") + "/" + k);
-                }
-            }
-            Assertions.assertEquals(6, count);
-            return null;
-        });
-        pipeline.run();
-    }
-
-    /**
-     * {@code weightBy}: the seller's past sessions weighed by how close their start price was to this listing's,
-     * w = exp(−|Δprice| / 50). {@code sold} reaches the system 6 days after a session, so B/s1 (two days after A) sees
-     * nothing yet; C/s1 (price 80) sees A (100, sold) and B (200, unsold); D/s1 (120) sees A, B and C (80, sold).
-     */
-    @Test
-    public void testSequenceWeightBy() throws java.io.IOException {
-        final String blocks = """
-                    - name: similar
-                      scope: sequence
-                      entity: seller
-                      ops:
-                        - {type: aggregate, field: sold, funcs: [count, mean], weightBy: "exp(-abs(start_price - $self.start_price) / 50)"}
-                        - {type: aggregate, field: sold, funcs: [count, mean], as: plain}
-                """;
-        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
-        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
-        final MCollection output = outputs.get("features");
-        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_similar_all_sold_count").getFieldType().getType());
-        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_similar_all_plain_count").getFieldType().getType());
-        Assertions.assertEquals("windowShift", output.getSchema().getField("f_similar_all_sold_mean").getOptions().get("feature.status"));
-        PAssert.that(output.getCollection()).satisfies(rows -> {
-            int count = 0;
-            for (final MElement row : rows) {
-                count++;
-                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
-                final double a, b, c;
-                switch (id) {
-                    case "A/s1", "A/s2", "B/s1" -> {
-                        Assertions.assertEquals(0L, row.getAsLong("f_similar_all_plain_count"), id);
-                        Assertions.assertEquals(0.0, row.getAsDouble("f_similar_all_sold_count"), 1e-12, id);
-                        Assertions.assertNull(row.getPrimitiveValue("f_similar_all_sold_mean"), id);
-                    }
-                    case "C/s1" -> {
-                        a = Math.exp(-20 / 50d);
-                        b = Math.exp(-120 / 50d);
-                        Assertions.assertEquals(2L, row.getAsLong("f_similar_all_plain_count"));
-                        Assertions.assertEquals(0.5, row.getAsDouble("f_similar_all_plain_mean"), 1e-12);
-                        Assertions.assertEquals(a + b, row.getAsDouble("f_similar_all_sold_count"), 1e-12);
-                        Assertions.assertEquals(a / (a + b), row.getAsDouble("f_similar_all_sold_mean"), 1e-12, "the similar listing (sold) dominates the distant one");
-                    }
-                    case "C/s2" -> {
-                        Assertions.assertEquals(Math.exp(-10 / 50d), row.getAsDouble("f_similar_all_sold_count"), 1e-12);
-                        Assertions.assertEquals(0.0, row.getAsDouble("f_similar_all_sold_mean"), 1e-12);
-                    }
-                    case "D/s1" -> {
-                        a = Math.exp(-20 / 50d);
-                        b = Math.exp(-80 / 50d);
-                        c = Math.exp(-40 / 50d);
-                        Assertions.assertEquals(3L, row.getAsLong("f_similar_all_plain_count"));
-                        Assertions.assertEquals(a + b + c, row.getAsDouble("f_similar_all_sold_count"), 1e-12);
-                        Assertions.assertEquals((a + c) / (a + b + c), row.getAsDouble("f_similar_all_sold_mean"), 1e-12);
-                        Assertions.assertTrue(row.getAsDouble("f_similar_all_sold_mean") > row.getAsDouble("f_similar_all_plain_mean"));
-                    }
-                    default -> Assertions.fail("unexpected row " + id);
                 }
             }
             Assertions.assertEquals(6, count);
