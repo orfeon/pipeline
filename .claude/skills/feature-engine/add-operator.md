@@ -63,7 +63,7 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
      free. `SummaryTest` has the monoid / group harness (`assertMonoid`, `assertInvertible`) —
      add the family there.
    - **Scan**: a new `case` in `evaluateScan` over the `window` sublist. Then declare the
-     retention: a bounded tail in `tailSize` (`lag` / `trend` = k, `delta` = k+1, `maxEvents`), else
+     retention: a bounded tail in `tailSize` (`lag` / `trend` / `fracdiff` = k, `delta` = k+1, `maxEvents`), else
      the column is *unbounded* — `unboundedReason` must describe it and the
      `sequence.window.unbounded` hint will list it. Do not add scan ops that walk the whole
      history per row without a bound unless the spec really needs it.

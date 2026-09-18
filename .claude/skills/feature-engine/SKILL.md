@@ -145,7 +145,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   with `invertible()` saying whether a contribution can be removed again (a group: windows can evict)
   or only added (a monoid: extrema). Built-in families in `Summary.Summaries`: `MOMENTS` (n, Σ, Σ²:
   count / sum / mean / std), `EXTREMA` (max / min, not invertible), `COUNTS` (value → count:
-  distribution), `ORDER` (`OrderStatistics`: quantiles). `OperatorCatalog.summary(stat)` maps a
+  distribution), `ORDER` (`OrderStatistics`: quantiles), `REGRESSION` (anchored cross moments of a pair
+  `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
+  events and is therefore scan-only). `OperatorCatalog.summary(stat)` maps a
   statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
   families are meant to become the per-block Combine state of the fit stage, the prefix-scan state and
   the streaming state (proposal-feature-unification §2.1), so a new statistic is one family + one

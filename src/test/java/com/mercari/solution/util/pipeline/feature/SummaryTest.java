@@ -25,6 +25,12 @@ public class SummaryTest {
 
     /** Merging the two halves in either order equals folding everything, for every readout given. */
     private static <S extends Serializable> void assertMonoid(final Summary<S> family, final List<?> values, final Summary.Readout... readouts) {
+        assertMonoid(family, values, Assertions::assertEquals, readouts);
+    }
+
+    /** {@link #assertMonoid} with the comparison given: a family that re-anchors on merge agrees up to floating rounding. */
+    private static <S extends Serializable> void assertMonoid(final Summary<S> family, final List<?> values,
+                                                              final java.util.function.BiConsumer<Object, Object> assertSame, final Summary.Readout... readouts) {
         final int cut = values.size() / 3;
         final S left = fold(family, values.subList(0, cut)), right = fold(family, values.subList(cut, values.size()));
         final S all = fold(family, values);
@@ -35,9 +41,9 @@ public class SummaryTest {
         final S withEmpty = fold(family, values);
         family.merge(withEmpty, family.create());
         for (final Summary.Readout r : readouts) {
-            Assertions.assertEquals(family.read(all, r), family.read(leftFirst, r), r.name());
-            Assertions.assertEquals(family.read(all, r), family.read(rightFirst, r), r.name());
-            Assertions.assertEquals(family.read(all, r), family.read(withEmpty, r), r.name());
+            assertSame.accept(family.read(all, r), family.read(leftFirst, r));
+            assertSame.accept(family.read(all, r), family.read(rightFirst, r));
+            assertSame.accept(family.read(all, r), family.read(withEmpty, r));
         }
         Assertions.assertEquals(family.count(all), family.count(leftFirst), 1e-12);
     }
@@ -150,8 +156,69 @@ public class SummaryTest {
         assertInvertible(o, random, () -> (double) random.nextInt(50), SummaryTest::assertClose, readouts);
     }
 
+    /**
+     * x = 1..5, y = 2x + 1 + (0.5, −0.5, 0, 0.5, −0.5): var(x) = 2, cov = 3.8 → beta 1.9, intercept 7 − 1.9 · 3 = 1.3;
+     * var(y) = 7.4 (Σy² = 282 over 5, mean 7) → corr = 3.8 / √14.8.
+     */
+    @Test
+    public void testRegression() {
+        final Summary<Summary.Regression.State> g = Summary.Summaries.REGRESSION;
+        final List<double[]> pairs = List.of(new double[]{1, 3.5}, new double[]{2, 4.5}, new double[]{3, 7}, new double[]{4, 9.5}, new double[]{5, 10.5});
+        final Summary.Regression.State s = fold(g, pairs);
+        Assertions.assertEquals(5L, g.read(s, COUNT));
+        Assertions.assertEquals(3.8, (Double) g.read(s, Summary.Readout.of("cov")), 1e-12);
+        Assertions.assertEquals(1.9, (Double) g.read(s, Summary.Readout.of("beta")), 1e-12);
+        Assertions.assertEquals(1.3, (Double) g.read(s, Summary.Readout.of("intercept")), 1e-12);
+        Assertions.assertEquals(3.8 / Math.sqrt(2 * 7.4), (Double) g.read(s, Summary.Readout.of("corr")), 1e-12);
+        Assertions.assertEquals(3.8 * 3.8 / (2 * 7.4), (Double) g.read(s, Summary.Readout.of("r2")), 1e-12);
+        // fewer than two pairs: nothing but the count; a constant series has no correlation, a constant x no slope
+        Assertions.assertNull(g.read(g.create(), Summary.Readout.of("cov")));
+        Assertions.assertNull(g.read(fold(g, pairs.subList(0, 1)), Summary.Readout.of("beta")));
+        final Summary.Regression.State flatX = fold(g, List.of(new double[]{2, 1}, new double[]{2, 5}));
+        Assertions.assertNull(g.read(flatX, Summary.Readout.of("beta")));
+        Assertions.assertNull(g.read(flatX, Summary.Readout.of("corr")));
+        Assertions.assertEquals(0.0, (Double) g.read(flatX, Summary.Readout.of("cov")), 1e-12);
+        final Summary.Regression.State flatY = fold(g, List.of(new double[]{1, 4}, new double[]{3, 4}));
+        Assertions.assertEquals(0.0, (Double) g.read(flatY, Summary.Readout.of("beta")), 1e-12);
+        Assertions.assertNull(g.read(flatY, Summary.Readout.of("r2")));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> g.read(s, Summary.Readout.of("mean")));
+        // the anchor keeps a large common offset out of the products: a price level of 1e9 with unit moves
+        final List<double[]> offset = new ArrayList<>();
+        for (final double[] p : pairs) offset.add(new double[]{p[0] + 1e9, p[1] + 3e9});
+        Assertions.assertEquals(1.9, (Double) g.read(fold(g, offset), Summary.Readout.of("beta")), 1e-9);
+        Assertions.assertEquals(3.8 / Math.sqrt(2 * 7.4), (Double) g.read(fold(g, offset), Summary.Readout.of("corr")), 1e-9);
+        Assertions.assertEquals(1.3 + 3e9 - 1.9 * 1e9, (Double) g.read(fold(g, offset), Summary.Readout.of("intercept")), 1e-3);
+
+        final Summary.Readout[] readouts = {COUNT, Summary.Readout.of("cov"), Summary.Readout.of("corr"), Summary.Readout.of("beta"), Summary.Readout.of("intercept"), Summary.Readout.of("r2")};
+        assertMonoid(g, pairs, SummaryTest::assertClose, readouts);
+        assertMonoid(g, offset, SummaryTest::assertClose, readouts);
+        final Random random = new Random(17);
+        assertInvertible(g, random, () -> {
+            final double x = Math.round(random.nextGaussian() * 1000) / 100.0;
+            return new double[]{x, 0.7 * x + Math.round(random.nextGaussian() * 300) / 100.0};
+        }, SummaryTest::assertClose, readouts);
+        // emptied by eviction, the state starts over exactly (no rounding residue, a fresh anchor)
+        final Summary.Regression.State emptied = fold(g, pairs);
+        for (final double[] p : pairs) g.update(emptied, p, -1);
+        Assertions.assertEquals(0, g.count(emptied), 0);
+        Assertions.assertFalse(emptied.anchored);
+        Assertions.assertEquals(0.0, emptied.sxy, 0);
+        // the anchor pair evicted, a constant x sits at an offset from the anchor: still no slope (no rounding residue)
+        for (int trial = 0; trial < 200; trial++) {
+            final Summary.Regression.State drifted = g.create();
+            final double[] anchor = {Math.round(random.nextDouble() * 10000) / 100.0, 5};
+            final double constantX = Math.round(random.nextDouble() * 10000) / 100.0;
+            g.update(drifted, anchor, 1);
+            for (int i = 0; i < 2 + random.nextInt(28); i++) g.update(drifted, new double[]{constantX, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            g.update(drifted, anchor, -1);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("beta")), "x " + constantX + " anchored at " + anchor[0]);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("corr")));
+        }
+    }
+
     @Test
     public void testCatalogMapsStatisticsToFamilies() {
+        for (final String func : OperatorCatalog.REGRESSION_FUNCS) Assertions.assertSame(Summary.Summaries.REGRESSION, OperatorCatalog.summary(func).family(), func);
         Assertions.assertSame(Summary.Summaries.MOMENTS, OperatorCatalog.summary("mean").family());
         Assertions.assertSame(Summary.Summaries.MOMENTS, OperatorCatalog.summary("count").family());
         Assertions.assertEquals("std", OperatorCatalog.summary("std").readout().name());

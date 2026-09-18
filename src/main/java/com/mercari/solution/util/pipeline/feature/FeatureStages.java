@@ -1181,14 +1181,37 @@ public final class FeatureStages {
             return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
         }
 
-        /** {@code columns.get(i)} carries score {@code components[i]} (resolved once in {@link #svdSpecs}, never parsed per row). */
+        /** The {@code components} code of the residual-norm column. */
+        static final int RESIDUAL_NORM = Integer.MIN_VALUE;
+
+        /**
+         * What a column carries, from its coordinates: score {@code k} as {@code k ≥ 0}, the residual of input
+         * dimension {@code i} as {@code −i − 1}, the residual norm as {@link #RESIDUAL_NORM}.
+         */
+        static int output(final Map<String, String> coordinates) {
+            final String residual = coordinates.get("residual");
+            if (residual == null) return Integer.parseInt(coordinates.get("component"));
+            return "norm".equals(residual) ? RESIDUAL_NORM : -Integer.parseInt(residual) - 1;
+        }
+
+        /** {@code columns.get(i)} carries output {@code components[i]} (see {@link #output}; resolved once in {@link #svdSpecs}, never parsed per row). */
         @Override
         public void apply(final SvdModel model, final Map<String, Object> values) {
             final Svd svd = svdFor(model, values);
-            final double[] scores = svd == null ? null : svd.transform(vector(values));
+            final double[] x = svd == null ? null : vector(values);
+            final double[] scores = svd == null ? null : svd.transform(x);
+            double[] residual = null;
             for (int i = 0; i < components.length; i++) {
                 final int k = components[i];
-                values.put(columns.get(i).getCanonicalName(), scores == null || k >= scores.length ? null : scores[k]);
+                final Object value;
+                if (k >= 0) {
+                    value = scores == null || k >= scores.length ? null : scores[k];
+                } else {
+                    // a residual column: input dimension −k − 1, or the norm over every dimension
+                    if (residual == null && scores != null) residual = svd.residual(x);
+                    value = residual == null ? null : k == RESIDUAL_NORM ? (Object) com.mercari.solution.util.domain.math.MatrixOps.norm(residual) : (Object) residual[-k - 1];
+                }
+                values.put(columns.get(i).getCanonicalName(), value);
             }
         }
     }
@@ -1242,7 +1265,7 @@ public final class FeatureStages {
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
             final int[] components = new int[e.getValue().size()];
-            for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
+            for (int i = 0; i < components.length; i++) components[i] = SvdSpec.output(e.getValue().get(i).getCoordinates());
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,

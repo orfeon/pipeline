@@ -75,6 +75,8 @@ public final class OperatorCatalog {
         register(Scope.sequence, "sinceEvent", InputKind.predicate, null, false, "events / days since the predicate last held");
         register(Scope.sequence, "countMatch", InputKind.predicate, I64, false, "number of past rows where the predicate holds");
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
+        register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2; lag pairs the field with the other series k events earlier (lead-lag)");
+        register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
 
         // population (fit)
         register(Scope.population, "encoding", InputKind.any, F64, true, "shrinkage-smoothed conditional statistics over structured key space");
@@ -171,7 +173,8 @@ public final class OperatorCatalog {
      * statistics the keyed replay can serve from running state (and, being monoids, which can be combined per
      * block or per partition): {@code count / sum / mean / avg / rate / std} → moments, {@code max / min} →
      * extrema (not invertible: scan under a window), {@code distribution} → value counts, the quantile tokens →
-     * exact order statistics. Null for a token without a family ({@code share}, {@code first} / {@code last}, an
+     * exact order statistics, {@code cov / corr / beta / intercept / r2} → the cross moments of a pair (a lagged pairing is
+     * not a per-event contribution and stays on the scan path, see {@code SequenceEvaluator.summaryOf}). Null for a token without a family ({@code share}, {@code first} / {@code last}, an
      * unknown token): such a statistic is scan-only.
      */
     public static Summary.Spec summary(final String stat) {
@@ -180,6 +183,7 @@ public final class OperatorCatalog {
             case "count", "sum", "mean", "avg", "rate", "std" -> new Summary.Spec(Summary.Summaries.MOMENTS, Summary.Readout.of(stat));
             case "max", "min" -> new Summary.Spec(Summary.Summaries.EXTREMA, Summary.Readout.of(stat));
             case "distribution" -> new Summary.Spec(Summary.Summaries.COUNTS, Summary.Readout.of(stat));
+            case "cov", "corr", "beta", "intercept", "r2" -> new Summary.Spec(Summary.Summaries.REGRESSION, Summary.Readout.of(stat));
             default -> {
                 final Double p = quantileProbability(stat);
                 yield p == null ? null : new Summary.Spec(Summary.Summaries.ORDER, Summary.Readout.of("quantile", p));
@@ -201,6 +205,9 @@ public final class OperatorCatalog {
         final int percent = Integer.parseInt(m.group(1));
         return percent > 100 ? null : percent / 100d;
     }
+
+    /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
+    public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2");
 
     public static List<String> datetimeDerivations() {
         return List.of("year", "month", "day", "dayOfWeek", "dayOfYear", "weekOfYear", "hour", "minute");
