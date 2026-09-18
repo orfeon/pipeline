@@ -261,8 +261,9 @@ block from the keys' statistics up to that block, and recorded per block in the 
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
 (UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
-A `type: svd` block inherits this `mode` unless it declares its own (see *SVD / PCA*); the other population
-types (factorization / discretize / quantileTransform) are always static and are unaffected.
+A `type: svd` or `type: quantileTransform` block inherits this `mode` unless it declares its own (see *SVD / PCA*
+and *Quantile transform*); the other population types (factorization / discretize) are always static and are
+unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
 
@@ -353,7 +354,7 @@ coarse (4–8): the cardinality multiplies.
     bins: 100                          # quantile intervals of the fitted CDF (default 100)
     distribution: uniform              # uniform (default): F(v) in [0, 1] | normal: the normal score Φ⁻¹(F(v))
     # clip: 0.001                      # normal only: clamp F(v) to [clip, 1 − clip] before Φ⁻¹ (default 1e-6)
-    fit: {artifact: {uri: "gs://bucket/features"}}   # always fit.mode static
+    fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static, forward (below), or inherited from the top-level fit
 ```
 
 Rank-based normalisation: the whole input's distribution is summarised by `bins + 1` knots (the type-7
@@ -375,6 +376,21 @@ fitted transform, so the plan hash and the artifact directory. The clip is appli
 by the artifact: a serving config that pins an artifact (`fit.artifact.id`) or loads one fitted before `clip`
 existed still clamps at its own `clip`. With `distribution: uniform` it has no effect on the output but still
 participates in the plan hash — the warning `quantileTransform.clip` asks you to remove it.
+
+**Forward fit (`fit: {mode: forward, blocks, window, minBlocks | minHistory}`).** A static quantile transform
+ranks every row against a distribution that includes the test period — no label leaks, but a drifting field (a
+price level, a volume) is placed where it could not have been placed at the time. Under `forward` the values are
+gathered per time block and the knots are fitted for every block window a row may read — the complete blocks within
+`window` (all preceding blocks when absent) whose input is known at predictAt, the row's own block excluded (`fit.mode.forward`
+info; an outcome input delays the readable blocks by its settlement + ingestion lag) — so training and serving see
+the same walk-forward ranks. The fit is **exact**: the knots are the order statistics of exactly those values, identical
+to a static fit run on them. Rows with fewer than `minBlocks` (or `minHistory`) preceding blocks read null, as does a
+window holding no value. A block that declares no `fit.mode` of its own inherits a top-level `fit: {mode: forward}`
+(geometry included); `fit: {mode: static}` on the block opts it out and says so (`quantileTransform.fit.mode.static`
+info). The artifact still holds the whole-input knots, for a static serving run, and a forward fit is re-fitted every
+run. Cost: the values still meet on one worker (8 bytes per row, as in the static fit); the knots are re-fitted once per
+change point (every observed block, plus one per block leaving a `window`), each a sort of the readable values — tens
+of blocks over a few million rows is seconds.
 
 ### SVD / PCA (population, type: svd)
 
@@ -791,8 +807,8 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
   `factorization` / `discretize` / `quantileTransform` / `svd` (`spectralEmbedding`, `transitionStats`) are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
-  and non-static fits. Discretize and quantileTransform: non-static fits (`fit.cadence / window /
-  warmStart` are accepted and ignored); svd: `fold` (`static` and `forward` are implemented, `fit.cadence /
+  and non-static fits. Discretize: non-static fits (`fit.cadence / window /
+  warmStart` are accepted and ignored); quantileTransform and svd: `fold` (`static` and `forward` are implemented, `fit.cadence /
   warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
   `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and

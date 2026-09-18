@@ -318,8 +318,11 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
   `apply(model, values)` fills the block's columns. Adding a population type = one model class + one
   `StaticFitBlock` record + one compiler expansion (see the skill's `add-operator.md`). Two gather shapes:
-  discretize and quantileTransform gather the raw values (`Doubles`, 8 bytes per row) because quantiles need
-  the order statistics; svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ taken
+  discretize and quantileTransform gather the raw values (`Doubles` / `QuantileTransform.Values`, 8 bytes per
+  row) because quantiles need the order statistics — quantileTransform per time block, as a `Summary` family
+  that is a monoid without inverse (merge = concatenation), so a `BlockSeries` serves `static` (one block),
+  `forward` (a prefix) and a `window` (a range, merged rather than differenced) and the knots are re-fitted per
+  change point, exactly the static fit on the readable values (`QuantileModel`, the twin of `SvdModel`); svd gathers only the sufficient statistics (`Svd.Moments`: n, Σx, Σxxᵀ taken
   relative to the first accepted vector so a large offset does not cancel the covariance away; merging
   re-anchors exactly — one `Combine`, no row leaves the workers) and diagonalises the d × d matrix on the
   driver (cyclic Jacobi, convergence judged relative to the Frobenius norm).
@@ -617,11 +620,9 @@ roughly linear in the input).
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
 sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
-array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; `fit.mode: forward` for
-quantileTransform (static-only today, so the fit sees the test period too — no label leak, but a drifting field
-is placed in a distribution it could not have been placed in at the time; svd has it through `BlockSeries`, see
-below, quantileTransform needs a per-block summary of the value sets — sorted arrays merged on one worker, or a
-sketch); the run-time availability
+array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; a sketch-backed (approximate,
+bounded-size) fit state for quantileTransform and the per-key quantile / distribution stats in static / fold —
+the forward quantileTransform below keeps the exact values; the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
 sequence / population stages as fold-in merge targets (composite sorter key, §9.4.3); the prefix-scan
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries

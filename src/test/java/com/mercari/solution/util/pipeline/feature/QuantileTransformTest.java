@@ -139,4 +139,74 @@ public class QuantileTransformTest {
         });
     }
 
+    private static QuantileTransform.Values values(final double... xs) {
+        final QuantileTransform.Values v = QuantileTransform.VALUES.create();
+        for (final double x : xs) QuantileTransform.VALUES.update(v, x, 1);
+        return v;
+    }
+
+    /**
+     * The fit state as a summary family: a monoid (merge = concatenation, any order gives the same knots) that cannot
+     * remove; a forward model at a change point is exactly the static fit on the values of the blocks readable there,
+     * whole past or a window of blocks; the state survives serialization trimmed to its size.
+     */
+    @Test
+    public void testValuesFamilyAndBlockSeries() throws Exception {
+        final Summary<QuantileTransform.Values> family = QuantileTransform.VALUES;
+        Assertions.assertFalse(family.invertible());
+        Assertions.assertThrows(UnsupportedOperationException.class, () -> family.update(values(1, 2), 1.0, -1));
+        Assertions.assertEquals(3L, family.read(values(4, 5, 6), Summary.Readout.of("count")));
+        Assertions.assertEquals(0, family.count(family.create()), 0);
+
+        final java.util.Random random = new java.util.Random(41);
+        final java.util.Map<Long, QuantileTransform.Values> parts = new java.util.HashMap<>();
+        final java.util.Map<Long, double[]> raw = new java.util.TreeMap<>();
+        for (final long block : new long[]{10, 11, 13, 16}) {
+            final double[] xs = random.doubles(5 + random.nextInt(40)).map(d -> Math.round(d * 1000) / 10.0).toArray();
+            raw.put(block, xs);
+            parts.put(block, values(xs));
+        }
+        final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(family, parts);
+        final java.util.function.BiFunction<Long, Integer, QuantileTransform> direct = (at, window) -> {
+            final java.util.List<Double> readable = new java.util.ArrayList<>();
+            for (final java.util.Map.Entry<Long, double[]> e : raw.entrySet()) {
+                if (e.getKey() <= at && (window <= 0 || e.getKey() > at - window)) for (final double x : e.getValue()) readable.add(x);
+            }
+            java.util.Collections.shuffle(readable, random); // the order of the values must not matter
+            final double[] xs = readable.stream().mapToDouble(d -> d).toArray();
+            return QuantileTransform.fit(xs, xs.length, 8, QuantileTransform.UNIFORM);
+        };
+        for (final int window : new int[]{0, 2, 4}) {
+            final java.util.TreeMap<Long, QuantileTransform> models = series.models(window, v -> QuantileTransform.fit(v, 8, QuantileTransform.UNIFORM, QuantileTransform.DEFAULT_CLIP, false));
+            Assertions.assertEquals(series.changePoints(window), models.keySet());
+            for (final java.util.Map.Entry<Long, QuantileTransform> e : models.entrySet()) {
+                final QuantileTransform expected = direct.apply(e.getKey(), window);
+                Assertions.assertEquals(expected.n, e.getValue().n, "n at " + e.getKey() + " window " + window);
+                Assertions.assertArrayEquals(expected.knots, e.getValue().knots, 0, "knots at " + e.getKey() + " window " + window);
+            }
+        }
+        // under a window of 2 the block 13 has left at 15: nothing is readable there, and the model says so quietly
+        final QuantileTransform gap = series.models(2, v -> QuantileTransform.fit(v, 8, QuantileTransform.UNIFORM, QuantileTransform.DEFAULT_CLIP, false)).get(15L);
+        Assertions.assertTrue(gap.isEmpty());
+        Assertions.assertNull(gap.transform(1.0));
+        // the parts are not modified by the merges
+        for (final java.util.Map.Entry<Long, double[]> e : raw.entrySet()) Assertions.assertEquals(e.getValue().length, parts.get(e.getKey()).size());
+
+        // serialization: what travels is the values, not the spare capacity; the fit is unchanged
+        final QuantileTransform.Values v = values(3, 1, 2);
+        final java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
+            out.writeObject(v);
+        }
+        Assertions.assertTrue(bytes.size() < 200, "three doubles, not a 16-slot buffer: " + bytes.size());
+        final QuantileTransform.Values back;
+        try (java.io.ObjectInputStream in = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
+            back = (QuantileTransform.Values) in.readObject();
+        }
+        Assertions.assertEquals(3, back.size());
+        family.update(back, 9.0, 1); // a deserialized state can still grow
+        Assertions.assertArrayEquals(QuantileTransform.fit(new double[]{3, 1, 2, 9}, 4, 2, QuantileTransform.UNIFORM).knots,
+                QuantileTransform.fit(back, 2, QuantileTransform.UNIFORM, QuantileTransform.DEFAULT_CLIP, true).knots, 0);
+    }
+
 }

@@ -77,6 +77,83 @@ public final class QuantileTransform implements Serializable {
         return new QuantileTransform(knots, count, distribution, clip);
     }
 
+    /** Fits the knots on gathered {@link Values}; {@code warn} = report an empty fit (a forward window without values is normal, a whole input is not). */
+    public static QuantileTransform fit(final Values values, final int bins, final String distribution, final double clip, final boolean warn) {
+        if (values.size == 0 && !warn) return new QuantileTransform(new double[0], 0, distribution, clip);
+        return fit(values.values, values.size, bins, distribution, clip);
+    }
+
+    /**
+     * The values a fit reads — of the whole input, or of one time block under {@code fit.mode: forward}: a growable
+     * buffer, exact (the knots are order statistics of the very values, not of a sketch). What crosses a worker
+     * boundary is exactly {@code size} doubles.
+     */
+    public static final class Values implements Serializable {
+        double[] values = new double[16];
+        int size;
+
+        void add(final double v) {
+            if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
+            values[size++] = v;
+        }
+
+        void append(final Values other) {
+            if (size + other.size > values.length) values = Arrays.copyOf(values, Math.max(size + other.size, values.length * 2));
+            System.arraycopy(other.values, 0, values, size, other.size);
+            size += other.size;
+        }
+
+        public int size() {
+            return size;
+        }
+
+        private void writeObject(final java.io.ObjectOutputStream out) throws java.io.IOException {
+            if (values.length != size) values = Arrays.copyOf(values, size);
+            out.defaultWriteObject();
+        }
+    }
+
+    /**
+     * {@link Values} as a {@link Summary} family — a monoid (merge = concatenation) that cannot remove, so a
+     * {@link BlockSeries} serves a window by merging the range's blocks. The state is the data itself: the whole
+     * training column lands on the worker that fits, as it always did for this type (8 bytes per row).
+     */
+    public static final Summary<Values> VALUES = new ValuesSummary();
+
+    static final class ValuesSummary implements Summary<Values> {
+        @Override
+        public Values create() {
+            return new Values();
+        }
+
+        @Override
+        public void update(final Values state, final Object contribution, final int sign) {
+            if (sign < 0) throw new UnsupportedOperationException("gathered values are not invertible");
+            state.add(((Number) contribution).doubleValue());
+        }
+
+        @Override
+        public boolean invertible() {
+            return false;
+        }
+
+        @Override
+        public void merge(final Values into, final Values other) {
+            into.append(other);
+        }
+
+        @Override
+        public Object read(final Values state, final Readout readout) {
+            if ("count".equals(readout.name())) return (long) state.size;
+            throw new IllegalArgumentException("gathered values cannot read " + readout.name());
+        }
+
+        @Override
+        public double count(final Values state) {
+            return state.size;
+        }
+    }
+
     /** Whether the fit saw no value: every value maps to null (a serving config loading such an artifact reads null everywhere). */
     public boolean isEmpty() {
         return n == 0;

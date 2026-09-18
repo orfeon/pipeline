@@ -205,10 +205,13 @@ offset}`, `als: {epochs, reg, seed}`, `outputs: [{pair: [a, b], as}, {embedding:
 `minSamplesPerBin`, `fit: {artifact}`. Output int64: `-1` missing, `0` below, `1..B`, `B+1` above.
 Typically the key of a following encoding.
 
-### `type: quantileTransform` (always static)
+### `type: quantileTransform` (static, or forward per time block)
 
 `input` (numeric), `bins` (default 100), `distribution: uniform | normal`, `clip` (normal only, default
-`1e-6`: F(v) is clamped to `[clip, 1 − clip]` before Φ⁻¹), `fit: {artifact}`. Output float64 `<name>`: the
+`1e-6`: F(v) is clamped to `[clip, 1 − clip]` before Φ⁻¹), `fit: {artifact}` and, for the walk-forward fit,
+`fit: {mode: forward, blocks, window, minBlocks | minHistory}` (exact: the knots of the values in the complete
+preceding blocks; a block with no `fit.mode` of its own inherits a top-level `fit: {mode: forward}`; rows without
+enough preceding blocks read null). Output float64 `<name>`: the
 value's position in the fitted distribution (0..1, interpolated between the quantile knots; ties read the
 middle of their range, also a tied run at the minimum or maximum such as a zero-inflated count's zeros; out
 of range clamps to 0 / 1) or its normal score. Missing → null. With the default clip the fitted minimum /

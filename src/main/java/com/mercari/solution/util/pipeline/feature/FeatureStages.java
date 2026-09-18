@@ -1017,26 +1017,37 @@ public final class FeatureStages {
 
     // --- quantileTransform ---------------------------------------------------------------------------
 
-    /** One quantileTransform block of a fit stage, rebuilt from its output column's coordinates. */
+    /**
+     * The fitted quantile transform of a block: the whole-input knots ({@code total}, what the artifact holds) and,
+     * under {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed
+     * blocks (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
+     */
+    record QuantileModel(QuantileTransform total, TreeMap<Long, QuantileTransform> byBlock, TreeSet<Long> observed) implements Serializable {}
+
+    /**
+     * One quantileTransform block of a fit stage, rebuilt from its column's coordinates. The fit state is the values
+     * themselves ({@link QuantileTransform#VALUES}, exact), gathered per time block — one block for a static fit.
+     */
     record QuantileTransformSpec(String block, String column, String field, int bins, String distribution, double clip,
-                                 String artifactUri, boolean refit) implements StaticFitBlock<QuantileTransform> {
+                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis) implements StaticFitBlock<QuantileModel> {
         @Override
         public String artifactPath(final String planHash) {
             return QuantileTransform.artifactPath(artifactUri, planHash, block);
         }
 
+        /** A forward fit is always re-fitted (the artifact holds the whole-input knots only, for a static serving run). */
         @Override
         public boolean artifactExists(final String planHash) {
-            return QuantileTransform.exists(artifactUri, planHash, block);
+            return forward == null && QuantileTransform.exists(artifactUri, planHash, block);
         }
 
         @Override
-        public QuantileTransform readArtifact(final String planHash) {
+        public QuantileModel readArtifact(final String planHash) {
             final QuantileTransform q = QuantileTransform.read(artifactUri, planHash, block);
             if (q.clip != clip) {
                 LOG.info("quantileTransform {}: the artifact was written with clip {}; applying the config's clip {}", block, q.clip, clip);
             }
-            return q.withClip(clip);
+            return new QuantileModel(q.withClip(clip), null, null);
         }
 
         @Override
@@ -1044,20 +1055,37 @@ public final class FeatureStages {
             return List.of(field);
         }
 
-        /** Gathers the non-null values on one worker (8 bytes per row) and fits the quantile knots; an empty input still fits (n = 0). */
+        /**
+         * Gathers the non-null values per block in one {@code Combine.perKey}, then every block on one worker (8 bytes
+         * per row, as the static fit always did) and fits the knots: once over everything, and under forward once per
+         * change point over the blocks readable there. An empty input still fits (n = 0).
+         */
         @Override
-        public PCollectionView<List<QuantileTransform>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+        public PCollectionView<List<QuantileModel>> fit(final PCollection<MElement> fitInput, final String label, final String planHash) {
+            final String prefix = label + "_Quantiles_" + block;
             return fitInput
-                    .apply(label + "_Quantiles_" + block + "_Values", ParDo.of(new ExtractValuesDoFn(field)))
-                    .setCoder(DoubleCoder.of())
-                    .apply(label + "_Quantiles_" + block + "_Gather", Combine.globally(new GatherDoublesFn()))
-                    .apply(label + "_Quantiles_" + block + "_Fit", ParDo.of(new FitQuantileTransformDoFn(this, planHash)))
-                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(QuantileTransform.class))
-                    .apply(label + "_Quantiles_" + block + "_View", View.asList());
+                    .apply(prefix + "_Values", ParDo.of(new ExtractBlockValuesDoFn(field, forward)))
+                    .setCoder(KvCoder.of(org.apache.beam.sdk.coders.VarLongCoder.of(), DoubleCoder.of()))
+                    .apply(prefix + "_Blocks", Combine.perKey(new SummaryFn<>(QuantileTransform.VALUES, QuantileTransform.Values.class)))
+                    .apply(prefix + "_Gather", Combine.globally(new GatherFn<KV<Long, QuantileTransform.Values>>()))
+                    .apply(prefix + "_Fit", ParDo.of(new FitQuantileTransformDoFn(this, planHash)))
+                    .setCoder(org.apache.beam.sdk.coders.SerializableCoder.of(QuantileModel.class))
+                    .apply(prefix + "_View", View.asList());
+        }
+
+        /** The knots a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
+        QuantileTransform transformFor(final QuantileModel model, final Map<String, Object> values) {
+            if (model == null) return null;
+            if (forward == null) return model.total();
+            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
+            if (eventMillis == null) return null;
+            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
+            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
         }
 
         @Override
-        public void apply(final QuantileTransform q, final Map<String, Object> values) {
+        public void apply(final QuantileModel model, final Map<String, Object> values) {
+            final QuantileTransform q = transformFor(model, values);
             values.put(column, q == null ? null : q.transform(FeatureValues.toDouble(values.get(field))));
         }
     }
@@ -1071,12 +1099,41 @@ public final class FeatureStages {
                     Integer.parseInt(k.getOrDefault("bins", Integer.toString(QuantileTransform.DEFAULT_BINS))),
                     k.getOrDefault("distribution", QuantileTransform.UNIFORM),
                     Double.parseDouble(k.getOrDefault("clip", Double.toString(QuantileTransform.DEFAULT_CLIP))),
-                    k.get("artifactUri"), "true".equals(k.get("refit"))));
+                    k.get("artifactUri"), "true".equals(k.get("refit")),
+                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }
 
-    static class FitQuantileTransformDoFn extends DoFn<Doubles, QuantileTransform> {
+    /** One (block, value) per non-null value: block 0 for a static fit, the time block of the row under forward. */
+    static class ExtractBlockValuesDoFn extends DoFn<MElement, KV<Long, Double>> {
+        private final String field;
+        private final Forward forward;
+
+        ExtractBlockValuesDoFn(final String field, final Forward forward) {
+            this.field = field;
+            this.forward = forward;
+        }
+
+        @ProcessElement
+        public void processElement(final ProcessContext c) {
+            final MElement element = c.element();
+            if (element == null) return;
+            final Map<String, Object> row = element.asPrimitiveMap();
+            final Double v = FeatureValues.toDouble(row.get(field));
+            if (v == null || v.isNaN()) return;
+            long block = 0L;
+            if (forward != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
+                if (millis == null) return;
+                block = forward.blocks().indexOf(millis);
+            }
+            c.output(KV.of(block, v));
+        }
+    }
+
+    /** Fits the gathered per-block values: the whole-input knots, plus one fit per change point under forward. */
+    static class FitQuantileTransformDoFn extends DoFn<ArrayList<KV<Long, QuantileTransform.Values>>, QuantileModel> {
         private final QuantileTransformSpec spec;
         private final String planHash;
 
@@ -1087,11 +1144,26 @@ public final class FeatureStages {
 
         @ProcessElement
         public void processElement(final ProcessContext c) {
-            final Doubles values = c.element();
-            LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", spec.block(), spec.bins(), values.size);
-            final QuantileTransform q = QuantileTransform.fit(values.values, values.size, spec.bins(), spec.distribution(), spec.clip());
-            if (spec.artifactUri() != null) QuantileTransform.write(spec.artifactUri(), planHash, spec.block(), q);
-            c.output(q);
+            final Map<Long, QuantileTransform.Values> parts = new HashMap<>();
+            // Combine.perKey yields one part per block; merge into a fresh state rather than mutating the input element
+            for (final KV<Long, QuantileTransform.Values> e : c.element()) {
+                QuantileTransform.VALUES.merge(parts.computeIfAbsent(e.getKey(), k -> QuantileTransform.VALUES.create()), e.getValue());
+            }
+            final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
+            final QuantileTransform.Values all = series.total();
+            final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
+            LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", spec.block(), spec.bins(), values.size());
+            final QuantileTransform total = QuantileTransform.fit(values, spec.bins(), spec.distribution(), spec.clip(), true);
+            TreeMap<Long, QuantileTransform> byBlock = null;
+            if (spec.forward() != null) {
+                byBlock = series.models(spec.forward().windowBlocks(), v -> QuantileTransform.fit(v, spec.bins(), spec.distribution(), spec.clip(), false));
+                LOG.info("quantileTransform {}: forward fit over {} block(s), {} change point(s)", spec.block(), parts.size(), byBlock.size());
+            }
+            // a forward fit re-fits every run but writes the whole-input knots once (refit: true overwrites)
+            if (spec.artifactUri() != null && (spec.forward() == null || spec.refit() || !QuantileTransform.exists(spec.artifactUri(), planHash, spec.block()))) {
+                QuantileTransform.write(spec.artifactUri(), planHash, spec.block(), total);
+            }
+            c.output(new QuantileModel(total, byBlock, spec.forward() == null ? null : series.observed()));
         }
     }
 

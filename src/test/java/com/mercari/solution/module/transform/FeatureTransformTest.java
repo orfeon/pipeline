@@ -1119,6 +1119,79 @@ public class FeatureTransformTest {
         Assertions.assertFalse(new java.io.File(dirs[0], "price_z.quantiles.json").exists(), "no artifact URI for the second block");
     }
 
+    private static String quantileForwardConfig(final String dir, final String extra) {
+        final String blocks = """
+                    - name: price_q
+                      scope: population
+                      type: quantileTransform
+                      input: start_price
+                      bins: 4
+                      fit: {mode: forward, blocks: {size: P7D}%s, artifact: {uri: "%s"}}
+                """.formatted(extra, dir);
+        return FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+    }
+
+    private static Map<String, MElement> byRow(final Iterable<MElement> rows) {
+        final Map<String, MElement> byKey = new HashMap<>();
+        for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+        return byKey;
+    }
+
+    /**
+     * quantileTransform under {@code fit.mode: forward} with weekly blocks (A = 2869, B = 2870, C = 2872, D = 2874):
+     * every row is placed in the distribution of the complete preceding blocks. A reads nothing; B (200) lies above
+     * {50, 100} → 1; C reads {50, 100, 200}, knots (50, 75, 100, 150, 200): 80 → (1 + 5/25) / 4 = 0.3, 60 → (10/25) / 4
+     * = 0.1; D reads {50, 60, 80, 100, 200}, knots = the values: 120 → (3 + 20/100) / 4 = 0.8 (the static fit, which
+     * counts D itself, puts it at 0.76). The artifact holds the whole-input knots.
+     */
+    @Test
+    public void testQuantileTransformForwardFit() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + quantileForwardConfig(dir, "")));
+        Assertions.assertEquals("forward", outputs.get("features").getSchema().getField("f_price_q").getOptions().get("feature.coord.fit"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertEquals(6, byKey.size());
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_price_q"));
+            Assertions.assertNull(byKey.get("A/s2").getPrimitiveValue("f_price_q"));
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.3, byKey.get("C/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.1, byKey.get("C/s2").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.8, byKey.get("D/s1").getAsDouble("f_price_q"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs, "artifact directory missing: " + dir);
+        final java.io.File artifact = new java.io.File(dirs[0], "price_q.quantiles.json");
+        Assertions.assertTrue(artifact.exists(), "the whole-input knots are persisted for a static serving run");
+        Assertions.assertEquals(6, com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject().get("n").getAsLong());
+
+        // window: P14D → two blocks. C reads (2870, 2872) → block 2870 alone ({200}: 80 lies below it → 0);
+        // D reads block 2872 ({60, 80}: 120 lies above → 1)
+        final TestPipeline windowed = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> windowedOut = MPipeline.apply(windowed, Config.load(SOURCE_CONFIG + quantileForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", window: P14D")));
+        PAssert.that(windowedOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertEquals(1.0, byKey.get("B/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(0.0, byKey.get("C/s1").getAsDouble("f_price_q"), 1e-9);
+            Assertions.assertEquals(1.0, byKey.get("D/s1").getAsDouble("f_price_q"), 1e-9);
+            return null;
+        });
+        windowed.run();
+
+        // minBlocks: 2 → B (one preceding block) reads nothing, C (two) reads the same knots as above
+        final TestPipeline min = TestPipeline.create().enableAbandonedNodeEnforcement(false);
+        final Map<String, MCollection> minOut = MPipeline.apply(min, Config.load(SOURCE_CONFIG + quantileForwardConfig("target/feature-artifacts/" + java.util.UUID.randomUUID(), ", minBlocks: 2")));
+        PAssert.that(minOut.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = byRow(rows);
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_price_q"));
+            Assertions.assertEquals(0.3, byKey.get("C/s1").getAsDouble("f_price_q"), 1e-9);
+            return null;
+        });
+        min.run();
+    }
+
     /**
      * svd over (start_price, current_bid_t10): the bid tracks the price (+5..+10), so the first component carries
      * nearly all the variance and the scores are centred and uncorrelated; the artifact holds the fitted moments.
