@@ -581,7 +581,7 @@ public class FeatureSpec implements Serializable {
         def.edges = doubles(o, "edges");
         def.values = Json.strings(o, "values");
         def.baseline = Json.string(o, "baseline");
-        def.on = onKey(o);
+        def.on = Json.string(o, "on");
         def.distribution = Json.string(o, "distribution");
         def.seed = longOf(o, "seed", diagnostics, loc);
 
@@ -774,16 +774,6 @@ public class FeatureSpec implements Serializable {
     }
 
     /** A numeric parameter as a Double: null when absent or not a number (reported as {@code <key>.invalid}, like {@link #longOf}). */
-    /**
-     * The {@code on} key of a residual. YAML 1.1 reads a bare {@code on} as the boolean true, so a YAML document
-     * delivers the entry under the key {@code "true"} (JSON, and a quoted {@code "on"}, keep the name): both are read,
-     * otherwise {@code on: logit} would silently fall back to identity.
-     */
-    private static String onKey(final JsonObject o) {
-        final String on = Json.string(o, "on");
-        return on != null ? on : Json.string(o, "true");
-    }
-
     private static Double doubleOf(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
         if (!o.has(key) || o.get(key).isJsonNull()) return null;
         final JsonElement e = o.get(key);

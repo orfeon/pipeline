@@ -635,7 +635,7 @@ public class FeatureTransformTest {
     }
 
     /**
-     * A residual's {@code on:} scale written in YAML (where a bare {@code on} is a boolean key) reaches the evaluator:
+     * A residual's {@code on:} scale written in YAML (a boolean key under YAML 1.1, a plain key under the 1.2 parser) reaches the evaluator:
      * session A, seller s1 has a start-price share of 100 / 150 against a market share of (1/120) / (1/120 + 1/55).
      */
     @Test
