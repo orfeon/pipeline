@@ -579,6 +579,9 @@ premise of the availability propagation rule (§6.1).
     - {type: lag, fields: [sold, start_price], k: 3}
     - {type: delta, field: start_price, k: 1}
     - {type: trend, field: start_price, k: 5}             # regression slope
+    - {type: regression, field: final_price, against: start_price,
+       funcs: [beta, corr]}                               # two series: cov | corr | beta | intercept | r2; lag: k pairs field with `against` k events earlier
+    - {type: fracdiff, field: start_price, d: 0.4, k: 20} # (1 − B)^d truncated to k terms (stationary, memory kept)
     - {type: ewma, field: start_price, halflife: [2, 5, 10],
        decayBy: events}                                   # events | time
     - {type: ewma, expr: "sold >= 1", halflife: [5]}      # an expression (desugared to an anonymous row feature, below)
@@ -644,6 +647,30 @@ desugared form.
   - equality (only past sessions of the same category) → `window.filter` + `$self` (reducible to a
     partition key)
   - difference (to the previous listing) → `lag` the past value into a column and subtract in a row `expr`
+  - similarity (past sessions weighed by how close they were to this one) → `weightBy` on the aggregate
+    (below): the one place where an op's arithmetic reads the current row, declared as such
+
+**Weighted aggregates (`weightBy`)**: an equality filter selects past rows 0 / 1 and empties sparse
+histories; a kernel keeps every row and weighs it. `weightBy` is a numeric expression over the past row (by
+name) and the current row (`$self.<field>`):
+
+```yaml
+- name: similar_history
+  scope: sequence
+  entity: seller
+  window: {maxAge: P1Y}
+  ops:
+    - {type: aggregate, field: sold, funcs: [count, mean],
+       weightBy: "exp(-abs(start_price - $self.start_price) / 50)"}
+```
+
+- `count` = Σw (the effective count), `sum` = Σw·x, `mean` = Σw·x / Σw, `std` weighted; order / extreme
+  statistics have no weighted form. A null / NaN / non-positive weight contributes nothing.
+- Availability: the past side follows the ordinary sequence rule (window shift included), the `$self` side
+  is checked like the `$self` fields of a filter.
+- It is genuinely a self-join: the weight differs per (row, past row) pair, so nothing folded once per past
+  row can serve it — the statistic has no running state and is evaluated by scanning the window per row. The
+  window must therefore be bounded (`maxAge` / `maxEvents`) for the per-key cost to stay linear.
 
 **Self-referencing filters (`window.filter`)**: aggregates such as "the same seller's recent sessions
 in the same category as this one" narrow the past rows by equality with an attribute of the current
@@ -711,6 +738,7 @@ shrinkage reference so the shrinkage implementation and vocabulary live in one p
   type: svd                      # compression of a sequence output (lag window) = SSA
   input: recent.lag_window
   rank: 5
+  outputs: [scores]              # scores | residual (per input, in input units: what the rank components do not explain) | residualNorm
 
 - name: price_quantile
   scope: population

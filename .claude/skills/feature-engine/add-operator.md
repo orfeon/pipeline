@@ -61,9 +61,11 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
      evaluator's job (`contribution(plan, past)`, null = skip); the scope's null / cast convention is
      `readStatistic`. The `EqualityFilter` sub-key dispatch and the fold / evict pointers come for
      free. `SummaryTest` has the monoid / group harness (`assertMonoid`, `assertInvertible`) —
-     add the family there.
+     add the family there. `Summary.Shape` (skew / kurt: anchored power sums, a catalog line, a `case` in
+     the scan `aggregate`) is the smallest worked example; a statistic that reads *neighbouring* values
+     (`SeriesStats`: acf, peaks) is not a sum of contributions and stays on the scan path.
    - **Scan**: a new `case` in `evaluateScan` over the `window` sublist. Then declare the
-     retention: a bounded tail in `tailSize` (`lag` / `trend` = k, `delta` = k+1, `maxEvents`), else
+     retention: a bounded tail in `tailSize` (`lag` / `trend` / `fracdiff` = k, `delta` = k+1, `maxEvents`), else
      the column is *unbounded* — `unboundedReason` must describe it and the
      `sequence.window.unbounded` hint will list it. Do not add scan ops that walk the whole
      history per row without a bound unless the spec really needs it.

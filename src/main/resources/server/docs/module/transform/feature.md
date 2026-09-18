@@ -25,7 +25,8 @@ Supports:
   share of total, gap to best, percentile, median difference, group size, value counts / ratios, entropy).
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
   time), run length, events/days since a predicate last held, count of matching rows, windowed aggregates
-  (count / mean / min / max / sum / std / first / last). Windows combine `maxEvents`, `maxAge` and a
+  (count / mean / min / max / sum / std / first / last, the shape and series summaries skew / kurt / zeroCross /
+  peaks / acf / pacf / ar). Windows combine `maxEvents`, `maxAge` and a
   `filter` that can reference the current row through `$self.<field>`.
 - **population** scope — expanding-fit encoding: conditional statistics of a target per key set
   (count / share / mean / rate / std / distribution / quantile), optionally windowed and offset by a baseline, with
@@ -149,6 +150,8 @@ features:
       - {type: lag, fields: [sold, start_price], k: 2}
       - {type: delta, field: start_price, k: 1}
       - {type: trend, field: start_price, k: 5}
+      - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # two series (see Two-series and fractional-difference ops)
+      - {type: fracdiff, field: start_price, d: 0.4, k: 20}
       - {type: ewma, expr: "sold >= 1", halflife: [3, 10], decayBy: events}
       - {type: runLength, field: condition_grade, value: good}
       - {type: sinceEvent, predicate: "sold = 1", unit: [events, days]}
@@ -157,6 +160,8 @@ features:
       - {type: ewma, expr: "start_price / quantity", halflife: [3], as: unit_price}  # as: replaces the anonymous __e{n} segment
       - {type: aggregate, field: start_price, funcs: [count, mean, max]}
       - {type: aggregate, funcs: [count]}        # COUNT(1): every visible past row, nulls included
+      # with a field, a null / NaN / ±Infinity value is missing: it counts for no statistic, count included
+      - {type: aggregate, field: sold, funcs: [count, mean], weightBy: "exp(-abs(start_price - $self.start_price) / 50)", as: near}  # similarity-weighted (see Weighted aggregates)
 
   - name: enc                       # population: expanding encoding, keySets × windows × targets × stats
     scope: population
@@ -209,6 +214,41 @@ without `distribution` is an error (`encoding.target.values`).
   no term of its own and falls back to its parent, as an unseen level does. `estimator: joint` fits the
   same per-cell terms (such a cell is skipped). A keySet with its own identity-scale or disabled `shrinkage`
   stays on the residual statistics above.
+
+### Two-series and fractional-difference ops (sequence `regression`, `fracdiff`)
+
+```yaml
+- name: vs_index
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P90D}]
+  ops:
+    - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # vs_index_90d_final_price_vs_start_price_beta / _corr
+    - {type: regression, field: final_price, against: start_price, lag: 1, funcs: [corr]} # ..._vs_start_price_lag1_corr
+    - {type: fracdiff, field: start_price, d: 0.4, k: 20}                                 # vs_index_90d_start_price_fracdiff0p4
+```
+
+- **`regression`** reads two fields of the entity's past events — `field` (y) regressed against `against` (x):
+  `cov` (population covariance), `corr`, `beta` (= cov / var x, the slope of y on x), `intercept`, `r2`
+  (default `[beta, corr]`). An event contributes when both values are present (not null / NaN / ±Infinity); every func needs two
+  contributing events; `corr` / `r2` are null when either series is constant, `beta` / `intercept` when x is.
+  The other series is an ordinary field of the row (a market or group series joined onto each row upstream).
+  The key is `against`, not `on` — YAML 1.1 reads a bare `on` as a boolean.
+- **`lag: k`** (lead-lag) pairs `field` of each event with `against` **k events earlier** inside the window —
+  "does x lead y by k events" (swap the two fields for the other direction; `lag` ≥ 0). Columns are named
+  `..._lag<k>_<func>`.
+- **`fracdiff`** is the fractional difference `(1 − B)^d` of the field, truncated to its first `k`
+  coefficients (`w0 = 1`, `wj = −w(j−1) · (d − j + 1) / j`; default `k: 20`) and applied to the last `k` past
+  events: `0 < d < 1` makes a level series stationary while keeping memory, `d: 1` is the plain first
+  difference. It needs `k` past events without a missing value among them (null otherwise — a fixed-width
+  filter over fewer terms would be a different series). Like every sequence op it is strictly past: the value
+  as of the latest past event, not including the current row.
+- **Cost / retention.** A same-event `regression` runs incrementally (running cross moments, evicted under
+  `maxAge`) — O(1) per row like a plain aggregate. A lagged `regression` is evaluated by scanning its window
+  per row: bound it with `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`). `fracdiff` keeps
+  only its last `k` events.
+- Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
+  `sequence.regression.lag`, `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 
 ### Static fits and artifacts (fit.mode static)
 
@@ -405,6 +445,7 @@ of blocks over a few million rows is seconds.
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
     standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
+    outputs: [scores]                  # scores (default) | residual | residualNorm — see "Residuals" below
     fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static, forward (below), or inherited from the top-level fit
 ```
 
@@ -436,6 +477,14 @@ block) and the components are re-solved for every block window a row may read �
 vectors. A block that declares no `fit.mode` of its own inherits a top-level `fit: {mode: forward}` (geometry
 included), so the whole spec walks forward together; `fit: {mode: static}` on the block opts it out and says so
 (`svd.fit.mode.static` info). The artifact still holds the whole-input components, for a static serving run.
+
+**Residuals (`outputs: [scores, residual, residualNorm]`).** The scores say where a vector sits on the leading
+`rank` components; the residual is what those components do not explain — `x − mean − scale · Σ score_k ·
+component_k`, per input and **in the units of the input** (the idiosyncratic part of each series once the common
+factors are taken out). `residual` emits one column per input, `<name>_resid_<input>`, and needs named `inputs`
+(an array has no named dimensions: `svd.outputs`); `residualNorm` emits `<name>_residnorm`, the Euclidean length
+of the residual vector, and works for an array input too. With every component kept (`rank` = the vector length)
+the residual is 0. The columns share the block's fit (static or forward) and read null wherever the scores do.
 
 ### Shrinkage and key lattices (population)
 
@@ -519,6 +568,47 @@ that are only usable offline get a leading `_` and are not emitted.
 Inline `expr` in sequence ops and encoding targets is evaluated per past row (no `$self`); expressions are
 numeric (Lucene expression syntax), predicates and window filters use the SQL-like
 [Filter](../common/filter.md) syntax.
+
+### Weighted aggregates (sequence `aggregate` with `weightBy`)
+
+A window `filter` selects past events 0 / 1 (`category = $self.category`); on sparse histories — a new
+seller, a listing unlike the earlier ones — an equality filter leaves nothing. `weightBy` keeps every
+event and weighs it by how similar it is to the current row instead:
+
+```yaml
+- name: similar
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P365D}]
+  ops:
+    - type: aggregate
+      field: sold
+      funcs: [count, mean]
+      weightBy: "exp(-abs(start_price - $self.start_price) / 50)"   # the event's fields by name, the current row's as $self.<field>
+      as: near                                                      # similar_365d_near_count / _mean
+```
+
+- The expression is numeric (the row `expr` syntax; operands numeric / bool). A name reads the **past
+  event**, `$self.<field>` reads the **current row**; a weight without `$self` is a plain per-event weight.
+- An event contributes when its value is present (not null / NaN / ±Infinity) and its weight is a positive
+  finite number. A null operand on either side, a NaN and a weight ≤ 0 contribute nothing — so a current row whose `$self` field
+  is null gets `count` 0 and null for the rest.
+- Funcs: `count` = Σw (the *effective count*, **float64** — 0 when nothing contributes), `sum` = Σw·x,
+  `mean` / `avg` / `rate` = Σw·x / Σw, `std` = the weighted population deviation (two contributing events at
+  least). With every weight 1 these are the plain aggregates. `min` / `max` / `first` / `last` have no
+  weighted form (`sequence.weightBy.func`). Without a `field`, `count` weighs every visible row.
+- `weightBy` composes with the window (`maxAge`, `maxEvents`, `filter` — the window selects first, then the
+  weights apply) and is only defined on `aggregate` (`sequence.weightBy.op`).
+- **Availability**: the event side follows the sequence rule (an outcome read from past events shifts the
+  window like any other past input); the `$self` side must be known at `predictAt` — `$self.<outcome>` is
+  an `availability.violation`.
+- **Cost**: the weights differ for every (row, event) pair, so no running statistic can serve them: the
+  aggregate scans its window for every row (info `sequence.weightBy.scan`) instead of the O(1) incremental
+  update of a plain aggregate. Give the window a `maxAge` or `maxEvents`; without either the column keeps
+  the key's whole history and is listed by the `sequence.window.unbounded` hint.
+- A plain and a weighted aggregate of one field in one block would share a column name: set `as:` on one.
+- Diagnostics: `sequence.weightBy.op`, `sequence.weightBy.func`, `sequence.weightBy.type` (a non-numeric
+  operand), `sequence.weightBy.parse`.
 
 ### Naming, conditions and placement notes
 
@@ -630,6 +720,42 @@ permutation importance without leaving the pipeline:
   content, whatever order the runner delivers the rows. The multiset per group is preserved, the output
   keeps the field's type and **availability** (a shuffled outcome is still an outcome: emitting it is
   the usual violation; as an intermediate consumed by a sequence feature it is fine).
+
+### Shape and series summaries (sequence `aggregate` funcs)
+
+Besides the moments and the extremes, `aggregate` reads scalar summaries of *how* the past values are
+distributed and ordered — the descriptive statistics of a short series:
+
+```yaml
+- name: price_shape
+  scope: sequence
+  entity: seller
+  windows: [{maxEvents: 30}]
+  ops:
+    - {type: aggregate, field: start_price, funcs: [skew, kurt, peaks, acf1, pacf2, ar2_1]}
+    - {type: aggregate, expr: "start_price - 100", funcs: [zeroCross], as: vs100}   # crossings of a level: subtract it first
+```
+
+| func | output | value |
+|---|---|---|
+| `skew` | float64 | m₃ / m₂^1.5 of the window's values (population moments, the `std` convention); three values at least |
+| `kurt` | float64 | excess kurtosis m₄ / m₂² − 3; four values at least |
+| `zeroCross` | int64 | sign changes between consecutive non-zero values (a zero has no sign) |
+| `peaks` | int64 | strict local maxima — values above both neighbours; the two ends never count |
+| `acf<j>` | float64 | sample autocorrelation at lag j (in events), the biased estimator Σ(x_t − x̄)(x_{t−j} − x̄) / Σ(x_t − x̄)²; more than j values |
+| `pacf<j>` | float64 | partial autocorrelation at lag j (the last coefficient of the Yule–Walker AR(j) fit) |
+| `ar<p>_<i>` | float64 | i-th coefficient (1 ≤ i ≤ p) of the AR(p) model solved from the Yule–Walker equations (Levinson–Durbin) |
+
+- j and p run 1..20. Missing values (null / NaN / ±Infinity) are dropped first: the series is the window's
+  present values in time order.
+- A window without spread (a constant series, up to rounding) has no `skew` / `kurt` / `acf` / `pacf` / `ar`
+  (null, never NaN); `zeroCross` / `peaks` are null only when the window holds no value at all.
+- **Cost.** `skew` / `kurt` are sums of per-event contributions (power sums up to order four): they fold
+  incrementally and evict under `maxAge` like `mean` / `std`. The series readouts read *neighbouring* values, so
+  they are evaluated by scanning the window for every row — give the window `maxEvents` or `maxAge` (a window
+  with neither keeps the key's whole history: `sequence.window.unbounded`).
+- An unknown func — or a lag / order outside 1..20, an `ar` index outside 1..p — is `sequence.aggregate.func`;
+  the message lists what is available.
 
 ### Availability check
 

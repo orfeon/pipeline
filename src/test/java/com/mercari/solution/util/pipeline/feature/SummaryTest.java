@@ -25,6 +25,12 @@ public class SummaryTest {
 
     /** Merging the two halves in either order equals folding everything, for every readout given. */
     private static <S extends Serializable> void assertMonoid(final Summary<S> family, final List<?> values, final Summary.Readout... readouts) {
+        assertMonoid(family, values, Assertions::assertEquals, readouts);
+    }
+
+    /** {@link #assertMonoid} with the comparison given: a family that re-anchors on merge agrees up to floating rounding. */
+    private static <S extends Serializable> void assertMonoid(final Summary<S> family, final List<?> values,
+                                                              final java.util.function.BiConsumer<Object, Object> assertSame, final Summary.Readout... readouts) {
         final int cut = values.size() / 3;
         final S left = fold(family, values.subList(0, cut)), right = fold(family, values.subList(cut, values.size()));
         final S all = fold(family, values);
@@ -35,9 +41,9 @@ public class SummaryTest {
         final S withEmpty = fold(family, values);
         family.merge(withEmpty, family.create());
         for (final Summary.Readout r : readouts) {
-            Assertions.assertEquals(family.read(all, r), family.read(leftFirst, r), r.name());
-            Assertions.assertEquals(family.read(all, r), family.read(rightFirst, r), r.name());
-            Assertions.assertEquals(family.read(all, r), family.read(withEmpty, r), r.name());
+            assertSame.accept(family.read(all, r), family.read(leftFirst, r));
+            assertSame.accept(family.read(all, r), family.read(rightFirst, r));
+            assertSame.accept(family.read(all, r), family.read(withEmpty, r));
         }
         Assertions.assertEquals(family.count(all), family.count(leftFirst), 1e-12);
     }
@@ -89,10 +95,75 @@ public class SummaryTest {
         Assertions.assertNull(m.read(empty, Summary.Readout.of("mean")));
         Assertions.assertNull(m.read(fold(m, List.of(3.0)), Summary.Readout.of("std")));
         Assertions.assertThrows(IllegalArgumentException.class, () -> m.read(s, Summary.Readout.of("max")));
+        // an emptied window starts over: the evictions leave no residue behind for the next values
+        final Summary.Moments.State emptied = fold(m, List.of(0.1, 0.7, 1e8));
+        for (final double x : new double[]{0.1, 0.7, 1e8}) m.update(emptied, x, -1);
+        Assertions.assertEquals(0.0, emptied.sum);
+        Assertions.assertEquals(0.0, emptied.sumSq);
+        m.update(emptied, 2.0, 1);
+        m.update(emptied, 2.0, 1);
+        Assertions.assertEquals(0.0, (Double) m.read(emptied, Summary.Readout.of("std")));
         final Summary.Readout[] readouts = {COUNT, Summary.Readout.of("sum"), Summary.Readout.of("mean"), Summary.Readout.of("std")};
         assertMonoid(m, xs, readouts);
         final Random random = new Random(3);
         assertInvertible(m, random, () -> Math.round(random.nextGaussian() * 1000) / 100.0, SummaryTest::assertClose, readouts);
+    }
+
+    /** 1, 2, 3, 4, 10: mean 4, deviations −3, −2, −1, 0, 6 → m₂ = 10, m₃ = 36, m₄ = 278.8. */
+    @Test
+    public void testShape() {
+        final Summary<Summary.Shape.State> h = Summary.Summaries.SHAPE;
+        final List<Double> xs = List.of(1.0, 2.0, 3.0, 4.0, 10.0);
+        final Summary.Shape.State s = fold(h, xs);
+        final Summary.Readout skew = Summary.Readout.of("skew"), kurt = Summary.Readout.of("kurt");
+        Assertions.assertEquals(5L, h.read(s, COUNT));
+        Assertions.assertEquals(36 / Math.pow(10, 1.5), (Double) h.read(s, skew), 1e-12);
+        Assertions.assertEquals(278.8 / 100 - 3, (Double) h.read(s, kurt), 1e-12);
+        // a symmetric series has no skew; the two-point distribution has the smallest excess kurtosis there is (−2)
+        Assertions.assertEquals(0.0, (Double) h.read(fold(h, List.of(-2.0, -1.0, 0.0, 1.0, 2.0)), skew), 1e-12);
+        Assertions.assertEquals(-2.0, (Double) h.read(fold(h, List.of(1.0, 3.0, 1.0, 3.0)), kurt), 1e-12);
+        // too few values, and a series without spread (exactly, or up to the rounding of a non-representable constant)
+        Assertions.assertNull(h.read(fold(h, List.of(1.0, 2.0)), skew));
+        Assertions.assertNull(h.read(fold(h, List.of(1.0, 2.0, 4.0)), kurt));
+        Assertions.assertNull(h.read(h.create(), skew));
+        Assertions.assertNull(h.read(fold(h, List.of(7.0, 7.0, 7.0, 7.0)), skew));
+        final Summary.Shape.State constant = fold(h, List.of(5.0, 0.1, 0.1, 0.1, 0.1));
+        h.update(constant, 5.0, -1);
+        Assertions.assertNull(h.read(constant, kurt), "the evicted 5.0 leaves a constant series: no spread, not noise");
+        // the constant left behind may sit on the anchor itself: the sums then hold nothing but the evictions' residue
+        final Summary.Shape.State onAnchor = fold(h, List.of(3.3, 1.7, 9.1, 2.2, 3.3, 3.3, 3.3, 3.3));
+        for (final double x : new double[]{3.3, 1.7, 9.1, 2.2}) h.update(onAnchor, x, -1);
+        Assertions.assertNull(h.read(onAnchor, skew), "a constant on the anchor: residue, not spread");
+        Assertions.assertNull(h.read(onAnchor, kurt), "a constant on the anchor: residue, not spread");
+        // a window sliding along a trend: the anchor follows (left at the first value, 10⁴ away by the end, the running
+        // fourth power sum is off by ~0.08 in kurt), so the running state keeps agreeing with a fresh fold up to rounding
+        final Random drift = new Random(3);
+        final double[] trend = new double[20_000];
+        for (int i = 0; i < trend.length; i++) trend[i] = i * 0.5 + drift.nextGaussian();
+        final Summary.Shape.State sliding = h.create();
+        for (int i = 0; i < trend.length; i++) {
+            h.update(sliding, trend[i], 1);
+            if (i >= 30) h.update(sliding, trend[i - 30], -1);
+        }
+        final Summary.Shape.State fresh = fold(h, java.util.Arrays.stream(trend, trend.length - 30, trend.length).boxed().toList());
+        Assertions.assertEquals((Double) h.read(fresh, kurt), (Double) h.read(sliding, kurt), 1e-2);
+        Assertions.assertEquals((Double) h.read(fresh, skew), (Double) h.read(sliding, skew), 1e-2);
+        Assertions.assertThrows(IllegalArgumentException.class, () -> h.read(s, Summary.Readout.of("mean")));
+        // the anchor keeps a level offset out of the fourth powers
+        final List<Double> offset = xs.stream().map(x -> x + 1e6).toList();
+        Assertions.assertEquals(36 / Math.pow(10, 1.5), (Double) h.read(fold(h, offset), skew), 1e-9);
+        Assertions.assertEquals(278.8 / 100 - 3, (Double) h.read(fold(h, offset), kurt), 1e-9);
+
+        final Summary.Readout[] readouts = {COUNT, skew, kurt};
+        assertMonoid(h, xs, SummaryTest::assertClose, readouts);
+        assertMonoid(h, offset, SummaryTest::assertClose, readouts);
+        final Random random = new Random(13);
+        assertInvertible(h, random, () -> Math.round(Math.exp(random.nextGaussian()) * 1000) / 100.0, SummaryTest::assertClose, readouts);
+        // emptied by eviction, the state starts over exactly
+        final Summary.Shape.State emptied = fold(h, xs);
+        for (final Double x : xs) h.update(emptied, x, -1);
+        Assertions.assertFalse(emptied.anchored);
+        Assertions.assertEquals(0.0, emptied.s4, 0);
     }
 
     @Test
@@ -150,11 +221,75 @@ public class SummaryTest {
         assertInvertible(o, random, () -> (double) random.nextInt(50), SummaryTest::assertClose, readouts);
     }
 
+    /**
+     * x = 1..5, y = 2x + 1 + (0.5, −0.5, 0, 0.5, −0.5): var(x) = 2, cov = 3.8 → beta 1.9, intercept 7 − 1.9 · 3 = 1.3;
+     * var(y) = 7.4 (Σy² = 282 over 5, mean 7) → corr = 3.8 / √14.8.
+     */
+    @Test
+    public void testRegression() {
+        final Summary<Summary.Regression.State> g = Summary.Summaries.REGRESSION;
+        final List<double[]> pairs = List.of(new double[]{1, 3.5}, new double[]{2, 4.5}, new double[]{3, 7}, new double[]{4, 9.5}, new double[]{5, 10.5});
+        final Summary.Regression.State s = fold(g, pairs);
+        Assertions.assertEquals(5L, g.read(s, COUNT));
+        Assertions.assertEquals(3.8, (Double) g.read(s, Summary.Readout.of("cov")), 1e-12);
+        Assertions.assertEquals(1.9, (Double) g.read(s, Summary.Readout.of("beta")), 1e-12);
+        Assertions.assertEquals(1.3, (Double) g.read(s, Summary.Readout.of("intercept")), 1e-12);
+        Assertions.assertEquals(3.8 / Math.sqrt(2 * 7.4), (Double) g.read(s, Summary.Readout.of("corr")), 1e-12);
+        Assertions.assertEquals(3.8 * 3.8 / (2 * 7.4), (Double) g.read(s, Summary.Readout.of("r2")), 1e-12);
+        // fewer than two pairs: nothing but the count; a constant series has no correlation, a constant x no slope
+        Assertions.assertNull(g.read(g.create(), Summary.Readout.of("cov")));
+        Assertions.assertNull(g.read(fold(g, pairs.subList(0, 1)), Summary.Readout.of("beta")));
+        final Summary.Regression.State flatX = fold(g, List.of(new double[]{2, 1}, new double[]{2, 5}));
+        Assertions.assertNull(g.read(flatX, Summary.Readout.of("beta")));
+        Assertions.assertNull(g.read(flatX, Summary.Readout.of("corr")));
+        Assertions.assertEquals(0.0, (Double) g.read(flatX, Summary.Readout.of("cov")), 1e-12);
+        final Summary.Regression.State flatY = fold(g, List.of(new double[]{1, 4}, new double[]{3, 4}));
+        Assertions.assertEquals(0.0, (Double) g.read(flatY, Summary.Readout.of("beta")), 1e-12);
+        Assertions.assertNull(g.read(flatY, Summary.Readout.of("r2")));
+        Assertions.assertThrows(IllegalArgumentException.class, () -> g.read(s, Summary.Readout.of("mean")));
+        // the anchor keeps a large common offset out of the products: a price level of 1e9 with unit moves
+        final List<double[]> offset = new ArrayList<>();
+        for (final double[] p : pairs) offset.add(new double[]{p[0] + 1e9, p[1] + 3e9});
+        Assertions.assertEquals(1.9, (Double) g.read(fold(g, offset), Summary.Readout.of("beta")), 1e-9);
+        Assertions.assertEquals(3.8 / Math.sqrt(2 * 7.4), (Double) g.read(fold(g, offset), Summary.Readout.of("corr")), 1e-9);
+        Assertions.assertEquals(1.3 + 3e9 - 1.9 * 1e9, (Double) g.read(fold(g, offset), Summary.Readout.of("intercept")), 1e-3);
+
+        final Summary.Readout[] readouts = {COUNT, Summary.Readout.of("cov"), Summary.Readout.of("corr"), Summary.Readout.of("beta"), Summary.Readout.of("intercept"), Summary.Readout.of("r2")};
+        assertMonoid(g, pairs, SummaryTest::assertClose, readouts);
+        assertMonoid(g, offset, SummaryTest::assertClose, readouts);
+        final Random random = new Random(17);
+        assertInvertible(g, random, () -> {
+            final double x = Math.round(random.nextGaussian() * 1000) / 100.0;
+            return new double[]{x, 0.7 * x + Math.round(random.nextGaussian() * 300) / 100.0};
+        }, SummaryTest::assertClose, readouts);
+        // emptied by eviction, the state starts over exactly (no rounding residue, a fresh anchor)
+        final Summary.Regression.State emptied = fold(g, pairs);
+        for (final double[] p : pairs) g.update(emptied, p, -1);
+        Assertions.assertEquals(0, g.count(emptied), 0);
+        Assertions.assertFalse(emptied.anchored);
+        Assertions.assertEquals(0.0, emptied.sxy, 0);
+        // the anchor pair evicted, a constant x sits at an offset from the anchor: still no slope (no rounding residue)
+        for (int trial = 0; trial < 200; trial++) {
+            final Summary.Regression.State drifted = g.create();
+            final double[] anchor = {Math.round(random.nextDouble() * 10000) / 100.0, 5};
+            final double constantX = Math.round(random.nextDouble() * 10000) / 100.0;
+            g.update(drifted, anchor, 1);
+            for (int i = 0; i < 2 + random.nextInt(28); i++) g.update(drifted, new double[]{constantX, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            g.update(drifted, anchor, -1);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("beta")), "x " + constantX + " anchored at " + anchor[0]);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("corr")));
+        }
+    }
+
     @Test
     public void testCatalogMapsStatisticsToFamilies() {
+        for (final String func : OperatorCatalog.REGRESSION_FUNCS) Assertions.assertSame(Summary.Summaries.REGRESSION, OperatorCatalog.summary(func).family(), func);
         Assertions.assertSame(Summary.Summaries.MOMENTS, OperatorCatalog.summary("mean").family());
         Assertions.assertSame(Summary.Summaries.MOMENTS, OperatorCatalog.summary("count").family());
         Assertions.assertEquals("std", OperatorCatalog.summary("std").readout().name());
+        Assertions.assertSame(Summary.Summaries.SHAPE, OperatorCatalog.summary("skew").family());
+        Assertions.assertEquals("kurt", OperatorCatalog.summary("kurt").readout().name());
+        for (final String series : List.of("zeroCross", "peaks", "acf1", "pacf2", "ar2_1")) Assertions.assertNull(OperatorCatalog.summary(series), series + " reads neighbouring values: scan only");
         Assertions.assertSame(Summary.Summaries.EXTREMA, OperatorCatalog.summary("max").family());
         Assertions.assertSame(Summary.Summaries.COUNTS, OperatorCatalog.summary("distribution").family());
         final Summary.Spec q90 = OperatorCatalog.summary("q90");

@@ -65,6 +65,12 @@ public class FeatureSpec implements Serializable {
         public String value;
         public List<String> unit = new ArrayList<>();
         public String decayBy;
+        /** regression: the explanatory series ({@code field} is regressed against it; not {@code on}, a YAML 1.1 boolean). */
+        public String against;
+        /** regression: pair {@code field} with {@code against} this many events earlier (lead-lag; null / 0 = same event). */
+        public Integer lag;
+        /** fracdiff: the differencing order (0 < d < 1 keeps memory; 1 = the first difference). */
+        public Double d;
         /** Output name override (replaces the field / anonymous-expression segment, or the op suffix). */
         public String as;
         /** countByValue / ratioByValue: emit one column per listed value instead of a map. */
@@ -82,6 +88,12 @@ public class FeatureSpec implements Serializable {
         public String scoreNull;
         /** shuffle: the seed of the deterministic permutation. */
         public Long seed;
+        /**
+         * sequence aggregate: a numeric expression giving every past event its weight; it reads the event's fields by
+         * name and the current row's through {@code $self.<field>} (a similarity kernel). Null / NaN / non-positive
+         * weights contribute nothing.
+         */
+        public String weightBy;
     }
 
     public static class KeySet implements Serializable {
@@ -191,6 +203,8 @@ public class FeatureSpec implements Serializable {
         /** null = the type's default (svd: centre). */
         public Boolean center;
         public boolean standardize;
+        /** svd: what to emit — {@code scores} (default) | {@code residual} (per input, in input units) | {@code residualNorm}. */
+        public List<String> outputs = new ArrayList<>();
 
         public String location() {
             return "features." + name;
@@ -674,6 +688,7 @@ public class FeatureSpec implements Serializable {
         def.rank = Json.integer(o, "rank");
         def.center = o.has("center") && !o.get("center").isJsonNull() ? Json.bool(o, "center", true) : null;
         def.standardize = Json.bool(o, "standardize", false);
+        def.outputs = Json.strings(o, "outputs");
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");
             def.taskTarget = Json.string(task, "target") != null ? Json.string(task, "target") : Json.string(task, "field");
@@ -766,11 +781,15 @@ public class FeatureSpec implements Serializable {
         op.expr = Json.string(o, "expr");
         op.predicate = Json.string(o, "predicate");
         op.k = Json.integer(o, "k");
+        op.against = Json.string(o, "against");
+        op.lag = Json.integer(o, "lag");
+        op.d = doubleOf(o, "d", diagnostics, loc);
         op.halflife = doubles(o, "halflife");
         op.funcs = Json.strings(o, "funcs");
         op.value = Json.string(o, "value");
         op.unit = Json.strings(o, "unit");
         op.decayBy = Json.string(o, "decayBy");
+        op.weightBy = Json.string(o, "weightBy");
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");

@@ -915,7 +915,7 @@ public final class FeatureStages {
         }
     }
 
-    /** Solves one block per group from its per-time-block states (merged into fresh states: the inputs are never mutated). */
+    /** Solves one block per group from its per-time-block states (taken as is; the inputs are never mutated). */
     static class SolveSummaryBlocksDoFn<T, S extends Serializable> extends DoFn<KV<String, Iterable<KV<Long, S>>>, KV<String, Serializable>> {
         private final List<SummaryFitBlock<T, S, ?>> blocks;
         private final String planHash;
@@ -931,9 +931,17 @@ public final class FeatureStages {
             final SummaryFitBlock<T, S, ?> block = blocks.stream().filter(b -> b.block().equals(name)).findFirst()
                     .orElseThrow(() -> new IllegalStateException("no summary-fit block named " + name));
             final Map<Long, S> parts = new HashMap<>();
+            // Combine.perKey yields one part per time block, taken as is (a quantileTransform state is the whole column:
+            // no copy); a repeated time block is merged into a fresh state rather than mutating the input element.
+            // Nothing in a solve mutates a part (BlockSeries merges into fresh states).
             for (final KV<Long, S> part : c.element().getValue()) {
                 if (part.getKey() == EMPTY_MARKER) continue;
-                block.family().merge(parts.computeIfAbsent(part.getKey(), k -> block.family().create()), part.getValue());
+                parts.merge(part.getKey(), part.getValue(), (a, b) -> {
+                    final S merged = block.family().create();
+                    block.family().merge(merged, a);
+                    block.family().merge(merged, b);
+                    return merged;
+                });
             }
             final Serializable model = block.solve(parts, planHash);
             if (model != null) c.output(KV.of(name, model));
@@ -1255,7 +1263,8 @@ public final class FeatureStages {
         @Override
         public QuantileModel solve(final Map<Long, QuantileTransform.Values> parts, final String planHash) {
             final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
-            final QuantileTransform.Values all = series.total();
+            // a static fit has one block: fit on it directly instead of a merged copy (fit copies before sorting)
+            final QuantileTransform.Values all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
             final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
             LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", block, bins, values.size());
             final QuantileTransform total = QuantileTransform.fit(values, bins, distribution, clip, true);
@@ -1435,14 +1444,37 @@ public final class FeatureStages {
             return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
         }
 
-        /** {@code columns.get(i)} carries score {@code components[i]} (resolved once in {@link #svdSpecs}, never parsed per row). */
+        /** The {@code components} code of the residual-norm column. */
+        static final int RESIDUAL_NORM = Integer.MIN_VALUE;
+
+        /**
+         * What a column carries, from its coordinates: score {@code k} as {@code k ≥ 0}, the residual of input
+         * dimension {@code i} as {@code −i − 1}, the residual norm as {@link #RESIDUAL_NORM}.
+         */
+        static int output(final Map<String, String> coordinates) {
+            final String residual = coordinates.get("residual");
+            if (residual == null) return Integer.parseInt(coordinates.get("component"));
+            return "norm".equals(residual) ? RESIDUAL_NORM : -Integer.parseInt(residual) - 1;
+        }
+
+        /** {@code columns.get(i)} carries output {@code components[i]} (see {@link #output}; resolved once in {@link #svdSpecs}, never parsed per row). */
         @Override
         public void apply(final SvdModel model, final Map<String, Object> values) {
             final Svd svd = svdFor(model, values);
-            final double[] scores = svd == null ? null : svd.transform(vector(values));
+            final double[] x = svd == null ? null : vector(values);
+            final double[] scores = svd == null ? null : svd.transform(x);
+            double[] residual = null;
             for (int i = 0; i < components.length; i++) {
                 final int k = components[i];
-                values.put(columns.get(i).getCanonicalName(), scores == null || k >= scores.length ? null : scores[k]);
+                final Object value;
+                if (k >= 0) {
+                    value = scores == null || k >= scores.length ? null : scores[k];
+                } else {
+                    // a residual column: input dimension −k − 1, or the norm over every dimension
+                    if (residual == null && scores != null) residual = svd.residual(x);
+                    value = residual == null ? null : k == RESIDUAL_NORM ? (Object) com.mercari.solution.util.domain.math.MatrixOps.norm(residual) : (Object) residual[-k - 1];
+                }
+                values.put(columns.get(i).getCanonicalName(), value);
             }
         }
     }
@@ -1496,7 +1528,7 @@ public final class FeatureStages {
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
             final int[] components = new int[e.getValue().size()];
-            for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
+            for (int i = 0; i < components.length; i++) components[i] = SvdSpec.output(e.getValue().get(i).getCoordinates());
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,

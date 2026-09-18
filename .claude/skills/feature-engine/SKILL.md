@@ -145,7 +145,9 @@ reads what the compile layer wrote into each column's `coordinates`.
   with `invertible()` saying whether a contribution can be removed again (a group: windows can evict)
   or only added (a monoid: extrema). Built-in families in `Summary.Summaries`: `MOMENTS` (n, Σ, Σ²:
   count / sum / mean / std), `EXTREMA` (max / min, not invertible), `COUNTS` (value → count:
-  distribution), `ORDER` (`OrderStatistics`: quantiles). `OperatorCatalog.summary(stat)` maps a
+  distribution), `ORDER` (`OrderStatistics`: quantiles), `REGRESSION` (anchored cross moments of a pair
+  `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
+  events and is therefore scan-only). `OperatorCatalog.summary(stat)` maps a
   statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
   families are meant to become the per-block Combine state of the fit stage, the prefix-scan state and
   the streaming state (proposal-feature-unification §2.1), so a new statistic is one family + one
@@ -156,7 +158,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   `Summary` state per filter value; `contribution(plan, past)` extracts what a row contributes,
   `readStatistic` applies the scope's null / cast convention) when `summaryOf(c)` is non-null, no
   `maxEvents`, no general filter, and either no `maxAge` or the family is invertible; else **scan**
-  (`select` = binary-searched sublist view, `evaluateScan` switch). `History` (absolute indices,
+  (`select` = binary-searched sublist view, `evaluateScan` switch). An aggregate with `weightBy` (a
+  numeric expression over the event and, through `$self.f` → `__self_f`, the current row) is scan-only by
+  declaration — `OperatorCatalog.summary(stat, weighted)` returns no family, because a self-dependent
+  weight differs per (row, event) pair — and runs `weightedAggregate` (`Weight` = the compiled expression
+  + its variable split, built once in `setup()`). `History` (absolute indices,
   trimmable prefix), `Watermarks` (per-field trim floors), `retainInto` / `tailSize` /
   `unboundedColumns` / `unboundedReason` (the compile-time twin used by the
   `sequence.window.unbounded` hint). `bufferedFields()` = union of `pastInputs` = what the stage

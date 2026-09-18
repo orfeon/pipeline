@@ -75,6 +75,8 @@ public final class OperatorCatalog {
         register(Scope.sequence, "sinceEvent", InputKind.predicate, null, false, "events / days since the predicate last held");
         register(Scope.sequence, "countMatch", InputKind.predicate, I64, false, "number of past rows where the predicate holds");
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
+        register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2; lag pairs the field with the other series k events earlier (lead-lag)");
+        register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
 
         // population (fit)
         register(Scope.population, "encoding", InputKind.any, F64, true, "shrinkage-smoothed conditional statistics over structured key space");
@@ -96,13 +98,24 @@ public final class OperatorCatalog {
         return List.copyOf(OPERATORS.values());
     }
 
-    /** Aggregate functions accepted by sequence.aggregate and their output types. */
+    /** What sequence.aggregate accepts, for the "unknown func" message. */
+    public static final String AVAILABLE_AGGREGATES = "count | sum | mean | avg | rate | std | skew | kurt | min | max | first | last | zeroCross | peaks"
+            + " | acf<j> | pacf<j> | ar<p>_<i> (j, p up to " + SeriesStats.MAX_LAG + ")";
+
+    /**
+     * Aggregate functions accepted by sequence.aggregate and their output types: the moments, the shape of the
+     * distribution ({@code skew} / {@code kurt}), the extremes and ends, and the order-dependent series readouts of
+     * {@link SeriesStats} ({@code zeroCross}, {@code peaks}, {@code acf<j>}, {@code pacf<j>}, {@code ar<p>_<i>}).
+     */
     public static Schema.FieldType aggregateOutput(final String func, final Schema.FieldType inputType) {
         return switch (func) {
             case "count" -> I64;
-            case "mean", "avg", "std", "sum", "rate" -> F64;
+            case "mean", "avg", "std", "sum", "rate", "skew", "kurt" -> F64;
             case "min", "max", "last", "first" -> inputType;
-            default -> null;
+            default -> {
+                final SeriesStats.Readout series = SeriesStats.parse(func);
+                yield series == null ? null : SeriesStats.isCount(series) ? I64 : F64;
+            }
         };
     }
 
@@ -119,6 +132,28 @@ public final class OperatorCatalog {
             case "length", "argmin", "argmax" -> I64;
             default -> F64;
         };
+    }
+
+    /**
+     * The aggregate functions defined under a per-event weight ({@code weightBy}): {@code count} reads Σw (the
+     * effective count, FLOAT64), {@code sum} Σw·x, {@code mean} Σw·x / Σw, {@code std} the weighted population
+     * deviation. Order / extreme statistics ({@code min / max / first / last}) have no weighted form.
+     */
+    public static final List<String> WEIGHTED_FUNCS = List.of("count", "sum", "mean", "avg", "rate", "std");
+
+    /** Output type of an aggregate function under {@code weightBy}, or null when it has no weighted form. */
+    public static Schema.FieldType weightedAggregateOutput(final String func) {
+        return WEIGHTED_FUNCS.contains(func) ? F64 : null;
+    }
+
+    /**
+     * {@link #summary(String)} for a statistic that may carry a per-event weight. A weight may read the current row
+     * ({@code $self}): it is then a different number for every (row, event) pair, so no running state — nothing
+     * folded once per event — can serve it, whatever the family. Weighted statistics are therefore scan-only; a
+     * weight over the event alone would fit a weighted-moments family, which does not exist yet.
+     */
+    public static Summary.Spec summary(final String stat, final boolean weighted) {
+        return weighted ? null : summary(stat);
     }
 
     /**
@@ -147,17 +182,21 @@ public final class OperatorCatalog {
     /**
      * The {@link Summary} family a statistic token runs on incrementally — the single place that decides which
      * statistics the keyed replay can serve from running state (and, being monoids, which can be combined per
-     * block or per partition): {@code count / sum / mean / avg / rate / std} → moments, {@code max / min} →
+     * block or per partition): {@code count / sum / mean / avg / rate / std} → moments, {@code skew / kurt} → the
+     * power sums up to order four, {@code max / min} →
      * extrema (not invertible: scan under a window), {@code distribution} → value counts, the quantile tokens →
-     * exact order statistics. Null for a token without a family ({@code share}, {@code first} / {@code last}, an
+     * exact order statistics, {@code cov / corr / beta / intercept / r2} → the cross moments of a pair (a lagged pairing is
+     * not a per-event contribution and stays on the scan path, see {@code SequenceEvaluator.summaryOf}). Null for a token without a family ({@code share}, {@code first} / {@code last}, an
      * unknown token): such a statistic is scan-only.
      */
     public static Summary.Spec summary(final String stat) {
         if (stat == null) return null;
         return switch (stat) {
             case "count", "sum", "mean", "avg", "rate", "std" -> new Summary.Spec(Summary.Summaries.MOMENTS, Summary.Readout.of(stat));
+            case "skew", "kurt" -> new Summary.Spec(Summary.Summaries.SHAPE, Summary.Readout.of(stat));
             case "max", "min" -> new Summary.Spec(Summary.Summaries.EXTREMA, Summary.Readout.of(stat));
             case "distribution" -> new Summary.Spec(Summary.Summaries.COUNTS, Summary.Readout.of(stat));
+            case "cov", "corr", "beta", "intercept", "r2" -> new Summary.Spec(Summary.Summaries.REGRESSION, Summary.Readout.of(stat));
             default -> {
                 final Double p = quantileProbability(stat);
                 yield p == null ? null : new Summary.Spec(Summary.Summaries.ORDER, Summary.Readout.of("quantile", p));
@@ -179,6 +218,9 @@ public final class OperatorCatalog {
         final int percent = Integer.parseInt(m.group(1));
         return percent > 100 ? null : percent / 100d;
     }
+
+    /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
+    public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2");
 
     public static List<String> datetimeDerivations() {
         return List.of("year", "month", "day", "dayOfWeek", "dayOfYear", "weekOfYear", "hour", "minute");

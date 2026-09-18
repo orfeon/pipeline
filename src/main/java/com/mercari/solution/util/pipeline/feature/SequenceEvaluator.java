@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.feature;
 
+import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.pipeline.Filter;
 
 import java.io.Serializable;
@@ -23,7 +24,8 @@ import java.util.regex.Pattern;
  *       (max / min cannot evict). Used for {@code aggregate} / encoding statistics; turns the per-key cost from
  *       O(n²) into O(n).</li>
  *   <li><b>Scan</b>: binary-searched window bounds + a {@code subList} view (no copying) for everything
- *       else (lag / trend / ewma / predicates / maxEvents windows / general filters).</li>
+ *       else (lag / trend / ewma / predicates / maxEvents windows / general filters / a {@code weightBy}
+ *       aggregate, whose weights depend on the current row).</li>
  * </ul>
  *
  * <p>The evaluator owns the extraction — which value of a past row contributes ({@link #contribution}) and the
@@ -47,14 +49,44 @@ public class SequenceEvaluator implements Serializable {
         Integer maxEvents;
         String filterText;
         EqualityFilter equality;
+        /** An order-dependent aggregate ({@link SeriesStats}: zeroCross / peaks / acf / pacf / ar), or null. */
+        SeriesStats.Readout series;
         String offset;
         boolean incremental;
         String field;
+        /** regression: the explanatory field ({@code field} is regressed against it) and the events it leads by. */
+        String against;
+        int lag;
+        /** fracdiff: the truncated filter, newest event first ({@code w[0] = 1}). */
+        double[] fracdiffWeights;
         String stat; // aggregate func / encoding stat token (drives the extraction of a contribution)
         /** The summary family and readout the statistic runs on incrementally, or null (scan only). */
         Summary.Spec summary;
         /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
         Serializable empty;
+        /** The aggregate's per-event weight expression ({@code weightBy}), or null. */
+        String weightBy;
+    }
+
+    /**
+     * A compiled {@code weightBy}: the expression and its variables split into the current row's ({@code $self.f},
+     * spelled {@code __self_f} at runtime) and the event's.
+     */
+    private record Weight(ExpressionUtil.Expression expression, List<String> selfVariables, List<String> selfFields, List<String> pastFields) {
+
+        static Weight of(final String text) {
+            final ExpressionUtil.Expression expression = ExpressionUtil.createDefaultExpression(text.replace("$self.", FeatureValues.SELF_PREFIX));
+            final List<String> selfVariables = new ArrayList<>(), selfFields = new ArrayList<>(), pastFields = new ArrayList<>();
+            for (final String name : expression.getVariableNames()) {
+                if (name.startsWith(FeatureValues.SELF_PREFIX)) {
+                    selfVariables.add(name);
+                    selfFields.add(name.substring(FeatureValues.SELF_PREFIX.length()));
+                } else {
+                    pastFields.add(name);
+                }
+            }
+            return new Weight(expression, selfVariables, selfFields, pastFields);
+        }
     }
 
     /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
@@ -250,7 +282,7 @@ public class SequenceEvaluator implements Serializable {
         if (plan.maxEvents != null) return plan.maxEvents;
         final String k = c.coordinates.get("k");
         return switch (c.operator) {
-            case "lag", "trend" -> k == null ? null : Integer.parseInt(k);
+            case "lag", "trend", "fracdiff" -> k == null ? null : Integer.parseInt(k);
             case "delta" -> k == null ? null : Integer.parseInt(k) + 1;
             default -> null;
         };
@@ -279,6 +311,7 @@ public class SequenceEvaluator implements Serializable {
         final ColumnPlan plan = evaluator.plan(c);
         if (!unbounded(plan, c)) return null;
         if (plan.filterText != null) return "a window with a filter and no maxAge";
+        if (plan.weightBy != null) return "a weightBy aggregate without maxAge or maxEvents";
         return c.operator + " without maxAge";
     }
 
@@ -309,6 +342,7 @@ public class SequenceEvaluator implements Serializable {
     private transient Map<String, Filter.ConditionNode> conditions;
     private transient Map<String, ColumnPlan> plans;
     private transient Map<String, RetainPlan> retainPlans;
+    private transient Map<String, Weight> weights;
 
     public SequenceEvaluator(final List<OutputColumn> columns) {
         this(columns, false);
@@ -334,7 +368,10 @@ public class SequenceEvaluator implements Serializable {
     public void setup() {
         conditions = new HashMap<>();
         plans = new HashMap<>();
+        weights = new HashMap<>();
         for (final OutputColumn c : columns) {
+            final String weightBy = c.coordinates.get("weightBy");
+            if (weightBy != null) weights.computeIfAbsent(weightBy, Weight::of);
             for (final String key : List.of("filter", "predicate")) {
                 final String text = c.coordinates.get(key);
                 if (text != null && !conditions.containsKey(text)) {
@@ -358,12 +395,21 @@ public class SequenceEvaluator implements Serializable {
             if (m.matches()) plan.equality = new EqualityFilter(m.group(1), m.group(2));
         }
         plan.field = c.coordinates.get("field");
+        plan.against = c.coordinates.get("against");
+        plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
+        if ("fracdiff".equals(c.operator)) {
+            plan.fracdiffWeights = fracdiffWeights(Double.parseDouble(c.coordinates.get("d")), Integer.parseInt(c.coordinates.get("k")));
+        }
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = statToken(c);
+        plan.weightBy = c.coordinates.get("weightBy");
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
+        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
         plan.incremental = !forceScan
                 && plan.summary != null
+                // a weight may read the current row: the catalog declares weighted statistics scan-only
+                && (plan.weightBy == null || OperatorCatalog.summary(plan.stat, true) != null)
                 && plan.maxEvents == null
                 && (plan.filterText == null || plan.equality != null)
                 // a window evicts: only a group (invertible family) can remove a contribution again
@@ -371,14 +417,22 @@ public class SequenceEvaluator implements Serializable {
         return plan;
     }
 
-    /** The statistic token of the column ({@code aggregate} func); overridden for encoding stats. */
+    /** The statistic token of the column ({@code aggregate} / {@code regression} func); overridden for encoding stats. */
     String statToken(final OutputColumn c) {
-        return "aggregate".equals(c.operator) ? c.coordinates.get("func") : null;
+        return "aggregate".equals(c.operator) || "regression".equals(c.operator) ? c.coordinates.get("func") : null;
     }
 
-    /** The summary family the column's statistic runs on incrementally, or null when it is scan-only. */
+    /**
+     * The summary family the column's statistic runs on incrementally, or null when it is scan-only. A lagged
+     * regression pairs an event with an earlier one: that pair is not a contribution of one event (evicting the
+     * far edge would need the rows before it), so it has no family.
+     */
     Summary.Spec summaryOf(final OutputColumn c) {
-        return "aggregate".equals(c.operator) ? OperatorCatalog.summary(c.coordinates.get("func")) : null;
+        return switch (c.operator) {
+            case "aggregate" -> OperatorCatalog.summary(c.coordinates.get("func"));
+            case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(c.coordinates.get("func"));
+            default -> null;
+        };
     }
 
     public void evaluate(final Map<String, Object> row, final long nowMillis, final List<Past> history) {
@@ -432,11 +486,28 @@ public class SequenceEvaluator implements Serializable {
     /**
      * What one past row contributes to the column's summary, or null when it contributes nothing (a missing
      * value); overridden by the population evaluator. A field-less count contributes a bare 0 (every visible row
-     * counts, nulls included); a field contributes its numeric value.
+     * counts, nulls included); a field contributes its numeric value when it is {@link #finite}.
      */
     Object contribution(final ColumnPlan plan, final Past p) {
         if (plan.field == null) return 0d;
-        return FeatureValues.toDouble(p.values().get(plan.field));
+        if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
+        return finite(p.values().get(plan.field));
+    }
+
+    /**
+     * A past value as a statistic of the window reads it: null when missing — null, non-numeric, NaN or ±∞. The
+     * incremental and the scan path share this rule; a non-finite contribution would also poison a running sum for
+     * good (NaN stays NaN, and evicting an ∞ leaves ∞ − ∞ = NaN), where the scan recovers once it leaves the window.
+     */
+    static Double finite(final Object value) {
+        final Double d = FeatureValues.toDouble(value);
+        return d == null || !Double.isFinite(d) ? null : d;
+    }
+
+    /** The (x, y) contribution of a regression, or null when either value is missing ({@link #finite}). */
+    private static double[] pair(final Object x, final Object y) {
+        final Double dx = finite(x), dy = finite(y);
+        return dx == null || dy == null ? null : new double[]{dx, dy};
     }
 
     /**
@@ -454,6 +525,8 @@ public class SequenceEvaluator implements Serializable {
     Object evaluateScan(final OutputColumn c, final ColumnPlan plan, final Map<String, Object> row,
                         final long nowMillis, final List<Past> window) {
         final String field = plan.field;
+        // an order-dependent aggregate reads the window's present values as one series, in time order
+        if (plan.series != null) return SeriesStats.read(plan.series, series(window, field));
         switch (c.operator) {
             case "lag" -> {
                 final int k = Integer.parseInt(c.coordinates.get("k"));
@@ -518,7 +591,30 @@ public class SequenceEvaluator implements Serializable {
                 return n;
             }
             case "aggregate" -> {
+                if (plan.weightBy != null) return weightedAggregate(c.coordinates.get("func"), window, field, weights.get(plan.weightBy), row);
                 return aggregate(c.coordinates.get("func"), window, field, c);
+            }
+            case "regression" -> {
+                // the same family as the incremental path, folded over the window; under a lag the field of event
+                // i is paired with `against` of event i − lag, both inside the window
+                final Summary<Summary.Regression.State> family = Summary.Summaries.REGRESSION;
+                final Summary.Regression.State state = family.create();
+                for (int i = plan.lag; i < window.size(); i++) {
+                    final double[] pair = pair(window.get(i - plan.lag).values().get(plan.against), window.get(i).values().get(field));
+                    if (pair != null) family.update(state, pair, 1);
+                }
+                return family.read(state, Summary.Readout.of(c.coordinates.get("func")));
+            }
+            case "fracdiff" -> {
+                final double[] w = plan.fracdiffWeights;
+                if (window.size() < w.length) return null;
+                double value = 0;
+                for (int j = 0; j < w.length; j++) {
+                    final Double x = FeatureValues.toDouble(window.get(window.size() - 1 - j).values().get(field));
+                    if (x == null || x.isNaN()) return null;
+                    value += w[j] * x;
+                }
+                return Double.isFinite(value) ? value : null;
             }
             default -> throw new IllegalStateException("unsupported sequence operator: " + c.operator);
         }
@@ -574,6 +670,17 @@ public class SequenceEvaluator implements Serializable {
         return lo;
     }
 
+    /** The present ({@link #finite}) values of a field over the window, oldest first. */
+    private static double[] series(final List<Past> window, final String field) {
+        final double[] x = new double[window.size()];
+        int n = 0;
+        for (final Past p : window) {
+            final Double d = finite(p.values().get(field));
+            if (d != null) x[n++] = d;
+        }
+        return n == x.length ? x : Arrays.copyOf(x, n);
+    }
+
     static Object aggregate(final String func, final List<Past> window, final String field, final OutputColumn c) {
         if (field == null) {
             return (long) window.size();
@@ -585,7 +692,7 @@ public class SequenceEvaluator implements Serializable {
             if (v == null) continue;
             if (first == null) first = v;
             last = v;
-            final Double d = FeatureValues.toDouble(v);
+            final Double d = finite(v);
             if (d != null) values.add(d);
         }
         return switch (func) {
@@ -601,7 +708,57 @@ public class SequenceEvaluator implements Serializable {
                 final double mean = values.stream().mapToDouble(d -> d).average().orElse(Double.NaN);
                 yield Math.sqrt(values.stream().mapToDouble(d -> (d - mean) * (d - mean)).sum() / values.size());
             }
+            case "skew", "kurt" -> {
+                // the family of the incremental path, folded over the window (one arithmetic, one null rule)
+                final Summary<Summary.Shape.State> shape = Summary.Summaries.SHAPE;
+                final Summary.Shape.State state = shape.create();
+                for (final Double d : values) shape.update(state, d, 1);
+                yield shape.read(state, Summary.Readout.of(func));
+            }
             default -> throw new IllegalStateException("unsupported aggregate func: " + func);
+        };
+    }
+
+    /**
+     * An aggregate under {@code weightBy}: every event of the window is weighed against the current row — the
+     * expression reads the event's fields by name and the row's as {@code $self.f} — and contributes when its value
+     * is present and its weight is a positive finite number (a null operand makes the weight NaN: no contribution).
+     * {@code count} = Σw (0 without contributions), {@code sum} = Σw·x, {@code mean} = Σw·x / Σw, {@code std} = the
+     * weighted population deviation (two contributing events at least); with every weight 1 these are the plain
+     * aggregates. A field-less count weighs every visible row.
+     */
+    private static Object weightedAggregate(final String func, final List<Past> window, final String field, final Weight weight, final Map<String, Object> row) {
+        final Map<String, Double> variables = new HashMap<>();
+        for (int i = 0; i < weight.selfVariables().size(); i++) {
+            variables.put(weight.selfVariables().get(i), FeatureValues.toDouble(row.get(weight.selfFields().get(i))));
+        }
+        final double[] ws = new double[window.size()], xs = new double[window.size()];
+        int n = 0;
+        double sumW = 0, sumWx = 0;
+        for (final Past p : window) {
+            final Double x = field == null ? Double.valueOf(0d) : finite(p.values().get(field));
+            if (x == null) continue;
+            for (final String f : weight.pastFields()) variables.put(f, FeatureValues.toDouble(p.values().get(f)));
+            final double w = weight.expression().evaluate(variables);
+            if (!(w > 0) || Double.isInfinite(w)) continue;
+            ws[n] = w;
+            xs[n++] = x;
+            sumW += w;
+            sumWx += w * x;
+        }
+        if ("count".equals(func)) return sumW;
+        if (n == 0) return null;
+        return switch (func) {
+            case "sum" -> sumWx;
+            case "mean", "avg", "rate" -> sumWx / sumW;
+            case "std" -> {
+                if (n < 2) yield null;
+                final double mean = sumWx / sumW;
+                double ss = 0;
+                for (int i = 0; i < n; i++) ss += ws[i] * (xs[i] - mean) * (xs[i] - mean);
+                yield Math.sqrt(ss / sumW);
+            }
+            default -> throw new IllegalStateException("aggregate " + func + " has no weighted form");
         };
     }
 
@@ -616,6 +773,17 @@ public class SequenceEvaluator implements Serializable {
             den += (i - xMean) * (i - xMean);
         }
         return den == 0 ? null : num / den;
+    }
+
+    /**
+     * The first {@code k} coefficients of (1 − B)^d: {@code w[0] = 1}, {@code w[j] = −w[j−1] (d − j + 1) / j}
+     * ({@code w[j]} weighs the value j events back). d = 1 gives the first difference (1, −1, 0, …).
+     */
+    static double[] fracdiffWeights(final double d, final int k) {
+        final double[] w = new double[k];
+        w[0] = 1;
+        for (int j = 1; j < k; j++) w[j] = -w[j - 1] * (d - j + 1) / j;
+        return w;
     }
 
 }

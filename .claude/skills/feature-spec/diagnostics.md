@@ -150,9 +150,15 @@ not expand because another block failed).
 | `sequence.predicate` | error | `sinceEvent` / `countMatch` need `predicate` |
 | `sequence.self` | error | `$self` inside an op `expr` / `predicate`; use `window.filter`, or `lag` + a row `expr` |
 | `sequence.aggregate.func` | error | unknown aggregate function |
+| `sequence.weightBy.op` / `sequence.weightBy.func` | error | `weightBy` is only defined on `aggregate`, for count / sum / mean / avg / rate / std (min / max / first / last have no weighted form) |
+| `sequence.weightBy.type` / `sequence.weightBy.parse` | error | the weight is a numeric expression: operands (past fields by name, `$self.<field>` for the current row) must be numeric / bool |
+| `sequence.weightBy.scan` | info | a weighted aggregate has no running state and scans its window per row: give the window `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`) |
 | `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required; `decayBy` is `events` or `time` |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
+| `sequence.regression.against` / `.func` / `.lag` | error | `regression` needs a numeric `against` field (the key is `against`, a bare `on` is a YAML boolean); funcs are cov / corr / beta / intercept / r2; `lag` ≥ 0 (swap the fields for the other direction) |
+| `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
+| `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
 | `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
 
@@ -203,7 +209,7 @@ not expand because another block failed).
 | `quantileTransform.fit.mode` / `quantileTransform.fit.mode.static` | error / info | quantileTransform is `static` or `forward` (expanding / fold are rejected); the info says a block declared `static` under a top-level forward fit and therefore sees the whole input |
 | `svd.fit.mode` | error | `static` \| `forward` only (`expanding` / `fold` are rejected) |
 | `svd.fit.mode.static` | info | the block declares `fit.mode: static` while the top-level fit is `forward`, so it alone is fitted on the whole input; drop the block's `fit.mode` to inherit the forward walk |
-| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `warmStart` not implemented; `window` applies to a forward `svd` only |
+| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `warmStart` not implemented; `window` applies to a forward `svd` / `quantileTransform` only |
 | `discretize.input` / `.bins` / `.minSamplesPerBin` / `.method` / `.target` | error / warning | numeric input; bins ≥ 2; minSamplesPerBin ≥ 1; only `quantile`; `target` is ignored by `quantile` |
 | `quantileTransform.input` / `.bins` / `.distribution` | error | numeric input; bins ≥ 2; `uniform \| normal` |
 | `quantileTransform.clip` | error / warning | error: `clip` must be a probability in `(0, 0.5)` (default `1e-6`); warning: `clip` with `distribution: uniform` has no effect on the output but still changes the plan hash — remove it or switch to `normal` |

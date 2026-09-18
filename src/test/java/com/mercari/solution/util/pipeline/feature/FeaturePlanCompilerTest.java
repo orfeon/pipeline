@@ -270,6 +270,57 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(sources, SPEC), "sources.fields.observedAtField"));
     }
 
+    /**
+     * The two-series {@code regression} op (one column per func, both series projected into the history, the lagged
+     * pairing marked for the scan path) and {@code fracdiff} (d and k in the coordinates, a bounded tail).
+     */
+    @Test
+    public void testRegressionAndFracdiffExpansion() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        Assertions.assertTrue(SPEC.contains(plain));
+        final String spec = SPEC.replace(plain, plain
+                + "\n      - {type: regression, field: final_price, against: start_price, funcs: [beta, corr, r2]}"
+                + "\n      - {type: regression, field: final_price, against: start_price, lag: 1}"
+                + "\n      - {type: fracdiff, field: start_price, d: 0.4, k: 10}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn beta = column(plan, "recent_365d_final_price_vs_start_price_beta");
+        Assertions.assertEquals("regression", beta.getOperator());
+        Assertions.assertEquals(Schema.Type.float64, beta.getFieldType().getType());
+        Assertions.assertEquals("beta", beta.getCoordinates().get("func"));
+        Assertions.assertEquals("final_price", beta.getCoordinates().get("field"));
+        Assertions.assertEquals("start_price", beta.getCoordinates().get("against"));
+        Assertions.assertNull(beta.getCoordinates().get("lag"));
+        Assertions.assertEquals(Set.of("final_price", "start_price"), beta.getPastInputs());
+        // final_price is an outcome: the pair's window is shifted like an aggregate of it
+        Assertions.assertEquals(OutputColumn.Status.windowShift, beta.getStatus());
+        Assertions.assertNotNull(column(plan, "recent_n5_final_price_vs_start_price_r2"));
+        // the lagged pairing: default funcs, its own names, the lag in the coordinates (what sends it to the scan path)
+        final OutputColumn lagged = column(plan, "recent_365d_final_price_vs_start_price_lag1_corr");
+        Assertions.assertEquals("1", lagged.getCoordinates().get("lag"));
+        Assertions.assertNotNull(column(plan, "recent_365d_final_price_vs_start_price_lag1_beta"));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(beta));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(lagged), "bounded by maxAge");
+
+        final OutputColumn fracdiff = column(plan, "recent_n5_start_price_fracdiff0p4");
+        Assertions.assertEquals("0.4", fracdiff.getCoordinates().get("d"));
+        Assertions.assertEquals("10", fracdiff.getCoordinates().get("k"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, fracdiff.getStatus());
+
+        final String reg = "- {type: regression, field: final_price, against: start_price, funcs: [beta, corr, r2]}";
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, funcs: [beta]}")), "sequence.regression.against"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: condition_grade}")), "sequence.regression.against"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: condition_grade, against: start_price}")), "sequence.op.type"));
+        final FeaturePlan func = compile(SOURCES, spec.replace("funcs: [beta, corr, r2]", "funcs: [beta, mean]"));
+        Assertions.assertTrue(hasCode(func, "sequence.regression.func"));
+        Assertions.assertTrue(func.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("cov | corr | beta")));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("lag: 1}", "lag: -1}")), "sequence.regression.lag"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(reg, "- {type: regression, field: final_price, against: nosuchfield}")), "reference.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4, k: 10", "k: 10")), "sequence.fracdiff.d"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("d: 0.4", "d: 2.5")), "sequence.fracdiff.d"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("k: 10}", "k: 1}")), "sequence.fracdiff.k"));
+    }
+
     @Test
     public void testUnresolvedReferenceAndCycle() {
         final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / nosuchfield\"");
@@ -281,10 +332,101 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(plan.getDiagnostics().hasErrors());
     }
 
+    /**
+     * The scalar summaries of the aggregate op: the shape of the distribution (skew / kurt, a summary family — they
+     * fold incrementally) and the order-dependent series readouts (zeroCross / peaks / acf / pacf / ar — scan only).
+     */
+    @Test
+    public void testAggregateShapeAndSeriesFuncs() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        Assertions.assertTrue(SPEC.contains(plain));
+        final String spec = SPEC.replace(plain, "- {type: aggregate, field: start_price, funcs: [skew, kurt, zeroCross, peaks, acf1, pacf2, ar2_1]}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        for (final String func : List.of("skew", "kurt", "acf1", "pacf2", "ar2_1")) {
+            final OutputColumn c = column(plan, "recent_365d_start_price_" + func);
+            Assertions.assertEquals("aggregate", c.getOperator());
+            Assertions.assertEquals(func, c.getCoordinates().get("func"));
+            Assertions.assertEquals(Schema.Type.float64, c.getFieldType().getType(), func);
+        }
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "recent_n5_start_price_zeroCross").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "recent_n5_start_price_peaks").getFieldType().getType());
+        // without a window: skew folds incrementally (bounded), a series readout scans the whole history (the hint)
+        final FeaturePlan open = compile(SOURCES, spec.replace("      - {maxEvents: 5}\n      - {maxAge: P365D}\n", "      - {}\n"));
+        Assertions.assertFalse(open.getDiagnostics().hasErrors(), open::describe);
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(column(open, "recent_all_start_price_skew")));
+        Assertions.assertNotNull(SequenceEvaluator.unboundedReason(column(open, "recent_all_start_price_acf1")));
+        // lags and orders outside 1..20, an index outside 1..order and unknown names are rejected with the list of funcs
+        for (final String bad : List.of("acf0", "acf21", "ar2_3", "ar2", "kurtosis")) {
+            final FeaturePlan rejected = compile(SOURCES, spec.replace("funcs: [skew,", "funcs: [" + bad + ","));
+            Assertions.assertTrue(hasCode(rejected, "sequence.aggregate.func"), bad);
+            Assertions.assertTrue(rejected.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("skew") && m.contains("ar<p>_<i>")), bad);
+        }
+    }
+
     @Test
     public void testSelfInOpExpressionIsRejected() {
         final String spec = SPEC.replace("expr: \"sold >= 1\", halflife: [5]", "expr: \"start_price - $self.start_price\", halflife: [5]");
         Assertions.assertTrue(hasCode(compile(SOURCES, spec), "sequence.self"));
+    }
+
+    /**
+     * {@code weightBy} on a sequence aggregate: the event side of the expression joins the projected history (and the
+     * window shift), the {@code $self} side is a row input checked against computeAt; every func is FLOAT64 (count =
+     * Σw); the aggregate is declared scan-only once per block.
+     */
+    @Test
+    public void testSequenceWeightBy() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        Assertions.assertTrue(SPEC.contains(plain));
+        final String kernel = "exp(-abs(start_price - $self.start_price) / 50)";
+        final String spec = SPEC.replace(plain, "- {type: aggregate, field: sold, funcs: [count, mean, std], weightBy: \"" + kernel + "\", as: near}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn mean = column(plan, "recent_n5_near_mean");
+        Assertions.assertEquals("aggregate", mean.getOperator());
+        Assertions.assertEquals(kernel, mean.getCoordinates().get("weightBy"));
+        Assertions.assertEquals("sold", mean.getCoordinates().get("field"));
+        Assertions.assertEquals(Set.of("sold", "start_price"), mean.getPastInputs(), "the event side of the weight is projected into the history");
+        Assertions.assertTrue(mean.getInputs().containsAll(Set.of("start_price", "seller_id")));
+        // sold is an outcome: the weighted window is shifted exactly like the plain aggregate's
+        final OutputColumn plainMean = column(compile(SOURCES, SPEC), "recent_n5_sold_mean");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, mean.getStatus());
+        Assertions.assertEquals(plainMean.getWindowShift(), mean.getWindowShift());
+        Assertions.assertEquals(Schema.Type.float64, column(plan, "recent_n5_near_count").getFieldType().getType(), "a weighted count is Σw");
+        Assertions.assertEquals(Schema.Type.int64, column(compile(SOURCES, SPEC), "recent_n5_sold_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, column(plan, "recent_365d_near_std").getFieldType().getType());
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.weightBy.scan")).count(), "reported once, not per window");
+        Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, spec.replace("/ 50)", "/ 25)")).getHash(), "the weight is a semantic parameter");
+
+        // a field-less weighted count: Σw over the visible rows
+        final FeaturePlan count = compile(SOURCES, SPEC.replace(plain, "- {type: aggregate, weightBy: \"" + kernel + "\", as: near}"));
+        Assertions.assertFalse(count.getDiagnostics().hasErrors(), count::describe);
+        Assertions.assertEquals(Schema.Type.float64, column(count, "recent_n5_near_count").getFieldType().getType());
+        Assertions.assertEquals(Set.of("start_price"), column(count, "recent_n5_near_count").getPastInputs());
+
+        // the event side may read an outcome (it is past, the window shift covers it); the current row's outcome is a leak
+        final FeaturePlan pastOutcome = compile(SOURCES, spec.replace(kernel, "1 + final_price"));
+        Assertions.assertFalse(pastOutcome.getDiagnostics().hasErrors(), pastOutcome::describe);
+        final FeaturePlan leak = compile(SOURCES, spec.replace(kernel, "exp(-abs(final_price - $self.final_price))"));
+        Assertions.assertTrue(hasCode(leak, "availability.violation"), leak::describe);
+
+        // validation
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {type: lag, fields: [sold, start_price], k: 2}", "- {type: lag, fields: [sold, start_price], k: 2, weightBy: \"1\"}")), "sequence.weightBy.op"));
+        final FeaturePlan func = compile(SOURCES, spec.replace("funcs: [count, mean, std]", "funcs: [mean, max]"));
+        Assertions.assertTrue(hasCode(func, "sequence.weightBy.func"), func::describe);
+        Assertions.assertTrue(func.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("count | sum | mean")), "the message lists the weighted funcs");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "condition_grade - $self.start_price")), "sequence.weightBy.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.condition_grade")), "sequence.weightBy.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "exp(-abs(start_price")), "sequence.weightBy.parse"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.nosuchfield")), "reference.unresolved"));
+
+        // block.column and baseline references are stored by the canonical names the history and the row map carry
+        final FeaturePlan qualified = compile(SOURCES, spec.replace(kernel, "exp(-abs(relative.start_price_rank - $self.market)) * market"));
+        Assertions.assertFalse(qualified.getDiagnostics().hasErrors(), qualified::describe);
+        final OutputColumn qualifiedMean = column(qualified, "recent_n5_near_mean");
+        Assertions.assertEquals("exp(-abs(relative_start_price_rank - $self.__baseline_market)) * __baseline_market", qualifiedMean.getCoordinates().get("weightBy"));
+        Assertions.assertTrue(qualifiedMean.getPastInputs().containsAll(Set.of("relative_start_price_rank", "__baseline_market")));
     }
 
     @Test
@@ -629,6 +771,34 @@ public class FeaturePlanCompilerTest {
         final int start = SPEC.indexOf("  - name: enc\n");
         final int end = SPEC.indexOf("output:\n");
         return SPEC.substring(0, start) + encodingBlock.replaceAll("(?m)^    ", "") + SPEC.substring(end);
+    }
+
+    /**
+     * The residual's scale is the key {@code on} — a boolean under YAML 1.1, where a YAML spec delivered it as
+     * {@code "true"} and the residual fell back to identity without a word. Configs are parsed as YAML 1.2 (core
+     * schema), so the key keeps its name: a bare and a quoted {@code on} both reach the column.
+     */
+    @Test
+    public void testResidualScaleFromYaml() {
+        Assertions.assertEquals("identity", column(compile(SOURCES, SPEC), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("logit", column(compile(SOURCES, SPEC.replace("on: identity", "on: logit")), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("log", column(compile(SOURCES, SPEC.replace("on: identity", "\"on\": log")), "vs_market").getCoordinates().get("on"));
+        Assertions.assertEquals("identity", column(compile(SOURCES, SPEC.replace("    on: identity\n", "")), "vs_market").getCoordinates().get("on"), "the default");
+        // the parsed document carries the key under its own name, never as the boolean's text
+        final JsonObject specJson = Config.convertConfigJson(SPEC.replace("on: identity", "on: logit"), Config.Format.yaml);
+        int residuals = 0;
+        for (final com.google.gson.JsonElement f : specJson.getAsJsonArray("features")) {
+            final JsonObject block = f.getAsJsonObject();
+            Assertions.assertFalse(block.has("true"), block::toString);
+            if (block.has("on")) {
+                Assertions.assertEquals("logit", block.get("on").getAsString());
+                residuals++;
+            }
+        }
+        Assertions.assertEquals(1, residuals);
+        // an unknown scale is rejected, and the plan hash sees the scale
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("on: identity", "on: probit")), "row.residual.on"));
+        Assertions.assertNotEquals(compile(SOURCES, SPEC).getHash(), compile(SOURCES, SPEC.replace("on: identity", "on: logit")).getHash());
     }
 
     @Test
@@ -1362,6 +1532,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertNull(c.getCoordinates().get("fields"));
         Assertions.assertEquals(Schema.Type.array, plan.getInputFields().get("embedding").getType().getType());
         Assertions.assertEquals(Schema.Type.float64, plan.getInputFields().get("embedding").getType().getArrayValueType().getType());
+        // an array has no named dimensions: the per-input residual needs 'inputs', the residual norm does not
+        Assertions.assertTrue(spec.contains("\n    rank: 2\n"), spec);
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("    rank: 2\n", "    rank: 2\n    outputs: [residual]\n")), "svd.outputs"));
+        final FeaturePlan norm = compile(sources, spec.replace("    rank: 2\n", "    rank: 2\n    outputs: [scores, residualNorm]\n"));
+        Assertions.assertFalse(norm.getDiagnostics().hasErrors(), norm::describe);
+        Assertions.assertEquals("norm", column(norm, "emb_pc_residnorm").getCoordinates().get("residual"));
         // an array input needs rank; a non-numeric array is not a vector
         Assertions.assertTrue(hasCode(compile(sources, spec.replace("        rank: 2\n", "")), "svd.rank"));
         Assertions.assertTrue(hasCode(compile(sources.replace("array<float64>", "array<string>"), spec), "svd.input"));
@@ -1508,6 +1684,20 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan.Stage seller = plan.getStages().stream().filter(s -> s.columnNames().contains("recent_n5_start_price_lag1")).findFirst().orElseThrow();
         Assertions.assertTrue(seller.index() < fit.index(), plan::describe);
         Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("hist").endsWith("hist.svd.json"));
+        // outputs: the scores by default; residual = one column per input (in input units), residualNorm = their length
+        final FeaturePlan residual = compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", "        rank: 2\n        outputs: [residual, residualNorm]\n")));
+        Assertions.assertFalse(residual.getDiagnostics().hasErrors(), residual::describe);
+        Assertions.assertNull(residual.getColumn("hist_0"), "scores are not listed");
+        Assertions.assertEquals("2", column(residual, "hist_resid_start_price").getCoordinates().get("residual"));
+        Assertions.assertEquals("0", column(residual, "hist_resid_recent_n5_start_price_lag1").getCoordinates().get("residual"));
+        Assertions.assertNull(column(residual, "hist_resid_start_price").getCoordinates().get("component"));
+        Assertions.assertEquals("norm", column(residual, "hist_residnorm").getCoordinates().get("residual"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(residual, "hist_residnorm").getStatus());
+        final FeaturePlan.Stage residualFit = residual.getStages().stream().filter(st -> st.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(residualFit.columnNames().containsAll(List.of("hist_resid_start_price", "hist_residnorm")), residual::describe);
+        Assertions.assertNotEquals(plan.getHash(), residual.getHash());
+        Assertions.assertNotNull(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", "        rank: 2\n        outputs: [scores, residual]\n"))).getColumn("hist_1"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", "        rank: 2\n        outputs: [loadings]\n"))), "svd.outputs"));
         // defaults: rank = min(d, 8)
         Assertions.assertNotNull(compile(SOURCES, withEncoding(SVD_BLOCK.replace("        rank: 2\n", ""))).getColumn("hist_2"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("rank: 2", "rank: 4"))), "svd.rank"));

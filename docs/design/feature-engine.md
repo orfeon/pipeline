@@ -250,16 +250,41 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   evict pointers (`advance` / `contribution` / `readStatistic`). A `Summary` is a typed, mergeable
   accumulator — `create` / `update(±1)` / `merge` / `read` — and the family a statistic runs on is
   declared once in `OperatorCatalog.summary` (moments for count / sum / mean / std, extrema for max /
-  min, value counts for distribution, exact order statistics for quantiles). Its algebra decides the
+  min, value counts for distribution, exact order statistics for quantiles, the cross moments of a pair for
+  the `regression` op's cov / corr / beta / intercept / r2). Its algebra decides the
   path: every family is a monoid (summaries of disjoint row sets merge), an *invertible* family is a
   group (a window can evict), so max / min run incrementally over an unbounded past but take the scan
   path under `maxAge`. Operators without a family (lag / trend / ewma / predicates) and windows with
-  `maxEvents` or a general filter take the scan path over a sublist view. `SequenceIncrementalTest`
+  `maxEvents` or a general filter take the scan path over a sublist view. So does an aggregate under
+  `weightBy`: its weight reads the current row (`$self`), a different number for every (row, event) pair,
+  so nothing folded once per event can serve it — *self-dependent* statistics have no family by
+  construction, which `OperatorCatalog.summary(stat, weighted)` declares (`weightedAggregate`: Σw, Σw·x and
+  a second pass for the deviation; the compiled expression and its `$self` / event variable split are
+  resolved once in `setup()`). A weighted aggregate is bounded by `maxAge` or `maxEvents` like any scan
+  column and unbounded without them. Both paths read a past value through one rule
+  (`SequenceEvaluator.finite`): null, non-numeric, NaN and ±∞ are missing and contribute to no statistic,
+  `count` included — a non-finite value folded into a running sum would stay there (NaN for good; ∞ − ∞ = NaN
+  once evicted) while the scan recovers when it leaves the window. `SequenceIncrementalTest`
   checks the two paths agree on random histories; `SummaryTest` checks the monoid / group laws.
+- **Scalar summaries of the window** (`aggregate` funcs). `skew` / `kurt` are sums of per-event contributions —
+  `Summary.Shape`, (n, Σx..Σx⁴) about an anchor, invertible — so they take the incremental path like the moments;
+  the family is separate from `Moments` so the state every encoding level carries stays three numbers.
+  `zeroCross` / `peaks` / `acf<j>` / `pacf<j>` / `ar<p>_<i>` (`SeriesStats`, tokens parsed once into the column
+  plan) read *neighbouring* values: as summaries they would be ordered monoids carrying boundary values, whose
+  eviction needs the successors of the evicted element — something `update(state, contribution, −1)` cannot
+  express — so they have no family and scan the window (they would scan under every rolling window anyway; an
+  ordered family only pays off for the streaming state).
 - **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
-  (scan), or the near edge minus a bounded tail (`lag` / `trend` = k, `delta` = k + 1, unfiltered
+  (scan), or the near edge minus a bounded tail (`lag` / `trend` / `fracdiff` = k, `delta` = k + 1, unfiltered
   `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`
   are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
+- **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
+  into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored
+  on merge) so a price level does not cancel the covariance away; invertible, so it evicts under `maxAge` like
+  the moments. The lead-lag form (`lag: k`, `field` of event i with `against` of event i − k) is *not* a
+  per-event contribution — evicting the far edge would need the rows before it — so `summaryOf` gives it no
+  family and it folds the same family over the scanned window. `fracdiff` is a fixed FIR over the last k events
+  (`fracdiffWeights`, resolved once into the column plan): a bounded tail, no state.
 - The general form (lift / summarize / compress, lti / bilinear) is v1; the LTI family is a recurrence
   over a fixed matrix and would keep a vector state per key rather than a buffer.
 

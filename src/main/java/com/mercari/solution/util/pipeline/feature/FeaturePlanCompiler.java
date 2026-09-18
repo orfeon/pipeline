@@ -430,8 +430,14 @@ public final class FeaturePlanCompiler {
         if (def.offset != null) refs.add(def.offset);
         for (final Op op : def.ops) {
             refs.addAll(op.fields);
+            if (op.against != null) refs.add(op.against);
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
+            if (op.weightBy != null) {
+                final References w = expressionReferences(op.weightBy);
+                refs.addAll(w.others);
+                refs.addAll(w.self);
+            }
         }
         for (final Window w : def.windows) {
             if (w.filter != null) {
@@ -1078,6 +1084,8 @@ public final class FeaturePlanCompiler {
                     final OutputColumn anonymous = desugarExpression(def, op.expr, computeAt);
                     if (anonymous != null) fields.add(anonymous.canonicalName);
                 }
+                final References weightRefs = op.weightBy == null ? null : weightReferences(def, op);
+                if (op.weightBy != null && weightRefs == null) continue;
                 if (operator.input() == InputKind.predicate) {
                     if (op.predicate == null) {
                         diagnostics.error("sequence.predicate", loc, "op " + op.type + " requires 'predicate'");
@@ -1102,9 +1110,12 @@ public final class FeaturePlanCompiler {
                 if (fields.isEmpty()) {
                     // COUNT(1): a field-less aggregate counts every visible past row, nulls included
                     if ("aggregate".equals(op.type) && (op.funcs.isEmpty() || op.funcs.equals(List.of("count")))) {
+                        // under weightBy the count is Σw over the visible rows (the effective count)
                         final OutputColumn c = newColumn(def.name, Scope.sequence, op.type,
-                                def.name + "_" + window.token() + "_count", Schema.FieldType.INT64, computeAt);
+                                def.name + "_" + window.token() + "_" + (op.as != null && weightRefs != null ? op.as + "_" : "") + "count",
+                                weightRefs == null ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
                         c.coordinates.put("func", "count");
+                        addWeight(c, op, weightRefs);
                         // the keys are read from the self row (keying), not from past rows: no projection
                         for (final String key : entity.keys()) addSelfInput(c, key);
                         finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -1171,9 +1182,13 @@ public final class FeaturePlanCompiler {
                         case "aggregate" -> {
                             final List<String> funcs = op.funcs.isEmpty() ? List.of("count", "mean") : op.funcs;
                             for (final String func : funcs) {
-                                final Schema.FieldType type = OperatorCatalog.aggregateOutput(func, ref.type());
+                                final Schema.FieldType type = weightRefs == null ? OperatorCatalog.aggregateOutput(func, ref.type()) : OperatorCatalog.weightedAggregateOutput(func);
+                                if (type == null && weightRefs != null && OperatorCatalog.aggregateOutput(func, ref.type()) != null) {
+                                    diagnostics.error("sequence.weightBy.func", loc, "aggregate " + func + " has no weighted form (available under weightBy: " + String.join(" | ", OperatorCatalog.WEIGHTED_FUNCS) + ")");
+                                    continue;
+                                }
                                 if (type == null) {
-                                    diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func);
+                                    diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func + " (available: " + OperatorCatalog.AVAILABLE_AGGREGATES + ")");
                                     continue;
                                 }
                                 if (List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {
@@ -1184,14 +1199,131 @@ public final class FeaturePlanCompiler {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 c.coordinates.put("func", func);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                                addWeight(c, op, weightRefs);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
+                        }
+                        case "regression" -> {
+                            // field regressed against `against` over the window's events; lag pairs field with `against` k events earlier
+                            final Ref onRef = resolve(op.against);
+                            if (op.against == null || onRef == null) {
+                                diagnostics.error("sequence.regression.against", loc, "regression requires 'against' (the explanatory field that '" + field + "' is regressed against)");
+                                continue;
+                            }
+                            if (!OperatorCatalog.isNumeric(onRef.type())) {
+                                diagnostics.error("sequence.regression.against", loc, "regression 'against' field '" + op.against + "' must be numeric (is " + (onRef.type() == null ? "unknown" : onRef.type().getType()) + ")");
+                                continue;
+                            }
+                            final int lag = op.lag == null ? 0 : op.lag;
+                            if (lag < 0) {
+                                diagnostics.error("sequence.regression.lag", loc, "lag must be >= 0 (the events by which 'against' leads 'field'); swap field and against for the other direction: " + lag);
+                                continue;
+                            }
+                            final List<String> funcs = op.funcs.isEmpty() ? List.of("beta", "corr") : op.funcs;
+                            final String pair = base + "vs_" + displayName(op.against) + "_" + (lag == 0 ? "" : "lag" + lag + "_");
+                            for (final String func : funcs) {
+                                if (!OperatorCatalog.REGRESSION_FUNCS.contains(func)) {
+                                    diagnostics.error("sequence.regression.func", loc, "unknown regression func: " + func + " (available: " + String.join(" | ", OperatorCatalog.REGRESSION_FUNCS) + ")");
+                                    continue;
+                                }
+                                final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, (op.as != null && fields.size() == 1 ? base : pair) + func, Schema.FieldType.FLOAT64, computeAt);
+                                c.coordinates.put("func", func);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                                c.coordinates.put("against", canonicalOf(op.against)); addPastInput(c, op.against);
+                                if (lag > 0) c.coordinates.put("lag", Integer.toString(lag));
+                                finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
+                            }
+                        }
+                        case "fracdiff" -> {
+                            if (op.d == null || !(op.d > 0) || op.d > 2) {
+                                diagnostics.error("sequence.fracdiff.d", loc, "fracdiff requires 'd', the differencing order, in (0, 2]: " + op.d);
+                                continue;
+                            }
+                            final int k = op.k == null ? 20 : op.k;
+                            if (k < 2) {
+                                diagnostics.error("sequence.fracdiff.k", loc, "k (the number of events the truncated filter reads) must be >= 2: " + k);
+                                continue;
+                            }
+                            final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "fracdiff" + number(op.d), Schema.FieldType.FLOAT64, computeAt);
+                            c.coordinates.put("d", Double.toString(op.d));
+                            c.coordinates.put("k", Integer.toString(k));
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         default -> diagnostics.error("sequence.op", loc, "unsupported sequence op: " + op.type);
                     }
                 }
             }
         }
+    }
+
+    /** Validated weightBy references per (block, expression): an op is expanded once per window, reported once. */
+    private final Map<String, Optional<References>> weightCache = new HashMap<>();
+
+    /**
+     * The references of an aggregate's {@code weightBy} — the event's fields by name, the current row's through
+     * {@code $self} — or null (after reporting) when the weight is not usable: on another op, not a numeric
+     * expression, over a non-numeric operand.
+     */
+    private References weightReferences(final FeatureDef def, final Op op) {
+        return weightCache.computeIfAbsent(def.name + " " + op.type + " " + op.weightBy, k -> {
+            final String loc = def.location();
+            if (!"aggregate".equals(op.type)) {
+                diagnostics.error("sequence.weightBy.op", loc, "weightBy is only defined on aggregate (op " + op.type + ")");
+                return Optional.empty();
+            }
+            final References refs = expressionReferences(op.weightBy);
+            boolean valid = true;
+            for (final String r : refs.others) valid &= numericWeightOperand(r, r, loc);
+            for (final String r : refs.self) valid &= numericWeightOperand(r, "$self." + r, loc);
+            try {
+                com.mercari.solution.util.ExpressionUtil.createDefaultExpression(op.weightBy.replace("$self.", FeatureValues.SELF_PREFIX));
+            } catch (final RuntimeException e) {
+                diagnostics.error("sequence.weightBy.parse", loc, "cannot parse weightBy '" + op.weightBy + "' as a numeric expression: " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+                valid = false;
+            }
+            if (!valid) return Optional.empty();
+            diagnostics.info("sequence.weightBy.scan", loc, "weightBy '" + op.weightBy + "' weighs every event against the current row, so no running state can serve it: "
+                    + "the aggregate scans its window per row — bound the window with maxAge or maxEvents");
+            return Optional.of(refs);
+        }).orElse(null);
+    }
+
+    private boolean numericWeightOperand(final String reference, final String shown, final String loc) {
+        final Ref ref = resolve(reference);
+        if (ref == null || ref.type() == null || OperatorCatalog.isNumeric(ref.type()) || ref.type().getType() == Schema.Type.bool) return true;
+        diagnostics.error("sequence.weightBy.type", loc, "weightBy operand '" + shown + "' is not numeric (" + ref.type().getType() + "); the weight is evaluated as a double");
+        return false;
+    }
+
+    /** Records the weight on an aggregate column: the event side joins the projected history, the $self side the row inputs. */
+    private void addWeight(final OutputColumn c, final Op op, final References weightRefs) {
+        if (weightRefs == null) return;
+        c.coordinates.put("weightBy", canonicalWeight(op.weightBy));
+        for (final String r : weightRefs.others) addPastInput(c, r);
+        for (final String r : weightRefs.self) addSelfInput(c, r);
+    }
+
+    /**
+     * The weight expression with every reference spelled by its canonical name — the key the projected history and
+     * the row map carry (a {@code block.column} or baseline reference would otherwise read null, i.e. weight NaN).
+     */
+    private String canonicalWeight(final String expression) {
+        final Matcher m = IDENTIFIER.matcher(expression);
+        final StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            final String replacement;
+            if (m.group(1) != null) {
+                replacement = "$self." + canonicalOf(m.group(1));
+            } else if (m.group(3) == null && !KEYWORDS.contains(m.group(2).toLowerCase()) && !m.group(2).startsWith("$")) {
+                replacement = canonicalOf(m.group(2)) + m.group().substring(m.group(2).length());
+            } else {
+                replacement = m.group();
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 
     /** The filter field when the window filter is a same-field {@code $self} equality over a safe field. */
@@ -1542,9 +1674,27 @@ public final class FeaturePlanCompiler {
                     + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the components (static-fit caveat)" : ""));
         }
 
+        // what to emit: the scores (default), the part of every input the components do not explain, its length
+        final List<String> outputs = def.outputs.isEmpty() ? List.of("scores") : def.outputs;
+        for (final String output : outputs) {
+            if (!List.of("scores", "residual", "residualNorm").contains(output)) {
+                diagnostics.error("svd.outputs", loc, "unknown svd output: " + output + " (scores | residual | residualNorm)");
+                return;
+            }
+        }
+        if (outputs.contains("residual") && arrayField != null) {
+            diagnostics.error("svd.outputs", loc, "outputs: residual emits one column per input and needs named 'inputs'; on an array input use residualNorm");
+            return;
+        }
+        // (column name, coordinate, index): a score per component, a residual per input dimension, the residual norm
+        final List<String[]> emitted = new ArrayList<>();
+        if (outputs.contains("scores")) for (int k = 0; k < rank; k++) emitted.add(new String[]{def.name + "_" + k, "component", Integer.toString(k)});
+        if (outputs.contains("residual")) for (int i = 0; i < fields.size(); i++) emitted.add(new String[]{def.name + "_resid_" + displayName(fields.get(i)), "residual", Integer.toString(i)});
+        if (outputs.contains("residualNorm")) emitted.add(new String[]{def.name + "_residnorm", "residual", "norm"});
+
         int produced = 0;
-        for (int k = 0; k < rank; k++) {
-            final OutputColumn c = newColumn(def.name, Scope.population, "svd", def.name + "_" + k, Schema.FieldType.FLOAT64, computeAt);
+        for (final String[] e : emitted) {
+            final OutputColumn c = newColumn(def.name, Scope.population, "svd", e[0], Schema.FieldType.FLOAT64, computeAt);
             c.fitted = true;
             c.coordinates.put("fit", forward ? "forward" : "static");
             if (forward) {
@@ -1554,7 +1704,7 @@ public final class FeaturePlanCompiler {
             if (arrayField != null) c.coordinates.put("arrayField", canonicalOf(arrayField));
             else c.coordinates.put("fields", String.join(",", fields.stream().map(this::canonicalOf).toList()));
             c.coordinates.put("rank", Integer.toString(rank));
-            c.coordinates.put("component", Integer.toString(k));
+            c.coordinates.put(e[1], e[2]);
             c.coordinates.put("center", Boolean.toString(center));
             c.coordinates.put("standardize", Boolean.toString(def.standardize));
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
@@ -1568,7 +1718,7 @@ public final class FeaturePlanCompiler {
             produced++;
         }
         if (def.maxFeatures != null && produced > def.maxFeatures) {
-            diagnostics.error("svd.maxFeatures", loc, "rank " + rank + " produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
+            diagnostics.error("svd.maxFeatures", loc, "rank " + rank + " with outputs " + outputs + " produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
         }
     }
 

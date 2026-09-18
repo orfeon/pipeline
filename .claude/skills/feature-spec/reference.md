@@ -142,11 +142,14 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `lag` | `field(s)` or `expr`, `k` (default 1) | `<name>_<w>_<field>_lag1 .. lagk`, input type |
 | `delta` | `field`, `k` | `..._delta<k>` float64 (lag k − lag k+1) |
 | `trend` | `field`, `k` (default 5) | `..._trend<k>` float64 (regression slope) |
+| `regression` | `field` (y), `against` (x — not `on`, a YAML 1.1 boolean), `funcs: [cov, corr, beta, intercept, r2]` (default `[beta, corr]`), optional `lag: k` (pairs `field` with `against` k events earlier: lead-lag) | `..._<field>_vs_<against>_[lag<k>_]<func>` float64; two contributing events at least; `corr` / `r2` null when a series is constant, `beta` / `intercept` when x is. Same-event form is incremental; with `lag` it scans the window per row (bound it with `maxAge` / `maxEvents`) |
+| `fracdiff` | `field`, `d` (required, 0 < d ≤ 2), `k` (terms, default 20) | `..._fracdiff<d>` float64: `(1 − B)^d` truncated to `k` coefficients over the last `k` past events; null when fewer than `k` events or one of them is missing; `d: 1` = first difference |
 | `ewma` | `field` / `expr`, `halflife: [h1, h2]`, `decayBy: events \| time` | `..._ewma<h>` float64 |
 | `runLength` | `field`, `value` | `..._runlength` int64 |
+| `aggregate` shape / series funcs | in `funcs`: `skew`, `kurt` (excess; population moments), `zeroCross` (sign changes, zeros ignored), `peaks` (strict local maxima), `acf<j>`, `pacf<j>`, `ar<p>_<i>` (Yule–Walker; j, p in 1..20, i in 1..p) | `..._<func>`: float64 (`zeroCross` / `peaks` int64). `skew` / `kurt` run incrementally; the others scan the window per row — bound it with `maxEvents` / `maxAge`. Null on too few values or a constant series; for a level other than 0 use `expr: "x - level"` with `zeroCross` |
 | `sinceEvent` | `predicate`, `unit: [events, days]` | `<name>_<w>_since_events` int64 / `_since_days` float64 |
 | `countMatch` | `predicate` | `<name>_<w>_countmatch` int64 |
-| `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1) | `..._<func>`; count int64, mean / std / sum / rate float64, min / max / first / last input type |
+| `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1). Optional `weightBy: "<numeric expr>"` — the past event's fields by name, the current row's as `$self.<field>` (a similarity kernel, e.g. `exp(-abs(start_price - $self.start_price) / 50)`): `count` = Σw (float64), `sum` = Σw·x, `mean` = Σw·x / Σw, `std` weighted; no `min / max / first / last`; null / NaN / ≤ 0 weights contribute nothing; `$self` fields must be known at `predictAt`; always scanned per row, so bound the window (`maxAge` / `maxEvents`); use `as:` when the block also has the plain aggregate of the field | `..._<func>`; count int64 (float64 under `weightBy`), mean / std / sum / rate float64, min / max / first / last input type |
 
 `as:` on an op names the field segment (or replaces the op suffix for `sinceEvent` / `countMatch`).
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and
@@ -230,6 +233,10 @@ float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained varianc
 component → null scores. An array input must have one length (other lengths are skipped, read null and are
 warned about at run time; `rank` above the array length is capped with a warning and the surplus columns read
 null). Fitted from (n, Σx, Σxxᵀ): no row leaves the workers.
+`outputs: [scores, residual, residualNorm]` (default `[scores]`): `residual` = what the kept components do not
+explain, one float64 `<name>_resid_<input>` per input **in input units** (`x − mean − scale · Σ score · component`;
+needs named `inputs`, not an array — `svd.outputs`); `residualNorm` = `<name>_residnorm`, its Euclidean length
+(arrays too). Null wherever the scores are null; 0 when `rank` equals the vector length.
 
 ## Availability expressions
 

@@ -93,7 +93,8 @@ public final class QuantileTransform implements Serializable {
         int size;
 
         void add(final double v) {
-            if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
+            // a state serialized empty comes back with a zero-length buffer: doubling 0 would stay 0
+            if (size == values.length) values = Arrays.copyOf(values, Math.max(16, values.length * 2));
             values[size++] = v;
         }
 
