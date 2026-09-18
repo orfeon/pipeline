@@ -656,11 +656,22 @@ only feed `type: svd`. It is a plain row op — no stage, no state, availability
 the first of the three supplies of the vector operators; the sequence-window and context-group supplies will
 call the same `VectorOps` readouts for the statistics that have no `Summary` family (scan).
 
-**Fit-stage fan-out (performance, not correctness)**: every static-fit block is its own
-`Extract → Combine.globally → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expands
-into ~34 Dataflow steps and the stage time grows with the block count (a consumer measured 13 → 20 min on 148k
-rows against the previous config). The fix is one keyed gather per block kind and stage (`KV<block, value>` →
-`Combine.perKey` → the models as one `View.asMap`), keeping the `StaticFitBlock` contract; not done yet.
+**Fit-stage fan-out (performance, not correctness)**: every static-fit block used to be its own
+`Extract → Combine → Gather → Fit → View` chain, so a fit stage with 13 quantileTransform / svd blocks expanded
+into ~34 Dataflow steps and the stage time grew with the block count (a consumer measured 13 → 20 min on 148k
+rows against the previous config). Blocks whose fit state is a `Summary` family now declare only what a row
+contributes and how the model is solved (`SummaryFitBlock`: `contribution(row)` → (time block, value),
+`solve(parts, planHash)`), and the stage fits them together (`fitSummaryBlocks`): per family ONE extraction pass
+over the rows (the row map is built once for every block, not once per block), ONE `Combine.perKey` keyed by
+(block, time block), a regrouping by block and one solve per block — the blocks solve in parallel, each on the
+worker its group lands on — and the models of every family reach `FitApplyDoFn` as ONE list side input of
+(block, model), indexed once per DoFn instance (a list, not a map view: a map side input is a state fetch per
+lookup on a portable runner). A block that fits an empty input too (quantileTransform: n = 0 is still an
+artifact) adds an empty marker part so its group exists; svd, which has no model without vectors, does not. On
+the test graph with eight blocks the stage's top-level transforms go 40 → 14 (289 → 38 nodes including composite
+internals) and no longer grow with the block count. svd (moments) and quantileTransform (values) are on it;
+discretize (the same gathered values) and the fm / joint fits keep their own chains. The Dataflow wall-clock
+measurement on the consumer's 13-block config is still to be recorded here.
 
 ### 9.3 S1: the keyed stages' own external sort (`KeyedSpillSorter`)
 
