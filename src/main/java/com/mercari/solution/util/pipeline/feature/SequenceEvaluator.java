@@ -395,6 +395,8 @@ public class SequenceEvaluator implements Serializable {
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.incremental = !forceScan
                 && plan.summary != null
+                // a weight may read the current row: the catalog declares weighted statistics scan-only
+                && (plan.weightBy == null || OperatorCatalog.summary(plan.stat, true) != null)
                 && plan.maxEvents == null
                 && (plan.filterText == null || plan.equality != null)
                 // a window evicts: only a group (invertible family) can remove a contribution again
@@ -409,7 +411,7 @@ public class SequenceEvaluator implements Serializable {
 
     /** The summary family the column's statistic runs on incrementally, or null when it is scan-only. */
     Summary.Spec summaryOf(final OutputColumn c) {
-        return "aggregate".equals(c.operator) ? OperatorCatalog.summary(c.coordinates.get("func"), c.coordinates.containsKey("weightBy")) : null;
+        return "aggregate".equals(c.operator) ? OperatorCatalog.summary(c.coordinates.get("func")) : null;
     }
 
     public void evaluate(final Map<String, Object> row, final long nowMillis, final List<Past> history) {
