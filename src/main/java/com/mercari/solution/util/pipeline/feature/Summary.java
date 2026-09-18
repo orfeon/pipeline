@@ -337,7 +337,7 @@ public interface Summary<S extends Serializable> extends Serializable {
             if ("count".equals(readout.name())) return (long) s.n;
             if (s.n < 2) return null;
             final double mx = s.sx / s.n, my = s.sy / s.n;
-            final double vx = Math.max(0, s.sxx / s.n - mx * mx), vy = Math.max(0, s.syy / s.n - my * my);
+            final double vx = variance(s.sxx / s.n, mx), vy = variance(s.syy / s.n, my);
             final double cov = s.sxy / s.n - mx * my;
             return switch (readout.name()) {
                 case "cov" -> cov;
@@ -351,6 +351,17 @@ public interface Summary<S extends Serializable> extends Serializable {
                 case "intercept" -> vx == 0 ? null : (my + s.ay) - cov / vx * (mx + s.ax);
                 default -> throw new IllegalArgumentException("regression cannot read " + readout.name());
             };
+        }
+
+        /**
+         * E[x²] − E[x]², snapped to 0 within rounding of E[x²]: once the anchor pair is evicted a constant series sits
+         * at a non-zero offset from the anchor, and the running sums leave a residue (~1e-16 relative) that would
+         * otherwise turn a constant x into a spurious beta / corr instead of null (the scan path anchors inside the
+         * window and gets an exact 0).
+         */
+        private static double variance(final double secondMoment, final double mean) {
+            final double v = secondMoment - mean * mean;
+            return v <= 1e-12 * secondMoment ? 0d : v;
         }
 
         private static double clamp(final double r) {

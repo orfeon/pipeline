@@ -203,6 +203,17 @@ public class SummaryTest {
         Assertions.assertEquals(0, g.count(emptied), 0);
         Assertions.assertFalse(emptied.anchored);
         Assertions.assertEquals(0.0, emptied.sxy, 0);
+        // the anchor pair evicted, a constant x sits at an offset from the anchor: still no slope (no rounding residue)
+        for (int trial = 0; trial < 200; trial++) {
+            final Summary.Regression.State drifted = g.create();
+            final double[] anchor = {Math.round(random.nextDouble() * 10000) / 100.0, 5};
+            final double constantX = Math.round(random.nextDouble() * 10000) / 100.0;
+            g.update(drifted, anchor, 1);
+            for (int i = 0; i < 2 + random.nextInt(28); i++) g.update(drifted, new double[]{constantX, Math.round(random.nextDouble() * 100) / 10.0}, 1);
+            g.update(drifted, anchor, -1);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("beta")), "x " + constantX + " anchored at " + anchor[0]);
+            Assertions.assertNull(g.read(drifted, Summary.Readout.of("corr")));
+        }
     }
 
     @Test
