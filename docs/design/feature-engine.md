@@ -250,10 +250,6 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   path under `maxAge`. Operators without a family (lag / trend / ewma / predicates) and windows with
   `maxEvents` or a general filter take the scan path over a sublist view. `SequenceIncrementalTest`
   checks the two paths agree on random histories; `SummaryTest` checks the monoid / group laws.
-- **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
-  (scan), or the near edge minus a bounded tail (`lag` / `trend` = k, `delta` = k + 1, unfiltered
-  `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`
-  are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
 - **Scalar summaries of the window** (`aggregate` funcs). `skew` / `kurt` are sums of per-event contributions —
   `Summary.Shape`, (n, Σx..Σx⁴) about an anchor, invertible — so they take the incremental path like the moments;
   the family is separate from `Moments` so the state every encoding level carries stays three numbers.
@@ -262,6 +258,10 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   eviction needs the successors of the evicted element — something `update(state, contribution, −1)` cannot
   express — so they have no family and scan the window (they would scan under every rolling window anyway; an
   ordered family only pays off for the streaming state).
+- **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
+  (scan), or the near edge minus a bounded tail (`lag` / `trend` = k, `delta` = k + 1, unfiltered
+  `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`
+  are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
 - The general form (lift / summarize / compress, lti / bilinear) is v1; the LTI family is a recurrence
   over a fixed matrix and would keep a vector state per key rather than a buffer.
 

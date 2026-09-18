@@ -116,7 +116,6 @@ public final class OperatorCatalog {
         };
     }
 
-
     /**
      * Encoding statistics: whether a target is required, the output type, and whether the statistic is
      * derived from the sufficient statistics (n, Σy, Σy²) — the ones a static / fold fit keeps per key.
