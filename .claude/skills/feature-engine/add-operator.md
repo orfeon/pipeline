@@ -185,7 +185,8 @@ Writing the family (worked examples: `Summary.Shape` — the smallest; `Summary.
 4. `OperatorCatalog.summary(stat)`: one `case` mapping the token(s) to `(family, Readout)`. Nothing else decides
    the path: `SequenceEvaluator.plan()` reads the family and `invertible()`.
 5. The evaluator side: `contribution(plan, past)` if the extraction is not "the field's number" (a pair reads two
-   fields; return null to skip a row), and the **scan twin** — fold the same family over the window rather than
+   fields; return null to skip a row — read each value through `SequenceEvaluator.finite`, so null, NaN and ±∞
+   are missing on both paths), and the **scan twin** — fold the same family over the window rather than
    re-deriving the arithmetic, so both paths share one null rule (`aggregate` `skew`, `regression`).
 6. Output type / validation: `OperatorCatalog.aggregateOutput` (or the op's own func list + `AVAILABLE_*` message).
 
