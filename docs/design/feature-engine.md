@@ -263,6 +263,14 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   resolved once in `setup()`). A weighted aggregate is bounded by `maxAge` or `maxEvents` like any scan
   column and unbounded without them. `SequenceIncrementalTest`
   checks the two paths agree on random histories; `SummaryTest` checks the monoid / group laws.
+- **Scalar summaries of the window** (`aggregate` funcs). `skew` / `kurt` are sums of per-event contributions —
+  `Summary.Shape`, (n, Σx..Σx⁴) about an anchor, invertible — so they take the incremental path like the moments;
+  the family is separate from `Moments` so the state every encoding level carries stays three numbers.
+  `zeroCross` / `peaks` / `acf<j>` / `pacf<j>` / `ar<p>_<i>` (`SeriesStats`, tokens parsed once into the column
+  plan) read *neighbouring* values: as summaries they would be ordered monoids carrying boundary values, whose
+  eviction needs the successors of the evicted element — something `update(state, contribution, −1)` cannot
+  express — so they have no family and scan the window (they would scan under every rolling window anyway; an
+  ordered family only pays off for the streaming state).
 - **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
   (scan), or the near edge minus a bounded tail (`lag` / `trend` / `fracdiff` = k, `delta` = k + 1, unfiltered
   `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`

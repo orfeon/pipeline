@@ -1188,7 +1188,7 @@ public final class FeaturePlanCompiler {
                                     continue;
                                 }
                                 if (type == null) {
-                                    diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func);
+                                    diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func + " (available: " + OperatorCatalog.AVAILABLE_AGGREGATES + ")");
                                     continue;
                                 }
                                 if (List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {
