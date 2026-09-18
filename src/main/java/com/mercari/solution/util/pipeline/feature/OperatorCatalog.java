@@ -107,9 +107,6 @@ public final class OperatorCatalog {
         };
     }
 
-    /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
-    public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2");
-
     /**
      * Encoding statistics: whether a target is required, the output type, and whether the statistic is
      * derived from the sufficient statistics (n, Σy, Σy²) — the ones a static / fold fit keeps per key.
@@ -170,6 +167,9 @@ public final class OperatorCatalog {
         final int percent = Integer.parseInt(m.group(1));
         return percent > 100 ? null : percent / 100d;
     }
+
+    /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
+    public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2");
 
     public static List<String> datetimeDerivations() {
         return List.of("year", "month", "day", "dayOfWeek", "dayOfYear", "weekOfYear", "hour", "minute");

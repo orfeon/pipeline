@@ -50,16 +50,16 @@ public class SequenceEvaluator implements Serializable {
         String offset;
         boolean incremental;
         String field;
-        String stat; // aggregate func / encoding stat token (drives the extraction of a contribution)
-        /** The summary family and readout the statistic runs on incrementally, or null (scan only). */
-        Summary.Spec summary;
-        /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
-        Serializable empty;
         /** regression: the explanatory field ({@code field} is regressed against it) and the events it leads by. */
         String against;
         int lag;
         /** fracdiff: the truncated filter, newest event first ({@code w[0] = 1}). */
         double[] fracdiffWeights;
+        String stat; // aggregate func / encoding stat token (drives the extraction of a contribution)
+        /** The summary family and readout the statistic runs on incrementally, or null (scan only). */
+        Summary.Spec summary;
+        /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
+        Serializable empty;
     }
 
     /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
@@ -363,13 +363,13 @@ public class SequenceEvaluator implements Serializable {
             if (m.matches()) plan.equality = new EqualityFilter(m.group(1), m.group(2));
         }
         plan.field = c.coordinates.get("field");
-        plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
-        plan.stat = statToken(c);
         plan.against = c.coordinates.get("against");
         plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
         if ("fracdiff".equals(c.operator)) {
             plan.fracdiffWeights = fracdiffWeights(Double.parseDouble(c.coordinates.get("d")), Integer.parseInt(c.coordinates.get("k")));
         }
+        plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
+        plan.stat = statToken(c);
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.incremental = !forceScan
@@ -652,17 +652,6 @@ public class SequenceEvaluator implements Serializable {
         };
     }
 
-    /**
-     * The first {@code k} coefficients of (1 − B)^d: {@code w[0] = 1}, {@code w[j] = −w[j−1] (d − j + 1) / j}
-     * ({@code w[j]} weighs the value j events back). d = 1 gives the first difference (1, −1, 0, …).
-     */
-    static double[] fracdiffWeights(final double d, final int k) {
-        final double[] w = new double[k];
-        w[0] = 1;
-        for (int j = 1; j < k; j++) w[j] = -w[j - 1] * (d - j + 1) / j;
-        return w;
-    }
-
     static Double slope(final List<Double> ys) {
         final int n = ys.size();
         if (n < 2) return null;
@@ -674,6 +663,17 @@ public class SequenceEvaluator implements Serializable {
             den += (i - xMean) * (i - xMean);
         }
         return den == 0 ? null : num / den;
+    }
+
+    /**
+     * The first {@code k} coefficients of (1 − B)^d: {@code w[0] = 1}, {@code w[j] = −w[j−1] (d − j + 1) / j}
+     * ({@code w[j]} weighs the value j events back). d = 1 gives the first difference (1, −1, 0, …).
+     */
+    static double[] fracdiffWeights(final double d, final int k) {
+        final double[] w = new double[k];
+        w[0] = 1;
+        for (int j = 1; j < k; j++) w[j] = -w[j - 1] * (d - j + 1) / j;
+        return w;
     }
 
 }

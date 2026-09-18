@@ -430,9 +430,9 @@ public final class FeaturePlanCompiler {
         if (def.offset != null) refs.add(def.offset);
         for (final Op op : def.ops) {
             refs.addAll(op.fields);
+            if (op.against != null) refs.add(op.against);
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
-            if (op.against != null) refs.add(op.against);
         }
         for (final Window w : def.windows) {
             if (w.filter != null) {
