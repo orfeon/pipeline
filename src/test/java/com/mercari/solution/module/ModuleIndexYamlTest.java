@@ -1,8 +1,8 @@
 package com.mercari.solution.module;
 
+import com.mercari.solution.util.domain.file.YamlUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,7 +16,7 @@ import java.util.Set;
  * Guards server/docs/module/index.yaml, the module catalog behind the Builder UI's /api/spec.
  * The server-side tests (com.mercari.solution.server.**) only compile under -Pserver, so this
  * lives with the module tests to run on every `mvn test`.
- * Regression: an unquoted description containing ": " broke SnakeYAML parsing, which made the
+ * Regression: an unquoted description containing ": " broke YAML parsing, which made the
  * API servlet fail at init and every /api/* request return 404 (PR #74).
  */
 public class ModuleIndexYamlTest {
@@ -38,7 +38,7 @@ public class ModuleIndexYamlTest {
     private static Map<String, Object> loadIndex() throws IOException {
         try (final InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(RESOURCE)) {
             Assertions.assertNotNull(is, "resource not found: " + RESOURCE);
-            final Object loaded = new Yaml().load(is);
+            final Object loaded = YamlUtil.load(is);
             Assertions.assertInstanceOf(Map.class, loaded, "index.yaml root");
             @SuppressWarnings("unchecked")
             final Map<String, Object> index = (Map<String, Object>) loaded;

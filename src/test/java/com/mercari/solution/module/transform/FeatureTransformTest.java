@@ -779,9 +779,12 @@ public class FeatureTransformTest {
      */
     private void assertParallelMatchesLinear(final String featureConfig, final int expectedRows,
                                              final List<String> expected, final List<String> forbidden) throws java.io.IOException {
-        final String linear = featureConfig
+        // merge into a declared engine block: a second `engine:` key is a duplicate-key error
+        final String linearEngine = featureConfig.contains("      engine: {")
+                ? featureConfig.replace("      engine: {", "      engine: {parallelWaves: false, ")
+                : featureConfig.replace("      lineage:", "      engine: {parallelWaves: false}\n      lineage:");
+        final String linear = linearEngine
                 .replace("name: features", "name: linear")
-                .replace("      lineage:", "      engine: {parallelWaves: false}\n      lineage:")
                 .replace("transforms:\n", "");
         final Config config = Config.load(SOURCE_CONFIG + featureConfig + linear);
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, config);

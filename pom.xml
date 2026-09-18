@@ -15,6 +15,8 @@
     <!-- The prism image bundles the prism release of this version: bump prism.zip.sha256 (prism profile) with it. -->
     <beam.version>2.76.0</beam.version>
 
+    <snakeyaml-engine.version>3.1.1</snakeyaml-engine.version>
+    <!-- pins the transitive SnakeYAML (Beam expansion-service, kafka schema-registry-client, jackson-dataformat-yaml); our code uses snakeyaml-engine -->
     <snakeyaml.version>2.7</snakeyaml.version>
     <freemarker.version>2.3.35</freemarker.version>
     <lucene.version>10.5.1</lucene.version>
@@ -642,6 +644,11 @@
   <dependencyManagement>
     <dependencies>
       <dependency>
+        <groupId>org.yaml</groupId>
+        <artifactId>snakeyaml</artifactId>
+        <version>${snakeyaml.version}</version>
+      </dependency>
+      <dependency>
         <groupId>org.apache.beam</groupId>
         <artifactId>beam-sdks-java-google-cloud-platform-bom</artifactId>
         <version>${beam.version}</version>
@@ -955,11 +962,11 @@
       <version>${jsoup.version}</version>
     </dependency>
 
-    <!-- https://mvnrepository.com/artifact/org.yaml/snakeyaml -->
+    <!-- https://mvnrepository.com/artifact/org.snakeyaml/snakeyaml-engine -->
     <dependency>
-      <groupId>org.yaml</groupId>
-      <artifactId>snakeyaml</artifactId>
-      <version>${snakeyaml.version}</version>
+      <groupId>org.snakeyaml</groupId>
+      <artifactId>snakeyaml-engine</artifactId>
+      <version>${snakeyaml-engine.version}</version>
     </dependency>
 
     <!-- https://mvnrepository.com/artifact/ai.djl.huggingface/tokenizers -->
