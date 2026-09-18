@@ -24,7 +24,8 @@ Supports:
   share of total, gap to best, percentile, median difference, group size, value counts / ratios, entropy).
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
   time), run length, events/days since a predicate last held, count of matching rows, windowed aggregates
-  (count / mean / min / max / sum / std / first / last). Windows combine `maxEvents`, `maxAge` and a
+  (count / mean / min / max / sum / std / first / last, the shape and series summaries skew / kurt / zeroCross /
+  peaks / acf / pacf / ar). Windows combine `maxEvents`, `maxAge` and a
   `filter` that can reference the current row through `$self.<field>`.
 - **population** scope — expanding-fit encoding: conditional statistics of a target per key set
   (count / share / mean / rate / std / distribution / quantile), optionally windowed and offset by a baseline, with
@@ -562,6 +563,41 @@ permutation importance without leaving the pipeline:
   content, whatever order the runner delivers the rows. The multiset per group is preserved, the output
   keeps the field's type and **availability** (a shuffled outcome is still an outcome: emitting it is
   the usual violation; as an intermediate consumed by a sequence feature it is fine).
+
+### Shape and series summaries (sequence `aggregate` funcs)
+
+Besides the moments and the extremes, `aggregate` reads scalar summaries of *how* the past values are
+distributed and ordered — the descriptive statistics of a short series:
+
+```yaml
+- name: price_shape
+  scope: sequence
+  entity: seller
+  windows: [{maxEvents: 30}]
+  ops:
+    - {type: aggregate, field: start_price, funcs: [skew, kurt, peaks, acf1, pacf2, ar2_1]}
+    - {type: aggregate, expr: "start_price - 100", funcs: [zeroCross], as: vs100}   # crossings of a level: subtract it first
+```
+
+| func | output | value |
+|---|---|---|
+| `skew` | float64 | m₃ / m₂^1.5 of the window's values (population moments, the `std` convention); three values at least |
+| `kurt` | float64 | excess kurtosis m₄ / m₂² − 3; four values at least |
+| `zeroCross` | int64 | sign changes between consecutive non-zero values (a zero has no sign) |
+| `peaks` | int64 | strict local maxima — values above both neighbours; the two ends never count |
+| `acf<j>` | float64 | sample autocorrelation at lag j (in events), the biased estimator Σ(x_t − x̄)(x_{t−j} − x̄) / Σ(x_t − x̄)²; more than j values |
+| `pacf<j>` | float64 | partial autocorrelation at lag j (the last coefficient of the Yule–Walker AR(j) fit) |
+| `ar<p>_<i>` | float64 | i-th coefficient (1 ≤ i ≤ p) of the AR(p) model solved from the Yule–Walker equations (Levinson–Durbin) |
+
+- j and p run 1..20. Missing values are dropped first: the series is the window's present values in time order.
+- A window without spread (a constant series, up to rounding) has no `skew` / `kurt` / `acf` / `pacf` / `ar`
+  (null, never NaN); `zeroCross` / `peaks` are null only when the window holds no value at all.
+- **Cost.** `skew` / `kurt` are sums of per-event contributions (power sums up to order four): they fold
+  incrementally and evict under `maxAge` like `mean` / `std`. The series readouts read *neighbouring* values, so
+  they are evaluated by scanning the window for every row — give the window `maxEvents` or `maxAge` (a window
+  with neither keeps the key's whole history: `sequence.window.unbounded`).
+- An unknown func — or a lag / order outside 1..20, an `ar` index outside 1..p — is `sequence.aggregate.func`;
+  the message lists what is available.
 
 ### Availability check
 

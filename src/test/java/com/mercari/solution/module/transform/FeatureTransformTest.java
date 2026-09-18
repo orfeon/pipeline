@@ -608,6 +608,69 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * The scalar summaries on seller s1's start prices, which are known at once: D sees (100, 200, 80) — one peak,
+     * a positive skew, one sign change of price − 100 (0, +100, −20: the zero has no sign) — and C sees (100, 200).
+     */
+    @Test
+    public void testAggregateShapeAndSeriesFuncs() throws java.io.IOException {
+        final String blocks = """
+                    - name: shape
+                      scope: sequence
+                      entity: seller
+                      ops:
+                        - {type: aggregate, field: start_price, funcs: [skew, peaks, acf1]}
+                        - {type: aggregate, expr: "start_price - 100", funcs: [zeroCross], as: vs100}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_shape_all_start_price_peaks").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_shape_all_start_price_skew").getFieldType().getType());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                switch (id) {
+                    case "D/s1" -> {
+                        final double[] x = {100, 200, 80};
+                        final double mean = (x[0] + x[1] + x[2]) / 3;
+                        double m2 = 0, m3 = 0, c1 = 0;
+                        for (final double v : x) {
+                            m2 += (v - mean) * (v - mean) / 3;
+                            m3 += (v - mean) * (v - mean) * (v - mean) / 3;
+                        }
+                        for (int t = 1; t < 3; t++) c1 += (x[t] - mean) * (x[t - 1] - mean);
+                        Assertions.assertEquals(m3 / Math.pow(m2, 1.5), row.getAsDouble("f_shape_all_start_price_skew"), 1e-9);
+                        Assertions.assertTrue(row.getAsDouble("f_shape_all_start_price_skew") > 0);
+                        Assertions.assertEquals(1L, row.getAsLong("f_shape_all_start_price_peaks"));
+                        Assertions.assertEquals(c1 / (3 * m2), row.getAsDouble("f_shape_all_start_price_acf1"), 1e-9);
+                        Assertions.assertEquals(1L, row.getAsLong("f_shape_all_vs100_zeroCross"));
+                    }
+                    case "C/s1" -> {
+                        Assertions.assertNull(row.getPrimitiveValue("f_shape_all_start_price_skew"), "two values have no skew");
+                        Assertions.assertEquals(0L, row.getAsLong("f_shape_all_start_price_peaks"));
+                        Assertions.assertEquals(-0.5, row.getAsDouble("f_shape_all_start_price_acf1"), 1e-9);
+                        Assertions.assertEquals(0L, row.getAsLong("f_shape_all_vs100_zeroCross"));
+                    }
+                    case "A/s1", "A/s2" -> {
+                        Assertions.assertNull(row.getPrimitiveValue("f_shape_all_start_price_peaks"), id + ": no history");
+                        Assertions.assertNull(row.getPrimitiveValue("f_shape_all_start_price_acf1"), id);
+                    }
+                    case "B/s1", "C/s2" -> {
+                        Assertions.assertEquals(0L, row.getAsLong("f_shape_all_start_price_peaks"), id + ": one past value");
+                        Assertions.assertNull(row.getPrimitiveValue("f_shape_all_start_price_acf1"), id);
+                    }
+                    default -> Assertions.fail("unexpected row " + id);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testAvroInputWithoutTimestampAttributeAndKeyedFirstStage() throws java.io.IOException {
         // Avro-typed input, no timestampAttribute (all elements share the default timestamp), and a spec whose

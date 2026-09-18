@@ -145,6 +145,7 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `runLength` | `field`, `value` | `..._runlength` int64 |
 | `sinceEvent` | `predicate`, `unit: [events, days]` | `<name>_<w>_since_events` int64 / `_since_days` float64 |
 | `countMatch` | `predicate` | `<name>_<w>_countmatch` int64 |
+| `aggregate` shape / series funcs | in `funcs`: `skew`, `kurt` (excess; population moments), `zeroCross` (sign changes, zeros ignored), `peaks` (strict local maxima), `acf<j>`, `pacf<j>`, `ar<p>_<i>` (Yule–Walker; j, p in 1..20, i in 1..p) | `..._<func>`: float64 (`zeroCross` / `peaks` int64). `skew` / `kurt` run incrementally; the others scan the window per row — bound it with `maxEvents` / `maxAge`. Null on too few values or a constant series; for a level other than 0 use `expr: "x - level"` with `zeroCross` |
 | `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1) | `..._<func>`; count int64, mean / std / sum / rate float64, min / max / first / last input type |
 
 `as:` on an op names the field segment (or replaces the op suffix for `sinceEvent` / `countMatch`).

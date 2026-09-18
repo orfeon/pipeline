@@ -149,6 +149,7 @@ not expand because another block failed).
 | `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required; `decayBy` is `events` or `time` |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
+| `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |
 | `sequence.window.unbounded` | hint | the column keeps every past row of its key (no `maxAge` on a scan-path op / filtered window): add `maxAge` |
 

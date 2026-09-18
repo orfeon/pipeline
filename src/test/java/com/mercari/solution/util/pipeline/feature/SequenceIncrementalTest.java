@@ -41,6 +41,15 @@ public class SequenceIncrementalTest {
             baselines:
               - {name: market, context: session, expr: "share(1 / start_price)"}
             features:
+              - name: shape
+                scope: sequence
+                entity: seller
+                windows:
+                  - {maxAge: P30D}
+                  - {maxAge: P90D, filter: "condition_grade = $self.condition_grade"}
+                  - {maxEvents: 25}
+                ops:
+                  - {type: aggregate, field: start_price, funcs: [skew, kurt, zeroCross, peaks, acf1, pacf2, ar2_1]}
               - name: seq
                 scope: sequence
                 entity: seller

@@ -86,6 +86,8 @@ public interface Summary<S extends Serializable> extends Serializable {
 
         /** Power sums up to order two: count / sum / mean / std. Invertible. */
         public static final Summary<Moments.State> MOMENTS = new Moments();
+        /** Power sums up to order four: the shape of the distribution (skew / kurt). Invertible. */
+        public static final Summary<Shape.State> SHAPE = new Shape();
         /** Running maximum and minimum. Not invertible (a removed extreme cannot be recovered). */
         public static final Summary<Extrema.State> EXTREMA = new Extrema();
         /** Count per distinct value (the string form): a value distribution. Invertible. */
@@ -144,6 +146,96 @@ public interface Summary<S extends Serializable> extends Serializable {
                 }
                 default -> throw new IllegalArgumentException("moments cannot read " + readout.name());
             };
+        }
+    }
+
+    /**
+     * (n, Σx, Σx², Σx³, Σx⁴) — the sufficient statistics of the third and fourth standardised moments. The sums are
+     * taken relative to an anchor (the first value folded in; merging re-anchors {@code other} by the binomial
+     * shift), because a central moment of order four formed from raw power sums of a value with an offset cancels
+     * away. Kept apart from {@link Moments} so that the statistics every encoding level carries stay three numbers.
+     */
+    final class Shape implements Summary<Shape.State> {
+        public static final class State implements Serializable {
+            public double n, s1, s2, s3, s4;
+            public double anchor;
+            public boolean anchored;
+        }
+
+        @Override
+        public State create() {
+            return new State();
+        }
+
+        @Override
+        public void update(final State s, final Object contribution, final int sign) {
+            final double value = ((Number) contribution).doubleValue();
+            if (!s.anchored) {
+                s.anchor = value;
+                s.anchored = true;
+            }
+            final double x = value - s.anchor, x2 = x * x;
+            s.n += sign;
+            s.s1 += sign * x;
+            s.s2 += sign * x2;
+            s.s3 += sign * x2 * x;
+            s.s4 += sign * x2 * x2;
+            // an emptied window starts over: no rounding residue, and the next value re-anchors
+            if (s.n == 0) {
+                s.s1 = s.s2 = s.s3 = s.s4 = 0;
+                s.anchored = false;
+            }
+        }
+
+        @Override
+        public boolean invertible() {
+            return true;
+        }
+
+        @Override
+        public void merge(final State into, final State other) {
+            if (other.n == 0) return;
+            if (!into.anchored) {
+                into.anchor = other.anchor;
+                into.anchored = true;
+            }
+            // x − a = (x − b) + d with d = b − a: the binomial shift of other's sums onto into's anchor
+            final double d = other.anchor - into.anchor, d2 = d * d;
+            into.s4 += other.s4 + 4 * d * other.s3 + 6 * d2 * other.s2 + 4 * d2 * d * other.s1 + other.n * d2 * d2;
+            into.s3 += other.s3 + 3 * d * other.s2 + 3 * d2 * other.s1 + other.n * d2 * d;
+            into.s2 += other.s2 + 2 * d * other.s1 + other.n * d2;
+            into.s1 += other.s1 + other.n * d;
+            into.n += other.n;
+        }
+
+        @Override
+        public double count(final State s) {
+            return s.n;
+        }
+
+        /**
+         * Population moments (the convention of {@code std}): {@code skew} = m₃ / m₂^1.5 (three values at least),
+         * {@code kurt} = m₄ / m₂² − 3, the excess kurtosis (four at least). Null on a series without spread — m₂ not
+         * above the rounding floor of the sums it is formed from, where the ratio would be noise.
+         */
+        @Override
+        public Object read(final State s, final Readout readout) {
+            if ("count".equals(readout.name())) return (long) s.n;
+            final int required = switch (readout.name()) {
+                case "skew" -> 3;
+                case "kurt" -> 4;
+                default -> throw new IllegalArgumentException("shape cannot read " + readout.name());
+            };
+            if (s.n < required) return null;
+            final double m = s.s1 / s.n, r2 = s.s2 / s.n, r3 = s.s3 / s.n, r4 = s.s4 / s.n;
+            final double m2 = r2 - m * m;
+            if (!(m2 > 1e-14 * r2)) return null;
+            if ("skew".equals(readout.name())) {
+                final double m3 = r3 - 3 * m * r2 + 2 * m * m * m;
+                return m3 / Math.pow(m2, 1.5);
+            }
+            final double m4 = r4 - 4 * m * r3 + 6 * m * m * r2 - 3 * m * m * m * m;
+            return m4 / (m2 * m2) - 3;
         }
     }
 

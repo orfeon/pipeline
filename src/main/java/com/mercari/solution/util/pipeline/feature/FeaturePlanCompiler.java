@@ -1093,7 +1093,7 @@ public final class FeaturePlanCompiler {
                             for (final String func : funcs) {
                                 final Schema.FieldType type = OperatorCatalog.aggregateOutput(func, ref.type());
                                 if (type == null) {
-                                    diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func);
+                                    diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func + " (available: " + OperatorCatalog.AVAILABLE_AGGREGATES + ")");
                                     continue;
                                 }
                                 if (List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {

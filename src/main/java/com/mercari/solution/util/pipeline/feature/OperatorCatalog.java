@@ -95,15 +95,26 @@ public final class OperatorCatalog {
         return List.copyOf(OPERATORS.values());
     }
 
-    /** Aggregate functions accepted by sequence.aggregate and their output types. */
+    /**
+     * Aggregate functions accepted by sequence.aggregate and their output types: the moments, the shape of the
+     * distribution ({@code skew} / {@code kurt}), the extremes and ends, and the order-dependent series readouts of
+     * {@link SeriesStats} ({@code zeroCross}, {@code peaks}, {@code acf<j>}, {@code pacf<j>}, {@code ar<p>_<i>}).
+     */
     public static Schema.FieldType aggregateOutput(final String func, final Schema.FieldType inputType) {
         return switch (func) {
             case "count" -> I64;
-            case "mean", "avg", "std", "sum", "rate" -> F64;
+            case "mean", "avg", "std", "sum", "rate", "skew", "kurt" -> F64;
             case "min", "max", "last", "first" -> inputType;
-            default -> null;
+            default -> {
+                final SeriesStats.Readout series = SeriesStats.parse(func);
+                yield series == null ? null : SeriesStats.isCount(series) ? I64 : F64;
+            }
         };
     }
+
+    /** What sequence.aggregate accepts, for the "unknown func" message. */
+    public static final String AVAILABLE_AGGREGATES = "count | sum | mean | avg | rate | std | skew | kurt | min | max | first | last | zeroCross | peaks"
+            + " | acf<j> | pacf<j> | ar<p>_<i> (j, p up to " + SeriesStats.MAX_LAG + ")";
 
     /**
      * Encoding statistics: whether a target is required, the output type, and whether the statistic is
@@ -131,7 +142,8 @@ public final class OperatorCatalog {
     /**
      * The {@link Summary} family a statistic token runs on incrementally — the single place that decides which
      * statistics the keyed replay can serve from running state (and, being monoids, which can be combined per
-     * block or per partition): {@code count / sum / mean / avg / rate / std} → moments, {@code max / min} →
+     * block or per partition): {@code count / sum / mean / avg / rate / std} → moments, {@code skew / kurt} → the
+     * power sums up to order four, {@code max / min} →
      * extrema (not invertible: scan under a window), {@code distribution} → value counts, the quantile tokens →
      * exact order statistics. Null for a token without a family ({@code share}, {@code first} / {@code last}, an
      * unknown token): such a statistic is scan-only.
@@ -140,6 +152,7 @@ public final class OperatorCatalog {
         if (stat == null) return null;
         return switch (stat) {
             case "count", "sum", "mean", "avg", "rate", "std" -> new Summary.Spec(Summary.Summaries.MOMENTS, Summary.Readout.of(stat));
+            case "skew", "kurt" -> new Summary.Spec(Summary.Summaries.SHAPE, Summary.Readout.of(stat));
             case "max", "min" -> new Summary.Spec(Summary.Summaries.EXTREMA, Summary.Readout.of(stat));
             case "distribution" -> new Summary.Spec(Summary.Summaries.COUNTS, Summary.Readout.of(stat));
             default -> {

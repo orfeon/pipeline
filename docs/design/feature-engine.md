@@ -254,6 +254,14 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   (scan), or the near edge minus a bounded tail (`lag` / `trend` = k, `delta` = k + 1, unfiltered
   `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`
   are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
+- **Scalar summaries of the window** (`aggregate` funcs). `skew` / `kurt` are sums of per-event contributions —
+  `Summary.Shape`, (n, Σx..Σx⁴) about an anchor, invertible — so they take the incremental path like the moments;
+  the family is separate from `Moments` so the state every encoding level carries stays three numbers.
+  `zeroCross` / `peaks` / `acf<j>` / `pacf<j>` / `ar<p>_<i>` (`SeriesStats`, tokens parsed once into the column
+  plan) read *neighbouring* values: as summaries they would be ordered monoids carrying boundary values, whose
+  eviction needs the successors of the evicted element — something `update(state, contribution, −1)` cannot
+  express — so they have no family and scan the window (they would scan under every rolling window anyway; an
+  ordered family only pays off for the streaming state).
 - The general form (lift / summarize / compress, lti / bilinear) is v1; the LTI family is a recurrence
   over a fixed matrix and would keep a vector state per key rather than a buffer.
 

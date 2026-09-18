@@ -55,6 +55,8 @@ public class SequenceEvaluator implements Serializable {
         Summary.Spec summary;
         /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
         Serializable empty;
+        /** An order-dependent aggregate ({@link SeriesStats}: zeroCross / peaks / acf / pacf / ar), or null. */
+        SeriesStats.Readout series;
     }
 
     /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
@@ -360,6 +362,7 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = statToken(c);
+        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.incremental = !forceScan
@@ -518,6 +521,8 @@ public class SequenceEvaluator implements Serializable {
                 return n;
             }
             case "aggregate" -> {
+                // an order-dependent readout reads the window's present values as one series, in time order
+                if (plan.series != null) return SeriesStats.read(plan.series, series(window, field));
                 return aggregate(c.coordinates.get("func"), window, field, c);
             }
             default -> throw new IllegalStateException("unsupported sequence operator: " + c.operator);
@@ -601,8 +606,26 @@ public class SequenceEvaluator implements Serializable {
                 final double mean = values.stream().mapToDouble(d -> d).average().orElse(Double.NaN);
                 yield Math.sqrt(values.stream().mapToDouble(d -> (d - mean) * (d - mean)).sum() / values.size());
             }
+            case "skew", "kurt" -> {
+                // the family of the incremental path, folded over the window (one arithmetic, one null rule)
+                final Summary<Summary.Shape.State> shape = Summary.Summaries.SHAPE;
+                final Summary.Shape.State state = shape.create();
+                for (final Double d : values) shape.update(state, d, 1);
+                yield shape.read(state, Summary.Readout.of(func));
+            }
             default -> throw new IllegalStateException("unsupported aggregate func: " + func);
         };
+    }
+
+    /** The present (non-null, non-NaN) values of a field over the window, oldest first. */
+    private static double[] series(final List<Past> window, final String field) {
+        final double[] x = new double[window.size()];
+        int n = 0;
+        for (final Past p : window) {
+            final Double d = FeatureValues.toDouble(p.values().get(field));
+            if (d != null && !d.isNaN()) x[n++] = d;
+        }
+        return n == x.length ? x : Arrays.copyOf(x, n);
     }
 
     static Double slope(final List<Double> ys) {
