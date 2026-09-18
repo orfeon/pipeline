@@ -1237,6 +1237,117 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * svd {@code outputs}: with one component of (start_price, current_bid_t10) kept, the residual is what the shared
+     * price axis does not explain, per input and in input units — it sums to zero over the rows, its norm column is its
+     * length, and it is orthogonal to the score; with both components kept nothing is left.
+     */
+    @Test
+    public void testSvdResidual() throws java.io.IOException {
+        final String blocks = """
+                    - name: price_pc
+                      scope: population
+                      type: svd
+                      inputs: [start_price, current_bid_t10]
+                      rank: 1
+                      outputs: [scores, residual, residualNorm]
+                    - name: price_full
+                      scope: population
+                      type: svd
+                      inputs: [start_price, current_bid_t10]
+                      rank: 2
+                      outputs: [residualNorm]
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertNotNull(output.getSchema().getField("f_price_pc_0"));
+        Assertions.assertNull(output.getSchema().getField("f_price_pc_1"));
+        Assertions.assertNull(output.getSchema().getField("f_price_full_0"), "scores are not listed");
+        Assertions.assertTrue(output.getSchema().getField("f_price_pc_resid_current_bid_t10").getOptions().get("feature.derivedFrom").contains("market"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            double sumPrice = 0, sumBid = 0, sumSq = 0, cross = 0;
+            for (final MElement row : rows) {
+                count++;
+                final double rp = row.getAsDouble("f_price_pc_resid_start_price"), rb = row.getAsDouble("f_price_pc_resid_current_bid_t10");
+                Assertions.assertEquals(Math.sqrt(rp * rp + rb * rb), row.getAsDouble("f_price_pc_residnorm"), 1e-9);
+                Assertions.assertEquals(0.0, row.getAsDouble("f_price_full_residnorm"), 1e-6, "both components kept: nothing is left");
+                sumPrice += rp;
+                sumBid += rb;
+                sumSq += rp * rp + rb * rb;
+                // the residual is the dropped component's part, and the two components' scores are uncorrelated
+                cross += row.getAsDouble("f_price_pc_0") * (rp + rb);
+            }
+            Assertions.assertEquals(6, count);
+            Assertions.assertEquals(0.0, sumPrice, 1e-9);
+            Assertions.assertEquals(0.0, sumBid, 1e-9);
+            Assertions.assertEquals(0.0, cross, 1e-6);
+            Assertions.assertTrue(sumSq > 1, "the bid does not track the price exactly: " + sumSq);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * The two-series {@code regression} and {@code fracdiff} in the keyed stage. Seller s1's sessions A, B, C are
+     * visible to D (their outcomes arrived): final_price (150, 0, 95) against start_price (100, 200, 80); the start
+     * prices themselves are known at once, so D's first difference reads C − B = 80 − 200.
+     */
+    @Test
+    public void testSequenceRegressionAndFracdiff() throws java.io.IOException {
+        final String blocks = """
+                    - name: pair
+                      scope: sequence
+                      entity: seller
+                      ops:
+                        - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}
+                        - {type: fracdiff, field: start_price, d: 1, k: 2}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals("windowShift", output.getSchema().getField("f_pair_all_final_price_vs_start_price_beta").getOptions().get("feature.status"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                switch (id) {
+                    case "D/s1" -> {
+                        // x = (100, 200, 80), y = (150, 0, 95): the least-squares line of y on x, computed directly
+                        final double[] x = {100, 200, 80}, y = {150, 0, 95};
+                        final double mx = (x[0] + x[1] + x[2]) / 3, my = (y[0] + y[1] + y[2]) / 3;
+                        double sxy = 0, sxx = 0, syy = 0;
+                        for (int i = 0; i < 3; i++) {
+                            sxy += (x[i] - mx) * (y[i] - my);
+                            sxx += (x[i] - mx) * (x[i] - mx);
+                            syy += (y[i] - my) * (y[i] - my);
+                        }
+                        Assertions.assertEquals(sxy / sxx, row.getAsDouble("f_pair_all_final_price_vs_start_price_beta"), 1e-9);
+                        Assertions.assertEquals(sxy / Math.sqrt(sxx * syy), row.getAsDouble("f_pair_all_final_price_vs_start_price_corr"), 1e-9);
+                        Assertions.assertTrue(row.getAsDouble("f_pair_all_final_price_vs_start_price_beta") < 0, "the expensive listing did not sell");
+                        Assertions.assertEquals(80.0 - 200.0, row.getAsDouble("f_pair_all_start_price_fracdiff1"), 1e-9);
+                    }
+                    case "C/s1" -> {
+                        // two pairs: a line through (100, 150) and (200, 0)
+                        Assertions.assertEquals(-1.5, row.getAsDouble("f_pair_all_final_price_vs_start_price_beta"), 1e-9);
+                        Assertions.assertEquals(-1.0, row.getAsDouble("f_pair_all_final_price_vs_start_price_corr"), 1e-9);
+                        Assertions.assertEquals(200.0 - 100.0, row.getAsDouble("f_pair_all_start_price_fracdiff1"), 1e-9);
+                    }
+                    case "A/s1", "A/s2", "B/s1", "C/s2" -> {
+                        Assertions.assertNull(row.getPrimitiveValue("f_pair_all_final_price_vs_start_price_beta"), id + ": fewer than two pairs");
+                        Assertions.assertNull(row.getPrimitiveValue("f_pair_all_start_price_fracdiff1"), id + ": fewer than k events");
+                    }
+                    default -> Assertions.fail("unexpected row " + id);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     // ------------------------------------------------------------------------------------------
     // estimator: joint / conjugate families
     // ------------------------------------------------------------------------------------------

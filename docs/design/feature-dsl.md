@@ -559,6 +559,9 @@ premise of the availability propagation rule (§6.1).
     - {type: lag, fields: [sold, start_price], k: 3}
     - {type: delta, field: start_price, k: 1}
     - {type: trend, field: start_price, k: 5}             # regression slope
+    - {type: regression, field: final_price, against: start_price,
+       funcs: [beta, corr]}                               # two series: cov | corr | beta | intercept | r2; lag: k pairs field with `against` k events earlier
+    - {type: fracdiff, field: start_price, d: 0.4, k: 20} # (1 − B)^d truncated to k terms (stationary, memory kept)
     - {type: ewma, field: start_price, halflife: [2, 5, 10],
        decayBy: events}                                   # events | time
     - {type: ewma, expr: "sold >= 1", halflife: [5]}      # an expression (desugared to an anonymous row feature, below)
@@ -691,6 +694,7 @@ shrinkage reference so the shrinkage implementation and vocabulary live in one p
   type: svd                      # compression of a sequence output (lag window) = SSA
   input: recent.lag_window
   rank: 5
+  outputs: [scores]              # scores | residual (per input, in input units: what the rank components do not explain) | residualNorm
 
 - name: price_quantile
   scope: population

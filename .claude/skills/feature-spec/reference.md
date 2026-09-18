@@ -141,6 +141,8 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `lag` | `field(s)` or `expr`, `k` (default 1) | `<name>_<w>_<field>_lag1 .. lagk`, input type |
 | `delta` | `field`, `k` | `..._delta<k>` float64 (lag k − lag k+1) |
 | `trend` | `field`, `k` (default 5) | `..._trend<k>` float64 (regression slope) |
+| `regression` | `field` (y), `against` (x — not `on`, a YAML 1.1 boolean), `funcs: [cov, corr, beta, intercept, r2]` (default `[beta, corr]`), optional `lag: k` (pairs `field` with `against` k events earlier: lead-lag) | `..._<field>_vs_<against>_[lag<k>_]<func>` float64; two contributing events at least; `corr` / `r2` null when a series is constant, `beta` / `intercept` when x is. Same-event form is incremental; with `lag` it scans the window per row (bound it with `maxAge` / `maxEvents`) |
+| `fracdiff` | `field`, `d` (required, 0 < d ≤ 2), `k` (terms, default 20) | `..._fracdiff<d>` float64: `(1 − B)^d` truncated to `k` coefficients over the last `k` past events; null when fewer than `k` events or one of them is missing; `d: 1` = first difference |
 | `ewma` | `field` / `expr`, `halflife: [h1, h2]`, `decayBy: events \| time` | `..._ewma<h>` float64 |
 | `runLength` | `field`, `value` | `..._runlength` int64 |
 | `sinceEvent` | `predicate`, `unit: [events, days]` | `<name>_<w>_since_events` int64 / `_since_days` float64 |
@@ -226,6 +228,10 @@ float64 `<name>_0 .. <name>_{rank−1}`: PCA scores ordered by explained varianc
 component → null scores. An array input must have one length (other lengths are skipped, read null and are
 warned about at run time; `rank` above the array length is capped with a warning and the surplus columns read
 null). Fitted from (n, Σx, Σxxᵀ): no row leaves the workers.
+`outputs: [scores, residual, residualNorm]` (default `[scores]`): `residual` = what the kept components do not
+explain, one float64 `<name>_resid_<input>` per input **in input units** (`x − mean − scale · Σ score · component`;
+needs named `inputs`, not an array — `svd.outputs`); `residualNorm` = `<name>_residnorm`, its Euclidean length
+(arrays too). Null wherever the scores are null; 0 when `rank` equals the vector length.
 
 ## Availability expressions
 

@@ -147,6 +147,8 @@ features:
       - {type: lag, fields: [sold, start_price], k: 2}
       - {type: delta, field: start_price, k: 1}
       - {type: trend, field: start_price, k: 5}
+      - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # two series (see Two-series and fractional-difference ops)
+      - {type: fracdiff, field: start_price, d: 0.4, k: 20}
       - {type: ewma, expr: "sold >= 1", halflife: [3, 10], decayBy: events}
       - {type: runLength, field: condition_grade, value: good}
       - {type: sinceEvent, predicate: "sold = 1", unit: [events, days]}
@@ -207,6 +209,41 @@ without `distribution` is an error (`encoding.target.values`).
   no term of its own and falls back to its parent, as an unseen level does. `estimator: joint` fits the
   same per-cell terms (such a cell is skipped). A keySet with its own identity-scale or disabled `shrinkage`
   stays on the residual statistics above.
+
+### Two-series and fractional-difference ops (sequence `regression`, `fracdiff`)
+
+```yaml
+- name: vs_index
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P90D}]
+  ops:
+    - {type: regression, field: final_price, against: start_price, funcs: [beta, corr]}   # vs_index_90d_final_price_vs_start_price_beta / _corr
+    - {type: regression, field: final_price, against: start_price, lag: 1, funcs: [corr]} # ..._vs_start_price_lag1_corr
+    - {type: fracdiff, field: start_price, d: 0.4, k: 20}                                 # vs_index_90d_start_price_fracdiff0p4
+```
+
+- **`regression`** reads two fields of the entity's past events — `field` (y) regressed against `against` (x):
+  `cov` (population covariance), `corr`, `beta` (= cov / var x, the slope of y on x), `intercept`, `r2`
+  (default `[beta, corr]`). An event contributes when both values are present; every func needs two
+  contributing events; `corr` / `r2` are null when either series is constant, `beta` / `intercept` when x is.
+  The other series is an ordinary field of the row (a market or group series joined onto each row upstream).
+  The key is `against`, not `on` — YAML 1.1 reads a bare `on` as a boolean.
+- **`lag: k`** (lead-lag) pairs `field` of each event with `against` **k events earlier** inside the window —
+  "does x lead y by k events" (swap the two fields for the other direction; `lag` ≥ 0). Columns are named
+  `..._lag<k>_<func>`.
+- **`fracdiff`** is the fractional difference `(1 − B)^d` of the field, truncated to its first `k`
+  coefficients (`w0 = 1`, `wj = −w(j−1) · (d − j + 1) / j`; default `k: 20`) and applied to the last `k` past
+  events: `0 < d < 1` makes a level series stationary while keeping memory, `d: 1` is the plain first
+  difference. It needs `k` past events without a missing value among them (null otherwise — a fixed-width
+  filter over fewer terms would be a different series). Like every sequence op it is strictly past: the value
+  as of the latest past event, not including the current row.
+- **Cost / retention.** A same-event `regression` runs incrementally (running cross moments, evicted under
+  `maxAge`) — O(1) per row like a plain aggregate. A lagged `regression` is evaluated by scanning its window
+  per row: bound it with `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`). `fracdiff` keeps
+  only its last `k` events.
+- Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
+  `sequence.regression.lag`, `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 
 ### Static fits and artifacts (fit.mode static)
 
@@ -387,6 +424,7 @@ participates in the plan hash — the warning `quantileTransform.clip` asks you 
     rank: 2                            # score columns hist_pc_0, hist_pc_1 (default min(d, 8); required for an array input)
     center: true                       # subtract the fitted means (default true)
     standardize: false                 # divide by the fitted standard deviations (PCA of the correlation matrix; the RMS when center: false)
+    outputs: [scores]                  # scores (default) | residual | residualNorm — see "Residuals" below
     fit: {artifact: {uri: "gs://bucket/features"}}   # fit.mode static, forward (below), or inherited from the top-level fit
 ```
 
@@ -418,6 +456,14 @@ block) and the components are re-solved for every block window a row may read �
 vectors. A block that declares no `fit.mode` of its own inherits a top-level `fit: {mode: forward}` (geometry
 included), so the whole spec walks forward together; `fit: {mode: static}` on the block opts it out and says so
 (`svd.fit.mode.static` info). The artifact still holds the whole-input components, for a static serving run.
+
+**Residuals (`outputs: [scores, residual, residualNorm]`).** The scores say where a vector sits on the leading
+`rank` components; the residual is what those components do not explain — `x − mean − scale · Σ score_k ·
+component_k`, per input and **in the units of the input** (the idiosyncratic part of each series once the common
+factors are taken out). `residual` emits one column per input, `<name>_resid_<input>`, and needs named `inputs`
+(an array has no named dimensions: `svd.outputs`); `residualNorm` emits `<name>_residnorm`, the Euclidean length
+of the residual vector, and works for an array input too. With every component kept (`rank` = the vector length)
+the residual is 0. The columns share the block's fit (static or forward) and read null wherever the scores do.
 
 ### Shrinkage and key lattices (population)
 

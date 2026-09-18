@@ -44,6 +44,36 @@ public class SvdTest {
         Assertions.assertNull(svd.transform(new double[]{1, Double.NaN}));
     }
 
+    /** The residual is what the kept components do not explain, in input units: x = mean + scale · Σ score · component + residual. */
+    @Test
+    public void testResidual() {
+        // a = 2, b = 0.5 → x = (0.8, 1.9); rank 1 keeps a · (0.6, 0.8), so the residual is b's part −0.5 · (0.8, −0.6)
+        final double[] x = {0.6 * 2 - 0.8 * 0.5, 0.8 * 2 + 0.6 * 0.5};
+        final Svd rank1 = Svd.fit(axes(), 1, true, false);
+        Assertions.assertArrayEquals(new double[]{-0.4, 0.3}, rank1.residual(x), 1e-9);
+        // every component kept: nothing is left
+        Assertions.assertArrayEquals(new double[]{0, 0}, Svd.fit(axes(), 2, true, false).residual(x), 1e-9);
+        // standardised and centred: the identity holds in the units of the input
+        final Svd.Moments m = new Svd.Moments();
+        final double[][] rows = {{1, 12, 3}, {2, 27, 1}, {3, 31, 4}, {4, 48, 1}, {5, 50, 5}};
+        for (final double[] row : rows) m.add(row);
+        final Svd svd = Svd.fit(m, 2, true, true);
+        for (final double[] row : rows) {
+            final double[] scores = svd.transform(row), residual = svd.residual(row);
+            double orthogonal = 0;
+            for (int i = 0; i < 3; i++) {
+                double explained = 0;
+                for (int r = 0; r < 2; r++) explained += scores[r] * svd.components[r][i];
+                Assertions.assertEquals(row[i], svd.mean[i] + svd.scale[i] * explained + residual[i], 1e-9);
+                // in the standardised space the residual is orthogonal to the kept components
+                orthogonal += residual[i] / svd.scale[i] * svd.components[0][i];
+            }
+            Assertions.assertEquals(0.0, orthogonal, 1e-9);
+        }
+        Assertions.assertNull(svd.residual(new double[]{1, 2}));
+        Assertions.assertNull(svd.residual(null));
+    }
+
     @Test
     public void testCenteringAndStandardisation() {
         // x and y = 10 x + 5: one direction of variance; centring removes the offset, standardising equalises the scales

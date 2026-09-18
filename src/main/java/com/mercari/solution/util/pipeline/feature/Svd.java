@@ -315,6 +315,23 @@ public final class Svd implements Serializable {
         return scores;
     }
 
+    /**
+     * What the fitted components do not explain of a vector: {@code x − mean − scale · Σ_r score_r · component_r},
+     * per dimension and in the units of the input (the idiosyncratic part once the top {@code rank} factors are
+     * taken out). Null where {@link #transform} is null.
+     */
+    public double[] residual(final double[] x) {
+        final double[] scores = transform(x);
+        if (scores == null) return null;
+        final double[] residual = new double[dimension];
+        for (int i = 0; i < dimension; i++) {
+            double explained = 0;
+            for (int r = 0; r < components.length; r++) explained += scores[r] * components[r][i];
+            residual[i] = x[i] - mean[i] - scale[i] * explained;
+        }
+        return residual;
+    }
+
     // ------------------------------------------------------------------------------------------
     // artifact
     // ------------------------------------------------------------------------------------------

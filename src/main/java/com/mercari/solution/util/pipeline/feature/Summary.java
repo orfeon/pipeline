@@ -92,6 +92,8 @@ public interface Summary<S extends Serializable> extends Serializable {
         public static final Summary<Counts.State> COUNTS = new Counts();
         /** Exact order statistics (a multiset with deletion): quantiles. Invertible. */
         public static final Summary<Order.State> ORDER = new Order();
+        /** Cross moments of a pair (x, y): cov / corr / beta / intercept / r2 of y on x. Invertible. */
+        public static final Summary<Regression.State> REGRESSION = new Regression();
     }
 
     /** (n, Σx, Σx²) — the sufficient statistics of a mean and a variance. */
@@ -251,6 +253,108 @@ public interface Summary<S extends Serializable> extends Serializable {
                 }
                 default -> throw new IllegalArgumentException("counts cannot read " + readout.name());
             };
+        }
+    }
+
+    /**
+     * (n, Σx, Σy, Σx², Σy², Σxy) of a pair series — the sufficient statistics of the simple regression of y on x.
+     * A contribution is a {@code double[]{x, y}}. The sums are taken relative to an anchor (the first pair folded
+     * in), so the covariance of values with a large offset (a price level) is not the difference of two huge raw
+     * moments; merging re-anchors {@code other} onto {@code into}.
+     */
+    final class Regression implements Summary<Regression.State> {
+        public static final class State implements Serializable {
+            public double n, sx, sy, sxx, syy, sxy;
+            /** The anchor subtracted from every pair (unset while the state is empty). */
+            public double ax, ay;
+            public boolean anchored;
+        }
+
+        @Override
+        public State create() {
+            return new State();
+        }
+
+        @Override
+        public void update(final State s, final Object contribution, final int sign) {
+            final double[] pair = (double[]) contribution;
+            if (!s.anchored) {
+                s.ax = pair[0];
+                s.ay = pair[1];
+                s.anchored = true;
+            }
+            final double x = pair[0] - s.ax, y = pair[1] - s.ay;
+            s.n += sign;
+            s.sx += sign * x;
+            s.sy += sign * y;
+            s.sxx += sign * x * x;
+            s.syy += sign * y * y;
+            s.sxy += sign * x * y;
+            // an emptied window starts over: no rounding residue, and the next pair re-anchors
+            if (s.n == 0) reset(s);
+        }
+
+        private static void reset(final State s) {
+            s.sx = s.sy = s.sxx = s.syy = s.sxy = 0;
+            s.anchored = false;
+        }
+
+        @Override
+        public boolean invertible() {
+            return true;
+        }
+
+        @Override
+        public void merge(final State into, final State other) {
+            if (other.n == 0) return;
+            if (!into.anchored) {
+                into.ax = other.ax;
+                into.ay = other.ay;
+                into.anchored = true;
+            }
+            // shift other's sums from its anchor to into's: x − a = (x − b) + (b − a)
+            final double dx = other.ax - into.ax, dy = other.ay - into.ay;
+            into.sxx += other.sxx + 2 * dx * other.sx + other.n * dx * dx;
+            into.syy += other.syy + 2 * dy * other.sy + other.n * dy * dy;
+            into.sxy += other.sxy + dx * other.sy + dy * other.sx + other.n * dx * dy;
+            into.sx += other.sx + other.n * dx;
+            into.sy += other.sy + other.n * dy;
+            into.n += other.n;
+        }
+
+        @Override
+        public double count(final State s) {
+            return s.n;
+        }
+
+        /**
+         * Population moments (the convention of {@code std}): {@code cov}; {@code corr} (null when either series is
+         * constant); {@code beta} = cov / var(x) and {@code intercept} of y on x (null when x is constant);
+         * {@code r2} = corr². Every readout but {@code count} needs two pairs.
+         */
+        @Override
+        public Object read(final State s, final Readout readout) {
+            if ("count".equals(readout.name())) return (long) s.n;
+            if (s.n < 2) return null;
+            final double mx = s.sx / s.n, my = s.sy / s.n;
+            final double vx = Math.max(0, s.sxx / s.n - mx * mx), vy = Math.max(0, s.syy / s.n - my * my);
+            final double cov = s.sxy / s.n - mx * my;
+            return switch (readout.name()) {
+                case "cov" -> cov;
+                case "corr" -> vx == 0 || vy == 0 ? null : clamp(cov / Math.sqrt(vx * vy));
+                case "r2" -> {
+                    if (vx == 0 || vy == 0) yield null;
+                    final double r = clamp(cov / Math.sqrt(vx * vy));
+                    yield r * r;
+                }
+                case "beta" -> vx == 0 ? null : cov / vx;
+                case "intercept" -> vx == 0 ? null : (my + s.ay) - cov / vx * (mx + s.ax);
+                default -> throw new IllegalArgumentException("regression cannot read " + readout.name());
+            };
+        }
+
+        private static double clamp(final double r) {
+            return Math.max(-1d, Math.min(1d, r));
         }
     }
 

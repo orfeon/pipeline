@@ -55,6 +55,11 @@ public class SequenceEvaluator implements Serializable {
         Summary.Spec summary;
         /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
         Serializable empty;
+        /** regression: the explanatory field ({@code field} is regressed against it) and the events it leads by. */
+        String against;
+        int lag;
+        /** fracdiff: the truncated filter, newest event first ({@code w[0] = 1}). */
+        double[] fracdiffWeights;
     }
 
     /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
@@ -250,7 +255,7 @@ public class SequenceEvaluator implements Serializable {
         if (plan.maxEvents != null) return plan.maxEvents;
         final String k = c.coordinates.get("k");
         return switch (c.operator) {
-            case "lag", "trend" -> k == null ? null : Integer.parseInt(k);
+            case "lag", "trend", "fracdiff" -> k == null ? null : Integer.parseInt(k);
             case "delta" -> k == null ? null : Integer.parseInt(k) + 1;
             default -> null;
         };
@@ -360,6 +365,11 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = statToken(c);
+        plan.against = c.coordinates.get("against");
+        plan.lag = Integer.parseInt(c.coordinates.getOrDefault("lag", "0"));
+        if ("fracdiff".equals(c.operator)) {
+            plan.fracdiffWeights = fracdiffWeights(Double.parseDouble(c.coordinates.get("d")), Integer.parseInt(c.coordinates.get("k")));
+        }
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.incremental = !forceScan
@@ -371,14 +381,22 @@ public class SequenceEvaluator implements Serializable {
         return plan;
     }
 
-    /** The statistic token of the column ({@code aggregate} func); overridden for encoding stats. */
+    /** The statistic token of the column ({@code aggregate} / {@code regression} func); overridden for encoding stats. */
     String statToken(final OutputColumn c) {
-        return "aggregate".equals(c.operator) ? c.coordinates.get("func") : null;
+        return "aggregate".equals(c.operator) || "regression".equals(c.operator) ? c.coordinates.get("func") : null;
     }
 
-    /** The summary family the column's statistic runs on incrementally, or null when it is scan-only. */
+    /**
+     * The summary family the column's statistic runs on incrementally, or null when it is scan-only. A lagged
+     * regression pairs an event with an earlier one: that pair is not a contribution of one event (evicting the
+     * far edge would need the rows before it), so it has no family.
+     */
     Summary.Spec summaryOf(final OutputColumn c) {
-        return "aggregate".equals(c.operator) ? OperatorCatalog.summary(c.coordinates.get("func")) : null;
+        return switch (c.operator) {
+            case "aggregate" -> OperatorCatalog.summary(c.coordinates.get("func"));
+            case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(c.coordinates.get("func"));
+            default -> null;
+        };
     }
 
     public void evaluate(final Map<String, Object> row, final long nowMillis, final List<Past> history) {
@@ -436,7 +454,14 @@ public class SequenceEvaluator implements Serializable {
      */
     Object contribution(final ColumnPlan plan, final Past p) {
         if (plan.field == null) return 0d;
+        if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
         return FeatureValues.toDouble(p.values().get(plan.field));
+    }
+
+    /** The (x, y) contribution of a regression, or null when either value is missing / NaN. */
+    private static double[] pair(final Object x, final Object y) {
+        final Double dx = FeatureValues.toDouble(x), dy = FeatureValues.toDouble(y);
+        return dx == null || dy == null || dx.isNaN() || dy.isNaN() ? null : new double[]{dx, dy};
     }
 
     /**
@@ -519,6 +544,28 @@ public class SequenceEvaluator implements Serializable {
             }
             case "aggregate" -> {
                 return aggregate(c.coordinates.get("func"), window, field, c);
+            }
+            case "regression" -> {
+                // the same family as the incremental path, folded over the window; under a lag the field of event
+                // i is paired with `against` of event i − lag, both inside the window
+                final Summary<Summary.Regression.State> family = Summary.Summaries.REGRESSION;
+                final Summary.Regression.State state = family.create();
+                for (int i = plan.lag; i < window.size(); i++) {
+                    final double[] pair = pair(window.get(i - plan.lag).values().get(plan.against), window.get(i).values().get(field));
+                    if (pair != null) family.update(state, pair, 1);
+                }
+                return family.read(state, Summary.Readout.of(c.coordinates.get("func")));
+            }
+            case "fracdiff" -> {
+                final double[] w = plan.fracdiffWeights;
+                if (window.size() < w.length) return null;
+                double value = 0;
+                for (int j = 0; j < w.length; j++) {
+                    final Double x = FeatureValues.toDouble(window.get(window.size() - 1 - j).values().get(field));
+                    if (x == null || x.isNaN()) return null;
+                    value += w[j] * x;
+                }
+                return Double.isFinite(value) ? value : null;
             }
             default -> throw new IllegalStateException("unsupported sequence operator: " + c.operator);
         }
@@ -603,6 +650,17 @@ public class SequenceEvaluator implements Serializable {
             }
             default -> throw new IllegalStateException("unsupported aggregate func: " + func);
         };
+    }
+
+    /**
+     * The first {@code k} coefficients of (1 − B)^d: {@code w[0] = 1}, {@code w[j] = −w[j−1] (d − j + 1) / j}
+     * ({@code w[j]} weighs the value j events back). d = 1 gives the first difference (1, −1, 0, …).
+     */
+    static double[] fracdiffWeights(final double d, final int k) {
+        final double[] w = new double[k];
+        w[0] = 1;
+        for (int j = 1; j < k; j++) w[j] = -w[j - 1] * (d - j + 1) / j;
+        return w;
     }
 
     static Double slope(final List<Double> ys) {

@@ -432,6 +432,7 @@ public final class FeaturePlanCompiler {
             refs.addAll(op.fields);
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
+            if (op.against != null) refs.add(op.against);
         }
         for (final Window w : def.windows) {
             if (w.filter != null) {
@@ -1107,6 +1108,53 @@ public final class FeaturePlanCompiler {
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
+                        case "regression" -> {
+                            // field regressed against `against` over the window's events; lag pairs field with `against` k events earlier
+                            final Ref onRef = resolve(op.against);
+                            if (op.against == null || onRef == null) {
+                                diagnostics.error("sequence.regression.against", loc, "regression requires 'against' (the explanatory field that '" + field + "' is regressed against)");
+                                continue;
+                            }
+                            if (!OperatorCatalog.isNumeric(onRef.type())) {
+                                diagnostics.error("sequence.regression.against", loc, "regression 'against' field '" + op.against + "' must be numeric (is " + (onRef.type() == null ? "unknown" : onRef.type().getType()) + ")");
+                                continue;
+                            }
+                            final int lag = op.lag == null ? 0 : op.lag;
+                            if (lag < 0) {
+                                diagnostics.error("sequence.regression.lag", loc, "lag must be >= 0 (the events by which 'against' leads 'field'); swap field and against for the other direction: " + lag);
+                                continue;
+                            }
+                            final List<String> funcs = op.funcs.isEmpty() ? List.of("beta", "corr") : op.funcs;
+                            final String pair = base + "vs_" + displayName(op.against) + "_" + (lag == 0 ? "" : "lag" + lag + "_");
+                            for (final String func : funcs) {
+                                if (!OperatorCatalog.REGRESSION_FUNCS.contains(func)) {
+                                    diagnostics.error("sequence.regression.func", loc, "unknown regression func: " + func + " (available: " + String.join(" | ", OperatorCatalog.REGRESSION_FUNCS) + ")");
+                                    continue;
+                                }
+                                final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, (op.as != null && fields.size() == 1 ? base : pair) + func, Schema.FieldType.FLOAT64, computeAt);
+                                c.coordinates.put("func", func);
+                                c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                                c.coordinates.put("against", canonicalOf(op.against)); addPastInput(c, op.against);
+                                if (lag > 0) c.coordinates.put("lag", Integer.toString(lag));
+                                finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
+                            }
+                        }
+                        case "fracdiff" -> {
+                            if (op.d == null || !(op.d > 0) || op.d > 2) {
+                                diagnostics.error("sequence.fracdiff.d", loc, "fracdiff requires 'd', the differencing order, in (0, 2]: " + op.d);
+                                continue;
+                            }
+                            final int k = op.k == null ? 20 : op.k;
+                            if (k < 2) {
+                                diagnostics.error("sequence.fracdiff.k", loc, "k (the number of events the truncated filter reads) must be >= 2: " + k);
+                                continue;
+                            }
+                            final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "fracdiff" + number(op.d), Schema.FieldType.FLOAT64, computeAt);
+                            c.coordinates.put("d", Double.toString(op.d));
+                            c.coordinates.put("k", Integer.toString(k));
+                            c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
+                        }
                         default -> diagnostics.error("sequence.op", loc, "unsupported sequence op: " + op.type);
                     }
                 }
@@ -1448,9 +1496,27 @@ public final class FeaturePlanCompiler {
                     + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the components (static-fit caveat)" : ""));
         }
 
+        // what to emit: the scores (default), the part of every input the components do not explain, its length
+        final List<String> outputs = def.outputs.isEmpty() ? List.of("scores") : def.outputs;
+        for (final String output : outputs) {
+            if (!List.of("scores", "residual", "residualNorm").contains(output)) {
+                diagnostics.error("svd.outputs", loc, "unknown svd output: " + output + " (scores | residual | residualNorm)");
+                return;
+            }
+        }
+        if (outputs.contains("residual") && arrayField != null) {
+            diagnostics.error("svd.outputs", loc, "outputs: residual emits one column per input and needs named 'inputs'; on an array input use residualNorm");
+            return;
+        }
+        // (column name, coordinate, index): a score per component, a residual per input dimension, the residual norm
+        final List<String[]> emitted = new ArrayList<>();
+        if (outputs.contains("scores")) for (int k = 0; k < rank; k++) emitted.add(new String[]{def.name + "_" + k, "component", Integer.toString(k)});
+        if (outputs.contains("residual")) for (int i = 0; i < fields.size(); i++) emitted.add(new String[]{def.name + "_resid_" + displayName(fields.get(i)), "residual", Integer.toString(i)});
+        if (outputs.contains("residualNorm")) emitted.add(new String[]{def.name + "_residnorm", "residual", "norm"});
+
         int produced = 0;
-        for (int k = 0; k < rank; k++) {
-            final OutputColumn c = newColumn(def.name, Scope.population, "svd", def.name + "_" + k, Schema.FieldType.FLOAT64, computeAt);
+        for (final String[] e : emitted) {
+            final OutputColumn c = newColumn(def.name, Scope.population, "svd", e[0], Schema.FieldType.FLOAT64, computeAt);
             c.fitted = true;
             c.coordinates.put("fit", forward ? "forward" : "static");
             if (forward) {
@@ -1460,7 +1526,7 @@ public final class FeaturePlanCompiler {
             if (arrayField != null) c.coordinates.put("arrayField", canonicalOf(arrayField));
             else c.coordinates.put("fields", String.join(",", fields.stream().map(this::canonicalOf).toList()));
             c.coordinates.put("rank", Integer.toString(rank));
-            c.coordinates.put("component", Integer.toString(k));
+            c.coordinates.put(e[1], e[2]);
             c.coordinates.put("center", Boolean.toString(center));
             c.coordinates.put("standardize", Boolean.toString(def.standardize));
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
@@ -1474,7 +1540,7 @@ public final class FeaturePlanCompiler {
             produced++;
         }
         if (def.maxFeatures != null && produced > def.maxFeatures) {
-            diagnostics.error("svd.maxFeatures", loc, "rank " + rank + " produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
+            diagnostics.error("svd.maxFeatures", loc, "rank " + rank + " with outputs " + outputs + " produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
         }
     }
 
