@@ -1,6 +1,6 @@
 # Feature Transform Engine (Design Document)
 
-Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6 and the prefix-scan of §9.4.4 are design notes, not code.**
+Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6, the prefix-scan of §9.4.4 and the planned items of §9.6.6 are design notes, not code.**
 
 How the DSL of [feature-dsl.md](feature-dsl.md) (below: "the spec") is implemented as `module:
 feature` on Apache Beam: what is reused from the framework, what is new, where the spec and the
@@ -28,8 +28,12 @@ util/pipeline/feature/
   FeaturePlan, OutputColumn              — the compiled plan and its columns (Serializable)
   RowEvaluator, ContextEvaluator, SequenceEvaluator, PopulationEvaluator, FeatureValues
                                          — Beam-free evaluators, one instance per stage DoFn
-  Summary                                — typed mergeable accumulators (moments / extrema / counts / order):
-                                           the state of the incremental path, declared per statistic in OperatorCatalog
+  Summary                                — typed mergeable accumulators (moments / shape / extrema / counts / order /
+                                           regression): the state of the incremental path and of the fit stage's
+                                           Combine, declared per statistic in OperatorCatalog (§9.6.1)
+  BlockSeries, ForwardBlocks             — a fit as a window over time blocks: one Summary state per block, merged per
+                                           range, one model per change point (§9.6.2)
+  VectorOps, SeriesStats                 — pure readouts over a double[] (a row's array field, a sequence window) (§9.6.4)
   Shrinkage, VarianceComponents, Discretization, QuantileTransform, Svd, Factorization, OrderStatistics, FitArtifact
                                          — pure models shared by both layers
   FeatureStages                          — FeaturePlan → Beam transforms (stages, waves, fits, finalize)
@@ -656,7 +660,7 @@ sequence / population stages as fold-in merge targets (composite sorter key, §9
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries
 (spec §7 — whether sources should carry physical table references is undecided).
 
-**Block series and the forward svd** (proposal-feature-unification §2.2). `BlockSeries<S>` holds one `Summary`
+**Block series and the forward svd** (§9.6.2). `BlockSeries<S>` holds one `Summary`
 state per observed time block of a fit and merges the blocks a row may read on demand — `(usable − windowBlocks,
 usable]`, every block up to `usable` without a window — so a statistic written once as a `Summary` family is
 served under `static` (one block), `forward` (a prefix) and a `window` (a range) by the monoid law alone (a
@@ -672,7 +676,7 @@ block gains `window` (the range of blocks; for encodings the default of keySets 
 (prefix arrays + the per-block λ) for now; moving them onto `BlockSeries<Moments>` is the next step of this
 line, after which one Combine per summary family serves every block kind of a fit stage (the fan-out item above).
 
-**Row vector op** (proposal-feature-unification §2.5, the row supply). `type: vector` turns an
+**Row vector op** (§9.6.4, the row supply). `type: vector` turns an
 `array<float64>` input into scalar readout columns through `VectorOps` (§4.1); until then an array field could
 only feed `type: svd`. It is a plain row op — no stage, no state, availability inherited from the field — and
 the first of the three supplies of the vector operators; the sequence-window and context-group supplies will
@@ -966,6 +970,166 @@ harness), a bundled prism binary in the image, and `prism/cloudRunJob` launch ta
 `options/prism.md` and the deploy docs. Two upstream Beam issues were noted (the `PrismLocator` OS-name
 URL and a local zip not being unpacked).
 
+### 9.6 One summary, four places: the abstractions behind the statistics
+
+The requests that followed the first production uses — walk-forward fits for every fitted type, rolling
+two-series statistics, distribution-shape summaries, array inputs, similarity-weighted histories, cheaper fit
+stages — looked like forty separate features. They are mostly one question asked in different places: *which
+statistics can be maintained as a state, and what can that state do?* This section records the abstractions the
+engine settled on, so that a new statistic is a registration rather than a new code path. §4.3 / §4.5 describe
+the pieces where they are used; this is the map.
+
+#### 9.6.1 `Summary<S>` — the typed accumulator
+
+A `Summary` summarises a stream of *contributions* (what one event adds: a value, a pair, a vector): `create`,
+`update(state, contribution, ±1)`, `merge`, `read(state, Readout)`, `count`, and one declared property,
+`invertible()`. The evaluator owns the *extraction* (which value of a row contributes, the null convention of
+its scope); the family owns the arithmetic. Two algebraic facts decide everything else:
+
+| property | meaning | what it buys |
+|---|---|---|
+| monoid (every family) | `merge` is associative, `create()` is the identity | states of disjoint row sets combine: a Beam `Combine`, time blocks, partitions, folds |
+| group (`invertible()`) | a contribution can be removed again | a `maxAge` window evicts in O(1) per row; a block range can be a prefix difference (the encoding levels' `ForwardBlocks.Series`) |
+
+The same family is therefore usable in four places, and a statistic is implemented once:
+
+1. **the keyed replay's incremental path** (§4.3): fold a contribution in when its row becomes visible, remove it
+   when it leaves the window;
+2. **the fit stage's per-block `Combine`** (§9.6.2, §9.6.3);
+3. **a prefix-scan over a hot key** (§9.4.4, not implemented): the "mergeable state" that decomposition needs is
+   exactly a monoid, so the catalog already says which columns qualify;
+4. **the state of a streaming keyed stage** (§9.4.6, not implemented): state = `S`, eviction = `invertible()`.
+
+Families (`Summary.Summaries`, plus the two that live with their model class):
+
+| family | state | invertible | readouts | used by |
+|---|---|---|---|---|
+| `MOMENTS` | n, Σx, Σx² | yes | count / sum / mean / avg / rate / std | sequence `aggregate`, every encoding stat derived from (n, Σy, Σy²) |
+| `SHAPE` | n, Σx..Σx⁴ about an anchor | yes | skew / kurt | sequence `aggregate` |
+| `EXTREMA` | max, min | **no** | max / min | sequence `aggregate` (scan under `maxAge`) |
+| `COUNTS` | value → count | yes | distribution | encoding `distribution` |
+| `ORDER` | Fenwick multiset (`OrderStatistics`) | yes | quantile(p) | encoding quantile stats |
+| `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
+| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | yes | — (solved, not read) | `type: svd` fits |
+| `QuantileTransform.VALUES` | the values themselves | **no** (merge = concatenation) | count | `type: quantileTransform` fits |
+
+Conventions every family follows: population moments (the `std` convention) and null — never NaN — when a
+readout is undefined (too few contributions, no spread); power sums of order ≥ 2 over values that may carry a
+level (prices, epoch times) are taken **about an anchor** (the first contribution; `merge` re-anchors by the
+binomial shift) because a central moment formed from raw sums cancels away; a state emptied by eviction resets
+exactly, so rounding residue does not outlive a window.
+
+**The path rule.** `OperatorCatalog.summary(stat)` maps a statistic token to `(family, Readout)` and is the only
+place that decides what runs incrementally. `SequenceEvaluator.plan()` then reads:
+
+```
+incremental ⇔ the statistic has a family
+            ∧ (no maxAge ∨ the family is invertible)
+            ∧ no maxEvents                          (a count-bounded window is not a time-ordered fold / evict)
+            ∧ (no filter ∨ the filter is `f = $self.f`)   (one state per filter value)
+            ∧ the statistic is not self-dependent
+scan        ⇔ otherwise — bounded by maxAge, by maxEvents, or by the op's own tail (lag / trend / fracdiff = k,
+              delta = k + 1); anything else keeps the key's whole history and is reported (sequence.window.unbounded)
+```
+
+Three kinds of statistic have **no family by construction**, and the reason is part of the design:
+
+- **self-dependent** (`weightBy`): the weight reads the current row, a different number for every (row, event)
+  pair — nothing folded once per event can serve it. Declared as `OperatorCatalog.summary(stat, weighted)`.
+- **pairs of events** (the lagged `regression`, `lag: k`): the contribution belongs to two events; evicting the far
+  edge would need the rows before it.
+- **order-dependent readouts** (`SeriesStats`: zeroCross / peaks / acf / pacf / ar): as summaries they are *ordered*
+  monoids — `merge` is a concatenation that carries boundary values, contributions must arrive in order (so they
+  cannot be a Beam `CombineFn`), and removing the oldest element needs its *successors*, which
+  `update(state, contribution, −1)` cannot express. They would scan under every rolling window anyway; an ordered
+  family (an `ordered()` property and a successor-aware removal) only pays off for the streaming state and is to
+  be designed with it.
+
+All three fold the scan over the window; where a family exists for the same arithmetic (`regression`, `skew`), the
+scan path folds that very family so both paths share one arithmetic and one null rule.
+
+#### 9.6.2 `BlockSeries<S>` — a fit as a window over time blocks
+
+Every non-expanding fit mode is a way of choosing *which time blocks a row may read*; the model is whatever the
+merged state of those blocks solves to. `BlockSeries<S>` holds one `Summary` state per observed block
+(`ForwardBlocks`: `blocks.bucket` | `blocks.size`) and merges a range on demand:
+
+| fit | blocks a row reads | how |
+|---|---|---|
+| `static` | all (a single block, index 0) | the total |
+| `forward` | `(−∞, usable]` — the complete blocks whose inputs are known at predictAt, the row's own block excluded | merge of the prefix |
+| `forward` + `window` | `(usable − windowBlocks, usable]` | merge of the range |
+| `minBlocks` / `minHistory` | — | fewer observed blocks at or before `usable` → the row reads null |
+
+Only the monoid law is used (a range is *merged*, not differenced), which is what lets a non-invertible family
+— the gathered values of a quantile transform — walk forward exactly. A model that has to be *solved* from the
+state (an eigendecomposition, quantile knots) is fitted once per **change point** — every observed block and,
+under a window, the index at which a block leaves (`changePoints`) — and a row reads the floor entry of its
+usable block (`lookup`), the rule `JointFit` already used for its per-block solutions. The artifact keeps the
+whole-input model (what a static serving run loads); a forward fit is re-fitted every run.
+
+`type: svd` and `type: quantileTransform` are on it. The encoding levels still carry their own
+`ForwardBlocks.Series` (prefix arrays of `KeyStats` + the per-block λ); moving them onto
+`BlockSeries<Moments>` is the remaining step, after which `fold` by time with purge / embargo is "all blocks minus
+a range" and a warm start is "merge the new block into the stored parts".
+
+#### 9.6.3 `SummaryFitBlock` — what a fitted block declares
+
+A `StaticFitBlock` whose fit state is a `Summary` family declares only `contribution(row)` → (time block, value)
+and `solve(parts, planHash)`. The stage fits all such blocks together (`fitSummaryBlocks`): per family one
+extraction pass over the rows, **one** `Combine.perKey` keyed by (block, time block), a regrouping by block, one
+solve per block (in parallel across blocks), and one list side input of (block, model) for all of them, indexed
+once per `FitApplyDoFn` instance. The step count of a fit stage no longer grows with the number of blocks (eight
+blocks: 40 → 14 top-level transforms; the Dataflow wall-clock on the consumer's 13-block config is still to be
+recorded in §9.2). A block that fits an empty input too (quantileTransform: n = 0 is still an artifact) adds an
+empty marker part so its group exists. fm, discretize and the joint estimator keep their own chains: fm and joint
+have no summary state, discretize gathers the same values as the quantile transform and can join its family.
+
+#### 9.6.4 Vector operators and their three supplies
+
+A scan readout is a pure function over a `double[]`. Three places produce such a vector, and they are meant to
+share one operator set rather than grow three:
+
+| supply | producer | positions | status |
+|---|---|---|---|
+| a row's array field (`array<float64>`) | `RowEvaluator`, `type: vector` | index (or `unit`: index / (n − 1)) | implemented — `VectorOps`: slice → diff → normalize, then readouts incl. `polyfit` |
+| a sequence window's values in time order | `SequenceEvaluator`, the scan path | event order | implemented for `SeriesStats` (acf / pacf / ar / zeroCross / peaks), `trend`, `fracdiff` |
+| a context group's values | `ContextEvaluator.evaluateColumn` (`values`, `self`, `excludeSelf`) | position in the group | the existing ops (rank / zscore / …) already have this shape; group solvers (neutralisation residuals, within-group probability solvers) are the planned users |
+
+A vector *output* is always expanded into scalar columns (`<name>_<readout>`, `<name>_poly<k>`, svd `<name>_<k>`
+/ `<name>_resid_<input>`): Avro round-trips `array<double>` at float precision on this classpath, and the
+consumers are tabular models. `VectorOps` and `SeriesStats` are separate classes today only because they arrived
+on independent branches; they are one catalogue.
+
+#### 9.6.5 The row-granularity principle (what stays outside)
+
+The transform maps **one input row to one output row plus columns**, and the availability algebra stands on
+that. A request that changes the row set belongs upstream:
+
+| request | why outside | where |
+|---|---|---|
+| bars from ticks, volume / dollar clocks that *emit* rows | the row set changes | an upstream resampling step (`aggregation`, or a dedicated transform) |
+| pairwise rows ((event, a) → (event, a, b)) and their reduction | row expansion and its inverse | upstream expansion → feature (entity = pair) → a second feature step (context reduce) |
+| as-of joins across sources | a join, and the DSL (spec §2.7) gives joins to the enrichment layer | the `query` transform's lookups |
+
+#### 9.6.6 Planned on the same line (design positions, not implemented)
+
+- **Dynamics** (spec §1.4 Summarize): `lti` (s ← A(Δ) s + B(Δ) x: exponential / Legendre / Fourier measures) and
+  `bilinear` (log-signature; Chen's identity makes it a group) are summaries over a *path*; `ewma` becomes
+  `lti(exponential, order 0)` and `trend` a `REGRESSION` readout, as sugar over coordinates. Component outputs are
+  scalar columns; a size diagnostic bounds `depth × channels`. An exponential state evicts by an inverse that
+  accumulates rounding, so the window is re-folded every N evictions.
+- **Clock**: windows, decay, fit blocks measured on one declared clock — wall time (today), event ordinal
+  (`maxEvents`, `decayBy: events`), or a calendar of ticks (business days) declared in the sources document.
+  Availability stays on wall time: a clock measures windows, not knowledge.
+- **Labels as future windows**: `direction: future` is a mirrored keyed replay (descending sort, strictly-future
+  `pending`), its `availableAt` = t + horizon + settlement, so a label referenced as a feature is an ordinary
+  `availability.violation` and the purge range of a time fold follows from the label's own horizon.
+- **Ratings**: a sequence op under the global key whose state is a map entity → (μ, σ), updated when a group of
+  same-timestamp rows closes (the `pending` flush). Order-dependent, hence replay-only — declared non-mergeable.
+- **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold, an
+  approximate bounded-size state for the quantile transform, drift audits (PSI) against the fitted summaries.
+
 ---
 
 ## 10. Decisions and open questions
@@ -984,6 +1148,16 @@ URL and a local zip not being unpacked).
 7. The plan hash excludes artifact locations and `engine` knobs; artifacts are content-addressed.
 8. `feature.Durations` and `outbound.Durations` stay separate (different grammars).
 9. The DirectRunner is not a benchmark target for keyed stages; prism is the local tier.
+10. A statistic is a `Summary` family plus a catalog line; its algebra (monoid / group), not its call site,
+    decides where it runs — incremental replay, per-block Combine, and later prefix-scan and streaming state
+    (§9.6.1). Statistics without a family say why (self-dependent, pairs of events, order-dependent).
+11. Every non-expanding fit is a range of time blocks merged by the monoid law, solved per change point
+    (§9.6.2); exact states (the values of a quantile transform) are preferred over sketches for fitted transforms,
+    sketches are reserved for per-key statistics where the state must stay bounded.
+12. One input row in, one output row out: requests that change the row set (resampling, pairwise expansion,
+    as-of joins) are upstream steps, not feature scopes (§9.6.5).
+13. Vector outputs are expanded into scalar columns; parameter names avoid the YAML 1.1 booleans
+    (`on` / `off` / `yes` / `no`) even though configs are parsed as YAML 1.2, because specs travel through other tools.
 
 **Open questions**
 

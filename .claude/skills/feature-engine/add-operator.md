@@ -157,6 +157,61 @@ semantics (invariant 6), the one-fit-stage rule for static levels, and the wave 
 columns are row columns hosted by a keyed stage — they are *not* recomputed on branches, they
 travel in partial rows).
 
+## Recipe G — a `Summary` family (a statistic that is maintained, not re-read)
+
+Read engine doc §9.6.1 first. Decide with its table before writing code — the answer is a property of the
+statistic, not a preference:
+
+| the statistic … | then |
+|---|---|
+| is a sum of per-event contributions | a family: it runs incrementally, and as a fit state per time block |
+| … and a contribution can be subtracted again | `invertible()` = true: it also evicts under `maxAge` |
+| reads neighbouring events (acf, peaks), pairs two events (a lagged pairing), or reads the current row (`weightBy`) | **no family**: a scan readout (`VectorOps` / `SeriesStats`, a `case` in `evaluateScan`) — say why in the javadoc, and make sure the window is bounded or `unboundedReason` names it |
+
+Writing the family (worked examples: `Summary.Shape` — the smallest; `Summary.Regression` — a pair contribution;
+`QuantileTransform.VALUES` — a monoid without inverse):
+
+1. A `State` class (`Serializable`, public fields) and the family as a nested class of `Summary` (or next to its
+   model when only a fit uses it), a singleton constant in `Summary.Summaries`.
+2. `update(state, contribution, ±1)`: the contribution type is the family's contract (`Number`, `double[]{x, y}`,
+   a category) — document it; a non-invertible family throws `UnsupportedOperationException` on `−1`.
+   - Sums of order ≥ 2 over values that may carry a level: subtract an **anchor** (the first contribution), make
+     `merge` re-anchor `other` onto `into` (binomial shift), and **reset exactly when `n` returns to 0** so rounding
+     residue does not outlive a window and the next value re-anchors.
+   - `merge(into, other)` must not modify `other` (DirectRunner immutability, and `BlockSeries` re-merges parts).
+3. `read(state, Readout)`: population moments, **null — never NaN —** below the minimum count or without spread
+   (guard the variance against the rounding floor of the sums it is formed from, not against `== 0`); unknown
+   readout → `IllegalArgumentException`.
+4. `OperatorCatalog.summary(stat)`: one `case` mapping the token(s) to `(family, Readout)`. Nothing else decides
+   the path: `SequenceEvaluator.plan()` reads the family and `invertible()`.
+5. The evaluator side: `contribution(plan, past)` if the extraction is not "the field's number" (a pair reads two
+   fields; return null to skip a row), and the **scan twin** — fold the same family over the window rather than
+   re-deriving the arithmetic, so both paths share one null rule (`aggregate` `skew`, `regression`).
+6. Output type / validation: `OperatorCatalog.aggregateOutput` (or the op's own func list + `AVAILABLE_*` message).
+
+Tests (all three, they catch different bugs):
+
+- `SummaryTest`: hand values; degenerate inputs (too few, constant — including a constant *left behind by eviction*);
+  a large offset (the anchor); `assertMonoid(family, values, SummaryTest::assertClose, readouts)` — both merge orders
+  and the identity, with the comparator because re-anchoring agrees up to rounding; `assertInvertible` (random add /
+  remove vs a fresh fold); the exact reset.
+- `SequenceIncrementalTest`: add the func to the shared `SPEC` under a `maxAge` window, an equality-filter window
+  and a `maxEvents` window — incremental == scan and trimmed == untrimmed come for free.
+- Compiler (`unboundedReason` is null without a window for a family-backed func, non-null for a scan readout) and an
+  e2e value on the auction rows.
+
+**As a fit state** (a fitted block whose model is solved from the summary): implement `SummaryFitBlock` (recipe E,
+step 5) — `contribution(row)` → (time block, value), `solve(parts, planHash)` through a `BlockSeries`. `static`,
+`forward`, `window` and `minBlocks` then need no code of their own, and the block shares the stage's one
+`Combine.perKey` per family. Let the compiler accept the mode with `parseLookupFit(..., forwardAllowed = true)` +
+`forwardCoordinates`, and test that a change-point model **equals the static fit on the readable blocks**
+(`QuantileTransformTest.testValuesFamilyAndBlockSeries`, `SvdTest`).
+
+**Parallel branches.** Several statistics are usually added on independent branches. They all register in the same
+few places (`OperatorCatalog.summary`, `FeatureSpec.Op`, `blockReferences`, `ColumnPlan` / `plan()`, the test
+fixtures), so put each addition next to a *different* neighbouring line and trial-merge the open branches onto a
+throwaway branch before opening the PR — two insertions at one spot are a conflict even when the code is unrelated.
+
 ## Common checklist
 
 - [ ] Catalog is updated (`OperatorCatalog`) and the message of every "unknown / unsupported"

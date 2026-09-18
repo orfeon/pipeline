@@ -117,8 +117,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   `outbound.Durations` by decision), `FeatureValues` (value coercion, keys, `keyWithNullTokens`),
   `VectorOps` (pure `double[]` functions: `toVector` — shared with `SvdSpec`, a hole = no vector —,
   `slice` / `diff` / `normalize`, `read` / `polyfit`; the home of scan readouts over a vector, fed today by a
-  row's array field and meant to be fed by a sequence window and a context group too,
-  proposal-feature-unification §2.5).
+  row's array field and meant to be fed by a sequence window and a context group too, engine doc §9.6.4),
+  `SeriesStats` (order-dependent readouts of a sequence window's values: zeroCross / peaks / acf / pacf /
+  ar — tokens parsed once into the column plan; scan-only by construction, §9.6.1), `BlockSeries<S>` (one
+  `Summary` state per time block, merged per readable range, one model per change point: what makes
+  `static` / `forward` / `window` one implementation, §9.6.2).
 
 ### Evaluators (`Serializable`, Beam-free, one instance per stage DoFn)
 
@@ -145,13 +148,16 @@ reads what the compile layer wrote into each column's `coordinates`.
   with `invertible()` saying whether a contribution can be removed again (a group: windows can evict)
   or only added (a monoid: extrema). Built-in families in `Summary.Summaries`: `MOMENTS` (n, Σ, Σ²:
   count / sum / mean / std), `EXTREMA` (max / min, not invertible), `COUNTS` (value → count:
-  distribution), `ORDER` (`OrderStatistics`: quantiles), `REGRESSION` (anchored cross moments of a pair
+  distribution), `ORDER` (`OrderStatistics`: quantiles), `SHAPE` (anchored power sums to order four: skew /
+  kurt), `REGRESSION` (anchored cross moments of a pair
   `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
   events and is therefore scan-only). `OperatorCatalog.summary(stat)` maps a
   statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
-  families are meant to become the per-block Combine state of the fit stage, the prefix-scan state and
-  the streaming state (proposal-feature-unification §2.1), so a new statistic is one family + one
-  catalog line.
+  families are the per-block Combine state of the fit stage (`Svd.SUMMARY`, `QuantileTransform.VALUES` —
+  the latter a monoid without inverse) and are meant to become the prefix-scan state and the streaming
+  state, so a new statistic is one family + one catalog line (engine doc §9.6.1 has the family table, the
+  path rule and the three kinds of statistic that have no family by construction; recipe G in
+  [add-operator.md](add-operator.md)).
 - `SequenceEvaluator` — the keyed replay logic. `ColumnPlan` from coordinates (shift, `maxAge`,
   `maxEvents`, filter → `EqualityFilter` when `f = $self.f`, `stat` token, `summary` spec, `empty`
   state); two paths per column: **incremental** (fold / evict pointers over the history + one
@@ -340,7 +346,12 @@ the `screen` and `evaluation` transforms) reads the selectors and the roles from
   `bytes` (big-endian doubles), as `Factorization` does.
 - Beam `FileSystems` treats a Windows drive letter as a URI scheme: artifact / spill paths in tests
   must be **relative** (`target/feature-artifacts/<uuid>`) or `gs://`.
-- SnakeYAML caps a document at ~3 MB: generated large test configs must be JSON (`FeatureSpillTest`).
+- Configs are parsed as **YAML 1.2** (`YamlUtil`, SnakeYAML Engine, core schema, 64 MB limit): **duplicate keys are
+  an error** — a test that composes a config by `String.replace` and ends up with a second `engine:` / `fit:` key
+  fails loudly instead of silently keeping the last one — and `on` / `off` / `yes` / `no` are plain strings. Parameter
+  names still avoid them (`regression` takes `against`, not `on`): specs travel through YAML 1.1 tools outside this
+  repository, where a bare `on:` key arrives as `true` and is silently ignored. Very large generated test configs
+  stay JSON (`FeatureSpillTest`).
 - Text-block YAML in `FeatureTransformTest` has a *runtime* indentation of 6/8/10 spaces (the
   text block strips the common prefix); configs are composed with `String.replace` on exact
   lines, so match the runtime indentation, and `withEncoding` in the compiler test strips 4 more.

@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold fits, factorization, discretize, quantile stats). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, quantile stats; of §1.4 the sugar ops, not yet the general lift / summarize form). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
@@ -83,6 +83,35 @@ the data" (Koopman operator view); their freedom reduces to *which operator, tru
 
 **Localised fit**: only part of Lift (state embeddings) and Compress (SVD) need a fit; Summarize is
 always deterministic. Nested-learning instability is excluded structurally.
+
+**The algebra of a summary decides its cost.** A Summarize map is, operationally, a *state* updated per event, and
+what that state can do classifies every sequence statistic — the sugar ops of §4.3 as much as the families above:
+
+| kind of statistic | state | consequence | examples |
+|---|---|---|---|
+| sum of per-event contributions that can also be *removed* (a group) | power sums, counts, cross moments, an order-statistics multiset | incremental over any window: O(1) per row, evicting under `maxAge` | count / sum / mean / std, skew / kurt, cov / corr / beta, distribution, quantiles |
+| sum of per-event contributions that can only *grow* (a monoid) | running extremes, the gathered values | incremental over an unbounded past; re-read under a rolling window | min / max |
+| reads *neighbouring* events (an ordered monoid with boundary values) | — | re-read over the window per row; the window must be bounded | acf / pacf / AR coefficients, zero crossings, peaks, lagged cross-correlation, `trend`, `fracdiff` |
+| depends on the *current row* (a self-join) | none possible | re-read over the window per row; the window must be bounded | `weightBy` kernels |
+| a linear / bilinear recurrence over the path (`lti`, `bilinear`) | the recurrence state | incremental; a group when the recurrence is invertible (Chen's identity for signatures) | `ewma`, HiPPO projections, log-signatures — the general form, §4.3 |
+
+The same classification carries over to fits (§4.4): a state that merges is a state that can be accumulated per
+time block and combined per window of blocks, which is what makes a walk-forward fit a parallel computation instead
+of a replay. The engine's realisation — one accumulator contract used by the keyed replay and by the fit stage — is
+feature-engine.md §9.6.
+
+**Vectors have three supplies, one operator set.** A fixed-length summary of a variable-length vector is the same
+operation whether the vector is an array the row carries (`type: vector`, §4.1), the lifted history of a sequence
+window (§4.3), or the values collected over a context group (§4.2). Readouts defined for one supply are meant to be
+available to the others; a vector *result* is always expanded into scalar columns.
+
+#### 1.4.1 One row in, one row out
+
+The transform maps one input row to one output row plus columns; the availability algebra (§6) is defined on that
+shape. What changes the *row set* is not a scope and lives upstream of the transform: resampling events into bars
+(including volume / count clocks that emit rows), expanding an event's participants into pairs and reducing them
+back, and as-of joins across sources (§2.7 gives joins to the enrichment layer). A feature over such rows is an
+ordinary feature over the rows the upstream step produced — e.g. entity = the pair.
 
 ### 1.5 The data contract layer (sources)
 
@@ -615,6 +644,24 @@ premise of the availability propagation rule (§6.1).
     - {type: aggregate, field: sold, funcs: [count, mean, min]}
 ```
 
+**Aggregate functions.** `aggregate` takes `funcs` from four groups: moments (`count / sum / mean / avg / rate /
+std`), distribution shape (`skew`, `kurt` — excess kurtosis; population moments), extremes and ends (`min / max /
+first / last`), and order-dependent series readouts (`zeroCross`, `peaks`, `acf<j>`, `pacf<j>`, `ar<p>_<i>` — the
+biased sample autocorrelation and the Yule–Walker AR(p) fit, j and p in 1..20). A readout that is undefined on the
+window (too few values, no spread) is null, never NaN. Crossings of a level other than zero subtract it first
+(`expr: "x - level"`).
+
+**The cost contract of an op** follows from §1.4 and is part of the language, because it decides whether a window
+may be left unbounded:
+
+| op | evaluated | retention without `maxAge` |
+|---|---|---|
+| `aggregate` moments / shape, same-event `regression` | incrementally (evicting under `maxAge`) | none beyond the state |
+| `aggregate` `min / max` | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
+| `lag`, `delta`, `trend`, `fracdiff` | by re-reading a fixed tail | k (k + 1) events |
+| any op under `maxEvents` | by re-reading | `maxEvents` events |
+| series readouts, `first / last`, lagged `regression`, `weightBy`, `ewma`, `runLength`, predicates, general filters | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
+
 **Several windows (`windows`)**: `windows` is a list, an expandable field expanded as the product
 `windows × fields × funcs` (`× halflife` for ewma; positional under `combine: zip`; counts towards
 `maxFeatures`). A singular `window:` is sugar for a one-element list. Each element carries
@@ -745,6 +792,7 @@ shrinkage reference so the shrinkage implementation and vocabulary live in one p
   type: quantileTransform
   input: start_price
   bins: 20
+  fit: {mode: forward, blocks: {bucket: month}, window: P2Y}   # walk-forward ranks (below); static when omitted
 
 - name: price_bins               # fitted discretisation (an encoding key)
   scope: population
@@ -822,6 +870,27 @@ delay after its event — and never the row's own block: a stepwise expanding fi
 Combine per (key, block) + a per-key prefix over blocks (no time-ordered replay, hence no single-key
 global stage), leak-free unlike `fold`. Sufficient statistics only; `maxAge` windows round up to whole
 blocks; with `varianceComponents` the pseudo-count is estimated per block from the keys' prefix.
+
+**A fit is a window over time blocks.** Every mode but `expanding` answers one question — *which blocks may this row
+read* — and the model is what the merged state of those blocks solves to:
+
+| `fit` | blocks a row reads |
+|---|---|
+| `mode: static` | all of them (the fit sees the test period too: no label leak, but a drifting field is placed in a distribution it could not have been placed in at the time) |
+| `mode: forward` | the complete blocks before the row whose inputs are known at predictAt — never the row's own block |
+| `mode: forward` + `window: P2Y` | of those, the blocks within the window (rounded up to whole blocks): the fit forgets |
+| `minBlocks: n` / `minHistory: P180D` | the row reads null until that many preceding blocks carry data |
+| `mode: fold` | every fold but the row's own (not leak-free in time: other folds include later events) |
+
+`blocks` (`bucket: year | quarter | month | week | day`, or `size: <duration>`, default `P90D`), `window`, `minBlocks`
+/ `minHistory` are semantic parameters (in the plan hash). Support by type: `encoding` — all modes (`forward` for the
+statistics derived from (n, Σy, Σy²)); `svd`, `quantileTransform` — `static | forward`, exact in both (an svd from the
+merged moments, a quantile transform from the very values of the readable blocks); `discretize`, `factorization` —
+`static`. A block that declares no `mode` of its own follows a top-level `fit: {mode: forward}` when its type supports
+it, so a spec walks forward as a whole; `fit: {mode: static}` on the block opts out, with an info saying that this
+block alone sees the whole input. A forward fit is re-fitted on every run; its artifact keeps the whole-input model for
+a static serving run. Planned on the same footing: `fold: {by: time, purge, embargo}` (all blocks minus a range, the
+purge defaulting to a label's horizon) and warm starts (merge the new block into the stored ones).
 
 ---
 

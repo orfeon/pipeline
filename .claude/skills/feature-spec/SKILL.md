@@ -220,6 +220,46 @@ sequence ops never see the current row.
   the plan before and after; if the extra depth is not worth it, key the encoding on a hand-written
   row `bin` (no fit, no extra wave) or accept the cost consciously.
 
+### Step 4b — choose how fitted blocks see time (`fit`)
+
+Every fitted block (`encoding` outside `expanding`, `svd`, `quantileTransform`, `discretize`, `factorization`)
+answers one question: *which rows shaped the numbers this row reads?*
+
+| `fit.mode` | the row reads a model fitted on | use when |
+|---|---|---|
+| `expanding` (encoding only) | its key's strictly-past rows | the default for encodings: exact, leak-free, but every row of a key is replayed in time order (one worker per key — watch `encoding.globalKey`) |
+| `forward` | the complete time blocks before it whose inputs were already known at predictAt | backtests and anything that drifts: leak-free like `expanding`, parallel like `static`; values move in steps of one block |
+| `static` | the whole input, its own row and the test period included | serving configs (load the artifact), and quantities that do not drift. Not a label leak for `svd` / `quantileTransform` over pre-event fields, but a drifting field is placed in a distribution it could not have been placed in at the time |
+| `fold` (encoding only) | the other folds | classical out-of-fold target encoding; other folds contain later events, so it is not leak-free in time |
+
+`svd` and `quantileTransform` support `static | forward`, `discretize` and `factorization` only `static`. **A block
+without its own `fit.mode` follows a top-level `fit: {mode: forward}`** (svd, quantileTransform, encodings), so one
+line at the top walks the whole spec forward; `fit: {mode: static}` on a block opts it out (the plan says so:
+`<type>.fit.mode.static`).
+
+The three forward knobs, all in the plan hash:
+
+- `blocks: {bucket: year | quarter | month | week | day}` or `{size: P90D}` (the default) — staleness against
+  stability. A row never reads its own block, so **the first block of the data reads null**, and with yearly blocks
+  that is the first year. Pick the largest block whose within-block drift you can ignore; `month` / `P90D` are the
+  usual answers for daily data.
+- `window: P2Y` — the fit forgets: only the blocks within the window are read (rounded up to whole blocks). Use it
+  when old regimes should stop shaping today's ranks / components; leave it out to use all history. For an encoding
+  it is the default of keySets without their own `maxAge`.
+- `minBlocks: n` or `minHistory: P180D` (rounded up to blocks; `minBlocks` wins) — rows with fewer preceding
+  blocks that carry data read null instead of a model fitted on a handful of rows. Decide what the consumer does with
+  those nulls (`nullPolicy`, or drop the warm-up period from training).
+
+Reading the plan: `fit.mode.forward` (info) states per block what it reads, `windowBlocks` / `minBlocks` /
+`forwardLagMillis` are in the column coordinates — an **outcome** input delays the readable blocks by its settlement
++ ingestion lag, which you see as a larger `forwardLagMillis`. A forward fit is re-fitted on every run (it cannot be
+loaded); its artifact holds the whole-input model, which is what a `static` serving config loads.
+
+Cost: forward svd accumulates moments per block (nothing but d × d matrices travels); forward quantileTransform
+gathers the values per block and re-fits the knots once per change point — exact, with the same 8 bytes per row on
+one worker as the static fit. Many fitted blocks in one spec share one pass and one combine per kind, so the fit
+stage does not grow with their number.
+
 ### Step 5 — validate, read the report, fix, repeat
 
 Three equivalent entry points (all run the same compiler, none executes the pipeline):
