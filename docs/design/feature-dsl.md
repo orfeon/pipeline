@@ -658,9 +658,9 @@ may be left unbounded:
 |---|---|---|
 | `aggregate` moments / shape, same-event `regression` | incrementally (evicting under `maxAge`) | none beyond the state |
 | `aggregate` `min / max` | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
-| `lag`, `delta`, `trend`, `fracdiff` | by re-reading a fixed tail | k (k + 1) events |
-| any op under `maxEvents` | by re-reading | `maxEvents` events |
-| series readouts, `first / last`, lagged `regression`, `weightBy`, `ewma`, `runLength`, predicates, general filters | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
+| `lag`, `delta`, `trend`, `fracdiff` without a `filter` | by re-reading a fixed tail | k (k + 1) events |
+| any op under `maxEvents`, without a `filter` | by re-reading | `maxEvents` events |
+| series readouts, `first / last`, lagged `regression`, `weightBy`, `ewma`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
 
 **Several windows (`windows`)**: `windows` is a list, an expandable field expanded as the product
 `windows × fields × funcs` (`× halflife` for ewma; positional under `combine: zip`; counts towards

@@ -655,9 +655,9 @@ roughly linear in the input).
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
 sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
-array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; a sketch-backed (approximate,
-bounded-size) fit state for quantileTransform and the per-key quantile / distribution stats in static / fold —
-the forward quantileTransform below keeps the exact values; the run-time availability
+array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
+bounded-size) per-key quantile / distribution stats in static / fold — quantileTransform, static and forward,
+keeps the exact values (decision 11); the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
 sequence / population stages as fold-in merge targets (composite sorter key, §9.4.3); the prefix-scan
 decomposition of the global-key stage (§9.4.4); observedAt / ingestedAt / confounding audit queries
@@ -1013,7 +1013,7 @@ Families (`Summary.Summaries`, plus the two that live with their model class):
 | `COUNTS` | value → count | yes | distribution | encoding `distribution` |
 | `ORDER` | Fenwick multiset (`OrderStatistics`) | yes | quantile(p) | encoding quantile stats |
 | `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
-| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | yes | — (solved, not read) | `type: svd` fits |
+| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits |
 | `QuantileTransform.VALUES` | the values themselves | **no** (merge = concatenation) | count | `type: quantileTransform` fits |
 
 Conventions every family follows: population moments (the `std` convention) and null — never NaN — when a
@@ -1031,8 +1031,9 @@ incremental ⇔ the statistic has a family
             ∧ no maxEvents                          (a count-bounded window is not a time-ordered fold / evict)
             ∧ (no filter ∨ the filter is `f = $self.f`)   (one state per filter value)
             ∧ the statistic is not self-dependent
-scan        ⇔ otherwise — bounded by maxAge, by maxEvents, or by the op's own tail (lag / trend / fracdiff = k,
-              delta = k + 1); anything else keeps the key's whole history and is reported (sequence.window.unbounded)
+scan        ⇔ otherwise — bounded by maxAge, or, without a filter, by maxEvents or the op's own tail (lag / trend /
+              fracdiff = k, delta = k + 1); anything else — any filter without maxAge, `f = $self.f` included — keeps the
+              key's whole history and is reported (sequence.window.unbounded)
 ```
 
 Three kinds of statistic have **no family by construction**, and the reason is part of the design:
@@ -1130,8 +1131,9 @@ that. A request that changes the row set belongs upstream:
   `availability.violation` and the purge range of a time fold follows from the label's own horizon.
 - **Ratings**: a sequence op under the global key whose state is a map entity → (μ, σ), updated when a group of
   same-timestamp rows closes (the `pending` flush). Order-dependent, hence replay-only — declared non-mergeable.
-- **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold, an
-  approximate bounded-size state for the quantile transform, drift audits (PSI) against the fitted summaries.
+- **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold and
+  drift audits (PSI) against the fitted summaries. The quantile transform keeps its exact `VALUES` state
+  (decision 11).
 
 ---
 

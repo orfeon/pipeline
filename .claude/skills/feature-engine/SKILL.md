@@ -154,7 +154,7 @@ reads what the compile layer wrote into each column's `coordinates`.
   events and is therefore scan-only). `OperatorCatalog.summary(stat)` maps a
   statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
   families are the per-block Combine state of the fit stage (`Svd.SUMMARY`, `QuantileTransform.VALUES` —
-  the latter a monoid without inverse) and are meant to become the prefix-scan state and the streaming
+  both monoids without inverse) and are meant to become the prefix-scan state and the streaming
   state, so a new statistic is one family + one catalog line (engine doc §9.6.1 has the family table, the
   path rule and the three kinds of statistic that have no family by construction; recipe G in
   [add-operator.md](add-operator.md)).
