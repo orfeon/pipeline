@@ -1567,13 +1567,27 @@ public final class FeaturePlanCompiler {
                 clipCoordinate = Double.toString(def.clip);
             }
         }
-        final FeatureSpec.FitSpec fitSpec = parseStaticOnlyFit(def, "quantileTransform", "the quantiles are fitted", "quantile knots fitted on the whole input");
-        diagnostics.info("fit.mode.static", loc, "quantileTransform fits " + bins + " quantile intervals on the whole input" + artifactPhrase(fitSpec)
-                + (isOutcomeLike(ref) ? "; the input is outcome-like, so training rows' own outcomes shape the knots (static-fit caveat)" : ""));
+        final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "quantileTransform", "the quantiles are fitted", "quantile knots fitted on the whole input", true);
+        final boolean forward = fitSpec.mode == FitMode.forward;
+        if (forward) {
+            final ForwardBlocks blocks = fitSpec.forwardBlocks();
+            diagnostics.info("fit.mode.forward", loc, "quantileTransform gathers the values per time block (" + blocks.describe() + ") and, for every row, fits " + bins
+                    + " quantile intervals over the complete blocks" + (fitSpec.window == null ? "" : " within " + fitSpec.window)
+                    + " whose input is known at predictAt (the row's own block excluded)"
+                    + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input knots are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+        } else {
+            diagnostics.info("fit.mode.static", loc, "quantileTransform fits " + bins + " quantile intervals on the whole input" + artifactPhrase(fitSpec)
+                    + (isOutcomeLike(ref) ? "; the input is outcome-like, so training rows' own outcomes shape the knots (static-fit caveat)" : ""));
+        }
 
         final OutputColumn c = newColumn(def.name, Scope.population, "quantileTransform", def.name, Schema.FieldType.FLOAT64, computeAt);
         c.fitted = true;
-        c.coordinates.put("fit", "static");
+        c.coordinates.put("fit", forward ? "forward" : "static");
+        if (forward) {
+            forwardCoordinates(c, null, List.of(input), def, fitSpec);
+            c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+        }
         c.coordinates.put("field", canonicalOf(input));
         c.coordinates.put("bins", Integer.toString(bins));
         c.coordinates.put("distribution", distribution);

@@ -627,6 +627,64 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
+     * quantileTransform accepts {@code fit.mode: forward} like svd: the column carries the block geometry, an outcome
+     * input delays the blocks it may read (forwardLagMillis), a block without its own mode follows a top-level forward
+     * fit, and the other modes stay rejected.
+     */
+    @Test
+    public void testQuantileTransformForwardFit() {
+        final String qt = SPEC.replace("output:\n  prefix: f_", """
+                  - name: price_q
+                    scope: population
+                    type: quantileTransform
+                    input: start_price
+                    bins: 10
+                    fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}
+                output:
+                  prefix: f_""".replaceAll("(?m)^                ", ""));
+        final FeaturePlan plan = compile(SOURCES, qt);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.forward"), plan::describe);
+        final OutputColumn c = column(plan, "price_q");
+        Assertions.assertEquals("forward", c.getCoordinates().get("fit"));
+        Assertions.assertEquals(Long.toString(7 * 86_400_000L), c.getCoordinates().get("blockSizeMillis"));
+        Assertions.assertEquals("2", c.getCoordinates().get("windowBlocks"), "P10D rounds up to 2 weekly blocks");
+        Assertions.assertEquals("3", c.getCoordinates().get("minBlocks"), "P21D = 3 weekly blocks");
+        Assertions.assertEquals("0", c.getCoordinates().get("forwardLagMillis"));
+        Assertions.assertEquals(Long.toString(-8 * 60_000L), c.getCoordinates().get("predictOffsetMillis"));
+        Assertions.assertEquals("session_time", c.getCoordinates().get("blockField"));
+        Assertions.assertEquals("10", c.getCoordinates().get("bins"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+        // one fit stage, like the static form
+        Assertions.assertEquals(1, plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit && s.columnNames().contains("price_q")).count());
+        // static keeps its coordinates (and warns that window is forward-only); expanding / fold stay rejected
+        final FeaturePlan statik = compile(SOURCES, qt.replace("mode: forward, ", ""));
+        Assertions.assertFalse(statik.getDiagnostics().hasErrors(), statik::describe);
+        Assertions.assertEquals("static", column(statik, "price_q").getCoordinates().get("fit"));
+        Assertions.assertNull(column(statik, "price_q").getCoordinates().get("windowBlocks"));
+        Assertions.assertTrue(hasCode(statik, "quantileTransform.fit.window"), statik::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, qt.replace("mode: forward", "mode: fold")), "quantileTransform.fit.mode"));
+        Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, qt.replace("window: P10D", "window: P30D")).getHash());
+        // the knots of an outcome are only known after settlement + ingestion: the readable blocks are delayed by that lag
+        final OutputColumn outcome = column(compile(SOURCES, qt.replace("input: start_price", "input: final_price")), "price_q");
+        Assertions.assertTrue(Long.parseLong(outcome.getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, outcome.getCoordinates()::toString);
+
+        // inheritance: no fit.mode of its own under a top-level forward fit → forward; an explicit static opts out
+        final String blockFit = "    fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\n";
+        final String topFit = "fit: {mode: forward, blocks: {size: P7D}, window: P10D, minHistory: P21D}\noutput:\n  prefix: f_";
+        final String inherited = qt.replace(blockFit, "").replace("output:\n  prefix: f_", topFit);
+        final FeaturePlan inheritedPlan = compile(SOURCES, inherited);
+        Assertions.assertFalse(inheritedPlan.getDiagnostics().hasErrors(), inheritedPlan::describe);
+        Assertions.assertEquals("forward", column(inheritedPlan, "price_q").getCoordinates().get("fit"), inheritedPlan::describe);
+        Assertions.assertEquals("2", column(inheritedPlan, "price_q").getCoordinates().get("windowBlocks"));
+        final FeaturePlan optedOut = compile(SOURCES, inherited.replace("    type: quantileTransform", "    type: quantileTransform\n    fit: {mode: static}"));
+        Assertions.assertEquals("static", column(optedOut, "price_q").getCoordinates().get("fit"));
+        Assertions.assertTrue(hasCode(optedOut, "quantileTransform.fit.mode.static"), optedOut::describe);
+        // discretize stays static-only
+        Assertions.assertTrue(hasCode(compile(SOURCES, qt.replace("type: quantileTransform", "type: discretize")), "discretize.fit.mode"));
+    }
+
+    /**
      * svd accepts {@code fit.mode: forward}: the score columns carry the block geometry, the window / minimum history
      * rounded to blocks, the inputs' availability lag and the predictAt offset; the other lookup modes stay rejected.
      * An encoding's forward fit takes {@code fit.window} / {@code fit.minHistory} as block-level defaults.
