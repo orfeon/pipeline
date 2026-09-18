@@ -160,6 +160,7 @@ features:
       - {type: ewma, expr: "start_price / quantity", halflife: [3], as: unit_price}  # as: replaces the anonymous __e{n} segment
       - {type: aggregate, field: start_price, funcs: [count, mean, max]}
       - {type: aggregate, funcs: [count]}        # COUNT(1): every visible past row, nulls included
+      # with a field, a null / NaN / ±Infinity value is missing: it counts for no statistic, count included
       - {type: aggregate, field: sold, funcs: [count, mean], weightBy: "exp(-abs(start_price - $self.start_price) / 50)", as: near}  # similarity-weighted (see Weighted aggregates)
 
   - name: enc                       # population: expanding encoding, keySets × windows × targets × stats
@@ -229,7 +230,7 @@ without `distribution` is an error (`encoding.target.values`).
 
 - **`regression`** reads two fields of the entity's past events — `field` (y) regressed against `against` (x):
   `cov` (population covariance), `corr`, `beta` (= cov / var x, the slope of y on x), `intercept`, `r2`
-  (default `[beta, corr]`). An event contributes when both values are present; every func needs two
+  (default `[beta, corr]`). An event contributes when both values are present (not null / NaN / ±Infinity); every func needs two
   contributing events; `corr` / `r2` are null when either series is constant, `beta` / `intercept` when x is.
   The other series is an ordinary field of the row (a market or group series joined onto each row upstream).
   The key is `against`, not `on` — YAML 1.1 reads a bare `on` as a boolean.
@@ -573,8 +574,8 @@ event and weighs it by how similar it is to the current row instead:
 
 - The expression is numeric (the row `expr` syntax; operands numeric / bool). A name reads the **past
   event**, `$self.<field>` reads the **current row**; a weight without `$self` is a plain per-event weight.
-- An event contributes when its value is present and its weight is a positive finite number. A null
-  operand on either side, a NaN and a weight ≤ 0 contribute nothing — so a current row whose `$self` field
+- An event contributes when its value is present (not null / NaN / ±Infinity) and its weight is a positive
+  finite number. A null operand on either side, a NaN and a weight ≤ 0 contribute nothing — so a current row whose `$self` field
   is null gets `count` 0 and null for the rest.
 - Funcs: `count` = Σw (the *effective count*, **float64** — 0 when nothing contributes), `sum` = Σw·x,
   `mean` / `avg` / `rate` = Σw·x / Σw, `std` = the weighted population deviation (two contributing events at
@@ -729,7 +730,8 @@ distributed and ordered — the descriptive statistics of a short series:
 | `pacf<j>` | float64 | partial autocorrelation at lag j (the last coefficient of the Yule–Walker AR(j) fit) |
 | `ar<p>_<i>` | float64 | i-th coefficient (1 ≤ i ≤ p) of the AR(p) model solved from the Yule–Walker equations (Levinson–Durbin) |
 
-- j and p run 1..20. Missing values are dropped first: the series is the window's present values in time order.
+- j and p run 1..20. Missing values (null / NaN / ±Infinity) are dropped first: the series is the window's
+  present values in time order.
 - A window without spread (a constant series, up to rounding) has no `skew` / `kurt` / `acf` / `pacf` / `ar`
   (null, never NaN); `zeroCross` / `peaks` are null only when the window holds no value at all.
 - **Cost.** `skew` / `kurt` are sums of per-event contributions (power sums up to order four): they fold

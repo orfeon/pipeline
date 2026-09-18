@@ -115,6 +115,8 @@ public interface Summary<S extends Serializable> extends Serializable {
             s.n += sign;
             s.sum += sign * v;
             s.sumSq += sign * v * v;
+            // an emptied window starts over: no rounding residue left by the evictions
+            if (s.n == 0) s.sum = s.sumSq = 0;
         }
 
         @Override
