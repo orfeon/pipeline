@@ -332,6 +332,38 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(plan.getDiagnostics().hasErrors());
     }
 
+    /**
+     * The scalar summaries of the aggregate op: the shape of the distribution (skew / kurt, a summary family — they
+     * fold incrementally) and the order-dependent series readouts (zeroCross / peaks / acf / pacf / ar — scan only).
+     */
+    @Test
+    public void testAggregateShapeAndSeriesFuncs() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        Assertions.assertTrue(SPEC.contains(plain));
+        final String spec = SPEC.replace(plain, "- {type: aggregate, field: start_price, funcs: [skew, kurt, zeroCross, peaks, acf1, pacf2, ar2_1]}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        for (final String func : List.of("skew", "kurt", "acf1", "pacf2", "ar2_1")) {
+            final OutputColumn c = column(plan, "recent_365d_start_price_" + func);
+            Assertions.assertEquals("aggregate", c.getOperator());
+            Assertions.assertEquals(func, c.getCoordinates().get("func"));
+            Assertions.assertEquals(Schema.Type.float64, c.getFieldType().getType(), func);
+        }
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "recent_n5_start_price_zeroCross").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "recent_n5_start_price_peaks").getFieldType().getType());
+        // without a window: skew folds incrementally (bounded), a series readout scans the whole history (the hint)
+        final FeaturePlan open = compile(SOURCES, spec.replace("      - {maxEvents: 5}\n      - {maxAge: P365D}\n", "      - {}\n"));
+        Assertions.assertFalse(open.getDiagnostics().hasErrors(), open::describe);
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(column(open, "recent_all_start_price_skew")));
+        Assertions.assertNotNull(SequenceEvaluator.unboundedReason(column(open, "recent_all_start_price_acf1")));
+        // lags and orders outside 1..20, an index outside 1..order and unknown names are rejected with the list of funcs
+        for (final String bad : List.of("acf0", "acf21", "ar2_3", "ar2", "kurtosis")) {
+            final FeaturePlan rejected = compile(SOURCES, spec.replace("funcs: [skew,", "funcs: [" + bad + ","));
+            Assertions.assertTrue(hasCode(rejected, "sequence.aggregate.func"), bad);
+            Assertions.assertTrue(rejected.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("skew") && m.contains("ar<p>_<i>")), bad);
+        }
+    }
+
     @Test
     public void testSelfInOpExpressionIsRejected() {
         final String spec = SPEC.replace("expr: \"sold >= 1\", halflife: [5]", "expr: \"start_price - $self.start_price\", halflife: [5]");

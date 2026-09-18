@@ -49,6 +49,8 @@ public class SequenceEvaluator implements Serializable {
         Integer maxEvents;
         String filterText;
         EqualityFilter equality;
+        /** An order-dependent aggregate ({@link SeriesStats}: zeroCross / peaks / acf / pacf / ar), or null. */
+        SeriesStats.Readout series;
         String offset;
         boolean incremental;
         String field;
@@ -403,6 +405,7 @@ public class SequenceEvaluator implements Serializable {
         plan.weightBy = c.coordinates.get("weightBy");
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
+        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
         plan.incremental = !forceScan
                 && plan.summary != null
                 // a weight may read the current row: the catalog declares weighted statistics scan-only
@@ -512,6 +515,8 @@ public class SequenceEvaluator implements Serializable {
     Object evaluateScan(final OutputColumn c, final ColumnPlan plan, final Map<String, Object> row,
                         final long nowMillis, final List<Past> window) {
         final String field = plan.field;
+        // an order-dependent aggregate reads the window's present values as one series, in time order
+        if (plan.series != null) return SeriesStats.read(plan.series, series(window, field));
         switch (c.operator) {
             case "lag" -> {
                 final int k = Integer.parseInt(c.coordinates.get("k"));
@@ -655,6 +660,17 @@ public class SequenceEvaluator implements Serializable {
         return lo;
     }
 
+    /** The present (non-null, non-NaN) values of a field over the window, oldest first. */
+    private static double[] series(final List<Past> window, final String field) {
+        final double[] x = new double[window.size()];
+        int n = 0;
+        for (final Past p : window) {
+            final Double d = FeatureValues.toDouble(p.values().get(field));
+            if (d != null && !d.isNaN()) x[n++] = d;
+        }
+        return n == x.length ? x : Arrays.copyOf(x, n);
+    }
+
     static Object aggregate(final String func, final List<Past> window, final String field, final OutputColumn c) {
         if (field == null) {
             return (long) window.size();
@@ -681,6 +697,13 @@ public class SequenceEvaluator implements Serializable {
                 if (values.size() < 2) yield null;
                 final double mean = values.stream().mapToDouble(d -> d).average().orElse(Double.NaN);
                 yield Math.sqrt(values.stream().mapToDouble(d -> (d - mean) * (d - mean)).sum() / values.size());
+            }
+            case "skew", "kurt" -> {
+                // the family of the incremental path, folded over the window (one arithmetic, one null rule)
+                final Summary<Summary.Shape.State> shape = Summary.Summaries.SHAPE;
+                final Summary.Shape.State state = shape.create();
+                for (final Double d : values) shape.update(state, d, 1);
+                yield shape.read(state, Summary.Readout.of(func));
             }
             default -> throw new IllegalStateException("unsupported aggregate func: " + func);
         };
