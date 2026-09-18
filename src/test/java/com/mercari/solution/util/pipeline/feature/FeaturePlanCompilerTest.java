@@ -1327,6 +1327,95 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(hasCode(FeaturePlanCompiler.compile(sourcesJson, specJson, repeated), "lineage.type.mismatch"));
     }
 
+    /**
+     * Row {@code type: vector}: one column per readout (polyfit: one per coefficient), the steps and the readout in
+     * the coordinates, the array field's availability and lineage inherited, every parameter validated.
+     */
+    @Test
+    public void testVectorExpansion() {
+        // bid_path: the bids observed up to ten minutes before the session (market information, like current_bid_t10)
+        final String sources = SOURCES.replace("      - {name: snapshot_time, type: timestamp,",
+                "      - {name: bid_path, type: array<float64>, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n      - {name: snapshot_time, type: timestamp,");
+        Assertions.assertTrue(sources.contains("bid_path"), "the contract line must match the text block's runtime indentation");
+        final String block = """
+                  - name: bids
+                    scope: row
+                    type: vector
+                    input: bid_path
+                    slice: {from: -4}
+                    diff: 1
+                    normalize: mean
+                    position: unit
+                    funcs: [length, mean, argmax, slope, polyfit]
+                    degree: 3
+                  - name: bid_momentum
+                    scope: row
+                    expr: "bids_slope / bids_mean"
+            """;
+        final String spec = withEncoding(block).replace("- {fields: [current_bid_t10], from: price_snapshots}", "- {fields: [current_bid_t10, bid_path], from: price_snapshots}");
+        final FeaturePlan plan = compile(sources, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        final OutputColumn slope = column(plan, "bids_slope");
+        Assertions.assertEquals("vector", slope.getOperator());
+        Assertions.assertEquals(Schema.Type.float64, slope.getFieldType().getType());
+        Assertions.assertEquals("slope", slope.getCoordinates().get("func"));
+        Assertions.assertEquals("-4", slope.getCoordinates().get("sliceFrom"));
+        Assertions.assertNull(slope.getCoordinates().get("sliceTo"));
+        Assertions.assertEquals("1", slope.getCoordinates().get("diff"));
+        Assertions.assertEquals("mean", slope.getCoordinates().get("normalize"));
+        Assertions.assertEquals("unit", slope.getCoordinates().get("position"));
+        Assertions.assertEquals(List.of("bid_path"), List.copyOf(slope.getInputs()));
+        // the readouts inherit the array field: market information known 10 minutes (+ 1 minute ingestion) before the event
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, slope.getStatus());
+        Assertions.assertEquals(column(plan, "relative_current_bid_t10_rank").getAvailableAt().toString(), slope.getAvailableAt().toString());
+        Assertions.assertTrue(slope.getDerivedFrom().contains("market"));
+
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "bids_length").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "bids_argmax").getFieldType().getType());
+        Assertions.assertNull(column(plan, "bids_mean").getCoordinates().get("position"), "position only shapes slope / polyfit");
+        for (int k = 0; k <= 3; k++) {
+            final OutputColumn poly = column(plan, "bids_poly" + k);
+            Assertions.assertEquals("polyfit", poly.getCoordinates().get("func"));
+            Assertions.assertEquals("3", poly.getCoordinates().get("degree"));
+            Assertions.assertEquals(Integer.toString(k), poly.getCoordinates().get("coefficient"));
+        }
+        Assertions.assertNull(plan.getColumn("bids_poly4"));
+        Assertions.assertNull(plan.getColumn("bids_polyfit"));
+        // the readouts are ordinary columns: an expr composes them, and they are part of the plan hash
+        Assertions.assertTrue(column(plan, "bid_momentum").getInputs().contains("bids_slope"));
+        // (withEncoding strips 4 more spaces: the block's parameters run at 4)
+        Assertions.assertTrue(spec.contains("\n    diff: 1\n"), spec);
+        Assertions.assertNotEquals(plan.getHash(), compile(sources, spec.replace("    diff: 1\n", "")).getHash());
+        // every readout the catalog lists is served by VectorOps
+        for (final String func : OperatorCatalog.VECTOR_FUNCS) {
+            if (!"polyfit".equals(func)) Assertions.assertNotNull(VectorOps.read(func, new double[]{1, 3, 2}, VectorOps.positions(3, false)), func);
+        }
+
+        // an outcome-like array cannot feed a feature before it is known
+        final String outcome = SOURCES.replace("      - {name: final_price, type: double, availableAt: after(event), kind: outcome}\n",
+                "      - {name: final_price, type: double, availableAt: after(event), kind: outcome}\n      - {name: bid_path, type: array<float64>, availableAt: after(event), kind: outcome}\n");
+        final FeaturePlan leak = compile(outcome, withEncoding(block).replace("- {fields: [sold, final_price], from: auction_results}", "- {fields: [sold, final_price, bid_path], from: auction_results}"));
+        Assertions.assertTrue(hasCode(leak, "availability.violation"), leak::describe);
+
+        // parameter validation
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("input: bid_path", "input: start_price")), "row.vector.input"));
+        Assertions.assertTrue(hasCode(compile(sources.replace("array<float64>, availableAt", "array<string>, availableAt"), spec), "row.vector.input"));
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("    funcs: [length, mean, argmax, slope, polyfit]\n", "")), "row.vector.funcs"));
+        final FeaturePlan unknown = compile(sources, spec.replace("funcs: [length,", "funcs: [kurtosis, length,"));
+        Assertions.assertTrue(hasCode(unknown, "row.vector.funcs"));
+        Assertions.assertTrue(unknown.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("argmax") && m.contains("polyfit")), "the message lists what is available");
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("funcs: [length,", "funcs: [mean, length,")), "row.vector.funcs"), "a readout listed twice");
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("slice: {from: -4}", "slice: [0, 4]")), "row.vector.slice"));
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("diff: 1", "diff: -1")), "row.vector.diff"));
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("normalize: mean", "normalize: softmax")), "row.vector.normalize"));
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("position: unit", "position: time")), "row.vector.position"));
+        Assertions.assertTrue(hasCode(compile(sources, spec.replace("degree: 3", "degree: 9")), "row.vector.degree"));
+        final FeaturePlan unused = compile(sources, spec.replace("slope, polyfit]", "slope]").replace("expr: \"bids_slope / bids_mean\"", "expr: \"bids_slope\""));
+        Assertions.assertFalse(unused.getDiagnostics().hasErrors(), unused::describe);
+        Assertions.assertTrue(hasCode(unused, "row.vector.degree"), "degree without polyfit is a warning");
+    }
+
     private static final String SVD_BLOCK = """
                   - name: hist
                     scope: population

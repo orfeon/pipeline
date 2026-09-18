@@ -49,6 +49,7 @@ public final class OperatorCatalog {
         register(Scope.row, "indicator", InputKind.categorical, I64, false, "one 0/1 column per listed value of a categorical field");
         register(Scope.row, "equals", InputKind.any, I64, false, "1 when two fields are equal, 0 otherwise (null if either is null)");
         register(Scope.row, "noise", InputKind.none, F64, false, "placebo: deterministic pseudo-random value from the row identity and a seed (normal | uniform)");
+        register(Scope.row, "vector", InputKind.numeric, F64, false, "scalar readouts (funcs) of a numeric array field after optional slice / diff / normalize steps");
 
         // context
         register(Scope.context, "rank", InputKind.numeric, I64, false, "rank within the group (1 = largest)");
@@ -102,6 +103,21 @@ public final class OperatorCatalog {
             case "mean", "avg", "std", "sum", "rate" -> F64;
             case "min", "max", "last", "first" -> inputType;
             default -> null;
+        };
+    }
+
+    /** The readouts of the row {@code vector} op ({@link VectorOps#read}; {@code polyfit} expands to one column per coefficient). */
+    public static final List<String> VECTOR_FUNCS = List.of("length", "sum", "mean", "std", "min", "max", "argmin", "argmax", "first", "last", "slope", "norm", "polyfit");
+
+    /** The vector → vector rescalings of the row {@code vector} op ({@link VectorOps#normalize}). */
+    public static final List<String> VECTOR_NORMALIZATIONS = List.of("sum", "mean", "l2", "zscore");
+
+    /** Output type of a {@code vector} readout, or null for an unknown one. */
+    public static Schema.FieldType vectorOutput(final String func) {
+        if (!VECTOR_FUNCS.contains(func)) return null;
+        return switch (func) {
+            case "length", "argmin", "argmax" -> I64;
+            default -> F64;
         };
     }
 

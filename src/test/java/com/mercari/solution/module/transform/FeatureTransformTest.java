@@ -1240,6 +1240,111 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * Row {@code type: vector} over {@code bid_path}, the bids observed before the session: readouts of the whole
+     * path, of the differences of its last three elements, and an expr composing two readouts. An empty path has
+     * length 0 and no other readout — a repeated field without a value (C/s2) arrives as the empty array, never as
+     * null; a single bid has no slope.
+     */
+    @Test
+    public void testVector() throws java.io.IOException {
+        final String[][] rows = {
+                {"current_bid_t10: 120.0,", "[100.0, 110.0, 120.0]"}, {"current_bid_t10: 55.0, ", "[50.0, 55.0]"}, {"current_bid_t10: 210.0,", "[200.0, 205.0, 203.0, 210.0]"},
+                {"current_bid_t10: 90.0, ", "[90.0]"}, {"current_bid_t10: 70.0, ", null}, {"current_bid_t10: 130.0,", "[]"}};
+        String source = SOURCE_CONFIG.replace("        - {name: current_bid_t10, type: float64}\n",
+                "        - {name: current_bid_t10, type: float64}\n        - {name: bid_path, type: float64, mode: repeated}\n");
+        Assertions.assertTrue(source.contains("bid_path"), "the schema field line must match the text block's runtime indentation");
+        for (final String[] row : rows) {
+            Assertions.assertTrue(source.contains(row[0]), row[0]);
+            if (row[1] != null) source = source.replace(row[0], row[0] + " bid_path: " + row[1] + ",");
+        }
+        final String blocks = """
+                    - name: bids
+                      scope: row
+                      type: vector
+                      input: bid_path
+                      funcs: [length, mean, last, argmax, slope, polyfit]
+                      degree: 1
+                    - name: bid_step
+                      scope: row
+                      type: vector
+                      input: bid_path
+                      slice: {from: -3}
+                      diff: 1
+                      funcs: [mean]
+                    - name: bid_lift
+                      scope: row
+                      expr: "bids_last / bids_mean"
+                """;
+        final String config = FEATURE_CONFIG
+                .replace("              - {name: current_bid_t10, type: float64, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n",
+                        "              - {name: current_bid_t10, type: float64, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n"
+                                + "              - {name: bid_path, type: array<float64>, availableAt: \"event_time - PT10M\", observedAtField: snapshot_time, kind: market}\n")
+                .replace("- {fields: [current_bid_t10], from: price_snapshots}", "- {fields: [current_bid_t10, bid_path], from: price_snapshots}")
+                .replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        Assertions.assertTrue(config.contains("array<float64>") && config.contains("current_bid_t10, bid_path]"), "the contract lines must match the text block's runtime indentation");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(source + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_bids_length").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_bids_argmax").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_bids_poly1").getFieldType().getType());
+        Assertions.assertNull(output.getSchema().getField("f_bids_poly2"));
+        Assertions.assertEquals("vector", output.getSchema().getField("f_bids_slope").getOptions().get("feature.operator"));
+        Assertions.assertTrue(output.getSchema().getField("f_bids_slope").getOptions().get("feature.derivedFrom").contains("market"), "the readouts inherit the array field's lineage");
+        PAssert.that(output.getCollection()).satisfies(rows_ -> {
+            int count = 0;
+            for (final MElement row : rows_) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                switch (id) {
+                    case "A/s1" -> {
+                        Assertions.assertEquals(3L, row.getAsLong("f_bids_length"));
+                        Assertions.assertEquals(110.0, row.getAsDouble("f_bids_mean"), 1e-9);
+                        Assertions.assertEquals(2L, row.getAsLong("f_bids_argmax"));
+                        Assertions.assertEquals(10.0, row.getAsDouble("f_bids_slope"), 1e-9);
+                        // degree 1 is the regression line 100 + 10 p
+                        Assertions.assertEquals(100.0, row.getAsDouble("f_bids_poly0"), 1e-6);
+                        Assertions.assertEquals(10.0, row.getAsDouble("f_bids_poly1"), 1e-6);
+                        Assertions.assertEquals(10.0, row.getAsDouble("f_bid_step_mean"), 1e-9);
+                        Assertions.assertEquals(120.0 / 110.0, row.getAsDouble("f_bid_lift"), 1e-9);
+                    }
+                    case "A/s2" -> {
+                        Assertions.assertEquals(2L, row.getAsLong("f_bids_length"));
+                        Assertions.assertEquals(5.0, row.getAsDouble("f_bids_slope"), 1e-9);
+                        Assertions.assertEquals(5.0, row.getAsDouble("f_bid_step_mean"), 1e-9, "the slice is clamped to the two bids there are");
+                    }
+                    case "B/s1" -> {
+                        Assertions.assertEquals(204.5, row.getAsDouble("f_bids_mean"), 1e-9);
+                        Assertions.assertEquals(3L, row.getAsLong("f_bids_argmax"));
+                        // Σ(p − 1.5)(x − 204.5) / Σ(p − 1.5)² = 14 / 5
+                        Assertions.assertEquals(2.8, row.getAsDouble("f_bids_slope"), 1e-9);
+                        // the last three bids 205, 203, 210 step by −2 and +7
+                        Assertions.assertEquals(2.5, row.getAsDouble("f_bid_step_mean"), 1e-9);
+                    }
+                    case "C/s1" -> {
+                        Assertions.assertEquals(1L, row.getAsLong("f_bids_length"));
+                        Assertions.assertEquals(90.0, row.getAsDouble("f_bids_last"), 1e-9);
+                        Assertions.assertEquals(0L, row.getAsLong("f_bids_argmax"));
+                        Assertions.assertNull(row.getPrimitiveValue("f_bids_slope"), "one bid has no slope");
+                        Assertions.assertNull(row.getPrimitiveValue("f_bids_poly1"));
+                        Assertions.assertNull(row.getPrimitiveValue("f_bid_step_mean"), "one bid has no step");
+                        Assertions.assertEquals(1.0, row.getAsDouble("f_bid_lift"), 1e-9);
+                    }
+                    case "C/s2", "D/s1" -> {
+                        Assertions.assertEquals(0L, row.getAsLong("f_bids_length"), "an empty path is a vector of length 0");
+                        for (final String name : List.of("f_bids_mean", "f_bids_last", "f_bids_argmax", "f_bids_slope", "f_bid_step_mean", "f_bid_lift")) {
+                            Assertions.assertNull(row.getPrimitiveValue(name), name + " of an empty bid path: " + row);
+                        }
+                    }
+                    default -> Assertions.fail("unexpected row " + id);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
     // ------------------------------------------------------------------------------------------
     // estimator: joint / conjugate families
     // ------------------------------------------------------------------------------------------
