@@ -9,9 +9,9 @@ import com.mercari.solution.util.cloud.google.ParameterManagerUtil;
 import com.mercari.solution.util.cloud.google.PubSubUtil;
 import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.domain.file.JsonUtil;
+import com.mercari.solution.util.domain.file.YamlUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -719,11 +719,11 @@ public class Config implements Serializable {
     }
 
     private static JsonObject parseYaml(final String text) {
-        final Yaml yaml = new Yaml();
-        final Map<?, ?> loadedYaml = yaml.loadAs(text, Map.class);
-        final Gson gson = new GsonBuilder().setPrettyPrinting().serializeNulls().create();
-        final String jsonText = gson.toJson(loadedYaml, Map.class);
-        return gson.fromJson(jsonText, JsonObject.class);
+        final JsonElement element = YamlUtil.toJson(text);
+        if (!element.isJsonObject()) {
+            throw new IllegalArgumentException("config yaml root must be a mapping, but was: " + element);
+        }
+        return element.getAsJsonObject();
     }
 
 }

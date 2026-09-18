@@ -3,11 +3,11 @@ package com.mercari.solution.server.api;
 import com.mercari.solution.server.launch.LaunchDefaults;
 import com.mercari.solution.server.launch.LaunchSchema;
 import com.google.gson.*;
+import com.mercari.solution.util.domain.file.YamlUtil;
 import com.mercari.solution.util.schema.JsonSchemaUtil;
 import com.networknt.schema.SchemaRegistry;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -450,7 +450,7 @@ public class SpecService {
                 if (is == null) {
                     throw new RuntimeException("Module index resource not found: " + RESOURCES_MODULE_INDEX);
                 }
-                final Map<String, Object> index = new Yaml().load(is);
+                final Map<?, ?> index = (Map<?, ?>) YamlUtil.load(is);
                 final JsonObject result = new JsonObject();
                 for (final String type : List.of("sources", "transforms", "sinks")) {
                     result.add(type, toModuleArray(index.get(type)));
