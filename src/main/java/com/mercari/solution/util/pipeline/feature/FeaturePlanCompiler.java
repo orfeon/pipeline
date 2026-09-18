@@ -1171,9 +1171,31 @@ public final class FeaturePlanCompiler {
     /** Records the weight on an aggregate column: the event side joins the projected history, the $self side the row inputs. */
     private void addWeight(final OutputColumn c, final Op op, final References weightRefs) {
         if (weightRefs == null) return;
-        c.coordinates.put("weightBy", op.weightBy);
+        c.coordinates.put("weightBy", canonicalWeight(op.weightBy));
         for (final String r : weightRefs.others) addPastInput(c, r);
         for (final String r : weightRefs.self) addSelfInput(c, r);
+    }
+
+    /**
+     * The weight expression with every reference spelled by its canonical name — the key the projected history and
+     * the row map carry (a {@code block.column} or baseline reference would otherwise read null, i.e. weight NaN).
+     */
+    private String canonicalWeight(final String expression) {
+        final Matcher m = IDENTIFIER.matcher(expression);
+        final StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            final String replacement;
+            if (m.group(1) != null) {
+                replacement = "$self." + canonicalOf(m.group(1));
+            } else if (m.group(3) == null && !KEYWORDS.contains(m.group(2).toLowerCase()) && !m.group(2).startsWith("$")) {
+                replacement = canonicalOf(m.group(2)) + m.group().substring(m.group(2).length());
+            } else {
+                replacement = m.group();
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 
     /** The filter field when the window filter is a same-field {@code $self} equality over a safe field. */

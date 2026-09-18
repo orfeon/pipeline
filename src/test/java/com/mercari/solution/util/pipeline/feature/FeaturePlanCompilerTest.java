@@ -337,6 +337,13 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.condition_grade")), "sequence.weightBy.type"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "exp(-abs(start_price")), "sequence.weightBy.parse"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.nosuchfield")), "reference.unresolved"));
+
+        // block.column and baseline references are stored by the canonical names the history and the row map carry
+        final FeaturePlan qualified = compile(SOURCES, spec.replace(kernel, "exp(-abs(relative.start_price_rank - $self.market)) * market"));
+        Assertions.assertFalse(qualified.getDiagnostics().hasErrors(), qualified::describe);
+        final OutputColumn qualifiedMean = column(qualified, "recent_n5_near_mean");
+        Assertions.assertEquals("exp(-abs(relative_start_price_rank - $self.__baseline_market)) * __baseline_market", qualifiedMean.getCoordinates().get("weightBy"));
+        Assertions.assertTrue(qualifiedMean.getPastInputs().containsAll(Set.of("relative_start_price_rank", "__baseline_market")));
     }
 
     @Test
