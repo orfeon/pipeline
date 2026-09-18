@@ -248,7 +248,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   path: every family is a monoid (summaries of disjoint row sets merge), an *invertible* family is a
   group (a window can evict), so max / min run incrementally over an unbounded past but take the scan
   path under `maxAge`. Operators without a family (lag / trend / ewma / predicates) and windows with
-  `maxEvents` or a general filter take the scan path over a sublist view. `SequenceIncrementalTest`
+  `maxEvents` or a general filter take the scan path over a sublist view. So does an aggregate under
+  `weightBy`: its weight reads the current row (`$self`), a different number for every (row, event) pair,
+  so nothing folded once per event can serve it — *self-dependent* statistics have no family by
+  construction, which `OperatorCatalog.summary(stat, weighted)` declares (`weightedAggregate`: Σw, Σw·x and
+  a second pass for the deviation; the compiled expression and its `$self` / event variable split are
+  resolved once in `setup()`). A weighted aggregate is bounded by `maxAge` or `maxEvents` like any scan
+  column and unbounded without them. `SequenceIncrementalTest`
   checks the two paths agree on random histories; `SummaryTest` checks the monoid / group laws.
 - **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
   (scan), or the near edge minus a bounded tail (`lag` / `trend` = k, `delta` = k + 1, unfiltered

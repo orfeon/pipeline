@@ -287,6 +287,58 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec), "sequence.self"));
     }
 
+    /**
+     * {@code weightBy} on a sequence aggregate: the event side of the expression joins the projected history (and the
+     * window shift), the {@code $self} side is a row input checked against computeAt; every func is FLOAT64 (count =
+     * Σw); the aggregate is declared scan-only once per block.
+     */
+    @Test
+    public void testSequenceWeightBy() {
+        final String plain = "- {type: aggregate, field: sold, funcs: [count, mean]}";
+        Assertions.assertTrue(SPEC.contains(plain));
+        final String kernel = "exp(-abs(start_price - $self.start_price) / 50)";
+        final String spec = SPEC.replace(plain, "- {type: aggregate, field: sold, funcs: [count, mean, std], weightBy: \"" + kernel + "\", as: near}");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn mean = column(plan, "recent_n5_near_mean");
+        Assertions.assertEquals("aggregate", mean.getOperator());
+        Assertions.assertEquals(kernel, mean.getCoordinates().get("weightBy"));
+        Assertions.assertEquals("sold", mean.getCoordinates().get("field"));
+        Assertions.assertEquals(Set.of("sold", "start_price"), mean.getPastInputs(), "the event side of the weight is projected into the history");
+        Assertions.assertTrue(mean.getInputs().containsAll(Set.of("start_price", "seller_id")));
+        // sold is an outcome: the weighted window is shifted exactly like the plain aggregate's
+        final OutputColumn plainMean = column(compile(SOURCES, SPEC), "recent_n5_sold_mean");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, mean.getStatus());
+        Assertions.assertEquals(plainMean.getWindowShift(), mean.getWindowShift());
+        Assertions.assertEquals(Schema.Type.float64, column(plan, "recent_n5_near_count").getFieldType().getType(), "a weighted count is Σw");
+        Assertions.assertEquals(Schema.Type.int64, column(compile(SOURCES, SPEC), "recent_n5_sold_count").getFieldType().getType());
+        Assertions.assertEquals(Schema.Type.float64, column(plan, "recent_365d_near_std").getFieldType().getType());
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.weightBy.scan")).count(), "reported once, not per window");
+        Assertions.assertNotEquals(plan.getHash(), compile(SOURCES, spec.replace("/ 50)", "/ 25)")).getHash(), "the weight is a semantic parameter");
+
+        // a field-less weighted count: Σw over the visible rows
+        final FeaturePlan count = compile(SOURCES, SPEC.replace(plain, "- {type: aggregate, weightBy: \"" + kernel + "\", as: near}"));
+        Assertions.assertFalse(count.getDiagnostics().hasErrors(), count::describe);
+        Assertions.assertEquals(Schema.Type.float64, column(count, "recent_n5_near_count").getFieldType().getType());
+        Assertions.assertEquals(Set.of("start_price"), column(count, "recent_n5_near_count").getPastInputs());
+
+        // the event side may read an outcome (it is past, the window shift covers it); the current row's outcome is a leak
+        final FeaturePlan pastOutcome = compile(SOURCES, spec.replace(kernel, "1 + final_price"));
+        Assertions.assertFalse(pastOutcome.getDiagnostics().hasErrors(), pastOutcome::describe);
+        final FeaturePlan leak = compile(SOURCES, spec.replace(kernel, "exp(-abs(final_price - $self.final_price))"));
+        Assertions.assertTrue(hasCode(leak, "availability.violation"), leak::describe);
+
+        // validation
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {type: lag, fields: [sold, start_price], k: 2}", "- {type: lag, fields: [sold, start_price], k: 2, weightBy: \"1\"}")), "sequence.weightBy.op"));
+        final FeaturePlan func = compile(SOURCES, spec.replace("funcs: [count, mean, std]", "funcs: [mean, max]"));
+        Assertions.assertTrue(hasCode(func, "sequence.weightBy.func"), func::describe);
+        Assertions.assertTrue(func.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("count | sum | mean")), "the message lists the weighted funcs");
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "condition_grade - $self.start_price")), "sequence.weightBy.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.condition_grade")), "sequence.weightBy.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "exp(-abs(start_price")), "sequence.weightBy.parse"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(kernel, "start_price - $self.nosuchfield")), "reference.unresolved"));
+    }
+
     @Test
     public void testWindowFilterWithSelfIsAllowed() {
         final String spec = SPEC.replace("- {maxEvents: 5}", "- {maxEvents: 5, filter: \"condition_grade = $self.condition_grade\"}");

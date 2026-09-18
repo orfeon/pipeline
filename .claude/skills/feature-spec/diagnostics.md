@@ -146,6 +146,9 @@ not expand because another block failed).
 | `sequence.predicate` | error | `sinceEvent` / `countMatch` need `predicate` |
 | `sequence.self` | error | `$self` inside an op `expr` / `predicate`; use `window.filter`, or `lag` + a row `expr` |
 | `sequence.aggregate.func` | error | unknown aggregate function |
+| `sequence.weightBy.op` / `sequence.weightBy.func` | error | `weightBy` is only defined on `aggregate`, for count / sum / mean / avg / rate / std (min / max / first / last have no weighted form) |
+| `sequence.weightBy.type` / `sequence.weightBy.parse` | error | the weight is a numeric expression: operands (past fields by name, `$self.<field>` for the current row) must be numeric / bool |
+| `sequence.weightBy.scan` | info | a weighted aggregate has no running state and scans its window per row: give the window `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`) |
 | `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required; `decayBy` is `events` or `time` |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
