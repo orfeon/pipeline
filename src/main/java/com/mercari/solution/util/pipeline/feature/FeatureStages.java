@@ -1145,12 +1145,19 @@ public final class FeatureStages {
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final Map<Long, QuantileTransform.Values> parts = new HashMap<>();
-            // Combine.perKey yields one part per block; merge into a fresh state rather than mutating the input element
+            // Combine.perKey yields one part per block, taken as is (the state is the whole column: no copy); a repeated
+            // block is merged into a fresh state rather than mutating the input element. Nothing below mutates a part.
             for (final KV<Long, QuantileTransform.Values> e : c.element()) {
-                QuantileTransform.VALUES.merge(parts.computeIfAbsent(e.getKey(), k -> QuantileTransform.VALUES.create()), e.getValue());
+                parts.merge(e.getKey(), e.getValue(), (a, b) -> {
+                    final QuantileTransform.Values merged = QuantileTransform.VALUES.create();
+                    QuantileTransform.VALUES.merge(merged, a);
+                    QuantileTransform.VALUES.merge(merged, b);
+                    return merged;
+                });
             }
             final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
-            final QuantileTransform.Values all = series.total();
+            // a static fit has one block: fit on it directly instead of a merged copy (fit copies before sorting)
+            final QuantileTransform.Values all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
             final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
             LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", spec.block(), spec.bins(), values.size());
             final QuantileTransform total = QuantileTransform.fit(values, spec.bins(), spec.distribution(), spec.clip(), true);
