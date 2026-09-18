@@ -115,7 +115,7 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
      block declares no mode of its own), `blocks` / `minBlocks` / `minHistory` / `window` are
      read into the spec, and the columns get the forward coordinates via `forwardCoordinates(c, null,
      inputs, def, fitSpec)` plus `predictOffsetMillis` — the engine side is a `BlockSeries<S>` fitted per
-     change point (`SvdSpec.fit` / `FitSvdDoFn` is the template);
+     change point (`SvdSpec` as a `SummaryFitBlock` — `contribution` / `solve` — is the template);
    - `diagnostics.info("fit.mode.static", loc, ...)` including `artifactPhrase(fitSpec)` and the
      outcome-like caveat when the input is an outcome;
    - `newColumn(...)`, `c.fitted = true`, coordinates `fit=static`, the parameters, `field`,
