@@ -47,6 +47,8 @@ public class SequenceEvaluator implements Serializable {
         Integer maxEvents;
         String filterText;
         EqualityFilter equality;
+        /** An order-dependent aggregate ({@link SeriesStats}: zeroCross / peaks / acf / pacf / ar), or null. */
+        SeriesStats.Readout series;
         String offset;
         boolean incremental;
         String field;
@@ -55,8 +57,6 @@ public class SequenceEvaluator implements Serializable {
         Summary.Spec summary;
         /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
         Serializable empty;
-        /** An order-dependent aggregate ({@link SeriesStats}: zeroCross / peaks / acf / pacf / ar), or null. */
-        SeriesStats.Readout series;
     }
 
     /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
@@ -362,9 +362,9 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = statToken(c);
-        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
+        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
         plan.incremental = !forceScan
                 && plan.summary != null
                 && plan.maxEvents == null
@@ -457,6 +457,8 @@ public class SequenceEvaluator implements Serializable {
     Object evaluateScan(final OutputColumn c, final ColumnPlan plan, final Map<String, Object> row,
                         final long nowMillis, final List<Past> window) {
         final String field = plan.field;
+        // an order-dependent aggregate reads the window's present values as one series, in time order
+        if (plan.series != null) return SeriesStats.read(plan.series, series(window, field));
         switch (c.operator) {
             case "lag" -> {
                 final int k = Integer.parseInt(c.coordinates.get("k"));
@@ -521,8 +523,6 @@ public class SequenceEvaluator implements Serializable {
                 return n;
             }
             case "aggregate" -> {
-                // an order-dependent readout reads the window's present values as one series, in time order
-                if (plan.series != null) return SeriesStats.read(plan.series, series(window, field));
                 return aggregate(c.coordinates.get("func"), window, field, c);
             }
             default -> throw new IllegalStateException("unsupported sequence operator: " + c.operator);
@@ -579,6 +579,17 @@ public class SequenceEvaluator implements Serializable {
         return lo;
     }
 
+    /** The present (non-null, non-NaN) values of a field over the window, oldest first. */
+    private static double[] series(final List<Past> window, final String field) {
+        final double[] x = new double[window.size()];
+        int n = 0;
+        for (final Past p : window) {
+            final Double d = FeatureValues.toDouble(p.values().get(field));
+            if (d != null && !d.isNaN()) x[n++] = d;
+        }
+        return n == x.length ? x : Arrays.copyOf(x, n);
+    }
+
     static Object aggregate(final String func, final List<Past> window, final String field, final OutputColumn c) {
         if (field == null) {
             return (long) window.size();
@@ -615,17 +626,6 @@ public class SequenceEvaluator implements Serializable {
             }
             default -> throw new IllegalStateException("unsupported aggregate func: " + func);
         };
-    }
-
-    /** The present (non-null, non-NaN) values of a field over the window, oldest first. */
-    private static double[] series(final List<Past> window, final String field) {
-        final double[] x = new double[window.size()];
-        int n = 0;
-        for (final Past p : window) {
-            final Double d = FeatureValues.toDouble(p.values().get(field));
-            if (d != null && !d.isNaN()) x[n++] = d;
-        }
-        return n == x.length ? x : Arrays.copyOf(x, n);
     }
 
     static Double slope(final List<Double> ys) {

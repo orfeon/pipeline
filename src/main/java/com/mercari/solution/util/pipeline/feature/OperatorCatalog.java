@@ -95,6 +95,10 @@ public final class OperatorCatalog {
         return List.copyOf(OPERATORS.values());
     }
 
+    /** What sequence.aggregate accepts, for the "unknown func" message. */
+    public static final String AVAILABLE_AGGREGATES = "count | sum | mean | avg | rate | std | skew | kurt | min | max | first | last | zeroCross | peaks"
+            + " | acf<j> | pacf<j> | ar<p>_<i> (j, p up to " + SeriesStats.MAX_LAG + ")";
+
     /**
      * Aggregate functions accepted by sequence.aggregate and their output types: the moments, the shape of the
      * distribution ({@code skew} / {@code kurt}), the extremes and ends, and the order-dependent series readouts of
@@ -112,9 +116,6 @@ public final class OperatorCatalog {
         };
     }
 
-    /** What sequence.aggregate accepts, for the "unknown func" message. */
-    public static final String AVAILABLE_AGGREGATES = "count | sum | mean | avg | rate | std | skew | kurt | min | max | first | last | zeroCross | peaks"
-            + " | acf<j> | pacf<j> | ar<p>_<i> (j, p up to " + SeriesStats.MAX_LAG + ")";
 
     /**
      * Encoding statistics: whether a target is required, the output type, and whether the statistic is
