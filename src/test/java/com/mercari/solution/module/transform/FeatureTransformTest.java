@@ -634,6 +634,27 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * A residual's {@code on:} scale written in YAML (where a bare {@code on} is a boolean key) reaches the evaluator:
+     * session A, seller s1 has a start-price share of 100 / 150 against a market share of (1/120) / (1/120 + 1/55).
+     */
+    @Test
+    public void testResidualScaleFromYaml() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("          baseline: market\n", "          baseline: market\n          on: log\n");
+        Assertions.assertTrue(config.contains("on: log"), "the residual line must match the text block's runtime indentation");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        Assertions.assertEquals("log", outputs.get("features").getSchema().getField("f_vs_market").getOptions().get("feature.coord.on"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) {
+                if (!"A".equals(row.getAsString("session_id")) || !"s1".equals(row.getAsString("seller_id"))) continue;
+                final double market = (1 / 120.0) / (1 / 120.0 + 1 / 55.0);
+                Assertions.assertEquals(Math.log(100.0 / 150.0) - Math.log(market), row.getAsDouble("f_vs_market"), 1e-9);
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testLeakIsRejectedAtAssembly() throws java.io.IOException {
         // a row feature that reads an outcome directly is available after predictAt → compile error
@@ -1232,27 +1253,6 @@ public class FeatureTransformTest {
                 }
             }
             Assertions.assertEquals(6, count);
-            return null;
-        });
-        pipeline.run();
-    }
-
-    /**
-     * A residual's {@code on:} scale written in YAML (where a bare {@code on} is a boolean key) reaches the evaluator:
-     * session A, seller s1 has a start-price share of 100 / 150 against a market share of (1/120) / (1/120 + 1/55).
-     */
-    @Test
-    public void testResidualScaleFromYaml() throws java.io.IOException {
-        final String config = FEATURE_CONFIG.replace("          baseline: market\n", "          baseline: market\n          on: log\n");
-        Assertions.assertTrue(config.contains("on: log"), "the residual line must match the text block's runtime indentation");
-        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
-        Assertions.assertEquals("log", outputs.get("features").getSchema().getField("f_vs_market").getOptions().get("feature.coord.on"));
-        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
-            for (final MElement row : rows) {
-                if (!"A".equals(row.getAsString("session_id")) || !"s1".equals(row.getAsString("seller_id"))) continue;
-                final double market = (1 / 120.0) / (1 / 120.0 + 1 / 55.0);
-                Assertions.assertEquals(Math.log(100.0 / 150.0) - Math.log(market), row.getAsDouble("f_vs_market"), 1e-9);
-            }
             return null;
         });
         pipeline.run();
