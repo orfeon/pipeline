@@ -156,7 +156,11 @@ reads what the compile layer wrote into each column's `coordinates`.
   `Summary` state per filter value; `contribution(plan, past)` extracts what a row contributes,
   `readStatistic` applies the scope's null / cast convention) when `summaryOf(c)` is non-null, no
   `maxEvents`, no general filter, and either no `maxAge` or the family is invertible; else **scan**
-  (`select` = binary-searched sublist view, `evaluateScan` switch). `History` (absolute indices,
+  (`select` = binary-searched sublist view, `evaluateScan` switch). An aggregate with `weightBy` (a
+  numeric expression over the event and, through `$self.f` → `__self_f`, the current row) is scan-only by
+  declaration — `OperatorCatalog.summary(stat, weighted)` returns no family, because a self-dependent
+  weight differs per (row, event) pair — and runs `weightedAggregate` (`Weight` = the compiled expression
+  + its variable split, built once in `setup()`). `History` (absolute indices,
   trimmable prefix), `Watermarks` (per-field trim floors), `retainInto` / `tailSize` /
   `unboundedColumns` / `unboundedReason` (the compile-time twin used by the
   `sequence.window.unbounded` hint). `bufferedFields()` = union of `pastInputs` = what the stage

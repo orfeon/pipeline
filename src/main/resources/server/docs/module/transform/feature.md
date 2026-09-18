@@ -157,6 +157,7 @@ features:
       - {type: ewma, expr: "start_price / quantity", halflife: [3], as: unit_price}  # as: replaces the anonymous __e{n} segment
       - {type: aggregate, field: start_price, funcs: [count, mean, max]}
       - {type: aggregate, funcs: [count]}        # COUNT(1): every visible past row, nulls included
+      - {type: aggregate, field: sold, funcs: [count, mean], weightBy: "exp(-abs(start_price - $self.start_price) / 50)", as: near}  # similarity-weighted (see Weighted aggregates)
 
   - name: enc                       # population: expanding encoding, keySets × windows × targets × stats
     scope: population
@@ -503,6 +504,47 @@ that are only usable offline get a leading `_` and are not emitted.
 Inline `expr` in sequence ops and encoding targets is evaluated per past row (no `$self`); expressions are
 numeric (Lucene expression syntax), predicates and window filters use the SQL-like
 [Filter](../common/filter.md) syntax.
+
+### Weighted aggregates (sequence `aggregate` with `weightBy`)
+
+A window `filter` selects past events 0 / 1 (`category = $self.category`); on sparse histories — a new
+seller, a listing unlike the earlier ones — an equality filter leaves nothing. `weightBy` keeps every
+event and weighs it by how similar it is to the current row instead:
+
+```yaml
+- name: similar
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P365D}]
+  ops:
+    - type: aggregate
+      field: sold
+      funcs: [count, mean]
+      weightBy: "exp(-abs(start_price - $self.start_price) / 50)"   # the event's fields by name, the current row's as $self.<field>
+      as: near                                                      # similar_365d_near_count / _mean
+```
+
+- The expression is numeric (the row `expr` syntax; operands numeric / bool). A name reads the **past
+  event**, `$self.<field>` reads the **current row**; a weight without `$self` is a plain per-event weight.
+- An event contributes when its value is present and its weight is a positive finite number. A null
+  operand on either side, a NaN and a weight ≤ 0 contribute nothing — so a current row whose `$self` field
+  is null gets `count` 0 and null for the rest.
+- Funcs: `count` = Σw (the *effective count*, **float64** — 0 when nothing contributes), `sum` = Σw·x,
+  `mean` / `avg` / `rate` = Σw·x / Σw, `std` = the weighted population deviation (two contributing events at
+  least). With every weight 1 these are the plain aggregates. `min` / `max` / `first` / `last` have no
+  weighted form (`sequence.weightBy.func`). Without a `field`, `count` weighs every visible row.
+- `weightBy` composes with the window (`maxAge`, `maxEvents`, `filter` — the window selects first, then the
+  weights apply) and is only defined on `aggregate` (`sequence.weightBy.op`).
+- **Availability**: the event side follows the sequence rule (an outcome read from past events shifts the
+  window like any other past input); the `$self` side must be known at `predictAt` — `$self.<outcome>` is
+  an `availability.violation`.
+- **Cost**: the weights differ for every (row, event) pair, so no running statistic can serve them: the
+  aggregate scans its window for every row (info `sequence.weightBy.scan`) instead of the O(1) incremental
+  update of a plain aggregate. Give the window a `maxAge` or `maxEvents`; without either the column keeps
+  the key's whole history and is listed by the `sequence.window.unbounded` hint.
+- A plain and a weighted aggregate of one field in one block would share a column name: set `as:` on one.
+- Diagnostics: `sequence.weightBy.op`, `sequence.weightBy.func`, `sequence.weightBy.type` (a non-numeric
+  operand), `sequence.weightBy.parse`.
 
 ### Naming, conditions and placement notes
 

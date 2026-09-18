@@ -1,5 +1,6 @@
 package com.mercari.solution.util.pipeline.feature;
 
+import com.mercari.solution.util.ExpressionUtil;
 import com.mercari.solution.util.pipeline.Filter;
 
 import java.io.Serializable;
@@ -23,7 +24,8 @@ import java.util.regex.Pattern;
  *       (max / min cannot evict). Used for {@code aggregate} / encoding statistics; turns the per-key cost from
  *       O(n²) into O(n).</li>
  *   <li><b>Scan</b>: binary-searched window bounds + a {@code subList} view (no copying) for everything
- *       else (lag / trend / ewma / predicates / maxEvents windows / general filters).</li>
+ *       else (lag / trend / ewma / predicates / maxEvents windows / general filters / a {@code weightBy}
+ *       aggregate, whose weights depend on the current row).</li>
  * </ul>
  *
  * <p>The evaluator owns the extraction — which value of a past row contributes ({@link #contribution}) and the
@@ -55,6 +57,29 @@ public class SequenceEvaluator implements Serializable {
         Summary.Spec summary;
         /** The family's empty state, read for a filter value with no visible contribution (never mutated). */
         Serializable empty;
+        /** The aggregate's per-event weight expression ({@code weightBy}), or null. */
+        String weightBy;
+    }
+
+    /**
+     * A compiled {@code weightBy}: the expression and its variables split into the current row's ({@code $self.f},
+     * spelled {@code __self_f} at runtime) and the event's.
+     */
+    private record Weight(ExpressionUtil.Expression expression, List<String> selfVariables, List<String> selfFields, List<String> pastFields) {
+
+        static Weight of(final String text) {
+            final ExpressionUtil.Expression expression = ExpressionUtil.createDefaultExpression(text.replace("$self.", FeatureValues.SELF_PREFIX));
+            final List<String> selfVariables = new ArrayList<>(), selfFields = new ArrayList<>(), pastFields = new ArrayList<>();
+            for (final String name : expression.getVariableNames()) {
+                if (name.startsWith(FeatureValues.SELF_PREFIX)) {
+                    selfVariables.add(name);
+                    selfFields.add(name.substring(FeatureValues.SELF_PREFIX.length()));
+                } else {
+                    pastFields.add(name);
+                }
+            }
+            return new Weight(expression, selfVariables, selfFields, pastFields);
+        }
     }
 
     /** Running state of one column: fold / evict pointers and one summary state per filter value (key "" without a filter). */
@@ -279,6 +304,7 @@ public class SequenceEvaluator implements Serializable {
         final ColumnPlan plan = evaluator.plan(c);
         if (!unbounded(plan, c)) return null;
         if (plan.filterText != null) return "a window with a filter and no maxAge";
+        if (plan.weightBy != null) return "a weightBy aggregate without maxAge or maxEvents";
         return c.operator + " without maxAge";
     }
 
@@ -309,6 +335,7 @@ public class SequenceEvaluator implements Serializable {
     private transient Map<String, Filter.ConditionNode> conditions;
     private transient Map<String, ColumnPlan> plans;
     private transient Map<String, RetainPlan> retainPlans;
+    private transient Map<String, Weight> weights;
 
     public SequenceEvaluator(final List<OutputColumn> columns) {
         this(columns, false);
@@ -334,7 +361,10 @@ public class SequenceEvaluator implements Serializable {
     public void setup() {
         conditions = new HashMap<>();
         plans = new HashMap<>();
+        weights = new HashMap<>();
         for (final OutputColumn c : columns) {
+            final String weightBy = c.coordinates.get("weightBy");
+            if (weightBy != null) weights.computeIfAbsent(weightBy, Weight::of);
             for (final String key : List.of("filter", "predicate")) {
                 final String text = c.coordinates.get(key);
                 if (text != null && !conditions.containsKey(text)) {
@@ -360,10 +390,13 @@ public class SequenceEvaluator implements Serializable {
         plan.field = c.coordinates.get("field");
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = statToken(c);
+        plan.weightBy = c.coordinates.get("weightBy");
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.incremental = !forceScan
                 && plan.summary != null
+                // a weight may read the current row: the catalog declares weighted statistics scan-only
+                && (plan.weightBy == null || OperatorCatalog.summary(plan.stat, true) != null)
                 && plan.maxEvents == null
                 && (plan.filterText == null || plan.equality != null)
                 // a window evicts: only a group (invertible family) can remove a contribution again
@@ -518,6 +551,7 @@ public class SequenceEvaluator implements Serializable {
                 return n;
             }
             case "aggregate" -> {
+                if (plan.weightBy != null) return weightedAggregate(c.coordinates.get("func"), window, field, weights.get(plan.weightBy), row);
                 return aggregate(c.coordinates.get("func"), window, field, c);
             }
             default -> throw new IllegalStateException("unsupported sequence operator: " + c.operator);
@@ -602,6 +636,49 @@ public class SequenceEvaluator implements Serializable {
                 yield Math.sqrt(values.stream().mapToDouble(d -> (d - mean) * (d - mean)).sum() / values.size());
             }
             default -> throw new IllegalStateException("unsupported aggregate func: " + func);
+        };
+    }
+
+    /**
+     * An aggregate under {@code weightBy}: every event of the window is weighed against the current row — the
+     * expression reads the event's fields by name and the row's as {@code $self.f} — and contributes when its value
+     * is present and its weight is a positive finite number (a null operand makes the weight NaN: no contribution).
+     * {@code count} = Σw (0 without contributions), {@code sum} = Σw·x, {@code mean} = Σw·x / Σw, {@code std} = the
+     * weighted population deviation (two contributing events at least); with every weight 1 these are the plain
+     * aggregates. A field-less count weighs every visible row.
+     */
+    private static Object weightedAggregate(final String func, final List<Past> window, final String field, final Weight weight, final Map<String, Object> row) {
+        final Map<String, Double> variables = new HashMap<>();
+        for (int i = 0; i < weight.selfVariables().size(); i++) {
+            variables.put(weight.selfVariables().get(i), FeatureValues.toDouble(row.get(weight.selfFields().get(i))));
+        }
+        final double[] ws = new double[window.size()], xs = new double[window.size()];
+        int n = 0;
+        double sumW = 0, sumWx = 0;
+        for (final Past p : window) {
+            final Double x = field == null ? Double.valueOf(0d) : FeatureValues.toDouble(p.values().get(field));
+            if (x == null) continue;
+            for (final String f : weight.pastFields()) variables.put(f, FeatureValues.toDouble(p.values().get(f)));
+            final double w = weight.expression().evaluate(variables);
+            if (!(w > 0) || Double.isInfinite(w)) continue;
+            ws[n] = w;
+            xs[n++] = x;
+            sumW += w;
+            sumWx += w * x;
+        }
+        if ("count".equals(func)) return sumW;
+        if (n == 0) return null;
+        return switch (func) {
+            case "sum" -> sumWx;
+            case "mean", "avg", "rate" -> sumWx / sumW;
+            case "std" -> {
+                if (n < 2) yield null;
+                final double mean = sumWx / sumW;
+                double ss = 0;
+                for (int i = 0; i < n; i++) ss += ws[i] * (xs[i] - mean) * (xs[i] - mean);
+                yield Math.sqrt(ss / sumW);
+            }
+            default -> throw new IllegalStateException("aggregate " + func + " has no weighted form");
         };
     }
 

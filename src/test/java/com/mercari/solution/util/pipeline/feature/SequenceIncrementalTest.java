@@ -55,6 +55,15 @@ public class SequenceIncrementalTest {
                 entity: seller
                 ops:
                   - {type: aggregate, field: start_price, funcs: [max, min, count]}
+              - name: similar
+                scope: sequence
+                entity: seller
+                windows:
+                  - {maxAge: P30D}
+                  - {maxEvents: 20}
+                ops:
+                  - {type: aggregate, field: sold, funcs: [count, mean, std], weightBy: "exp(-abs(start_price - $self.start_price) / 100)"}
+                  - {type: aggregate, field: start_price, funcs: [count, mean, sum, std], weightBy: "1", as: unit}
               - name: enc
                 scope: population
                 type: encoding
@@ -141,6 +150,88 @@ public class SequenceIncrementalTest {
             pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
         }
         Assertions.assertTrue(compared > 4000);
+    }
+
+    /**
+     * {@code weightBy}: a weight of 1 reproduces the plain aggregate over the same window, a similarity kernel on the
+     * current row matches a direct computation, and the weighted aggregate never runs on a running state — the
+     * catalog declares it scan-only, so without a window it keeps the whole history (the unbounded hint).
+     */
+    @Test
+    public void testWeightBy() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(SPEC, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList();
+        final SequenceEvaluator evaluator = new SequenceEvaluator(columns);
+        evaluator.setup();
+        final OutputColumn kernelMean = plan.getColumn("similar_30d_sold_mean");
+        final OutputColumn kernelCount = plan.getColumn("similar_30d_sold_count");
+        Assertions.assertNotNull(kernelMean, plan::describe);
+        final long shift = kernelMean.getWindowShift() == null ? 0L : kernelMean.getWindowShift().toMillis();
+        Assertions.assertTrue(shift > 0, "sold is an outcome: the weighted window is shifted like any other");
+
+        final Random random = new Random(23);
+        long millis = 1_700_000_000_000L;
+        final List<SequenceEvaluator.Past> history = new ArrayList<>();
+        final List<SequenceEvaluator.Past> pending = new ArrayList<>();
+        long pendingMillis = Long.MIN_VALUE;
+        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState();
+        int weighted = 0, empty = 0;
+        for (int i = 0; i < 600; i++) {
+            if (random.nextDouble() > 0.15) millis += (long) (Math.pow(10, 4 + random.nextDouble() * 5));
+            final Map<String, Object> row = new HashMap<>();
+            row.put("seller_id", "s1");
+            row.put("condition_grade", "g" + random.nextInt(3));
+            row.put("start_price", random.nextInt(10) == 0 ? null : Math.round(random.nextDouble() * 1000) / 10.0);
+            row.put("sold", random.nextInt(12) == 0 ? null : random.nextInt(2));
+            if (millis != pendingMillis) {
+                history.addAll(pending);
+                pending.clear();
+                pendingMillis = millis;
+            }
+            // a unit weight is the plain aggregate (the count as a double)
+            for (final String func : List.of("count", "mean", "sum", "std")) {
+                assertSame("unit " + func + "@" + i,
+                        evaluator.evaluateColumn(plan.getColumn("seq_30d_start_price_" + func), row, millis, history, state),
+                        evaluator.evaluateColumn(plan.getColumn("similar_30d_unit_" + func), row, millis, history, state));
+            }
+            // the kernel against a direct computation over the shifted 30-day window
+            final Double self = (Double) row.get("start_price");
+            double sumW = 0, sumWy = 0;
+            int n = 0;
+            for (final SequenceEvaluator.Past p : history) {
+                if (p.millis() > millis - shift || p.millis() < millis - java.time.Duration.ofDays(30).toMillis()) continue;
+                final Object y = p.values().get("sold"), x = p.values().get("start_price");
+                if (y == null || x == null || self == null) continue;
+                final double w = Math.exp(-Math.abs((Double) x - self) / 100);
+                sumW += w;
+                sumWy += w * ((Number) y).doubleValue();
+                n++;
+            }
+            assertSame("kernel count@" + i, sumW, evaluator.evaluateColumn(kernelCount, row, millis, history, state));
+            assertSame("kernel mean@" + i, n == 0 ? null : sumWy / sumW, evaluator.evaluateColumn(kernelMean, row, millis, history, state));
+            if (n > 0) weighted++; else empty++;
+            pending.add(new SequenceEvaluator.Past(millis, new HashMap<>(row)));
+        }
+        Assertions.assertTrue(weighted > 300 && empty > 30, "both the weighted and the empty case are exercised: " + weighted + " / " + empty);
+
+        // declared scan-only: no summary family under a weight, so the same aggregate that folds incrementally
+        // without a window (bounded) reads its whole history once it is weighted (unbounded)
+        Assertions.assertNotNull(OperatorCatalog.summary("mean", false));
+        Assertions.assertNull(OperatorCatalog.summary("mean", true));
+        final String unwindowed = SPEC.replace("    windows:\n      - {maxAge: P30D}\n      - {maxEvents: 20}\n", "");
+        Assertions.assertNotEquals(SPEC, unwindowed);
+        final FeaturePlan open = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(unwindowed, Config.Format.yaml), null);
+        Assertions.assertFalse(open.getDiagnostics().hasErrors(), open::describe);
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(open.getColumn("unbounded_all_start_price_count")), "a plain count folds incrementally");
+        final String reason = SequenceEvaluator.unboundedReason(open.getColumn("similar_all_sold_mean"));
+        Assertions.assertNotNull(reason);
+        Assertions.assertTrue(reason.contains("weightBy"), reason);
+        Assertions.assertTrue(open.getDiagnostics().getMessages().stream().anyMatch(m -> m.code().equals("sequence.window.unbounded") && m.message().contains("similar_all_sold_mean")));
+        // bounded by either window kind
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan.getColumn("similar_30d_sold_mean")));
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan.getColumn("similar_n20_sold_mean")));
     }
 
     /**

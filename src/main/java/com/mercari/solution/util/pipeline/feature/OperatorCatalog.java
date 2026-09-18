@@ -122,6 +122,28 @@ public final class OperatorCatalog {
     }
 
     /**
+     * The aggregate functions defined under a per-event weight ({@code weightBy}): {@code count} reads Σw (the
+     * effective count, FLOAT64), {@code sum} Σw·x, {@code mean} Σw·x / Σw, {@code std} the weighted population
+     * deviation. Order / extreme statistics ({@code min / max / first / last}) have no weighted form.
+     */
+    public static final List<String> WEIGHTED_FUNCS = List.of("count", "sum", "mean", "avg", "rate", "std");
+
+    /** Output type of an aggregate function under {@code weightBy}, or null when it has no weighted form. */
+    public static Schema.FieldType weightedAggregateOutput(final String func) {
+        return WEIGHTED_FUNCS.contains(func) ? F64 : null;
+    }
+
+    /**
+     * {@link #summary(String)} for a statistic that may carry a per-event weight. A weight may read the current row
+     * ({@code $self}): it is then a different number for every (row, event) pair, so no running state — nothing
+     * folded once per event — can serve it, whatever the family. Weighted statistics are therefore scan-only; a
+     * weight over the event alone would fit a weighted-moments family, which does not exist yet.
+     */
+    public static Summary.Spec summary(final String stat, final boolean weighted) {
+        return weighted ? null : summary(stat);
+    }
+
+    /**
      * Encoding statistics: whether a target is required, the output type, and whether the statistic is
      * derived from the sufficient statistics (n, Σy, Σy²) — the ones a static / fold fit keeps per key.
      * {@code distribution} and the quantiles need the key's value distribution (expanding only).

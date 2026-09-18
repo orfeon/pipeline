@@ -432,6 +432,11 @@ public final class FeaturePlanCompiler {
             refs.addAll(op.fields);
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
+            if (op.weightBy != null) {
+                final References w = expressionReferences(op.weightBy);
+                refs.addAll(w.others);
+                refs.addAll(w.self);
+            }
         }
         for (final Window w : def.windows) {
             if (w.filter != null) {
@@ -1078,6 +1083,8 @@ public final class FeaturePlanCompiler {
                     final OutputColumn anonymous = desugarExpression(def, op.expr, computeAt);
                     if (anonymous != null) fields.add(anonymous.canonicalName);
                 }
+                final References weightRefs = op.weightBy == null ? null : weightReferences(def, op);
+                if (op.weightBy != null && weightRefs == null) continue;
                 if (operator.input() == InputKind.predicate) {
                     if (op.predicate == null) {
                         diagnostics.error("sequence.predicate", loc, "op " + op.type + " requires 'predicate'");
@@ -1102,9 +1109,12 @@ public final class FeaturePlanCompiler {
                 if (fields.isEmpty()) {
                     // COUNT(1): a field-less aggregate counts every visible past row, nulls included
                     if ("aggregate".equals(op.type) && (op.funcs.isEmpty() || op.funcs.equals(List.of("count")))) {
+                        // under weightBy the count is Σw over the visible rows (the effective count)
                         final OutputColumn c = newColumn(def.name, Scope.sequence, op.type,
-                                def.name + "_" + window.token() + "_count", Schema.FieldType.INT64, computeAt);
+                                def.name + "_" + window.token() + "_" + (op.as != null && weightRefs != null ? op.as + "_" : "") + "count",
+                                weightRefs == null ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
                         c.coordinates.put("func", "count");
+                        addWeight(c, op, weightRefs);
                         // the keys are read from the self row (keying), not from past rows: no projection
                         for (final String key : entity.keys()) addSelfInput(c, key);
                         finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -1171,7 +1181,11 @@ public final class FeaturePlanCompiler {
                         case "aggregate" -> {
                             final List<String> funcs = op.funcs.isEmpty() ? List.of("count", "mean") : op.funcs;
                             for (final String func : funcs) {
-                                final Schema.FieldType type = OperatorCatalog.aggregateOutput(func, ref.type());
+                                final Schema.FieldType type = weightRefs == null ? OperatorCatalog.aggregateOutput(func, ref.type()) : OperatorCatalog.weightedAggregateOutput(func);
+                                if (type == null && weightRefs != null && OperatorCatalog.aggregateOutput(func, ref.type()) != null) {
+                                    diagnostics.error("sequence.weightBy.func", loc, "aggregate " + func + " has no weighted form (available under weightBy: " + String.join(" | ", OperatorCatalog.WEIGHTED_FUNCS) + ")");
+                                    continue;
+                                }
                                 if (type == null) {
                                     diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func);
                                     continue;
@@ -1184,6 +1198,7 @@ public final class FeaturePlanCompiler {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
                                 c.coordinates.put("func", func);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                                addWeight(c, op, weightRefs);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
                         }
@@ -1192,6 +1207,75 @@ public final class FeaturePlanCompiler {
                 }
             }
         }
+    }
+
+    /** Validated weightBy references per (block, expression): an op is expanded once per window, reported once. */
+    private final Map<String, Optional<References>> weightCache = new HashMap<>();
+
+    /**
+     * The references of an aggregate's {@code weightBy} — the event's fields by name, the current row's through
+     * {@code $self} — or null (after reporting) when the weight is not usable: on another op, not a numeric
+     * expression, over a non-numeric operand.
+     */
+    private References weightReferences(final FeatureDef def, final Op op) {
+        return weightCache.computeIfAbsent(def.name + " " + op.type + " " + op.weightBy, k -> {
+            final String loc = def.location();
+            if (!"aggregate".equals(op.type)) {
+                diagnostics.error("sequence.weightBy.op", loc, "weightBy is only defined on aggregate (op " + op.type + ")");
+                return Optional.empty();
+            }
+            final References refs = expressionReferences(op.weightBy);
+            boolean valid = true;
+            for (final String r : refs.others) valid &= numericWeightOperand(r, r, loc);
+            for (final String r : refs.self) valid &= numericWeightOperand(r, "$self." + r, loc);
+            try {
+                com.mercari.solution.util.ExpressionUtil.createDefaultExpression(op.weightBy.replace("$self.", FeatureValues.SELF_PREFIX));
+            } catch (final RuntimeException e) {
+                diagnostics.error("sequence.weightBy.parse", loc, "cannot parse weightBy '" + op.weightBy + "' as a numeric expression: " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+                valid = false;
+            }
+            if (!valid) return Optional.empty();
+            diagnostics.info("sequence.weightBy.scan", loc, "weightBy '" + op.weightBy + "' weighs every event against the current row, so no running state can serve it: "
+                    + "the aggregate scans its window per row — bound the window with maxAge or maxEvents");
+            return Optional.of(refs);
+        }).orElse(null);
+    }
+
+    private boolean numericWeightOperand(final String reference, final String shown, final String loc) {
+        final Ref ref = resolve(reference);
+        if (ref == null || ref.type() == null || OperatorCatalog.isNumeric(ref.type()) || ref.type().getType() == Schema.Type.bool) return true;
+        diagnostics.error("sequence.weightBy.type", loc, "weightBy operand '" + shown + "' is not numeric (" + ref.type().getType() + "); the weight is evaluated as a double");
+        return false;
+    }
+
+    /** Records the weight on an aggregate column: the event side joins the projected history, the $self side the row inputs. */
+    private void addWeight(final OutputColumn c, final Op op, final References weightRefs) {
+        if (weightRefs == null) return;
+        c.coordinates.put("weightBy", canonicalWeight(op.weightBy));
+        for (final String r : weightRefs.others) addPastInput(c, r);
+        for (final String r : weightRefs.self) addSelfInput(c, r);
+    }
+
+    /**
+     * The weight expression with every reference spelled by its canonical name — the key the projected history and
+     * the row map carry (a {@code block.column} or baseline reference would otherwise read null, i.e. weight NaN).
+     */
+    private String canonicalWeight(final String expression) {
+        final Matcher m = IDENTIFIER.matcher(expression);
+        final StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            final String replacement;
+            if (m.group(1) != null) {
+                replacement = "$self." + canonicalOf(m.group(1));
+            } else if (m.group(3) == null && !KEYWORDS.contains(m.group(2).toLowerCase()) && !m.group(2).startsWith("$")) {
+                replacement = canonicalOf(m.group(2)) + m.group().substring(m.group(2).length());
+            } else {
+                replacement = m.group();
+            }
+            m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 
     /** The filter field when the window filter is a same-field {@code $self} equality over a safe field. */

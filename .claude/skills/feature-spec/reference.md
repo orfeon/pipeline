@@ -146,7 +146,7 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `runLength` | `field`, `value` | `..._runlength` int64 |
 | `sinceEvent` | `predicate`, `unit: [events, days]` | `<name>_<w>_since_events` int64 / `_since_days` float64 |
 | `countMatch` | `predicate` | `<name>_<w>_countmatch` int64 |
-| `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1) | `..._<func>`; count int64, mean / std / sum / rate float64, min / max / first / last input type |
+| `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1). Optional `weightBy: "<numeric expr>"` — the past event's fields by name, the current row's as `$self.<field>` (a similarity kernel, e.g. `exp(-abs(start_price - $self.start_price) / 50)`): `count` = Σw (float64), `sum` = Σw·x, `mean` = Σw·x / Σw, `std` weighted; no `min / max / first / last`; null / NaN / ≤ 0 weights contribute nothing; `$self` fields must be known at `predictAt`; always scanned per row, so bound the window (`maxAge` / `maxEvents`); use `as:` when the block also has the plain aggregate of the field | `..._<func>`; count int64 (float64 under `weightBy`), mean / std / sum / rate float64, min / max / first / last input type |
 
 `as:` on an op names the field segment (or replaces the op suffix for `sinceEvent` / `countMatch`).
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and

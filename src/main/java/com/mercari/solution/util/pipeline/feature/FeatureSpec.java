@@ -82,6 +82,12 @@ public class FeatureSpec implements Serializable {
         public String scoreNull;
         /** shuffle: the seed of the deterministic permutation. */
         public Long seed;
+        /**
+         * sequence aggregate: a numeric expression giving every past event its weight; it reads the event's fields by
+         * name and the current row's through {@code $self.<field>} (a similarity kernel). Null / NaN / non-positive
+         * weights contribute nothing.
+         */
+        public String weightBy;
     }
 
     public static class KeySet implements Serializable {
@@ -771,6 +777,7 @@ public class FeatureSpec implements Serializable {
         op.value = Json.string(o, "value");
         op.unit = Json.strings(o, "unit");
         op.decayBy = Json.string(o, "decayBy");
+        op.weightBy = Json.string(o, "weightBy");
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");
