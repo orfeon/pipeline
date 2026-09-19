@@ -2945,6 +2945,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("6", labelMean.getCoordinates().get("embargoBlocks"));
         Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.fold.purge".equals(m.code()) && m.location().contains("enc_label")), plan::describe);
         Assertions.assertTrue(hasCode(plan, "fit.mode.fold"));
+        // the purge is two-sided and the embargo extends it (the info spells out the width left out)
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code())
+                && m.message().contains("on both sides") && m.message().contains("2·purge + embargo + 1")), plan::describe);
 
         // a declared purge wins over the label's horizon and is inherited by the blocks (10 days of 7-day blocks → 2)
         final FeaturePlan declared = compile(SOURCES, spec.replace("fold: {by: time, embargo: P40D}", "fold: {by: time, purge: P10D, embargo: P40D}"));
@@ -2952,6 +2955,18 @@ public class FeaturePlanCompilerTest {
                 && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow().getCoordinates().get("purgeBlocks"));
 
         final String fold = "fold: {by: time, embargo: P40D}";
+        // purge / embargo round by the shortest block: 30 days of month blocks → 2 (a 28-day February may lie between)
+        final FeaturePlan monthly = compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: P30D, embargo: P40D}"));
+        Assertions.assertEquals("2", monthly.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow().getCoordinates().get("purgeBlocks"));
+        // a time fold has no hash folds to count
+        Assertions.assertFalse(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: fold, folds: 1, blocks: {bucket: month}")), "fit.folds"));
+        // groupBy does not silence the past-target key guard under a time fold (a time fold ignores groupBy), unlike under hash folds
+        final String pastTargetKey = spec.replace("      - keys: [seller_id]\n", "      - keys: [seller_id]\n      - keys: [recent_365d_sold_mean]\n")
+                .replace("fit: {mode: fold, blocks: {bucket: month}", "fit: {mode: fold, groupBy: seller, blocks: {bucket: month}");
+        Assertions.assertTrue(hasCode(compile(SOURCES, pastTargetKey), "fit.groupBy.required"));
+        Assertions.assertFalse(hasCode(compile(SOURCES, pastTargetKey.replace(fold, "fold: {by: row}")), "fit.groupBy.required"));
+
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: calendar}")), "fit.fold.by"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: -P1D}")), "fit.fold.purge"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, gap: P1D}")), "fit.fold"));

@@ -200,7 +200,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   A time fold (`fit.mode: fold` + `fold.by: time`) rides the same series: `Forward.of` also accepts the coordinates
   `foldBy` / `purgeBlocks` / `embargoBlocks` (`FeaturePlanCompiler.timeFoldCoordinates`, purge defaulting to the
   target label's horizon via `labelHorizon`) and `FitApplyDoFn.timeFoldStats` reads totals minus the blocks
-  `[b − purge, b + embargo]` with the whole-input λ.
+  `[b − purge, b + purge + embargo]` (two-sided purge) with the whole-input λ; `auditTimeFold` counts rows leaving
+  out more than half of the input's blocks (`feature/timeFold_<level>_excludedOverHalf`, run-time only).
 
 ### Beam engine (`FeatureStages`)
 

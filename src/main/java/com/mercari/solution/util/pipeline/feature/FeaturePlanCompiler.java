@@ -2308,21 +2308,19 @@ public final class FeaturePlanCompiler {
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+        // fold: {by, purge, embargo} (negative durations are rejected by parseFold); a time fold has no hash folds to count
+        fitSpec.foldBy = spec.fit.foldBy;
+        fitSpec.purge = spec.fit.purge;
+        fitSpec.embargo = spec.fit.embargo;
+        FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
-        if (mode == FitMode.fold && folds < 2) {
+        if (mode == FitMode.fold && !fitSpec.isTimeFold() && folds < 2) {
             diagnostics.error("fit.folds", loc, "fit.folds must be at least 2: " + folds);
             folds = 2;
         }
         fitSpec.groupBy = groupBy;
         fitSpec.folds = folds;
-        fitSpec.foldBy = spec.fit.foldBy;
-        fitSpec.purge = spec.fit.purge;
-        fitSpec.embargo = spec.fit.embargo;
-        FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
-        if (fitSpec.purge != null && fitSpec.purge.isNegative() || fitSpec.embargo != null && fitSpec.embargo.isNegative()) {
-            diagnostics.error("fit.fold.purge", loc, "fit.fold.purge / embargo must not be negative: purge=" + fitSpec.purge + " embargo=" + fitSpec.embargo);
-        }
         if (mode != FitMode.fold && (fitSpec.foldBy != null || fitSpec.purge != null || fitSpec.embargo != null) && hintedBlocks.add(def.name + "#foldIgnored")) {
             diagnostics.warning("fit.fold.ignored", loc, "fit.fold applies to fit.mode fold only (mode " + mode.token() + "): by / purge / embargo are ignored");
         } else if (mode == FitMode.fold && !fitSpec.isTimeFold() && (fitSpec.purge != null || fitSpec.embargo != null)) {
@@ -2338,8 +2336,10 @@ public final class FeaturePlanCompiler {
         } else if (mode == FitMode.fold && fitSpec.isTimeFold()) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold by time: every time block (" + fitSpec.forwardBlocks().describe() + ") is a fold — a row reads the"
                     + " statistics of the whole input minus its own block"
-                    + (fitSpec.embargo == null ? "" : ", the embargo " + fitSpec.embargo + " after it")
-                    + " and the purge before it (rounded up to whole blocks); the other blocks include rows AFTER it (cross-fit, not time-ordered)"
+                    + (fitSpec.purge == null ? ", for a target reading a label the label's horizon on both sides of it (the default purge)" : ", the purge " + fitSpec.purge + " on both sides of it")
+                    + (fitSpec.embargo == null ? "" : " and the embargo " + fitSpec.embargo + " after the purge")
+                    + " (rounded up to whole blocks: 2·purge + embargo + 1 blocks are left out; the engine warns when that is more than half of the input's blocks);"
+                    + " the other blocks include rows AFTER it (cross-fit, not time-ordered)"
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else if (mode == FitMode.fold) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
@@ -2489,11 +2489,15 @@ public final class FeaturePlanCompiler {
                 // the joint solve needs the whole cell table of the lattice: a fit-stage estimator, not a row-local replay
                 diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: joint fits every level of the lattice simultaneously over the fitted input and requires fit.mode static | fold | forward (expanding is row-local: use sequential or backoff)");
             }
-            if (mode == FitMode.fold && groupBy == null) {
+            // a time fold ignores groupBy (every block is a fold): an entity's rows in the other blocks still carry keys
+            // derived from this row's outcome, so groupBy must not silence the guard there
+            if (mode == FitMode.fold && (groupBy == null || fitSpec.isTimeFold())) {
                 for (final String key : ks.keys) {
                     final Ref ref = resolve(key);
                     if (ref != null && isOutcomeLike(ref)) {
-                        diagnostics.error("fit.groupBy.required", loc, "keySet key '" + key + "' derives from a past target; fit.mode fold requires fit.groupBy (entity-level folds)");
+                        diagnostics.error("fit.groupBy.required", loc, "keySet key '" + key + "' derives from a past target; " + (fitSpec.isTimeFold()
+                                ? "fit.fold.by: time cannot keep the entity's rows of the other blocks (whose keys carry this row's outcome) out of its statistics: use fit.fold.by: row with fit.groupBy (entity-level folds)"
+                                : "fit.mode fold requires fit.groupBy (entity-level folds)"));
                     }
                 }
             }
@@ -3058,9 +3062,10 @@ public final class FeaturePlanCompiler {
     }
 
     /**
-     * {@code fit.fold.by: time}: the blocks, and the blocks left out around the row's own — the purge before it (a
-     * training row whose label reaches into the row's block describes the same period; default = the horizon of the
-     * target's label, info {@code fit.fold.purge}) and the embargo after it, both rounded up to whole blocks.
+     * {@code fit.fold.by: time}: the blocks, and the blocks left out around the row's own — the purge on both sides
+     * of it (a training row whose label window overlaps the row's — before or after it — describes the same period;
+     * default = the horizon of the target's label, info {@code fit.fold.purge}) and the embargo beyond the purge after
+     * it, both rounded up to whole blocks.
      */
     private void timeFoldCoordinates(final OutputColumn c, final String targetReference, final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
@@ -3071,12 +3076,13 @@ public final class FeaturePlanCompiler {
             purge = labelHorizon(canonicalOf(targetReference), new HashSet<>());
             if (purge != null && hintedBlocks.add(def.name + "#purge:" + purge)) {
                 diagnostics.info("fit.fold.purge", def.location(), "fit.fold.purge defaults to " + purge + ", the horizon of the label '" + targetReference
-                        + "' (a training row whose label window reaches into a row's block is left out of it); declare fit.fold.purge to override");
+                        + "' (a training row whose label window overlaps a row's, before or after its block, is left out of it); declare fit.fold.purge to override");
             }
         }
-        c.coordinates.put("purgeBlocks", Integer.toString(purge == null || purge.isZero() ? 0 : blocks.windowBlocks(purge)));
+        // covering (shortest-block) rounding, not the nominal one of windowBlocks: a leak guard must never under-cover
+        c.coordinates.put("purgeBlocks", Integer.toString(purge == null || purge.isZero() ? 0 : blocks.coveringBlocks(purge)));
         final Duration embargo = fitSpec.embargo;
-        c.coordinates.put("embargoBlocks", Integer.toString(embargo == null || embargo.isZero() ? 0 : blocks.windowBlocks(embargo)));
+        c.coordinates.put("embargoBlocks", Integer.toString(embargo == null || embargo.isZero() ? 0 : blocks.coveringBlocks(embargo)));
     }
 
     /** The longest future-window horizon a column reads, directly or through the row / anonymous columns it derives from; null when none. */

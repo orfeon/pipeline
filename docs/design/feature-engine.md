@@ -1088,7 +1088,7 @@ merged state of those blocks solves to. `BlockSeries<S>` holds one `Summary` sta
 | `forward` | `(−∞, usable]` — the complete blocks whose inputs are known at predictAt, the row's own block excluded | merge of the prefix |
 | `forward` + `window` | `(usable − windowBlocks, usable]` | merge of the range |
 | `minBlocks` / `minHistory` | — | fewer observed blocks at or before `usable` → the row reads null |
-| `fold` by time | every block but `[b − purgeBlocks, b + embargoBlocks]` around the row's block `b` | the total minus the range |
+| `fold` by time | every block but `[b − purgeBlocks, b + purgeBlocks + embargoBlocks]` around the row's block `b` | the total minus the range |
 
 Only the monoid law is used (a range is *merged*, not differenced), which is what lets a non-invertible family
 — the gathered values of a quantile transform — walk forward exactly. A model that has to be *solved* from the
@@ -1105,7 +1105,11 @@ coordinates (`foldBy`, `purgeBlocks`, `embargoBlocks` — the compiler's `timeFo
 to the horizon of a `direction: future` column the target reads, `labelHorizon`), the level is fitted like a forward
 one, and `FitApplyDoFn.timeFoldStats` returns the totals minus one prefix difference — the encoding levels' series are
 invertible, so the range is differenced. λ is the whole input's (the last entry of the per-block step function), as for
-a hash fold. `estimator: joint` keeps hash folds only (`fit.fold.time.joint`).
+a hash fold. The purge is two-sided (a label window overlaps its neighbours in both directions) and the embargo
+extends the range after it. Only the engine knows the input's block span (the first / last block over the level's
+series), so the leave-out-more-than-half check is a run-time one: `auditTimeFold` counts the rows in
+`feature/timeFold_<level>_excludedOverHalf` and logs one warning per level and DoFn instance.
+`estimator: joint` keeps hash folds only (`fit.fold.time.joint`).
 
 #### 9.6.3 `SummaryFitBlock` — what a fitted block declares
 

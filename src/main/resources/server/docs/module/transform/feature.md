@@ -343,14 +343,23 @@ is a fold:
     fold: {by: time, purge: P20D, embargo: P7D}
 ```
 
-- A row in block `b` reads the statistics of the whole input minus the blocks `[b − purge, b + embargo]`: its own
-  block, the **purge** before it (the rows whose label window reaches into the row's block) and the **embargo** after
-  it. Both are rounded up to whole blocks (`purge: P20D` with 7-day blocks leaves 3 blocks out).
+- A row in block `b` reads the statistics of the whole input minus the blocks `[b − purge, b + purge + embargo]`: its
+  own block, the **purge** on both sides of it (the rows whose label window overlaps the row's — a label window
+  overlaps its neighbours before *and* after it) and the **embargo**, an extra buffer after the purge (e.g. for
+  serially correlated features). Both are rounded up to whole blocks (`purge: P20D` with 7-day blocks leaves 3 blocks
+  out on each side); a calendar bucket counts its shortest length (28 days a month, 90 a quarter, 365 a year), so the
+  range never falls short. Declaring an `embargo` only widens the range — it never replaces the purge.
 - `purge` defaults to the horizon of the label the target reads — a `direction: future` column, directly or through a
   row expression (info `fit.fold.purge`); other targets default to no purge. `embargo` defaults to none.
+- A row leaves out `2 × purge + embargo + 1` blocks. When that is more than half of the input's blocks the
+  out-of-fold statistics read a minority of the data: the engine logs a warning and counts the rows in the counter
+  `feature/timeFold_<level>_excludedOverHalf` (the input's block span is only known at run time) — use smaller blocks
+  or a shorter purge / embargo.
 - `folds` and `groupBy` do not apply (every block is a fold); `purge` / `embargo` without `by: time` are ignored with
   a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`). `estimator: joint` solves hash folds only
-  (`fit.fold.time.joint`).
+  (`fit.fold.time.joint`). A keySet key derived from a past target stays an error (`fit.groupBy.required`) — the
+  entity's rows in the other blocks carry this row's outcome in their key, and `groupBy` does not help here: use
+  `by: row` with `groupBy`.
 - Like every fold the result is a cross-fit (later blocks are read), batch only; the per-block statistics are one
   parallel Combine per (key, block), as in `fit.mode: forward`, and an `artifact` holds the whole-input totals.
 

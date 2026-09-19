@@ -2520,8 +2520,10 @@ public class FeatureTransformTest {
 
     /**
      * {@code fit.fold.by: time}: every 7-day block (counted from the epoch) is a fold; a row reads the whole input minus
-     * its own block, one block of purge before it and one of embargo after it. s1's sessions fall in blocks 2869 (A),
-     * 2870 (B), 2872 (C) and 2874 (D), s2's in 2869 (A) and 2872 (C).
+     * its own block, one block of purge on both sides of it and one of embargo after the purge — {@code [b − 1, b + 2]}.
+     * s1's sessions fall in blocks 2869 (A), 2870 (B), 2872 (C) and 2874 (D), s2's in 2869 (A) and 2872 (C). The input
+     * spans 6 blocks (2869..2874): the rows whose 4 left-out blocks all lie inside it (B/s1, C/s1, C/s2) leave out more
+     * than half of them and are counted by {@code feature/timeFold_<level>_excludedOverHalf} (per level).
      */
     @Test
     public void testTimeFoldFit() throws java.io.IOException {
@@ -2532,11 +2534,11 @@ public class FeatureTransformTest {
             final Map<String, MElement> byKey = new HashMap<>();
             for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
             Assertions.assertEquals(6, byKey.size());
-            // count of the seller's rows outside [b − 1, b + 1], and the share of them that sold
+            // count of the seller's rows outside [b − 1, b + 2], and the share of them that sold
             final Map<String, double[]> expected = Map.of(
                     "A/s1", new double[]{2, 1.0},        // C, D
-                    "B/s1", new double[]{2, 1.0},        // C, D
-                    "C/s1", new double[]{3, 2.0 / 3},    // A, B, D
+                    "B/s1", new double[]{1, 1.0},        // D (C lies in the purge after B)
+                    "C/s1", new double[]{2, 0.5},        // A, B (D lies in the purge + embargo after C)
                     "D/s1", new double[]{3, 2.0 / 3},    // A, B, C
                     "A/s2", new double[]{1, 1.0},        // C
                     "C/s2", new double[]{1, 0.0});       // A
@@ -2547,7 +2549,16 @@ public class FeatureTransformTest {
             }
             return null;
         });
-        pipeline.run();
+        final org.apache.beam.sdk.PipelineResult result = pipeline.run();
+        result.waitUntilFinish();
+        final Map<String, Long> overHalf = new TreeMap<>();
+        for (final org.apache.beam.sdk.metrics.MetricResult<Long> counter : result.metrics().queryMetrics(org.apache.beam.sdk.metrics.MetricsFilter.builder()
+                .addNameFilter(org.apache.beam.sdk.metrics.MetricNameFilter.inNamespace("feature")).build()).getCounters()) {
+            final String name = counter.getName().getName();
+            if (name.startsWith("timeFold_") && name.endsWith("_excludedOverHalf")) overHalf.merge(name, counter.getAttempted(), Long::sum);
+        }
+        // per level (the count level and the target's): B/s1, C/s1, C/s2
+        Assertions.assertEquals(Map.of("timeFold_enc__seller_id__n_excludedOverHalf", 3L, "timeFold_enc__seller_id__e2__n_excludedOverHalf", 3L), overHalf);
     }
 
     /**

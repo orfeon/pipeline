@@ -275,12 +275,12 @@ public class FeatureSpec implements Serializable {
         /**
          * {@code fit.fold.by}: {@code row} (default — {@code folds} hash folds of the row identity or the groupBy entity)
          * or {@code time} — every time block ({@code fit.blocks}) is a fold, and a row reads the totals minus its own
-         * block, the {@code purge} before it and the {@code embargo} after it.
+         * block, the {@code purge} on both sides of it and the {@code embargo} beyond the purge after it.
          */
         public String foldBy;
-        /** {@code fit.fold.purge}: the span before the row's block left out (default: the target label's horizon). */
+        /** {@code fit.fold.purge}: the span left out on both sides of the row's block (default: the target label's horizon). */
         public Duration purge;
-        /** {@code fit.fold.embargo}: the span after the row's block left out (default none). */
+        /** {@code fit.fold.embargo}: the extra span left out after the purge that follows the row's block (default none). */
         public Duration embargo;
 
         public boolean isTimeFold() {
@@ -303,8 +303,11 @@ public class FeatureSpec implements Serializable {
             }
             final Duration purge = Json.duration(fold, "purge", null, diagnostics, loc);
             final Duration embargo = Json.duration(fold, "embargo", null, diagnostics, loc);
-            if (purge != null) spec.purge = purge;
-            if (embargo != null) spec.embargo = embargo;
+            if (purge != null && purge.isNegative() || embargo != null && embargo.isNegative()) {
+                diagnostics.error("fit.fold.purge", loc, "fit.fold.purge / embargo must not be negative: purge=" + purge + " embargo=" + embargo);
+            }
+            if (purge != null && !purge.isNegative()) spec.purge = purge;
+            if (embargo != null && !embargo.isNegative()) spec.embargo = embargo;
             for (final String key : fold.keySet()) {
                 if (!List.of("by", "purge", "embargo").contains(key)) {
                     diagnostics.error("fit.fold", loc, "unknown fit.fold key '" + key + "' (accepted: by, purge, embargo)");
