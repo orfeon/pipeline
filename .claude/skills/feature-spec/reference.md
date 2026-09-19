@@ -177,8 +177,14 @@ the gap; add `sinceEvent` `unit: [days]` for the gap). `lift.exprs` entries are 
 (`as`), since an unnamed one is `<name>__e{n}`, numbered across the whole spec. `timeAugment` adds the constant
 channel `time` (components 1.. only), shifted like the latest of the block's channels. Every measure keeps no history
 without a window; `legendre` re-reads its window under `maxAge`. At most 64 component columns per block
-(windows × halflifes × channels × components). Channels must be numeric / bool. `compress` and
-`family: bilinear` are not implemented.
+(windows × halflifes × channels × components). Channels must be numeric / bool.
+
+`dynamics: {family: bilinear, type: logsignature, depth: 1..4 (default 2), decayBy}` summarises the joint path
+through all channels (+ `timeAugment` = the event's clock position as the last channel): one column per Lyndon word
+`<name>_<w>_logsig_<word>`, channels lettered a, b, c… in lift order (`a` = total increment of channel a, `ab` = the
+Lévy area of a and b). Null with fewer than two complete points; bounded windows re-read their events.
+`compress: {svd: {rank, center, standardize, outputs, fit}, keep: false}` fits an svd over the block's component
+columns: scores `<name>_svd_<k>`, the components become intermediate unless `keep: true`.
 
 `as:` on an op names the field segment (or replaces the op suffix for `sinceEvent` / `countMatch`).
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and

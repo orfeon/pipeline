@@ -165,7 +165,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   contribution `Event(millis, value)` that is never null (a missing value advances the events clock), read with
   `Summary.readAt(state, readout, now)` (the only position-dependent read), and `project` as the direct
   projection the scan path and the tests use. exponential / fourier are groups, legendre a monoid (it rescales
-  with its span: re-read under `maxAge`). `OperatorCatalog.summary(stat)` maps a
+  with its span: re-read under `maxAge`). `Signature` is the `bilinear` family (coordinate `family: bilinear`):
+  the log-signature of the joint path through all channels in the truncated tensor algebra (`exp` / `multiply` /
+  `inverse` / `log`, Lyndon-word readouts named by channel letters), contribution `Event(millis, values)` (null when
+  a channel is missing), a monoid whose `merge` is Chen's identity — bounded windows re-read. `compress: {svd}` is
+  compile-time only: `expandCompress` builds a synthetic svd block over the component columns. `trend` folds the
+  `REGRESSION` family over its tail. `OperatorCatalog.summary(stat)` maps a
   statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
   families are the per-block Combine state of the fit stage (`Svd.SUMMARY`, `QuantileTransform.VALUES` —
   both monoids without inverse) and are meant to become the prefix-scan state and the streaming

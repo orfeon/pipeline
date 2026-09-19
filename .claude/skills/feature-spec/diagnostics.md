@@ -171,10 +171,13 @@ not expand because another block failed).
 | `sequence.lift.anonymous` | info | an unnamed `lift.exprs` entry is named `<block>__e{n}` by a spec-wide counter (renumbers when another expression is added / removed): write `{expr: "...", as: name}` |
 | `sequence.lift.name` | error | two channels of a block share a name (a field and an `as`, or two `as`): set a distinct `as` |
 | `sequence.summarize` | error | the general form needs `summarize: {dynamics: {family: lti, measure: ...}}` |
-| `sequence.dynamics.family` | error | only `family: lti` is implemented (`bilinear` log-signatures and `probabilistic` are not) |
+| `sequence.dynamics.family` | error | `family` is `lti` or `bilinear` (`probabilistic` is not implemented) |
+| `sequence.dynamics.type` / `sequence.dynamics.depth` | error | bilinear takes `type: logsignature` and `depth` 1..4 |
+| `sequence.dynamics.channels` | warning | a log-signature of one channel is its total increment only: lift two channels or add `timeAugment` |
+| `sequence.dynamics.logsignature` | info | the letter legend of the log-signature columns (a = the first lift channel, …) |
 | `sequence.dynamics.measure` / `.order` / `.halflife` / `.period` / `.decayBy` / `.parameter` | error | `measure` exponential / fourier / legendre; order 0..16 (legendre 0..8, fourier from 1); exponential needs `halflife`, legendre has none; fourier needs `period`; `decayBy` events / time / a declared calendar (`clock.unknown` otherwise); no other keys |
 | `sequence.dynamics.size` | error | the block emits more than 64 component columns: lower `order`, fewer halflifes / windows, or split the channels over blocks |
-| `sequence.compress` | error | `compress` is not implemented: feed the component columns to a population `svd` block (`fields: [...]`) |
+| `sequence.compress` | error / info | `compress` is `{svd: {rank, center, standardize, outputs, fit}, keep}` with two or more component columns; the info names the svd block (`<name>_svd`) |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
 | `sequence.regression.against` / `.func` / `.lag` | error | `regression` needs a numeric `against` field (the key is `against`, a bare `on` is a YAML boolean); funcs are cov / corr / beta / intercept / r2; `lag` ≥ 0 (swap the fields for the other direction) |
 | `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |

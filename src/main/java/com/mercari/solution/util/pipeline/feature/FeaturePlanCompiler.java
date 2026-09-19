@@ -1320,13 +1320,23 @@ public final class FeaturePlanCompiler {
                 }
             }
         }
+        if (form != null && form.compress() != null) expandCompress(def, form, computeAt);
     }
 
     /** Upper bound on the component columns one general-form block emits (windows × halflifes × channels × components). */
     static final int MAX_DYNAMICS_COLUMNS = 64;
 
-    /** The validated general form of a sequence block: channels (a null reference = the constant time channel) and the dynamics. */
-    private record GeneralForm(List<Channel> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period, String decayBy) {}
+    /**
+     * The validated general form of a sequence block: channels (a null reference = the constant time channel), the
+     * dynamics ({@code lti}: measure / order / halflifes / period; {@code bilinear}: the log-signature depth) and the
+     * component columns the windows emitted, which {@code compress} reads.
+     */
+    private record GeneralForm(String family, List<Channel> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period,
+                               String decayBy, int depth, boolean timeAugment, JsonObject compress, List<OutputColumn> components) {
+        boolean bilinear() {
+            return "bilinear".equals(family);
+        }
+    }
 
     /** A lift channel: the column it reads ({@code null} = the constant time channel) and its name segment. */
     private record Channel(String reference, String name) {}
@@ -1338,58 +1348,83 @@ public final class FeaturePlanCompiler {
     private GeneralForm generalForm(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
         boolean valid = true;
-        if (def.compress) {
-            diagnostics.error("sequence.compress", loc, "compress is not implemented yet: feed the component columns to a population svd block (fields: [...])");
-            valid = false;
-        }
         if (!def.summarize || def.dynamics == null) {
-            diagnostics.error("sequence.summarize", loc, "the general form requires summarize: {dynamics: {family: lti, measure: exponential | legendre | fourier, ...}}");
+            diagnostics.error("sequence.summarize", loc, "the general form requires summarize: {dynamics: {family: lti | bilinear, ...}}");
             return null;
         }
         final DynamicsSpec d = def.dynamics;
-        if (!"lti".equals(d.family)) {
+        if (!"lti".equals(d.family) && !"bilinear".equals(d.family)) {
             diagnostics.error("sequence.dynamics.family", loc, d.family == null
-                    ? "summarize.dynamics requires 'family' (available: lti)"
-                    : "dynamics family '" + d.family + "' is " + (List.of("bilinear", "probabilistic").contains(d.family) ? "not implemented yet" : "unknown") + " (available: lti)");
+                    ? "summarize.dynamics requires 'family' (available: lti | bilinear)"
+                    : "dynamics family '" + d.family + "' is " + ("probabilistic".equals(d.family) ? "not implemented yet" : "unknown") + " (available: lti | bilinear)");
             return null;
         }
+        final boolean bilinear = "bilinear".equals(d.family);
         if (!d.unknown.isEmpty()) {
-            diagnostics.error("sequence.dynamics.parameter", loc, "unknown lti parameter(s) " + d.unknown + " (accepted: measure, order, halflife, period, decayBy)");
+            diagnostics.error("sequence.dynamics.parameter", loc, "unknown " + d.family + " parameter(s) " + d.unknown + " (accepted: "
+                    + (bilinear ? "type, depth, decayBy" : "measure, order, halflife, period, decayBy") + ")");
             valid = false;
         }
-        final Dynamics.Measure measure;
-        try {
-            measure = Dynamics.Measure.valueOf(String.valueOf(d.measure));
-        } catch (final IllegalArgumentException e) {
-            diagnostics.error("sequence.dynamics.measure", loc, "lti requires 'measure': exponential | legendre | fourier (got " + d.measure + ")");
-            return null;
-        }
-        final int order = d.order != null ? d.order : switch (measure) {
-            case exponential -> 0;
-            case fourier -> 1;
-            case legendre -> 3;
-        };
-        final int minOrder = measure == Dynamics.Measure.fourier ? 1 : 0;
-        if (order < minOrder || order > Dynamics.maxOrder(measure)) {
-            diagnostics.error("sequence.dynamics.order", loc, measure + " order must be in [" + minOrder + ", " + Dynamics.maxOrder(measure) + "]: " + order);
-            valid = false;
-        }
-        if (d.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
-            diagnostics.error("sequence.dynamics.halflife", loc, "halflife must be a positive number (clock units): " + d.halflife);
-            valid = false;
-        } else if (measure == Dynamics.Measure.exponential && d.halflife.isEmpty()) {
-            diagnostics.error("sequence.dynamics.halflife", loc, "the exponential measure requires 'halflife' (clock units; one state per value)");
-            valid = false;
-        } else if (measure == Dynamics.Measure.legendre && !d.halflife.isEmpty()) {
-            diagnostics.error("sequence.dynamics.halflife", loc, "legendre has no halflife: its measure is uniform over the window's span");
-            valid = false;
-        }
-        if (measure == Dynamics.Measure.fourier && (d.period == null || !(d.period > 0) || d.period.isInfinite())) {
-            diagnostics.error("sequence.dynamics.period", loc, "fourier requires a positive 'period' (clock units) for its first harmonic: " + d.period);
-            valid = false;
-        } else if (measure != Dynamics.Measure.fourier && d.period != null) {
-            diagnostics.error("sequence.dynamics.period", loc, "period is a fourier parameter (measure " + measure + ")");
-            valid = false;
+        Dynamics.Measure measure = null;
+        int order = 0;
+        int depth = 0;
+        if (bilinear) {
+            final List<String> foreign = new ArrayList<>();
+            if (d.measure != null) foreign.add("measure");
+            if (d.order != null) foreign.add("order");
+            if (!d.halflife.isEmpty()) foreign.add("halflife");
+            if (d.period != null) foreign.add("period");
+            if (!foreign.isEmpty()) {
+                diagnostics.error("sequence.dynamics.parameter", loc, foreign + " are lti parameters: a bilinear summary takes type, depth, decayBy");
+                valid = false;
+            }
+            if (d.type != null && !"logsignature".equals(d.type)) {
+                diagnostics.error("sequence.dynamics.type", loc, "bilinear type must be logsignature: " + d.type);
+                valid = false;
+            }
+            depth = d.depth == null ? 2 : d.depth;
+            if (depth < 1 || depth > Signature.MAX_DEPTH) {
+                diagnostics.error("sequence.dynamics.depth", loc, "logsignature depth must be in [1, " + Signature.MAX_DEPTH + "]: " + depth);
+                valid = false;
+            }
+        } else {
+            if (d.type != null || d.depth != null) {
+                diagnostics.error("sequence.dynamics.parameter", loc, "type / depth are bilinear parameters: an lti summary takes measure, order, halflife, period, decayBy");
+                valid = false;
+            }
+            try {
+                measure = Dynamics.Measure.valueOf(String.valueOf(d.measure));
+            } catch (final IllegalArgumentException e) {
+                diagnostics.error("sequence.dynamics.measure", loc, "lti requires 'measure': exponential | legendre | fourier (got " + d.measure + ")");
+                return null;
+            }
+            order = d.order != null ? d.order : switch (measure) {
+                case exponential -> 0;
+                case fourier -> 1;
+                case legendre -> 3;
+            };
+            final int minOrder = measure == Dynamics.Measure.fourier ? 1 : 0;
+            if (order < minOrder || order > Dynamics.maxOrder(measure)) {
+                diagnostics.error("sequence.dynamics.order", loc, measure + " order must be in [" + minOrder + ", " + Dynamics.maxOrder(measure) + "]: " + order);
+                valid = false;
+            }
+            if (d.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
+                diagnostics.error("sequence.dynamics.halflife", loc, "halflife must be a positive number (clock units): " + d.halflife);
+                valid = false;
+            } else if (measure == Dynamics.Measure.exponential && d.halflife.isEmpty()) {
+                diagnostics.error("sequence.dynamics.halflife", loc, "the exponential measure requires 'halflife' (clock units; one state per value)");
+                valid = false;
+            } else if (measure == Dynamics.Measure.legendre && !d.halflife.isEmpty()) {
+                diagnostics.error("sequence.dynamics.halflife", loc, "legendre has no halflife: its measure is uniform over the window's span");
+                valid = false;
+            }
+            if (measure == Dynamics.Measure.fourier && (d.period == null || !(d.period > 0) || d.period.isInfinite())) {
+                diagnostics.error("sequence.dynamics.period", loc, "fourier requires a positive 'period' (clock units) for its first harmonic: " + d.period);
+                valid = false;
+            } else if (measure != Dynamics.Measure.fourier && d.period != null) {
+                diagnostics.error("sequence.dynamics.period", loc, "period is a fourier parameter (measure " + measure + ")");
+                valid = false;
+            }
         }
         final String decayBy = d.decayBy == null ? "events" : d.decayBy;
         if (!Clock.BUILT_IN.contains(decayBy) && clock(decayBy, loc, "decayBy") == null) valid = false;
@@ -1422,12 +1457,12 @@ public final class FeaturePlanCompiler {
             diagnostics.info("sequence.lift.anonymous", loc, "an unnamed lift expression is named by the spec-wide anonymous counter ("
                     + def.name + "__e{n}), which renumbers when an earlier expression is added or removed: name it with {expr: \"...\", as: name}");
         }
-        final int perChannel = Dynamics.dimension(measure, order);
+        final int perChannel = bilinear ? 0 : Dynamics.dimension(measure, order);
         if (def.lift.timeAugment) {
-            if (perChannel == 1) {
+            if (!bilinear && perChannel == 1) {
                 diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
             }
-            channels.add(new Channel(null, "time"));
+            if (!bilinear) channels.add(new Channel(null, "time"));
             // the time channel reads no field: it takes the most delayed channel's availability, so it describes the
             // events the value channels see (a shifted window) rather than the events the entity had
             final Set<AvailableAt> availabilities = new LinkedHashSet<>();
@@ -1435,7 +1470,7 @@ public final class FeaturePlanCompiler {
                 final Ref ref = channel.reference() == null ? null : resolve(channel.reference());
                 if (ref != null) availabilities.add(ref.availableAt() == null ? AvailableAt.atEventTime() : ref.availableAt());
             }
-            if (availabilities.size() > 1) {
+            if (!bilinear && availabilities.size() > 1) {
                 diagnostics.info("sequence.lift.align", loc, "the lift channels are available at different times " + availabilities
                         + ": the time channel follows the latest one (its window is shifted like that channel's)");
             }
@@ -1447,23 +1482,59 @@ public final class FeaturePlanCompiler {
                 valid = false;
             }
         }
-        final int columns = Math.max(1, def.windows.size()) * Math.max(1, d.halflife.size())
-                * (perChannel * channels.size() - (def.lift.timeAugment ? 1 : 0));
+        final int columns;
+        if (bilinear) {
+            // one joint path over every channel (+ time): a column per Lyndon word up to the depth
+            final int letters = channels.size() + (def.lift.timeAugment ? 1 : 0);
+            if (letters < 2) {
+                diagnostics.warning("sequence.dynamics.channels", loc, "a log-signature of one channel is its total increment only: lift two channels or add timeAugment");
+            }
+            if (letters > 26) {
+                diagnostics.error("sequence.dynamics.size", loc, "a log-signature takes at most 26 channels (words are named by letters): " + letters);
+                valid = false;
+            }
+            columns = Math.max(1, def.windows.size()) * Signature.lyndonWords(Math.min(letters, 26), Math.max(1, Math.min(depth, Signature.MAX_DEPTH))).size();
+        } else {
+            columns = Math.max(1, def.windows.size()) * Math.max(1, d.halflife.size())
+                    * (perChannel * channels.size() - (def.lift.timeAugment ? 1 : 0));
+        }
         if (columns > MAX_DYNAMICS_COLUMNS) {
-            diagnostics.error("sequence.dynamics.size", loc, "the block would emit " + columns + " component columns (windows × halflifes × channels × "
-                    + perChannel + " components), over " + MAX_DYNAMICS_COLUMNS + ": lower the order or split the channels over several blocks");
+            diagnostics.error("sequence.dynamics.size", loc, "the block would emit " + columns + " component columns (" + (bilinear
+                    ? "windows × the Lyndon words of the channels up to depth " + depth : "windows × halflifes × channels × " + perChannel + " components")
+                    + "), over " + MAX_DYNAMICS_COLUMNS + ": lower the " + (bilinear ? "depth" : "order") + " or split the channels over several blocks");
             valid = false;
         }
-        return valid ? new GeneralForm(channels, measure, order, d.halflife, d.period, decayBy) : null;
+        JsonObject compress = null;
+        if (def.compress) {
+            compress = parseJsonObject(def.compressJson);
+            if (compress == null || !compress.has("svd") || !compress.get("svd").isJsonObject()) {
+                diagnostics.error("sequence.compress", loc, "compress must be {svd: {rank, center, standardize, fit}, keep: false}");
+                valid = false;
+            } else {
+                for (final String key : compress.keySet()) {
+                    if (!List.of("svd", "keep").contains(key)) {
+                        diagnostics.error("sequence.compress", loc, "unknown compress key '" + key + "' (accepted: svd, keep)");
+                        valid = false;
+                    }
+                }
+            }
+        }
+        return valid ? new GeneralForm(d.family, channels, measure, order, d.halflife, d.period, decayBy, depth, def.lift.timeAugment,
+                compress, new ArrayList<>()) : null;
     }
 
     /**
      * One window of a general-form block: per channel and halflife one running state (the {@code stateKey} its component
      * columns share) and one FLOAT64 column per component, {@code {block}_{window}_{channel}_{measure}_{component}}.
-     * The constant time channel skips its component 0 (always 1).
+     * The constant time channel skips its component 0 (always 1). A {@code bilinear} summary is one path over every
+     * channel: one state per window and a column per Lyndon word, {@code {block}_{window}_logsig_{word}}.
      */
     private void expandDynamics(final FeatureDef def, final EntityDef entity, final Window window, final References filterRefs,
                                 final String reducedKey, final GeneralForm form, final AvailableAt computeAt) {
+        if (form.bilinear()) {
+            expandSignature(def, entity, window, filterRefs, reducedKey, form, computeAt);
+            return;
+        }
         final List<Double> halflifes = form.halflifes().isEmpty() ? Collections.singletonList(null) : form.halflifes();
         final List<String> valueChannels = form.channels().stream().map(Channel::reference).filter(Objects::nonNull).toList();
         for (final Channel ch : form.channels()) {
@@ -1492,9 +1563,71 @@ public final class FeaturePlanCompiler {
                         addPastInput(c, channel);
                     }
                     finishSequence(c, def, entity, window, filterRefs, reducedKey, null, channel == null ? valueChannels : List.of());
+                    form.components().add(c);
                 }
             }
         }
+    }
+
+    /** One window of a {@code bilinear} block: the log-signature of the joint path, a column per Lyndon word (channels a, b, …). */
+    private void expandSignature(final FeatureDef def, final EntityDef entity, final Window window, final References filterRefs,
+                                 final String reducedKey, final GeneralForm form, final AvailableAt computeAt) {
+        final List<String> fields = form.channels().stream().map(ch -> canonicalOf(ch.reference())).toList();
+        final int letters = fields.size() + (form.timeAugment() ? 1 : 0);
+        final List<int[]> words = Signature.lyndonWords(letters, form.depth());
+        final String stateKey = def.name + "_" + window.token() + "_logsig";
+        if (hintedBlocks.add(def.name + "#logsigLetters")) {
+            final List<String> legend = new ArrayList<>();
+            for (int i = 0; i < form.channels().size(); i++) legend.add((char) ('a' + i) + "=" + form.channels().get(i).name());
+            if (form.timeAugment()) legend.add((char) ('a' + fields.size()) + "=time (" + form.decayBy() + ")");
+            diagnostics.info("sequence.dynamics.logsignature", def.location(), "log-signature columns are named by Lyndon words over the channels " + legend
+                    + " (e.g. _ab = the Lévy area of a and b); an unbounded window folds each event in, a bounded one re-reads its events");
+        }
+        for (int w = 0; w < words.size(); w++) {
+            final OutputColumn c = newColumn(def.name, Scope.sequence, "dynamics", stateKey + "_" + Signature.wordName(words.get(w)), Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("family", "bilinear");
+            c.coordinates.put("type", "logsignature");
+            c.coordinates.put("depth", Integer.toString(form.depth()));
+            c.coordinates.put("word", Integer.toString(w));
+            c.coordinates.put("fields", String.join(",", fields));
+            if (form.timeAugment()) c.coordinates.put("timeAugment", "true");
+            c.coordinates.put("decayBy", form.decayBy());
+            if (clocks.containsKey(form.decayBy())) c.clocks.put(form.decayBy(), clocks.get(form.decayBy()));
+            c.coordinates.put("stateKey", stateKey);
+            for (final Channel ch : form.channels()) addPastInput(c, ch.reference());
+            finishSequence(c, def, entity, window, filterRefs, reducedKey, null);
+            form.components().add(c);
+        }
+    }
+
+    /**
+     * {@code compress: {svd: {...}}}: a population svd block {@code {block}_svd} over every component column of the
+     * general form (all windows), fitted like any svd block (its own {@code fit}, else the top level). The components
+     * become intermediate unless {@code keep: true}.
+     */
+    private void expandCompress(final FeatureDef def, final GeneralForm form, final AvailableAt computeAt) {
+        final JsonObject svd = form.compress().getAsJsonObject("svd");
+        final FeatureDef compress = new FeatureDef();
+        compress.name = def.name + "_svd";
+        compress.scope = Scope.population;
+        compress.type = "svd";
+        compress.inputs = form.components().stream().map(c -> c.canonicalName).toList();
+        compress.rank = SourceContract.Json.integer(svd, "rank");
+        compress.center = svd.has("center") && !svd.get("center").isJsonNull() ? SourceContract.Json.bool(svd, "center", true) : null;
+        compress.standardize = SourceContract.Json.bool(svd, "standardize", false);
+        compress.outputs = SourceContract.Json.strings(svd, "outputs");
+        compress.fitJson = svd.has("fit") && svd.get("fit").isJsonObject() ? svd.get("fit").toString() : null;
+        compress.validFor = def.validFor;
+        if (compress.inputs.size() < 2) {
+            diagnostics.error("sequence.compress", def.location(), "compress needs two or more component columns (the block emits " + compress.inputs.size() + ")");
+            return;
+        }
+        expandSvd(compress, computeAt);
+        if (!SourceContract.Json.bool(form.compress(), "keep", false)) {
+            for (final OutputColumn c : form.components()) c.intermediate = true;
+        }
+        diagnostics.info("sequence.compress", def.location(), "compress fits an svd of the " + compress.inputs.size() + " component columns as block " + compress.name
+                + (SourceContract.Json.bool(form.compress(), "keep", false) ? "; the components are emitted too (keep: true)" : "; the components are intermediate (keep: true emits them)"));
     }
 
     /** Validated weightBy references per (block, expression): an op is expanded once per window, reported once. */

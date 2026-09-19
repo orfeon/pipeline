@@ -313,8 +313,8 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   unbounded scan), `fourier` (rotation per harmonic, optionally damped) — both groups — and `legendre` (power
   sums about the first event, rescaled to the window's span at read; a monoid, so a `maxAge` window re-reads).
   `Dynamics.project` is the direct projection of a window: the scan path (`maxEvents`, general filters) and the
-  reference of `DynamicsTest` / `SequenceIncrementalTest`. `compress` and the `bilinear` family (log-signatures)
-  are rejected at compile time (not implemented yet).
+  reference of `DynamicsTest` / `SequenceIncrementalTest`. The `bilinear` family (log-signatures, `Signature`) and
+  `compress` are in §9.6.6.
 
 ### 4.4 population (encoding) — expanding fits map onto the time-ordered replay
 
@@ -678,8 +678,7 @@ roughly linear in the input).
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); the general sequence
-form's `compress` stage and `bilinear` / `probabilistic` dynamics (`sequence.compress`,
-`sequence.dynamics.family`; the `lti` components are scalar columns an `svd` block can take as `fields`); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
+form's `probabilistic` dynamics (`sequence.dynamics.family`); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
 bounded-size) per-key quantile / distribution stats in static / fold — quantileTransform, static and forward,
 keeps the exact values (decision 11); the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
@@ -1184,8 +1183,20 @@ component is a weighted mean:
   coefficients `C(j,k) C(j+k,k)` grow); a block emits at most 64 component columns (`sequence.dynamics.size`).
 - **Sugar.** `ewma` columns carry `measure: exponential, order: 0, component: 0`; the old formula
   (`0.5^(steps / halflife)` from the current row) agrees to 1e-12 (`DynamicsTest.testEwmaMatchesTheFormerFormula`).
-  A NaN / ±∞ value is now missing for `ewma` as for every aggregate. `trend` stays a scan over its last k events
-  (its regression-on-index form is a `REGRESSION` readout, planned with the bilinear family).
+  A NaN / ±∞ value is now missing for `ewma` as for every aggregate. `trend` stays a scan over its last k events but
+  folds them into the `REGRESSION` family (the beta of the values on their order) — one arithmetic with the
+  `regression` op, equal to the former slope (`SequenceIncrementalTest.testTrendIsTheRegressionBeta`).
+- **`bilinear` — log-signatures** (`Signature`, a `Summary`): the path through the lifted channels (every channel
+  present; `timeAugment` appends the event's clock position) in the truncated tensor algebra, `S = exp(Δ₁) ⊗ exp(Δ₂) ⊗
+  …`, read as the coefficients of `log S` at the Lyndon words (a basis of the free Lie algebra; the coordinate map is
+  triangular, so the columns determine the log-signature). One state per window for all channels, a column per word.
+  Chen's identity is the monoid: `merge` joins two paths by the increment between them, `S(X) ⊗ exp(y₀ − x_n) ⊗
+  S(Y)`; the reversed path is the inverse (`SignatureTest`). Evicting the oldest point would remove the increment to
+  the *next* point, which a per-event contribution cannot carry, so the family is not invertible: an unbounded window
+  folds once per event, a bounded one re-reads (the legendre rule). Depth ≤ 4, at most 64 columns per block.
+- **`compress: {svd}`**: the compiler expands a population svd block `{block}_svd` over the block's component columns
+  (every window; `expandCompress` → `expandSvd` with a synthetic definition) and marks the components intermediate
+  unless `keep: true` — the "Compress" stage is an ordinary svd fit, static or forward.
 
 #### 9.6.7 Clock — windows, decay and blocks on a calendar
 
@@ -1210,8 +1221,6 @@ the same clock (`clock.fit`), where it is counted in blocks.
 
 #### 9.6.8 Planned on the same line (design positions, not implemented)
 
-- **Dynamics `bilinear`** (log-signature; Chen's identity makes it a group) and `compress: {svd}` wired to the
-  component columns; `timeAugment` as a path channel (the increments of time) for signatures.
 - **Ratings**: a sequence op under the global key whose state is a map entity → (μ, σ), updated when a group of
   same-timestamp rows closes (the `pending` flush). Order-dependent, hence replay-only — declared non-mergeable.
 - **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold and

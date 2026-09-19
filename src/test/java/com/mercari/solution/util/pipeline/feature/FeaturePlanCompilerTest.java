@@ -422,7 +422,7 @@ public class FeaturePlanCompilerTest {
         final String exp = "{family: lti, measure: exponential, order: 2, halflife: [7, 30.5], decayBy: time}";
         Assertions.assertTrue(spec.contains(exp));
         final Map<String, String> rejected = new java.util.LinkedHashMap<>();
-        rejected.put("{family: bilinear, type: logsignature, depth: 2}", "sequence.dynamics.family");
+        rejected.put("{family: probabilistic}", "sequence.dynamics.family");
         rejected.put("{measure: exponential, halflife: [7]}", "sequence.dynamics.family");
         rejected.put("{family: lti, measure: laplace, halflife: [7]}", "sequence.dynamics.measure");
         rejected.put("{family: lti, measure: exponential, order: 2}", "sequence.dynamics.halflife");
@@ -3026,5 +3026,68 @@ public class FeaturePlanCompilerTest {
             final FeaturePlan bad = compile(sources, e.getKey());
             Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e.getValue() + "\n" + bad.describe());
         }
+    }
+
+    /**
+     * {@code family: bilinear}: one log-signature state per window over every channel, a column per Lyndon word (named by
+     * channel letters); {@code compress: {svd}} fits an svd block over the component columns, which become intermediate.
+     */
+    @Test
+    public void testLogSignatureAndCompress() {
+        final String block = """
+                  - name: path
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 10}]
+                    lift: {fields: [start_price, quantity], timeAugment: true}
+                    summarize:
+                      dynamics: {family: bilinear, type: logsignature, depth: 2, decayBy: time}
+                    compress:
+                      svd: {rank: 2}
+                """;
+        final String anchor = "  - name: vs_market\n";
+        final String spec = SPEC.replace(anchor, block + anchor);
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        // three letters (a = start_price, b = quantity, c = time), depth 2: a b c ab ac bc
+        final List<String> components = plan.getColumns().stream().filter(c -> "path".equals(c.getBlock()) && "dynamics".equals(c.getOperator()))
+                .map(OutputColumn::getCanonicalName).toList();
+        Assertions.assertEquals(List.of("path_n10_logsig_a", "path_n10_logsig_b", "path_n10_logsig_c", "path_n10_logsig_ab", "path_n10_logsig_ac", "path_n10_logsig_bc"), components);
+        final OutputColumn area = column(plan, "path_n10_logsig_ab");
+        Assertions.assertEquals("bilinear", area.getCoordinates().get("family"));
+        Assertions.assertEquals("start_price,quantity", area.getCoordinates().get("fields"));
+        Assertions.assertEquals("true", area.getCoordinates().get("timeAugment"));
+        Assertions.assertEquals("path_n10_logsig", area.getCoordinates().get("stateKey"));
+        Assertions.assertEquals(Set.of("start_price", "quantity"), area.getPastInputs());
+        Assertions.assertTrue(area.isIntermediate(), "compressed away");
+        Assertions.assertTrue(hasCode(plan, "sequence.dynamics.logsignature"));
+        // the svd block over the six components: two score columns, emitted
+        final OutputColumn score = column(plan, "path_svd_1");
+        Assertions.assertEquals("svd", score.getOperator());
+        Assertions.assertEquals(String.join(",", components), score.getCoordinates().get("fields"));
+        Assertions.assertFalse(score.isIntermediate());
+        Assertions.assertTrue(hasCode(plan, "sequence.compress"));
+        // keep: true emits the components too
+        Assertions.assertFalse(column(compile(SOURCES, spec.replace("svd: {rank: 2}", "svd: {rank: 2}\n      keep: true")), "path_n10_logsig_ab").isIntermediate());
+
+        final String dynamics = "dynamics: {family: bilinear, type: logsignature, depth: 2, decayBy: time}";
+        final Map<String, String> rejected = new java.util.LinkedHashMap<>();
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, type: signature, depth: 2}"), "sequence.dynamics.type");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, depth: 5}"), "sequence.dynamics.depth");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, depth: 2, halflife: [3]}"), "sequence.dynamics.parameter");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: lti, measure: exponential, halflife: [3], depth: 2}"), "sequence.dynamics.parameter");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: probabilistic}"), "sequence.dynamics.family");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, depth: 4}").replace("lift: {fields: [start_price, quantity], timeAugment: true}",
+                "lift: {fields: [start_price, quantity, current_bid_t10], timeAugment: true}"), "sequence.dynamics.size");
+        rejected.put(spec.replace("      svd: {rank: 2}", "      pca: {rank: 2}"), "sequence.compress");
+        for (final Map.Entry<String, String> e : rejected.entrySet()) {
+            Assertions.assertNotEquals(spec, e.getKey(), e.getValue());
+            final FeaturePlan bad = compile(SOURCES, e.getKey());
+            Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e.getValue() + "\n" + bad.describe());
+        }
+        // one channel: its total increment only
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("lift: {fields: [start_price, quantity], timeAugment: true}", "lift: {fields: [start_price]}")
+                .replace("    compress:\n      svd: {rank: 2}\n", "")), "sequence.dynamics.channels"));
     }
 }
