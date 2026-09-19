@@ -25,8 +25,8 @@ public class OutputColumn implements Serializable {
         /** availableAt > computeAt; only allowed as a consumed intermediate */ violation,
         /**
          * a label: post-event by construction (a {@code direction: future} window) or by declaration
-         * ({@code output.roles.label}); emitted with the role {@code label}, never a feature — a feature reading it
-         * is a violation
+         * ({@code output.roles.label}, or {@code output.roles.weight} — a training weight such as the uniqueness of
+         * overlapping labels); emitted, never a feature — a feature reading it is a violation
          */ label
     }
 

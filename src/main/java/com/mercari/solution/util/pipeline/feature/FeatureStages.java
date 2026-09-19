@@ -595,15 +595,26 @@ public final class FeatureStages {
         }
     }
 
-    /** fit.mode forward geometry of a level (from the column coordinates, see FeaturePlanCompiler.forwardCoordinates). */
-    record Forward(ForwardBlocks blocks, int minBlocks, long lagMillis, int windowBlocks, String blockField, String blockFieldType) implements Serializable {
+    /**
+     * The per-block geometry of a level (from the column coordinates, see FeaturePlanCompiler.forwardCoordinates /
+     * timeFoldCoordinates): {@code fit.mode forward} reads the blocks before the row's usable one; a time fold
+     * ({@code fit.mode fold} with {@code fit.fold.by: time}) reads every block but the row's own, the
+     * {@code purgeBlocks} on both sides of it and the {@code embargoBlocks} beyond the purge after it — both from the
+     * same per-(key, block) series.
+     */
+    record Forward(ForwardBlocks blocks, int minBlocks, long lagMillis, int windowBlocks, String blockField, String blockFieldType,
+                   boolean timeFold, int purgeBlocks, int embargoBlocks) implements Serializable {
         static Forward of(final Map<String, String> coordinates) {
-            if (!"forward".equals(coordinates.get("fit"))) return null;
+            final boolean timeFold = "fold".equals(coordinates.get("fit")) && "time".equals(coordinates.get("foldBy"));
+            if (!"forward".equals(coordinates.get("fit")) && !timeFold) return null;
             return new Forward(ForwardBlocks.fromCoordinates(coordinates.get("blockBucket"), coordinates.get("blockSizeMillis")),
                     Integer.parseInt(coordinates.getOrDefault("minBlocks", "1")),
                     Long.parseLong(coordinates.getOrDefault("forwardLagMillis", "0")),
                     Integer.parseInt(coordinates.getOrDefault("windowBlocks", "0")),
-                    coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"));
+                    coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"),
+                    timeFold,
+                    Integer.parseInt(coordinates.getOrDefault("purgeBlocks", "0")),
+                    Integer.parseInt(coordinates.getOrDefault("embargoBlocks", "0")));
         }
     }
 
@@ -1929,6 +1940,10 @@ public final class FeatureStages {
          */
         private transient Map<String, ForwardBlocks.Series> forwardSeries;
         private transient Map<String, TreeMap<Long, Double>> forwardLambdas;
+        /** Time folds: the input's block span per level (from the series index), the excluded-over-half counters and the levels warned about. */
+        private transient Map<String, long[]> timeFoldSpans;
+        private transient Map<String, Counter> counters;
+        private transient Set<String> warnedLevels;
 
         FitApplyDoFn(final StageEvaluator evaluator, final List<FitLevel> levels,
                      final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView,
@@ -1963,6 +1978,8 @@ public final class FeatureStages {
                 loaded.putAll(ARTIFACT_CACHE.computeIfAbsent(path, p -> FitArtifact.read(e.getValue(), planHash, e.getKey())));
             }
             loadedLambdas = loaded.isEmpty() ? Map.of() : VarianceComponents.lambdasInMemory(loaded);
+            counters = new HashMap<>();
+            warnedLevels = new HashSet<>();
             loadedModels = new HashMap<>();
             for (final StaticFitBlock<?> block : blocks) {
                 if (!blockLoad.contains(block.block())) continue;
@@ -2005,6 +2022,7 @@ public final class FeatureStages {
                                                           final String entry, final long eventMillis, final Map<String, Double> rowLambdas) {
             final Forward f = level.forward();
             final ForwardBlocks.Series s = series.get(entry);
+            if (f.timeFold()) return timeFoldStats(level, s, eventMillis, rowLambdas);
             final long usable = f.blocks().usableBlock(eventMillis, predictOffsetMillis, f.lagMillis());
             if (rowLambdas != null && forwardLambdas != null && forwardLambdas.containsKey(level.id())) {
                 final Map.Entry<Long, Double> lambda = forwardLambdas.get(level.id()).floorEntry(usable);
@@ -2018,6 +2036,65 @@ public final class FeatureStages {
             return s.statsBetween(from, position);
         }
 
+        /**
+         * A time fold: the totals minus the blocks {@code [b − purge, b + purge + embargo]} around the row's block
+         * {@code b} — one prefix difference of the series. The purge is two-sided (label windows overlap in both
+         * directions), the embargo an extra buffer after it. λ is the whole input's (the last block of the step
+         * function), as for a hash fold.
+         */
+        private VarianceComponents.KeyStats timeFoldStats(final FitLevel level, final ForwardBlocks.Series s, final long eventMillis,
+                                                          final Map<String, Double> rowLambdas) {
+            final Forward f = level.forward();
+            if (rowLambdas != null && forwardLambdas != null && forwardLambdas.containsKey(level.id())) {
+                final Map.Entry<Long, Double> lambda = forwardLambdas.get(level.id()).lastEntry();
+                if (lambda != null) rowLambdas.put(level.id(), lambda.getValue());
+            }
+            if (s == null) return null;
+            final long block = f.blocks().indexOf(eventMillis);
+            final long from = block - f.purgeBlocks();
+            final long to = block + f.purgeBlocks() + f.embargoBlocks();
+            auditTimeFold(level, from, to);
+            final VarianceComponents.KeyStats excluded = s.statsBetween(s.floor(from - 1), s.floor(to));
+            return VarianceComponents.subtract(s.totals(), excluded);
+        }
+
+        /**
+         * A time fold leaving out more than half of the input's blocks (the span of every key's series of the level,
+         * clipped to it) reads a minority of the data: counter {@code feature/timeFold_<level>_excludedOverHalf} per
+         * such row, and one warning per level and DoFn instance. Only the engine sees the input's block span.
+         */
+        private void auditTimeFold(final FitLevel level, final long from, final long to) {
+            final long[] span = timeFoldSpans == null ? null : timeFoldSpans.get(level.id());
+            if (span == null) return;
+            final long total = span[1] - span[0] + 1;
+            final long excluded = Math.min(to, span[1]) - Math.max(from, span[0]) + 1;
+            if (2 * excluded <= total) return;
+            counters.computeIfAbsent(level.id(), id -> Metrics.counter("feature", "timeFold_" + id + "_excludedOverHalf")).inc();
+            if (warnedLevels.add(level.id())) {
+                final Forward f = level.forward();
+                LOG.warn("feature fit: time fold of level {} leaves out {} of the input's {} blocks around a row (purge {} on both sides, embargo {}): "
+                        + "its out-of-fold statistics read less than half of the input; use smaller blocks or a shorter purge / embargo",
+                        level.id(), 2L * f.purgeBlocks() + f.embargoBlocks() + 1, total, f.purgeBlocks(), f.embargoBlocks());
+            }
+        }
+
+        /** The block span [first, last] of each time-fold level over every key's series. */
+        private Map<String, long[]> timeFoldSpans(final Map<String, ForwardBlocks.Series> index) {
+            final Set<String> timeFolds = new HashSet<>();
+            for (final FitLevel level : levels) if (level.isForward() && level.forward().timeFold()) timeFolds.add(level.id());
+            final Map<String, long[]> spans = new HashMap<>();
+            if (timeFolds.isEmpty()) return spans;
+            for (final Map.Entry<String, ForwardBlocks.Series> e : index.entrySet()) {
+                final ForwardBlocks.Series s = e.getValue();
+                final String level = FitArtifact.levelOf(e.getKey());
+                if (s.size() == 0 || !timeFolds.contains(level)) continue;
+                final long[] span = spans.computeIfAbsent(level, l -> new long[]{Long.MAX_VALUE, Long.MIN_VALUE});
+                span[0] = Math.min(span[0], s.blockAt(0));
+                span[1] = Math.max(span[1], s.blockAt(s.size() - 1));
+            }
+            return spans;
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final MElement input = c.element();
@@ -2029,6 +2106,7 @@ public final class FeatureStages {
                     final Map<String, ForwardBlocks.Series> index = new HashMap<>();
                     for (final KV<String, ForwardBlocks.Series> e : c.sideInput(seriesView)) index.put(e.getKey(), e.getValue());
                     forwardSeries = index;
+                    timeFoldSpans = timeFoldSpans(index);
                     LOG.info("feature fit: forward series indexed ({} entries)", index.size());
                 }
                 if (forwardLambdasView != null && forwardLambdas == null) {

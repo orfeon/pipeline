@@ -2308,14 +2308,24 @@ public final class FeaturePlanCompiler {
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+        // fold: {by, purge, embargo} (negative durations are rejected by parseFold); a time fold has no hash folds to count
+        fitSpec.foldBy = spec.fit.foldBy;
+        fitSpec.purge = spec.fit.purge;
+        fitSpec.embargo = spec.fit.embargo;
+        FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
-        if (mode == FitMode.fold && folds < 2) {
+        if (mode == FitMode.fold && !fitSpec.isTimeFold() && folds < 2) {
             diagnostics.error("fit.folds", loc, "fit.folds must be at least 2: " + folds);
             folds = 2;
         }
         fitSpec.groupBy = groupBy;
         fitSpec.folds = folds;
+        if (mode != FitMode.fold && (fitSpec.foldBy != null || fitSpec.purge != null || fitSpec.embargo != null) && hintedBlocks.add(def.name + "#foldIgnored")) {
+            diagnostics.warning("fit.fold.ignored", loc, "fit.fold applies to fit.mode fold only (mode " + mode.token() + "): by / purge / embargo are ignored");
+        } else if (mode == FitMode.fold && !fitSpec.isTimeFold() && (fitSpec.purge != null || fitSpec.embargo != null)) {
+            diagnostics.warning("fit.fold.ignored", loc, "purge / embargo need fit.fold.by: time (hash folds have no time order): they are ignored");
+        }
         // static and fold both fit sufficient statistics over the input and apply them by lookup; fold
         // subtracts the row's own fold so a row never sees its own contribution (out-of-fold statistics)
         final boolean isStatic = mode.isLookup();
@@ -2323,6 +2333,14 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.static", loc, "fit.mode static fits the statistics on the whole input"
                     + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persists them under " + fitSpec.artifactUri + "/<planHash>/")
                     + "; training rows include their own outcome, so use expanding for leak-safe backfill and static for serving / offline analysis");
+        } else if (mode == FitMode.fold && fitSpec.isTimeFold()) {
+            diagnostics.info("fit.mode.fold", loc, "fit.mode fold by time: every time block (" + fitSpec.forwardBlocks().describe() + ") is a fold — a row reads the"
+                    + " statistics of the whole input minus its own block"
+                    + (fitSpec.purge == null ? ", for a target reading a label the label's horizon on both sides of it (the default purge)" : ", the purge " + fitSpec.purge + " on both sides of it")
+                    + (fitSpec.embargo == null ? "" : " and the embargo " + fitSpec.embargo + " after the purge")
+                    + " (rounded up to whole blocks: 2·purge + embargo + 1 blocks are left out; the engine warns when that is more than half of the input's blocks);"
+                    + " the other blocks include rows AFTER it (cross-fit, not time-ordered)"
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else if (mode == FitMode.fold) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
                     + (groupBy == null ? "row identity (time.field + orderTieBreak)" : "entity " + groupBy) + "): a row never sees its own fold, "
@@ -2464,15 +2482,22 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("encoding.hierarchy.additive", loc, "'additive' must be the last entry before the global level");
                 }
             }
+            if (shrinkage.estimator == Shrinkage.Estimator.joint && mode == FitMode.fold && fitSpec.isTimeFold()) {
+                diagnostics.error("fit.fold.time.joint", loc, "estimator: joint solves hash folds only: fit.fold.by: time is not implemented for the joint cell table (use backoff / sequential, or by: row)");
+            }
             if (shrinkage.estimator == Shrinkage.Estimator.joint && !isStatic) {
                 // the joint solve needs the whole cell table of the lattice: a fit-stage estimator, not a row-local replay
                 diagnostics.error("encoding.shrinkage.estimator", loc, "estimator: joint fits every level of the lattice simultaneously over the fitted input and requires fit.mode static | fold | forward (expanding is row-local: use sequential or backoff)");
             }
-            if (mode == FitMode.fold && groupBy == null) {
+            // a time fold ignores groupBy (every block is a fold): an entity's rows in the other blocks still carry keys
+            // derived from this row's outcome, so groupBy must not silence the guard there
+            if (mode == FitMode.fold && (groupBy == null || fitSpec.isTimeFold())) {
                 for (final String key : ks.keys) {
                     final Ref ref = resolve(key);
                     if (ref != null && isOutcomeLike(ref)) {
-                        diagnostics.error("fit.groupBy.required", loc, "keySet key '" + key + "' derives from a past target; fit.mode fold requires fit.groupBy (entity-level folds)");
+                        diagnostics.error("fit.groupBy.required", loc, "keySet key '" + key + "' derives from a past target; " + (fitSpec.isTimeFold()
+                                ? "fit.fold.by: time cannot keep the entity's rows of the other blocks (whose keys carry this row's outcome) out of its statistics: use fit.fold.by: row with fit.groupBy (entity-level folds)"
+                                : "fit.mode fold requires fit.groupBy (entity-level folds)"));
                     }
                 }
             }
@@ -2923,7 +2948,9 @@ public final class FeaturePlanCompiler {
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
         }
-        if (mode == FitMode.fold) {
+        if (mode == FitMode.fold && fitSpec.isTimeFold()) {
+            timeFoldCoordinates(c, targetReference, def, fitSpec);
+        } else if (mode == FitMode.fold) {
             // fold unit: the groupBy entity's keys, else the row identity (time.field + orderTieBreak; time.field
             // alone without a tie-break, so rows sharing a timestamp share a fold). Read at apply time only —
             // not a lineage input of the column (hashing must never involve outcome fields)
@@ -2997,12 +3024,8 @@ public final class FeaturePlanCompiler {
                                     final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
         final String loc = def.location();
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
-        if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
-        else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        blockCoordinates(c, blocks);
         c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocksOf(blocks)));
-        c.coordinates.put("blockField", spec.timeField);
-        final FieldContract time = inputFields.get(spec.timeField);
-        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
         long lag = 0;
         for (final String reference : references) {
             if (reference == null) continue;
@@ -3027,6 +3050,53 @@ public final class FeaturePlanCompiler {
                         + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
             }
         }
+    }
+
+    /** The time blocks of a forward fit or a time fold, and the time field (and its type) the engine reads a row's block from. */
+    private void blockCoordinates(final OutputColumn c, final ForwardBlocks blocks) {
+        if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
+        else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        c.coordinates.put("blockField", spec.timeField);
+        final FieldContract time = inputFields.get(spec.timeField);
+        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
+    }
+
+    /**
+     * {@code fit.fold.by: time}: the blocks, and the blocks left out around the row's own — the purge on both sides
+     * of it (a training row whose label window overlaps the row's — before or after it — describes the same period;
+     * default = the horizon of the target's label, info {@code fit.fold.purge}) and the embargo beyond the purge after
+     * it, both rounded up to whole blocks.
+     */
+    private void timeFoldCoordinates(final OutputColumn c, final String targetReference, final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
+        final ForwardBlocks blocks = fitSpec.forwardBlocks();
+        blockCoordinates(c, blocks);
+        c.coordinates.put("foldBy", "time");
+        Duration purge = fitSpec.purge;
+        if (purge == null && targetReference != null) {
+            purge = labelHorizon(canonicalOf(targetReference), new HashSet<>());
+            if (purge != null && hintedBlocks.add(def.name + "#purge:" + purge)) {
+                diagnostics.info("fit.fold.purge", def.location(), "fit.fold.purge defaults to " + purge + ", the horizon of the label '" + targetReference
+                        + "' (a training row whose label window overlaps a row's, before or after its block, is left out of it); declare fit.fold.purge to override");
+            }
+        }
+        // covering (shortest-block) rounding, not the nominal one of windowBlocks: a leak guard must never under-cover
+        c.coordinates.put("purgeBlocks", Integer.toString(purge == null || purge.isZero() ? 0 : blocks.coveringBlocks(purge)));
+        final Duration embargo = fitSpec.embargo;
+        c.coordinates.put("embargoBlocks", Integer.toString(embargo == null || embargo.isZero() ? 0 : blocks.coveringBlocks(embargo)));
+    }
+
+    /** The longest future-window horizon a column reads, directly or through the row / anonymous columns it derives from; null when none. */
+    private Duration labelHorizon(final String canonical, final Set<String> visited) {
+        if (canonical == null || !visited.add(canonical)) return null;
+        final OutputColumn c = columnsByCanonical.get(canonical);
+        if (c == null) return null;
+        if ("future".equals(c.coordinates.get("direction")) && c.coordinates.containsKey("maxAge")) return Duration.parse(c.coordinates.get("maxAge"));
+        Duration horizon = null;
+        for (final String input : c.inputs) {
+            final Duration h = labelHorizon(input, visited);
+            if (h != null && (horizon == null || h.compareTo(horizon) > 0)) horizon = h;
+        }
+        return horizon;
     }
 
     private static JsonObject parseJsonObject(final String json) {
@@ -3079,9 +3149,9 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
-            // a column declared as the label (output.roles.label) is post-event by declaration, like a future window's
+            // a column declared as the label or the training weight (output.roles.label / weight) is post-event by declaration, like a future window's
             // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
-            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && "label".equals(c.role)) c.status = Status.label;
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role))) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;
