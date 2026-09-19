@@ -2482,7 +2482,8 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("encoding.hierarchy.additive", loc, "'additive' must be the last entry before the global level");
                 }
             }
-            if (shrinkage.estimator == Shrinkage.Estimator.joint && mode == FitMode.fold && fitSpec.isTimeFold()) {
+            // one error per block: the fold is the block's, whichever keySets ask for the joint estimator
+            if (shrinkage.estimator == Shrinkage.Estimator.joint && mode == FitMode.fold && fitSpec.isTimeFold() && hintedBlocks.add(def.name + "#timeFoldJoint")) {
                 diagnostics.error("fit.fold.time.joint", loc, "estimator: joint solves hash folds only: fit.fold.by: time is not implemented for the joint cell table (use backoff / sequential, or by: row)");
             }
             if (shrinkage.estimator == Shrinkage.Estimator.joint && !isStatic) {
