@@ -158,6 +158,7 @@ not expand because another block failed).
 | `sequence.lift` / `sequence.lift.type` | error | the general form needs `lift: {fields / exprs / timeAugment}`; channels must be numeric (or bool) |
 | `sequence.lift.timeAugment` | warning | `timeAugment` at order 0 adds no column (the constant channel's component 0 is always 1) |
 | `sequence.lift.align` | info | the block's channels are available at different times; the `time` channel follows the latest (its window is shifted like that channel's) |
+| `sequence.expr.anonymous` | info | an op `expr` without `as:` is named `<block>__e{n}` by a spec-wide counter (renumbers when another expression is added / removed): add `as:` |
 | `sequence.lift.anonymous` | info | an unnamed `lift.exprs` entry is named `<block>__e{n}` by a spec-wide counter (renumbers when another expression is added / removed): write `{expr: "...", as: name}` |
 | `sequence.lift.name` | error | two channels of a block share a name (a field and an `as`, or two `as`): set a distinct `as` |
 | `sequence.summarize` | error | the general form needs `summarize: {dynamics: {family: lti, measure: ...}}` |

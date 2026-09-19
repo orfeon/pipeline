@@ -615,7 +615,9 @@ event and weighs it by how similar it is to the current row instead:
 
 - `as:` on a sequence / context op names the output column segment: for `sinceEvent` / `countMatch` it replaces
   the op suffix (`<block>_<window>_<as>[_<unit>]`), otherwise the field segment — which is how an inline
-  `expr` avoids the anonymous `<block>__e{n}` name. On an encoding target `as:` replaces the target name
+  `expr` avoids the anonymous `<block>__e{n}` name. That `n` counts expressions across the whole spec, so adding
+  or removing an earlier one renames the columns: name an op `expr` with `as:` (`sequence.expr.anonymous` lists the
+  unnamed ones). On an encoding target `as:` replaces the target name
   (`<block>__<keys>__<as>__<stat>`).
 - `countByValue` / `ratioByValue` produce a `map` column by default; with `values: [...]` they produce one
   numeric column per value (`<block>_<field>_countByValue_<value>`, absent value = 0 / null ratio). Prefer
