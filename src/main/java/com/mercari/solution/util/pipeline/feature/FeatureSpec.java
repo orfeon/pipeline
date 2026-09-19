@@ -304,7 +304,7 @@ public class FeatureSpec implements Serializable {
             final Duration purge = Json.duration(fold, "purge", null, diagnostics, loc);
             final Duration embargo = Json.duration(fold, "embargo", null, diagnostics, loc);
             if (purge != null && purge.isNegative() || embargo != null && embargo.isNegative()) {
-                diagnostics.error("fit.fold.purge", loc, "fit.fold.purge / embargo must not be negative: purge=" + purge + " embargo=" + embargo);
+                diagnostics.error("fit.fold.negative", loc, "fit.fold.purge / embargo must not be negative: purge=" + purge + " embargo=" + embargo);
             }
             if (purge != null && !purge.isNegative()) spec.purge = purge;
             if (embargo != null && !embargo.isNegative()) spec.embargo = embargo;

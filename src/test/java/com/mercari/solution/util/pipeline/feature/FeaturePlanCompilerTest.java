@@ -2968,11 +2968,16 @@ public class FeaturePlanCompilerTest {
         Assertions.assertFalse(hasCode(compile(SOURCES, pastTargetKey.replace(fold, "fold: {by: row}")), "fit.groupBy.required"));
 
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: calendar}")), "fit.fold.by"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: -P1D}")), "fit.fold.purge"));
+        // a negative duration is its own error code, distinct from the fit.fold.purge info (reported once, where declared)
+        final FeaturePlan negative = compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: -P1D}"));
+        Assertions.assertEquals(1, negative.getDiagnostics().getMessages().stream().filter(m -> "fit.fold.negative".equals(m.code())).count(), negative::describe);
+        Assertions.assertTrue(negative.getDiagnostics().getMessages().stream().noneMatch(m -> "fit.fold.purge".equals(m.code()) && m.level() == Diagnostics.Level.error), negative::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, gap: P1D}")), "fit.fold"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, purge: P1D}")), "fit.fold.ignored"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: static, blocks: {bucket: month}")), "fit.fold.ignored"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
-                "- {expr: \"sold >= 1\", stats: [mean]}\n    shrinkage: {estimator: joint}")), "fit.fold.time.joint"));
+        // joint under a time fold: one error for the block, not one per keySet (enc has two)
+        final FeaturePlan joint = compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                "- {expr: \"sold >= 1\", stats: [mean]}\n    shrinkage: {estimator: joint}"));
+        Assertions.assertEquals(1, joint.getDiagnostics().getMessages().stream().filter(m -> "fit.fold.time.joint".equals(m.code())).count(), joint::describe);
     }
 }

@@ -2387,6 +2387,75 @@ public class FeatureTransformTest {
         Assertions.assertNull(FORWARD_VC_ROWS.get("A/s1").get("f_enc__seller_id__e2__mean"));
     }
 
+    private static final Map<String, Map<String, Object>> MIXED_FIT_ROWS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * A forward block and a time-fold block with variance-components weights in one fit stage: both read the one
+     * series side input, the forward levels keep their per-block λ (the values of
+     * {@link #testForwardFitVarianceComponents}) and the time-fold levels get the whole-input λ from their totals
+     * ({@code _TimeFoldVc}), without entering the per-block λ Combine (the series are split by {@code _ForwardOnly}).
+     */
+    @Test
+    public void testForwardAndTimeFoldInOneStage() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String vc = "- {expr: \"sold >= 1\", stats: [mean]}\n          shrinkage: {weights: varianceComponents, priorWeight: 1, output: [composed, effectiveN]}";
+        final String timeFold = """
+                    - name: enc_tf
+                      scope: population
+                      type: encoding
+                      keySets:
+                        - keys: [seller_id]
+                      targets:
+                        - {stats: [count]}
+                        - {expr: "sold >= 1", stats: [mean]}
+                      shrinkage: {weights: varianceComponents, priorWeight: 1, output: [composed, effectiveN]}
+                      fit: {mode: fold, blocks: {size: P7D}, fold: {by: time, purge: P7D, embargo: P7D}}
+            """;
+        final String config = forwardConfig(dir, "").replace("- {expr: \"sold >= 1\", stats: [mean]}", vc)
+                .replace("        - name: enc\n", timeFold + "        - name: enc\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Set<String> names = transformNames();
+        Assertions.assertTrue(hasTransform(names, "features", "_TimeFoldVc"), names::toString);
+        Assertions.assertTrue(hasTransform(names, "features", "_ForwardOnly"), names::toString);
+        Assertions.assertTrue(hasTransform(names, "features", "_ForwardVc"), names::toString);
+        MIXED_FIT_ROWS.clear();
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            for (final MElement row : rows) MIXED_FIT_ROWS.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row.asPrimitiveMap());
+            return null;
+        });
+        pipeline.run();
+        Assertions.assertEquals(6, MIXED_FIT_ROWS.size());
+        // the forward block: unchanged by the time fold sharing its stage
+        final Map<String, Object> d = MIXED_FIT_ROWS.get("D/s1");
+        Assertions.assertEquals(0.5, ((Number) d.get("f_enc__seller_id__e2__mean")).doubleValue(), 1e-9, d::toString);
+        Assertions.assertEquals(5.0, ((Number) d.get("f_enc__seller_id__e2__mean__neff")).doubleValue(), 1e-9, d::toString);
+        // the time-fold block: the counts of testTimeFoldFit ([b − 1, b + 2] left out) and a λ-weighted estimate
+        final Map<String, Long> counts = Map.of("A/s1", 2L, "B/s1", 1L, "C/s1", 2L, "D/s1", 3L, "A/s2", 1L, "C/s2", 1L);
+        for (final Map.Entry<String, Long> e : counts.entrySet()) {
+            final Map<String, Object> row = MIXED_FIT_ROWS.get(e.getKey());
+            Assertions.assertEquals(e.getValue(), ((Number) row.get("f_enc_tf__seller_id__count")).longValue(), e.getKey());
+            Assertions.assertNotNull(row.get("f_enc_tf__seller_id__e2__mean__neff"), row::toString);
+        }
+        // D's time fold reads A, B and C — the rows its forward read sees — and the whole input's λ (s1: 3 of 4 sold,
+        // s2: 1 of 2) is ∞ as well: the same full-shrinkage values. A missing λ would fall back to priorWeight 1
+        // ((2 + 0.5) / 4 = 0.625), so these pin the _TimeFoldVc side input reaching the evaluator
+        Assertions.assertEquals(0.5, ((Number) d.get("f_enc_tf__seller_id__e2__mean")).doubleValue(), 1e-9, d::toString);
+        Assertions.assertEquals(5.0, ((Number) d.get("f_enc_tf__seller_id__e2__mean__neff")).doubleValue(), 1e-9, d::toString);
+        // the time-fold artifact (the top-level artifact uri is inherited) is written like a hash fold's: the totals and
+        // their whole-input λ, no per-block λ; the forward manifest records its own levels' per-block λ only
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject timeFoldManifest = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(new java.io.File(files[0], "enc_tf.manifest.json").toPath())).getAsJsonObject();
+        Assertions.assertFalse(timeFoldManifest.has("lambdasByBlock"), timeFoldManifest::toString);
+        Assertions.assertEquals("Infinity", timeFoldManifest.getAsJsonObject("lambdas").get("enc_tf__seller_id__e2__n").getAsString(), timeFoldManifest::toString);
+        final com.google.gson.JsonObject forwardManifest = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(new java.io.File(files[0], "enc.manifest.json").toPath())).getAsJsonObject();
+        for (final String level : forwardManifest.getAsJsonObject("lambdasByBlock").keySet()) {
+            Assertions.assertTrue(level.startsWith("enc__"), forwardManifest::toString);
+        }
+    }
+
     @Test
     public void testForwardFitMinBlocks() throws java.io.IOException {
         final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
