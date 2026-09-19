@@ -246,11 +246,11 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `KeyedHistoryDoFn` hands the evaluators the mirrored clock `−t` for the row and for every history entry. On that
   clock the strictly-past machinery reads `(t, t + maxAge]` unchanged — the `maxAge` far edge, `decayBy: time`
   distances, the `pending` exclusion of same-timestamp rows, eviction and trimming — and the output keeps the real
-  event time. What reads the window in one direction is decided at compile time: `aggregate first / last` swap in the
-  coordinates (the replay's newest event is the nearest one), `lag` is named `lead`, `sinceEvent` `until`, and the
+  event time. What reads the window in one direction is decided up front: `aggregate first / last` swap in
+  `SequenceEvaluator.func` (the replay's newest event is the nearest one; the coordinates keep the declared func), `lag` is named `lead`, `sinceEvent` `until`, and the
   ops that would need the real order (`delta`, `trend`, `fracdiff`, lagged `regression`) are rejected. `barrier`
   (the first-touch label) scans the window from its newest (nearest) end against the current row's value. The
-  columns carry `Status.label` and the role `label` (`classifyFuture`: `availableAt` = the horizon plus the read
+  columns carry `Status.label` and no role — the role `label` stays with the declared `output.roles.label` (`classifyFuture`: `availableAt` = the horizon plus the read
   fields' own availability, no window shift); `finalizeColumns` exempts labels — and a column declared as
   `output.roles.label` — from the violation check and from `_isnull` indicators, so the only way a label reaches a
   feature is through `availableAt`, where it is an ordinary `availability.violation`.

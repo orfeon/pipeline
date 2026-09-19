@@ -1073,10 +1073,11 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.ops", loc, "sequence feature requires 'ops' or the general form 'lift' + 'summarize'");
             return;
         }
-        if (general && def.direction != null && !"past".equals(def.direction)) {
-            diagnostics.error(isFuture(def) ? "sequence.direction.op" : "sequence.direction", loc, isFuture(def)
-                    ? "the general form 'lift' + 'summarize' reads the past window only: a future window accepts ops (available: " + String.join(" | ", OperatorCatalog.FUTURE_OPS) + ")"
-                    : "direction must be past | future: " + def.direction);
+        // an unknown direction was reported by FeatureSpec (sequence.direction): the block expands nothing
+        if (def.direction != null && !FeatureSpec.DIRECTIONS.contains(def.direction)) return;
+        if (general && isFuture(def)) {
+            diagnostics.error("sequence.direction.op", loc, "the general form 'lift' + 'summarize' reads the past window only: a future window accepts ops (available: "
+                    + String.join(" | ", OperatorCatalog.FUTURE_OPS) + ")");
             return;
         }
         final GeneralForm form = general ? generalForm(def, computeAt) : null;
@@ -1234,8 +1235,8 @@ public final class FeaturePlanCompiler {
                                             "aggregate " + func + " over outcome field '" + field + "' (and other outcome means in this block) has no shrinkage; consider population encoding with a windowed keySet (§4.3 役割分担)");
                                 }
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
-                                // a future window is replayed on a mirrored clock: its nearest event is the replay's newest
-                                c.coordinates.put("func", future && "first".equals(func) ? "last" : future && "last".equals(func) ? "first" : func);
+                                // the declared func (a future window's first / last swap is the evaluator's: SequenceEvaluator.func)
+                                c.coordinates.put("func", func);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 addWeight(c, op, weightRefs);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -1726,10 +1727,6 @@ public final class FeaturePlanCompiler {
      */
     private boolean directionAccepts(final FeatureDef def, final Window window, final Op op) {
         final String loc = def.location();
-        if (def.direction != null && !List.of("past", "future").contains(def.direction)) {
-            if (directionReported.add(def.name + ":value")) diagnostics.error("sequence.direction", loc, "direction must be past | future: " + def.direction);
-            return false;
-        }
         if (!isFuture(def)) {
             if ("barrier".equals(op.type)) {
                 if (directionReported.add(def.name + ":barrier")) diagnostics.error("sequence.barrier.direction", loc, "barrier labels the path after the row: it needs direction: future");
@@ -1752,15 +1749,18 @@ public final class FeaturePlanCompiler {
         }
         if (directionReported.add(def.name + ":future")) {
             diagnostics.info("sequence.direction.future", loc, "block " + def.name + " reads the strictly-future window (t, t + maxAge] of each row: its columns are labels"
-                    + " (role label, post-event by construction) — a feature referencing one is an availability violation");
+                    + " (status label, post-event by construction) — a feature referencing one is an availability violation");
         }
         return true;
     }
 
     /**
      * A future window's column: a label. Its value is known once the last event of the horizon is available —
-     * {@code availableAt = maxAge + the past inputs' own availability} (a pre-event field adds nothing); it is never
-     * shifted (the window reads what happens, not what is known) and carries the role {@code label}.
+     * {@code availableAt = maxAge + the past inputs' own availability} (a pre-event or earlier field adds nothing; a
+     * dynamic one keeps its static lower bound, shifted by the horizon), joined with the self side read at the row
+     * itself (entity keys, {@code $self} filter fields, the barrier's entry value); it is never shifted (the window
+     * reads what happens, not what is known). Its status {@code label} marks it post-event — never a feature for a
+     * consumer; the role {@code label} stays with the declared {@code output.roles.label} column alone.
      */
     private void classifyFuture(final OutputColumn c, final Window window) {
         AvailableAt past = null;
@@ -1768,17 +1768,12 @@ public final class FeaturePlanCompiler {
             final Ref ref = resolve(p);
             if (ref != null) past = AvailableAt.max(past, ref.availableAt());
         }
-        final Duration horizon = window.maxAge;
-        if (past == null || past.isPreEvent()) {
-            c.availableAt = AvailableAt.eventRelative(horizon);
-        } else if (past.isStatic()) {
-            c.availableAt = AvailableAt.eventRelative(horizon.plus(past.getOffset()));
-        } else {
-            c.availableAt = AvailableAt.max(AvailableAt.eventRelative(horizon), past);
-        }
+        final AvailableAt horizon = AvailableAt.eventRelative(window.maxAge);
+        final AvailableAt end = past == null || past.isPreEvent() ? horizon : AvailableAt.max(horizon, past.plus(window.maxAge));
+        // c.availableAt holds the self side accumulated by addSelfInput
+        c.availableAt = AvailableAt.max(c.availableAt, end);
         c.coordinates.put("direction", "future");
         c.status = Status.label;
-        if (c.role == null) c.role = "label";
     }
 
     private void classifyPast(final OutputColumn c, final Duration minInterval) {
@@ -3078,7 +3073,8 @@ public final class FeaturePlanCompiler {
                 }
             }
             // a column declared as the label (output.roles.label) is post-event by declaration, like a future window's
-            if (c.status == Status.violation && "label".equals(c.role)) c.status = Status.label;
+            // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && "label".equals(c.role)) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;

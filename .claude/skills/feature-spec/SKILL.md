@@ -165,7 +165,7 @@ parameters:
 | the *shape* of the entity's recent path as a few numbers: decay-weighted trend (Laguerre), periodicity (Fourier), level / slope / curvature over the window (Legendre) | `sequence` general form: `lift` + `summarize.dynamics` (`family: lti`) | one float64 column per component; running state (no history kept); at most 64 columns per block |
 | a **target mean / rate per key**, shrunk toward coarser keys, optionally windowed | `population`, `type: encoding` | never `sequence.aggregate mean` over an outcome (no shrinkage; the validator hints `sequence.aggregate.encoding`) |
 | per-key counts / shares (frequency encoding), std, quantiles of a value | `population`, `type: encoding` with `stats: [count, share]` / `std` / `quantile`, `q25` | quantiles / distribution are expanding-only |
-| forward-looking **labels** (the value / return / first barrier touched over the next horizon) | `sequence` with `direction: future` and a `maxAge` | label columns (role `label`), never features — a feature reading one is `availability.violation`; declare a derived label in `output.roles.label` |
+| forward-looking **labels** (the value / return / first barrier touched over the next horizon) | `sequence` with `direction: future` and a `maxAge` | label columns (status `label`), never features — a feature reading one is `availability.violation`; declare a derived label in `output.roles.label` |
 | a key's category distribution as flat columns (for BigQuery / a model) | `population`, `type: encoding` with `stats: [distribution], values: [a, b, c]` on the target | one FLOAT64 share column per listed category (`<column>_<value>`) replaces the map column; unlisted categories are dropped |
 | low-rank interaction scores for sparse crosses | `population`, `type: factorization` | always static; whole training set on one worker |
 | learned bin edges (to key an encoding) | `population`, `type: discretize` (`method: quantile`) | always static; bins `-1` missing, `0` below, `1..B`, `B+1` above |
@@ -281,7 +281,7 @@ Read the text report top-down ([sizing.md](sizing.md) explains every line):
 1. **Header** `columns=<emitted>/<all> stages=n shuffles=n waves=d (dag shuffles~n)`.
 2. **`-- stages`**: `#i <kind> key=[...] blocks=[...] columns=n deps=[...] wave=w` — a key-less
    `population` / `sequence` stage is the global level.
-3. **`-- columns`**: `name : type [scope/op] availableAt=... status=staticSafe|windowShift|runtimeFilter|violation
+3. **`-- columns`**: `name : type [scope/op] availableAt=... status=staticSafe|windowShift|runtimeFilter|violation|label
    derivedFrom=[kinds] <- [inputs]`. `(intermediate)` columns are not emitted (`_` prefix).
 4. **`-- audit`**: SQL per key set — run it on the warehouse before a big backfill.
 5. **`-- diagnostics`**: `level[code] location: message`. Fix **errors** first (the run will not

@@ -457,6 +457,9 @@ public final class ScreenSpec implements Serializable {
         final Set<String> reserved = new HashSet<>();
         for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) reserved.add(r);
         reserved.addAll(rowId);
+        // every label column of the upstream feature transform (a direction: future block has several), not only the
+        // selected one: a post-event label is never a candidate feature
+        reserved.addAll(l.labels);
         if (labelExpr != null) {
             reserved.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
         }
@@ -503,6 +506,7 @@ public final class ScreenSpec implements Serializable {
         if (!conditioningPatterns.isEmpty() && inputSchema != null) {
             final Set<String> roleOnly = new HashSet<>();
             for (final String r : new String[]{group, labelField, baselineField, timeField, weightField, periodsField}) if (r != null) roleOnly.add(r);
+            roleOnly.addAll(l.labels);
             if (labelExpr != null) roleOnly.addAll(com.mercari.solution.util.ExpressionUtil.createDefaultExpression(labelExpr).getVariableNames());
             for (final String pattern : conditioningPatterns) {
                 final Pattern glob = StatMath.glob(pattern);

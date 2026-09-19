@@ -59,6 +59,10 @@ public class SequenceEvaluator implements Serializable {
         int lag;
         /** fracdiff: the truncated filter, newest event first ({@code w[0] = 1}). */
         double[] fracdiffWeights;
+        /** barrier: the relative moves that touch the upper / lower barrier (±∞ when not declared). */
+        double barrierUp, barrierDown;
+        /** The aggregate / regression func as the replay reads it ({@link #func}), or null. */
+        String func;
         String stat; // aggregate func / encoding stat token (drives the extraction of a contribution)
         /** The summary family and readout the statistic runs on incrementally, or null (scan only). */
         Summary.Spec summary;
@@ -405,13 +409,19 @@ public class SequenceEvaluator implements Serializable {
         if ("fracdiff".equals(c.operator)) {
             plan.fracdiffWeights = fracdiffWeights(Double.parseDouble(c.coordinates.get("d")), Integer.parseInt(c.coordinates.get("k")));
         }
+        if ("barrier".equals(c.operator)) {
+            final String up = c.coordinates.get("up"), down = c.coordinates.get("down");
+            plan.barrierUp = up == null ? Double.POSITIVE_INFINITY : Double.parseDouble(up);
+            plan.barrierDown = down == null ? Double.NEGATIVE_INFINITY : Double.parseDouble(down);
+        }
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
+        plan.func = func(c);
         plan.stat = statToken(c);
         plan.weightBy = c.coordinates.get("weightBy");
         plan.stateKey = c.coordinates.getOrDefault("stateKey", c.canonicalName);
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
-        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
+        plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(plan.func) : null;
         plan.incremental = !forceScan
                 && plan.summary != null
                 // a weight may read the current row: the catalog declares weighted statistics scan-only
@@ -423,9 +433,25 @@ public class SequenceEvaluator implements Serializable {
         return plan;
     }
 
+    /**
+     * The {@code aggregate} / {@code regression} func the evaluator runs. A future column ({@code direction: future})
+     * is replayed on the mirrored clock, where the replay's newest event is the nearest one: the declared
+     * {@code first} (nearest) reads the replay's {@code last}, and {@code last} (furthest) its {@code first}. The
+     * coordinates keep the declared func — what the column name, the schema options and the manifest say.
+     */
+    static String func(final OutputColumn c) {
+        final String func = c.coordinates.get("func");
+        if (func == null || !"future".equals(c.coordinates.get("direction"))) return func;
+        return switch (func) {
+            case "first" -> "last";
+            case "last" -> "first";
+            default -> func;
+        };
+    }
+
     /** The statistic token of the column ({@code aggregate} / {@code regression} func); overridden for encoding stats. */
     String statToken(final OutputColumn c) {
-        return "aggregate".equals(c.operator) || "regression".equals(c.operator) ? c.coordinates.get("func") : null;
+        return "aggregate".equals(c.operator) || "regression".equals(c.operator) ? func(c) : null;
     }
 
     /**
@@ -437,8 +463,8 @@ public class SequenceEvaluator implements Serializable {
     Summary.Spec summaryOf(final OutputColumn c) {
         return switch (c.operator) {
             case "ewma", "dynamics" -> Dynamics.spec(c.coordinates);
-            case "aggregate" -> OperatorCatalog.summary(c.coordinates.get("func"));
-            case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(c.coordinates.get("func"));
+            case "aggregate" -> OperatorCatalog.summary(func(c));
+            case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(func(c));
             default -> null;
         };
     }
@@ -592,8 +618,8 @@ public class SequenceEvaluator implements Serializable {
                 return n;
             }
             case "aggregate" -> {
-                if (plan.weightBy != null) return weightedAggregate(c.coordinates.get("func"), window, field, weights.get(plan.weightBy), row);
-                return aggregate(c.coordinates.get("func"), window, field, c);
+                if (plan.weightBy != null) return weightedAggregate(plan.func, window, field, weights.get(plan.weightBy), row);
+                return aggregate(plan.func, window, field, c);
             }
             case "regression" -> {
                 // the same family as the incremental path, folded over the window; under a lag the field of event
@@ -604,7 +630,7 @@ public class SequenceEvaluator implements Serializable {
                     final double[] pair = pair(window.get(i - plan.lag).values().get(plan.against), window.get(i).values().get(field));
                     if (pair != null) family.update(state, pair, 1);
                 }
-                return family.read(state, Summary.Readout.of(c.coordinates.get("func")));
+                return family.read(state, Summary.Readout.of(plan.func));
             }
             case "fracdiff" -> {
                 final double[] w = plan.fracdiffWeights;
@@ -622,17 +648,16 @@ public class SequenceEvaluator implements Serializable {
                 // from the end of the list; the entry is the current row's own value
                 final Double entry = finite(row.get(field));
                 if (entry == null || entry == 0) return null;
-                final String up = c.coordinates.get("up"), down = c.coordinates.get("down");
-                final double upper = up == null ? Double.POSITIVE_INFINITY : Double.parseDouble(up);
-                final double lower = down == null ? Double.NEGATIVE_INFINITY : Double.parseDouble(down);
                 boolean path = false;
                 for (int i = window.size() - 1; i >= 0; i--) {
                     final Double x = finite(window.get(i).values().get(field));
                     if (x == null) continue;
                     path = true;
-                    final double move = x / entry - 1;
-                    if (move >= upper) return 1L;
-                    if (move <= lower) return -1L;
+                    // (x − entry) / |entry|: exact at a declared level (100 → 90 is −0.1, where 90 / 100 − 1 rounds
+                    // above it), and "up" stays an increase for a negative entry
+                    final double move = (x - entry) / Math.abs(entry);
+                    if (move >= plan.barrierUp) return 1L;
+                    if (move <= plan.barrierDown) return -1L;
                 }
                 return path ? 0L : null;
             }

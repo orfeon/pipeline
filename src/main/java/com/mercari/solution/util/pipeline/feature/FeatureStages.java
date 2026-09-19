@@ -2465,10 +2465,6 @@ public final class FeatureStages {
         /** Sort the key's rows latest first (a future stage). */
         private final boolean descending;
 
-        SortKeyDoFn(final List<String> keys) {
-            this(keys, false);
-        }
-
         SortKeyDoFn(final List<String> keys, final boolean descending) {
             this.keys = keys;
             this.descending = descending;
@@ -2620,12 +2616,6 @@ public final class FeatureStages {
          * window {@code (t, t + maxAge]}; the output keeps the real event time.
          */
         private final boolean mirrored;
-
-        KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
-                         final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
-                         final KeyedSpillSorter sorter, final String label) {
-            this(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, false);
-        }
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,

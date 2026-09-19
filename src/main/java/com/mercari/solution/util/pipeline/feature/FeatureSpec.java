@@ -33,6 +33,8 @@ public class FeatureSpec implements Serializable {
     }
     public enum NullPolicy { keep, fillZero, indicator }
     public enum Combine { product, zip }
+    /** The values of a sequence block's {@code direction} (null = past). */
+    public static final List<String> DIRECTIONS = List.of("past", "future");
 
     public record LineageEntry(List<String> fields, String from, String eventTime) implements Serializable {}
     public record EntityDef(String name, List<String> keys, Duration minInterval) implements Serializable {}
@@ -685,6 +687,8 @@ public class FeatureSpec implements Serializable {
         def.direction = Json.string(o, "direction");
         if (def.direction != null && def.scope != Scope.sequence) {
             diagnostics.error("features.direction", loc, "direction is a sequence parameter (scope " + def.scope + ")");
+        } else if (def.direction != null && !DIRECTIONS.contains(def.direction)) {
+            diagnostics.error("sequence.direction", loc, "direction must be past | future: " + def.direction);
         }
         def.windows = parseWindows(o, diagnostics, loc);
         if (o.has("ops")) {

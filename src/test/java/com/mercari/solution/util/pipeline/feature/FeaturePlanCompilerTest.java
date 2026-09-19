@@ -2787,9 +2787,10 @@ public class FeaturePlanCompilerTest {
     }
 
     /**
-     * {@code direction: future}: label columns over the strictly-future window — role label, status label, the
-     * availability of the horizon's last event, a stage of their own (descending replay); a declared label over
-     * them is emitted, a feature reading them is a violation; the ops a future window rejects.
+     * {@code direction: future}: label columns over the strictly-future window — status label (no role: the role
+     * stays with the declared label), the availability of the horizon's last event, a stage of their own
+     * (descending replay); a declared label over them is emitted, a feature reading them is a violation; the ops a
+     * future window rejects.
      */
     @Test
     public void testFutureLabels() {
@@ -2819,14 +2820,18 @@ public class FeaturePlanCompilerTest {
         // the horizon's last event is known after its own availability (final_price: settlement 30 min + ingestion 6 days)
         final OutputColumn last = column(plan, "horizon_7d_final_price_last");
         Assertions.assertEquals(OutputColumn.Status.label, last.getStatus());
-        Assertions.assertEquals("label", last.getRole());
+        Assertions.assertNull(last.getRole());
         Assertions.assertEquals("future", last.getCoordinates().get("direction"));
-        Assertions.assertEquals("first", last.getCoordinates().get("func"), "the replay's first event is the furthest one");
+        Assertions.assertEquals("last", last.getCoordinates().get("func"), "the coordinates keep the declared func (the evaluator swaps it)");
         Assertions.assertEquals(Duration.ofDays(13).plusMinutes(30), last.getAvailableAt().getOffset());
         Assertions.assertNull(last.getWindowShift());
         Assertions.assertFalse(last.isIntermediate());
         // a pre-event field: the horizon itself; lag reads the next events (lead), sinceEvent the events until
         Assertions.assertEquals(Duration.ofDays(7), column(plan, "horizon_7d_start_price_lead1").getAvailableAt().getOffset());
+        // the self side counts too: a $self filter field known after the horizon delays the label
+        final FeaturePlan selfSide = compile(SOURCES, spec.replace("windows: [{maxAge: P7D}]", "windows: [{maxAge: P1D, filter: \"start_price <= $self.final_price\"}]")
+                .replace("horizon_7d_", "horizon_1d_"));
+        Assertions.assertEquals(Duration.ofDays(6).plusMinutes(30), column(selfSide, "horizon_1d_start_price_lead1").getAvailableAt().getOffset(), selfSide::describe);
         Assertions.assertEquals(Schema.Type.int64, column(plan, "horizon_7d_start_price_barrier").getFieldType().getType());
         Assertions.assertTrue(column(plan, "horizon_7d_start_price_barrier").getInputs().contains("start_price"));
         column(plan, "horizon_7d_until_events");
@@ -2841,12 +2846,18 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(future.columnNames().contains("horizon_7d_final_price_last"));
         Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() != FeaturePlan.StageKind.future && s.columnNames().contains("recent_n5_sold_lag1")));
 
-        // the declared label over them is emitted as the label; the other future columns are labels too
+        // the declared label over them is emitted as the label; the other future columns are status label only
         final OutputColumn ret = column(plan, "ret");
         Assertions.assertEquals(OutputColumn.Status.label, ret.getStatus());
         Assertions.assertEquals("label", ret.getRole());
         Assertions.assertFalse(ret.isIntermediate());
-        Assertions.assertEquals("f_ret", plan.getRoleColumns().get("label"), "the declared label wins over the other label columns");
+        Assertions.assertEquals("f_ret", plan.getRoleColumns().get("label"));
+        Assertions.assertEquals(1, plan.getColumns().stream().filter(c -> "label".equals(c.getRole())).count());
+        // another role may name a future column: it is resolved, not dropped
+        final FeaturePlan weighted = compile(SOURCES, spec.replace("roles: {label: ret}", "roles: {label: ret, weight: horizon_7d_final_price_mean}"));
+        Assertions.assertFalse(weighted.getDiagnostics().hasErrors(), weighted::describe);
+        Assertions.assertEquals("f_horizon_7d_final_price_mean", weighted.getRoleColumns().get("weight"), weighted::describe);
+        Assertions.assertEquals("f_ret", weighted.getRoleColumns().get("label"));
 
         // an encoding over past labels is fine: a past row's label counts once its horizon has passed (a window shift)
         final String target = "- {expr: \"sold >= 1\", stats: [mean]}";

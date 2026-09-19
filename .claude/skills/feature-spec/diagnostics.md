@@ -171,7 +171,7 @@ not expand because another block failed).
 | `sequence.direction` / `features.direction` | error | `direction` is `past` (default) or `future`, on sequence blocks only |
 | `sequence.direction.maxAge` | error | a `direction: future` window needs `maxAge` (the label horizon) |
 | `sequence.direction.op` | error | the op reads the window in one direction (`delta`, `trend`, `fracdiff`, a lagged `regression`), or the general form `lift` + `summarize` (past only) — not defined over the future; the message lists what is |
-| `sequence.direction.future` | info | the block's columns are labels (role `label`): referencing one from a feature is a violation |
+| `sequence.direction.future` | info | the block's columns are labels (status `label`): referencing one from a feature is a violation |
 | `sequence.barrier.levels` / `sequence.barrier.direction` | error | `barrier` needs `up` > 0 and / or `down` < 0, and exists only under `direction: future` |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
 | `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |

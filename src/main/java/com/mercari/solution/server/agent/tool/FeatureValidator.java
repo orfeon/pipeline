@@ -11,7 +11,7 @@ public class FeatureValidator {
     @Tool(name = "validateFeature", value = """
         Compile a `feature` transform specification without running the pipeline (validate --expand).
         Returns the expanded output columns with their availability status (staticSafe / windowShift /
-        runtimeFilter / violation), lineage, evaluation stages, and the compiler's errors / warnings / hints.
+        runtimeFilter / violation / label), lineage, evaluation stages, and the compiler's errors / warnings / hints.
         Use it after writing or editing a feature transform, and fix every error it reports before running.
     """)
     public String validate(

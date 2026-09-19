@@ -26,6 +26,12 @@ public final class FeatureLineage implements Serializable {
     public final Map<String, Entry> columns = new LinkedHashMap<>();
     /** role name → column (feature manifest {@code roles} / {@code feature.role} field options) */
     public final Map<String, String> roles = new LinkedHashMap<>();
+    /**
+     * Every label column (status {@code label}: the columns of a {@code direction: future} block; role
+     * {@code label}: the declared label) — post-event by construction, so a consumer never reads one as a feature, whichever label
+     * it selects.
+     */
+    public final Set<String> labels = new LinkedHashSet<>();
     public String timeField;
     /** feature manifest identities (null when the lineage came from the schema) */
     public String planHash;
@@ -46,20 +52,17 @@ public final class FeatureLineage implements Serializable {
     public static FeatureLineage fromSchema(final Schema schema) {
         final FeatureLineage l = new FeatureLineage();
         if (schema == null) return l;
-        final Set<String> ambiguous = new LinkedHashSet<>();
         for (final Schema.Field f : schema.getFields()) {
             final Map<String, String> o = f.getOptions();
             if (o == null || !o.containsKey("feature.scope")) continue;
             l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), split(o.get("feature.derivedFrom")), o.get("feature.evidence"), o.get("feature.kind")));
             final String role = o.get("feature.role");
+            if ("label".equals(role) || "label".equals(o.get("feature.status"))) l.labels.add(f.getName());
             if (role != null) {
-                if (l.roles.putIfAbsent(role, f.getName()) != null) ambiguous.add(role);
+                l.roles.putIfAbsent(role, f.getName());
                 if ("time".equals(role) && l.timeField == null) l.timeField = f.getName();
             }
         }
-        // several fields carry the role (the label columns of future windows): the schema cannot tell which one is
-        // declared — the manifest's roles (merged as the fallback) or the consumer's own parameter decide
-        for (final String role : ambiguous) l.roles.remove(role);
         return l;
     }
 
@@ -95,6 +98,7 @@ public final class FeatureLineage implements Serializable {
                     if (keys.size() == 1) column = keys.get(0).getAsString();
                 }
                 if (column != null) l.roles.put(e.getKey(), column);
+                if (column != null && "label".equals(e.getKey())) l.labels.add(column);
             }
         }
         // the pass-through input fields: scope input, derivedFrom = their kind (older manifests carry kind only)
@@ -112,6 +116,7 @@ public final class FeatureLineage implements Serializable {
                 }
                 final String scope = string(f, "scope");
                 l.columns.put(name, new Entry(scope == null ? "input" : scope, null, derived, string(f, "evidence"), string(f, "kind")));
+                if ("label".equals(string(f, "role"))) l.labels.add(name);
             }
         }
         if (m.has("columns") && m.get("columns").isJsonArray()) {
@@ -130,6 +135,7 @@ public final class FeatureLineage implements Serializable {
                     evidence = string(lineage, "evidence");
                 }
                 l.columns.put(name, new Entry(string(c, "scope"), string(c, "block"), derived, evidence));
+                if ("label".equals(string(c, "role")) || "label".equals(string(c, "status"))) l.labels.add(name);
             }
         }
         return l;
@@ -140,6 +146,7 @@ public final class FeatureLineage implements Serializable {
         if (other == null) return this;
         other.columns.forEach(columns::putIfAbsent);
         other.roles.forEach(roles::putIfAbsent);
+        labels.addAll(other.labels);
         if (timeField == null) timeField = other.timeField;
         if (planHash == null) planHash = other.planHash;
         if (outputHash == null) outputHash = other.outputHash;

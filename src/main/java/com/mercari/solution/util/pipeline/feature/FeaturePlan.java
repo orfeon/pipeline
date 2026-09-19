@@ -172,16 +172,6 @@ public class FeaturePlan implements Serializable {
         for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
             if (inputFields.containsKey(e.getValue())) roles.put(e.getKey(), e.getValue());
         }
-        // a declared role wins over the other columns carrying the same role (every future-window column is a label)
-        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
-            if (roles.containsKey(e.getKey())) continue;
-            for (final OutputColumn c : columns) {
-                if (!c.intermediate && e.getKey().equals(c.role) && (c.canonicalName.equals(e.getValue()) || c.outputName.equals(e.getValue()))) {
-                    roles.put(e.getKey(), c.outputName);
-                    break;
-                }
-            }
-        }
         for (final OutputColumn c : columns) {
             if (!c.intermediate && c.role != null) roles.putIfAbsent(c.role, c.outputName);
         }

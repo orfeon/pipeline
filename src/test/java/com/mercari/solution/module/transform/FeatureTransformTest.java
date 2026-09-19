@@ -2424,7 +2424,8 @@ public class FeatureTransformTest {
 
     /**
      * {@code direction: future}: the seller's next 20 days after each listing, replayed latest first in its own
-     * keyed stage; the label columns and a declared label over them are emitted with the role {@code label}.
+     * keyed stage; the label columns are emitted with the status {@code label}, the declared label over them with
+     * the role {@code label} — which a directly-downstream consumer resolves from the schema alone.
      */
     @Test
     public void testFutureLabels() throws java.io.IOException {
@@ -2433,9 +2434,12 @@ public class FeatureTransformTest {
         final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
         final MCollection output = outputs.get("features");
         final Map<String, String> options = output.getSchema().getField("f_next_20d_final_price_last").getOptions();
-        Assertions.assertEquals("label", options.get("feature.role"));
+        Assertions.assertNull(options.get("feature.role"));
         Assertions.assertEquals("label", options.get("feature.status"));
         Assertions.assertEquals("label", output.getSchema().getField("f_ret").getOptions().get("feature.role"));
+        final com.mercari.solution.util.pipeline.feature.FeatureLineage lineage = com.mercari.solution.util.pipeline.feature.FeatureLineage.fromSchema(output.getSchema());
+        Assertions.assertEquals("f_ret", lineage.roles.get("label"));
+        Assertions.assertTrue(lineage.labels.containsAll(List.of("f_ret", "f_next_20d_final_price_last")));
         Assertions.assertTrue(transformNames().stream().anyMatch(n -> n.startsWith("features/") && n.contains("_future")));
         PAssert.that(output.getCollection()).satisfies(rows -> {
             int count = 0;
@@ -2465,6 +2469,41 @@ public class FeatureTransformTest {
                 }
             }
             Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * Rows sharing a timestamp are not in each other's future: the mirrored replay holds them pending until its clock
+     * moves, exactly as the past replay does. E is listed at B's time: B and E each see C only, A sees all three.
+     */
+    @Test
+    public void testFutureLabelsSameTimestamp() throws java.io.IOException {
+        final String b = "{session_id: B, seller_id: s1, category: electronics, quantity: 1, start_price: 200.0, condition_grade: good, current_bid_t10: 210.0, sold: 0, final_price: 0.0,   session_time: \"2025-01-03T10:00:00Z\"}\n";
+        final String e = "{session_id: E, seller_id: s1, category: electronics, quantity: 1, start_price: 160.0, condition_grade: good, current_bid_t10: 170.0, sold: 1, final_price: 110.0, session_time: \"2025-01-03T10:00:00Z\"}\n";
+        Assertions.assertTrue(SOURCE_CONFIG.contains(b));
+        final String indent = "        - "; // the elements list inside the text block
+        final String source = SOURCE_CONFIG.replace(b, b + indent + e);
+        final String config = FEATURE_CONFIG.replace("      output:\n", FUTURE_BLOCKS + "      output:\n")
+                .replace("        prefix: f_\n", "        prefix: f_\n        roles: {label: ret}\n");
+        final MCollection output = MPipeline.apply(pipeline, Config.load(source + config)).get("features");
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byId = new HashMap<>();
+            for (final MElement row : rows) byId.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(7, byId.size());
+            // count, last final_price, next start_price
+            for (final String id : List.of("B/s1", "E/s1")) {
+                final MElement row = byId.get(id);
+                Assertions.assertEquals(1L, ((Number) row.getPrimitiveValue("f_next_20d_final_price_count")).longValue(), id);
+                Assertions.assertEquals(95.0, ((Number) row.getPrimitiveValue("f_next_20d_final_price_last")).doubleValue(), 1e-9, id);
+                Assertions.assertEquals(80.0, ((Number) row.getPrimitiveValue("f_next_20d_start_price_lead1")).doubleValue(), 1e-9, id);
+            }
+            final MElement a = byId.get("A/s1");
+            Assertions.assertEquals(3L, ((Number) a.getPrimitiveValue("f_next_20d_final_price_count")).longValue());
+            Assertions.assertEquals(95.0, ((Number) a.getPrimitiveValue("f_next_20d_final_price_last")).doubleValue(), 1e-9);
+            // E sold at day 2: A's next sale is E's, not C's
+            Assertions.assertEquals(2.0, ((Number) a.getPrimitiveValue("f_next_20d_until_days")).doubleValue(), 1e-9);
             return null;
         });
         pipeline.run();

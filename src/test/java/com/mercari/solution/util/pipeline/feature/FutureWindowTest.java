@@ -61,7 +61,7 @@ public class FutureWindowTest {
         final SequenceEvaluator evaluator = new SequenceEvaluator(columns);
         evaluator.setup();
 
-        // one key, strictly increasing times (a same-timestamp pair is tested separately), steps of hours to days
+        // one key, strictly increasing times (same-timestamp rows: FeatureTransformTest#testFutureLabelsSameTimestamp, through the real replay), steps of hours to days
         final Random random = new Random(7);
         final List<Map<String, Object>> rows = new ArrayList<>();
         final List<Long> times = new ArrayList<>();
@@ -168,7 +168,7 @@ public class FutureWindowTest {
                 final Object v = rows.get(j).get("start_price");
                 if (v == null) continue;
                 if (barrier == null) barrier = 0L;
-                final double move = (Double) v / (Double) entry - 1;
+                final double move = ((Double) v - (Double) entry) / Math.abs((Double) entry);
                 if (move >= 0.1) { barrier = 1L; break; }
                 if (move <= -0.1) { barrier = -1L; break; }
             }
@@ -177,25 +177,20 @@ public class FutureWindowTest {
         return out;
     }
 
-    /** Rows sharing a timestamp never see each other, in the future direction as in the past one. */
+    /** A move of exactly the declared level touches the barrier (100 → 90 at −10%), and "up" is an increase for a negative entry. */
     @Test
-    public void testSameTimestampRowsAreNotInEachOthersFuture() {
+    public void testBarrierLevelsAreExactAndSignAware() {
         final FeaturePlan plan = FeaturePlanCompiler.compile(Config.convertConfigJson(SOURCES, Config.Format.yaml),
                 Config.convertConfigJson(SPEC, Config.Format.yaml), null);
-        final OutputColumn count = plan.getColumn("next_7d_start_price_count");
-        final SequenceEvaluator evaluator = new SequenceEvaluator(List.of(count));
+        final OutputColumn barrier = plan.getColumn("next_7d_start_price_barrier");
+        final SequenceEvaluator evaluator = new SequenceEvaluator(List.of(barrier));
         evaluator.setup();
         final long t = 1_700_000_000_000L;
-        // replay order latest first: the later row, then the two rows sharing t (pending until the clock moves)
-        final List<SequenceEvaluator.Past> history = new ArrayList<>();
-        final SequenceEvaluator.KeyState state = new SequenceEvaluator.KeyState();
-        final Map<String, Object> later = Map.of("seller_id", "s1", "start_price", 100.0);
-        Assertions.assertEquals(0L, evaluator.evaluateColumn(count, new HashMap<>(later), -(t + 3_600_000L), history, state));
-        history.add(new SequenceEvaluator.Past(-(t + 3_600_000L), new HashMap<>(later)));
-        final Map<String, Object> a = new HashMap<>(Map.of("seller_id", "s1", "start_price", 90.0));
-        final Map<String, Object> b = new HashMap<>(Map.of("seller_id", "s1", "start_price", 95.0));
-        Assertions.assertEquals(1L, evaluator.evaluateColumn(count, a, -t, history, state), "only the later row");
-        Assertions.assertEquals(1L, evaluator.evaluateColumn(count, b, -t, history, state), "the row sharing t is not in its future");
+        for (final double[] c : new double[][]{{100, 90, -1}, {100, 110, 1}, {-10, -12, -1}, {-10, -8, 1}, {100, 95, 0}}) {
+            final List<SequenceEvaluator.Past> history = new ArrayList<>(List.of(new SequenceEvaluator.Past(-(t + 3_600_000L), new HashMap<>(Map.of("seller_id", "s1", "start_price", c[1])))));
+            final Map<String, Object> row = new HashMap<>(Map.of("seller_id", "s1", "start_price", c[0]));
+            Assertions.assertEquals((long) c[2], evaluator.evaluateColumn(barrier, row, -t, history, null), () -> java.util.Arrays.toString(c));
+        }
     }
 
     private static void assertSame(final String at, final Object expected, final Object actual) {

@@ -229,11 +229,13 @@ reads what the compile layer wrote into each column's `coordinates`.
    - `future` (a `direction: future` block — label columns) → the same chain with `SortKeyDoFn(keys, true)`
      (`~millis`, latest first) and `KeyedHistoryDoFn(..., mirrored = true)`: the evaluators see the clock `−t`
      for the row and the history, so the strictly-past `SequenceEvaluator` reads `(t, t + maxAge]` unchanged; the
-     order-dependent readings are fixed at compile time (`first` / `last` swapped in the coordinates, `lag` named
-     `lead`, `sinceEvent` `until`; `delta` / `trend` / `fracdiff` / lagged `regression` rejected —
-     `OperatorCatalog.FUTURE_OPS`). The columns are `Status.label` with role `label` (`classifyFuture`), exempt
-     from the violation check and from `_isnull`; a feature reading one is a violation through `availableAt`.
-     `FeatureLineage.fromSchema` leaves a role carried by several fields unresolved (the manifest decides).
+     order-dependent readings are fixed up front (`first` / `last` swapped by `SequenceEvaluator.func` while the
+     coordinates keep the declared func, `lag` named `lead`, `sinceEvent` `until`; `delta` / `trend` /
+     `fracdiff` / lagged `regression` rejected — `OperatorCatalog.FUTURE_OPS`). The columns are `Status.label`
+     without a role (`classifyFuture`; the role `label` is the declared `output.roles.label` only), exempt from
+     the violation check and from `_isnull`; a feature reading one is a violation through `availableAt`.
+     `FeatureLineage.labels` collects every status / role `label` column; a screen excludes them all from its
+     candidates.
    - `fit` → `applyFit`: encoding levels (`fitLevels` → `VarianceComponents.perKeyStats` over the
      stage input re-windowed into `GlobalWindows` → `View.asMap`; artifact load via `FitArtifact`,
      artifact write through `writeArtifacts` = the entries grouped under their block + an empty marker →

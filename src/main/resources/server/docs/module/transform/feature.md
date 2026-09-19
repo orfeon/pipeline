@@ -828,6 +828,8 @@ columns add the constraint that a past row at t' contributes only when
   (+ the predictAt offset) later. This is what makes training features reproducible at serving time.
 - **violation** — an emitted column would use information available after `predictAt`: assembly fails.
   Such a column may still exist as an intermediate consumed by a sequence feature (its past values are fine).
+- **label** — post-event by construction (a `direction: future` block) or by declaration (`output.roles.label`):
+  emitted as a label, never a feature (see "Labels over the future" below).
 
 ### Output contract (roles, include, manifest)
 
@@ -917,7 +919,8 @@ output:
   roles: {label: ret}
 ```
 
-- **They are labels, never features.** Every column of the block gets the role `label` and the status `label`:
+- **They are labels, never features.** Every column of the block gets the status `label` (the role `label` stays
+  with the one column `output.roles.label` names, so a downstream screen / evaluation defaults to it):
   it is emitted (whatever `include` / `exclude` say), has no `_isnull` companion under `nullPolicy: indicator`,
   and its `availableAt` is the horizon plus the availability of what it reads (`final_price`, known 6 days after
   its own event, gives `event_time + P20D + P6DT30M`) — so any *feature* referencing it (a row expression, a
