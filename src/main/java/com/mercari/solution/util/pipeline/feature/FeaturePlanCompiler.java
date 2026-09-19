@@ -38,6 +38,8 @@ public final class FeaturePlanCompiler {
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
+    /** The calendar clocks declared in the sources document ({@code clocks:}). */
+    private final Map<String, Clock> clocks;
     private final FeatureSpec spec;
     private final List<Schema.Field> inputSchemaFields;
     private final Map<String, FieldContract> inputFields = new LinkedHashMap<>();
@@ -60,6 +62,7 @@ public final class FeaturePlanCompiler {
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
                                 final List<Schema.Field> inputSchemaFields) {
         this.sources = SourceContract.parseAll(sourcesDocument, diagnostics);
+        this.clocks = Clock.parseAll(sourcesDocument, diagnostics);
         this.spec = FeatureSpec.parse(parameters, diagnostics);
         this.inputSchemaFields = inputSchemaFields;
     }
@@ -1204,7 +1207,8 @@ public final class FeaturePlanCompiler {
                                 continue;
                             }
                             final String decayBy = op.decayBy == null ? "events" : op.decayBy;
-                            if (!List.of("events", "time").contains(decayBy)) diagnostics.error("sequence.ewma.decayBy", loc, "decayBy must be events | time");
+                            final Clock decayClock = Clock.BUILT_IN.contains(decayBy) ? null : clock(decayBy, loc, "decayBy");
+                            if (!Clock.BUILT_IN.contains(decayBy) && decayClock == null) continue;
                             for (final Double h : op.halflife) {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "ewma" + number(h), Schema.FieldType.FLOAT64, computeAt);
                                 // sugar: the order-0 exponential dynamics of the general form (one running state, O(1) per row)
@@ -1213,6 +1217,7 @@ public final class FeaturePlanCompiler {
                                 c.coordinates.put("component", "0");
                                 c.coordinates.put("halflife", plainNumber(h));
                                 c.coordinates.put("decayBy", decayBy);
+                                if (decayClock != null) c.clocks.put(decayBy, decayClock);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
@@ -1387,10 +1392,7 @@ public final class FeaturePlanCompiler {
             valid = false;
         }
         final String decayBy = d.decayBy == null ? "events" : d.decayBy;
-        if (!List.of("events", "time").contains(decayBy)) {
-            diagnostics.error("sequence.dynamics.decayBy", loc, "decayBy (the clock) must be events | time: " + decayBy);
-            valid = false;
-        }
+        if (!Clock.BUILT_IN.contains(decayBy) && clock(decayBy, loc, "decayBy") == null) valid = false;
         if (def.lift == null || def.lift.fields.isEmpty() && def.lift.exprs.isEmpty() && !def.lift.timeAugment) {
             diagnostics.error("sequence.lift", loc, "the general form requires lift: {fields: [...]} (and / or exprs, timeAugment)");
             return null;
@@ -1483,6 +1485,7 @@ public final class FeaturePlanCompiler {
                     if (h != null) c.coordinates.put("halflife", plainNumber(h));
                     if (form.period() != null) c.coordinates.put("period", plainNumber(form.period()));
                     c.coordinates.put("decayBy", form.decayBy());
+                    if (clocks.containsKey(form.decayBy())) c.clocks.put(form.decayBy(), clocks.get(form.decayBy()));
                     c.coordinates.put("stateKey", stateKey);
                     if (channel != null) {
                         c.coordinates.put("field", canonicalOf(channel));
@@ -1698,6 +1701,7 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("entity", entity.name());
         c.coordinates.put("window", window.token());
         if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
+        calendarWindow(c, window, def.location());
         if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
         if (reducedKey != null) {
             final List<String> stageKeys = new ArrayList<>(entity.keys());
@@ -1740,6 +1744,12 @@ public final class FeaturePlanCompiler {
                 return false;
             }
             return true;
+        }
+        if (window.onCalendar()) {
+            if (directionReported.add(def.name + ":clock:" + window.token())) {
+                diagnostics.error("clock.direction", loc, "a future window measures its horizon on wall time (maxAge as an ISO-8601 duration): window " + window.token());
+            }
+            return false;
         }
         if (window.maxAge == null) {
             if (directionReported.add(def.name + ":maxAge:" + window.token())) {
@@ -2128,10 +2138,13 @@ public final class FeaturePlanCompiler {
             if (!modeDeclared && spec.fit.mode == FitMode.forward) mode = FitMode.forward;
             fitSpec.blockBucket = spec.fit.blockBucket;
             fitSpec.blockSize = spec.fit.blockSize;
+            fitSpec.blockClock = spec.fit.blockClock;
+            fitSpec.blockTicks = spec.fit.blockTicks;
             fitSpec.minBlocks = spec.fit.minBlocks;
             fitSpec.window = spec.fit.window;
             fitSpec.minHistory = spec.fit.minHistory;
             FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+            resolveBlockClock(fitSpec, loc);
             if (mode == FitMode.statik && defFit != null && defFit.has("window")) {
                 diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
             }
@@ -2304,10 +2317,13 @@ public final class FeaturePlanCompiler {
         }
         fitSpec.blockBucket = spec.fit.blockBucket;
         fitSpec.blockSize = spec.fit.blockSize;
+        fitSpec.blockClock = spec.fit.blockClock;
+        fitSpec.blockTicks = spec.fit.blockTicks;
         fitSpec.minBlocks = spec.fit.minBlocks;
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+        resolveBlockClock(fitSpec, loc);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
         if (mode == FitMode.fold && folds < 2) {
@@ -2703,9 +2719,12 @@ public final class FeaturePlanCompiler {
         if ((declared.maxEvents != null || declared.filter != null) && hintedBlocks.add(def.name + "#forwardWindowIgnored")) {
             diagnostics.warning("fit.mode.forward.windowIgnored", def.location(), "maxEvents / filter windows are ignored in fit.mode forward (statistics are per block; only maxAge applies, rounded to blocks)");
         }
-        if (declared.maxAge == null) return null;
+        if (declared.maxAge == null && !declared.onCalendar()) return null;
         final Window window = new Window();
         window.maxAge = declared.maxAge;
+        // a window on a calendar clock is counted in the blocks' ticks (forwardCoordinates)
+        window.clock = declared.clock;
+        window.maxAgeTicks = declared.maxAgeTicks;
         return window;
     }
 
@@ -2965,6 +2984,7 @@ public final class FeaturePlanCompiler {
         if (window != null) {
             c.coordinates.put("window", window.token());
             if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
+            calendarWindow(c, window, def.location());
             if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
             if (window.filter != null) {
                 final String filterText = conditionText(window.filter, def.location(), "filter");
@@ -3037,6 +3057,15 @@ public final class FeaturePlanCompiler {
         }
         c.coordinates.put("forwardLagMillis", Long.toString(lag));
         // the blocks a row reads: the keySet's maxAge, else the block-level fit.window
+        if (window != null && window.onCalendar()) {
+            if (blocks.clock() == null || !blocks.clock().name().equals(window.clock)) {
+                diagnostics.error("clock.fit", loc, "a keySet window on the clock '" + window.clock + "' under fit.mode forward needs fit.blocks on the same clock ({size: <ticks>, clock: "
+                        + window.clock + "}); the blocks are " + blocks.describe());
+            } else {
+                c.coordinates.put("windowBlocks", Long.toString(Math.max(1, (window.maxAgeTicks + blocks.ticks() - 1) / blocks.ticks())));
+            }
+            return;
+        }
         final Duration maxAge = window != null && window.maxAge != null ? window.maxAge : fitSpec.window;
         if (maxAge != null) {
             final int k = blocks.windowBlocks(maxAge);
@@ -3048,10 +3077,50 @@ public final class FeaturePlanCompiler {
         }
     }
 
+    /**
+     * A declared calendar clock by name, or null after reporting {@code clock.unknown} ({@code what} names the parameter:
+     * {@code window.clock}, {@code decayBy}, {@code fit.blocks.clock}).
+     */
+    private Clock clock(final String name, final String loc, final String what) {
+        final Clock clock = clocks.get(name);
+        if (clock == null) {
+            diagnostics.error("clock.unknown", loc, what + " '" + name + "' is neither a built-in clock " + Clock.BUILT_IN
+                    + " nor declared in the sources' clocks" + (clocks.isEmpty() ? "" : " (declared: " + String.join(", ", clocks.keySet()) + ")"));
+        }
+        return clock;
+    }
+
+    /** A window on a calendar clock: its tick count and clock name in the coordinates, the calendar attached to the column. */
+    private void calendarWindow(final OutputColumn c, final Window window, final String loc) {
+        if (!window.onCalendar()) return;
+        final Clock clock = clock(window.clock, loc, "window.clock");
+        if (clock == null) return;
+        c.coordinates.put("maxAgeTicks", Long.toString(window.maxAgeTicks));
+        c.coordinates.put("windowClock", window.clock);
+        c.clocks.put(window.clock, clock);
+    }
+
+    /** Resolves {@code fit.blocks.clock} of a block's fit to the declared calendar (reported once per block). */
+    private void resolveBlockClock(final FeatureSpec.FitSpec fitSpec, final String loc) {
+        if (fitSpec.blockClock == null) {
+            fitSpec.blockCalendar = null;
+            return;
+        }
+        fitSpec.blockCalendar = clocks.get(fitSpec.blockClock);
+        if (fitSpec.blockCalendar == null && hintedBlocks.add(loc + "#blockClock")) clock(fitSpec.blockClock, loc, "fit.blocks.clock");
+    }
+
     /** The time blocks of a forward fit or a time fold, and the time field (and its type) the engine reads a row's block from. */
     private void blockCoordinates(final OutputColumn c, final ForwardBlocks blocks) {
-        if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
-        else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        if (blocks.clock() != null) {
+            c.coordinates.put("blockClock", blocks.clock().name());
+            c.coordinates.put("blockTicks", Integer.toString(blocks.ticks()));
+            c.clocks.put(blocks.clock().name(), blocks.clock());
+        } else if (blocks.bucket() != null) {
+            c.coordinates.put("blockBucket", blocks.bucket());
+        } else {
+            c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        }
         c.coordinates.put("blockField", spec.timeField);
         final FieldContract time = inputFields.get(spec.timeField);
         c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());

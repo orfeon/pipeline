@@ -40,7 +40,35 @@ public final class FeaturePlanService {
         }
         resolveInclude(copy, templateArgs);
         resolveTemperatureFrom(copy, templateArgs);
+        resolveClocks(sources, templateArgs);
         return new Documents(sources, copy);
+    }
+
+    /**
+     * {@code clocks[].uri} of the sources document (a calendar's tick dates: one per line / the first CSV column, or a
+     * JSON array) is read here into {@code dates}, with {@code hash} = the content hash: the plan hash covers the dates
+     * (and the uri they came from) — a calendar that changes changes the plan.
+     */
+    static void resolveClocks(final JsonElement sources, final Map<String, String> templateArgs) {
+        if (sources == null || !sources.isJsonObject() || !sources.getAsJsonObject().has("clocks")
+                || !sources.getAsJsonObject().get("clocks").isJsonArray()) return;
+        for (final JsonElement e : sources.getAsJsonObject().getAsJsonArray("clocks")) {
+            if (!e.isJsonObject()) continue;
+            final JsonObject clock = e.getAsJsonObject();
+            if (!clock.has("uri") || clock.has("dates") || !clock.get("uri").isJsonPrimitive()) continue;
+            final String reference = clock.get("uri").getAsString();
+            final String raw;
+            try {
+                raw = Config.readContent(reference);
+            } catch (final IOException ex) {
+                throw new IllegalArgumentException("failed to read the dates of clock " + clock.get("name") + ": " + reference, ex);
+            }
+            final String text = templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs);
+            final com.google.gson.JsonArray dates = new com.google.gson.JsonArray();
+            for (final String date : Clock.parseDates(text)) dates.add(date);
+            clock.add("dates", dates);
+            clock.addProperty("hash", FeaturePlanCompiler.sha256(text));
+        }
     }
 
     /**

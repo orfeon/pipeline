@@ -2600,4 +2600,50 @@ public class FeatureTransformTest {
         });
         pipeline.run();
     }
+
+    /**
+     * A calendar clock whose ticks are the four session days (2025-01-01, 01-03, 01-20, 02-01): a window of one tick
+     * reaches the previous session day however far back it is, and forward blocks of one tick are those days — the
+     * row count level reads the blocks before the row's, the outcome level (known 6 days and 30 minutes after its
+     * session) the blocks complete by then.
+     */
+    @Test
+    public void testCalendarClock() throws java.io.IOException {
+        final String blocks = """
+                - name: sess
+                  scope: sequence
+                  entity: seller
+                  windows: [{maxAge: 1, clock: sessions}]
+                  ops:
+                    - {type: aggregate, field: start_price, funcs: [count]}
+            """.replaceAll("(?m)^", "    ");
+        final String config = FEATURE_CONFIG
+                .replace("      lineage:\n", "        clocks:\n          - {name: sessions, type: calendar, dates: [2025-01-01, 2025-01-03, 2025-01-20, 2025-02-01]}\n      lineage:\n")
+                .replace("      output:\n", blocks + "      fit: {mode: forward, blocks: {size: 1, clock: sessions}}\n      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals("sessions", output.getSchema().getField("f_sess_1sessions_start_price_count").getOptions().get("feature.coord.windowClock"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // one tick back: the previous session day of the seller (C/s2's previous session is two ticks back)
+            final Map<String, Long> counts = Map.of("A/s1", 0L, "B/s1", 1L, "C/s1", 1L, "D/s1", 1L, "A/s2", 0L, "C/s2", 0L);
+            for (final Map.Entry<String, Long> e : counts.entrySet()) {
+                Assertions.assertEquals(e.getValue(), ((Number) byKey.get(e.getKey()).getPrimitiveValue("f_sess_1sessions_start_price_count")).longValue(), e.getKey());
+            }
+            // forward, one block per session day: the row count reads the earlier days
+            Assertions.assertEquals(1L, ((Number) byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(2L, ((Number) byKey.get("C/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(3L, ((Number) byKey.get("D/s1").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            Assertions.assertEquals(1L, ((Number) byKey.get("C/s2").getPrimitiveValue("f_enc__seller_id__count")).longValue());
+            // the outcome is known 6d30m after its session: D (02-01) reads the blocks complete by 01-26 → A, B (sold 1, 0);
+            // C (01-20) reads by 01-14 → A only; B (01-03) reads nothing yet
+            Assertions.assertEquals(0.5, byKey.get("D/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertEquals(1.0, byKey.get("C/s1").getAsDouble("f_enc__seller_id__e2__mean"), 1e-9);
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_enc__seller_id__e2__mean"));
+            return null;
+        });
+        pipeline.run();
+    }
 }

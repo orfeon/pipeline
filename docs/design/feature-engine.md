@@ -1,6 +1,6 @@
 # Feature Transform Engine (Design Document)
 
-Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6, the prefix-scan of §9.4.4 and the planned items of §9.6.7 are design notes, not code.**
+Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6, the prefix-scan of §9.4.4 and the planned items of §9.6.8 are design notes, not code.**
 
 How the DSL of [feature-dsl.md](feature-dsl.md) (below: "the spec") is implemented as `module:
 feature` on Apache Beam: what is reused from the framework, what is new, where the spec and the
@@ -1187,13 +1187,31 @@ component is a weighted mean:
   A NaN / ±∞ value is now missing for `ewma` as for every aggregate. `trend` stays a scan over its last k events
   (its regression-on-index form is a `REGRESSION` readout, planned with the bilinear family).
 
-#### 9.6.7 Planned on the same line (design positions, not implemented)
+#### 9.6.7 Clock — windows, decay and blocks on a calendar
+
+A calendar clock (`Clock`: a name and its tick dates as sorted epoch days, parsed from the sources document's
+`clocks:`; a `uri` is read by `FeaturePlanService.resolveClocks` before compile, so the dates are in the plan hash)
+answers one question — the **position** of an instant, the ordinal of the last tick on or before its UTC date — and
+everything else is built on it:
+
+| use | wall time | calendar |
+|---|---|---|
+| window far edge | `now − maxAge` | the start of the tick `ordinal(now) − maxAgeTicks` (`Clock.farEdgeMillis`): a millisecond bound again, monotone in `now`, so the scan's binary search, the incremental evict pointer and the trim watermark (`SequenceEvaluator.farEdge`) are unchanged |
+| decay / dynamics age | `(a − b) / day` | `ordinal(a) − ordinal(b)` (`Dynamics.distance`) |
+| fit block | `floor(millis / size)` or a calendar bucket | `floor(ordinal / ticks)` (`ForwardBlocks.ofClock`); rounding a duration (`fit.window`, `minHistory`, `purge`) to blocks uses the mean tick spacing |
+
+The calendar is the one piece of the engine contract that is data rather than a string: the coordinates name the clock
+(`windowClock` + `maxAgeTicks`, `decayBy`, `blockClock` + `blockTicks`) and the `Clock` instance rides with the column
+(`OutputColumn.clocks`, one shared instance per clock, so a serialized stage carries each calendar once);
+`Forward.of(column)` / `Dynamics.spec(coordinates, clocks)` / `SequenceEvaluator.plan` read it there. Availability never
+uses a clock (the window shift stays in millis). A future window stays on wall time (`clock.direction`: its mirrored
+replay would need the mirrored calendar), and a keySet window on a calendar under `fit.mode: forward` needs blocks on
+the same clock (`clock.fit`), where it is counted in blocks.
+
+#### 9.6.8 Planned on the same line (design positions, not implemented)
 
 - **Dynamics `bilinear`** (log-signature; Chen's identity makes it a group) and `compress: {svd}` wired to the
   component columns; `timeAugment` as a path channel (the increments of time) for signatures.
-- **Clock**: windows, decay, fit blocks measured on one declared clock — wall time (today), event ordinal
-  (`maxEvents`, `decayBy: events`), or a calendar of ticks (business days) declared in the sources document.
-  Availability stays on wall time: a clock measures windows, not knowledge.
 - **Ratings**: a sequence op under the global key whose state is a map entity → (μ, σ), updated when a group of
   same-timestamp rows closes (the `pending` flush). Order-dependent, hence replay-only — declared non-mergeable.
 - **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold and
