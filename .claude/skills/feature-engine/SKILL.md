@@ -43,6 +43,13 @@ reads what the compile layer wrote into each column's `coordinates`.
 - `SourceContract` — the sources document: per-source `eventTime`, `availability`, `settlementLag`,
   `ingestionLag`, `mutability`, `snapshotOf`, per-field `availableAt` / `observedAtField` / `kind`
   (attribute / market / outcome) / `validFor`. `SourceContract.Json` is the shared lenient JSON accessor.
+- `Clock` — a calendar declared in the sources document's `clocks:` (tick dates; a `uri` is read by
+  `FeaturePlanService.resolveClocks`, so the dates are in the plan hash): `ordinal(millis)`, `farEdgeMillis(now,
+  ticks)` (a window's far edge as millis — the scan / evict / trim machinery is unchanged), `distance` (decay ages
+  in ticks). Coordinates name the clock (`windowClock` + `maxAgeTicks`, `decayBy`, `blockClock` + `blockTicks`); the
+  instance rides with the column (`OutputColumn.getClocks()` — the one non-string part of the engine contract, shared per
+  clock) and is read by `SequenceEvaluator.plan`, `Dynamics.spec(coordinates, clocks)` and `Forward.of(column)`
+  (`ForwardBlocks.ofClock`). Availability never uses a clock; future windows stay on wall time (engine doc §9.6.7).
 - `FeatureSpec` — the parsed spec (`FeatureDef`, `Op`, `Window`, `KeySet`, `Target`, `FitSpec`,
   `OutputSpec`, `EngineSpec`). It rides inside DoFns, so it holds **no Gson objects**: nested
   blocks are kept as JSON strings (`fitJson`, `shrinkageJson`, `hierarchyJson`) and re-parsed by the
@@ -197,6 +204,10 @@ reads what the compile layer wrote into each column's `coordinates`.
   `blockBucket` | `blockSizeMillis`, `minBlocks`, `forwardLagMillis` (target availability delay), `windowBlocks`,
   `blockField` / `blockFieldType` written by `FeaturePlanCompiler.forwardCoordinates`; the engine side is
   `FitLevel.forward` + `FitApplyDoFn.forwardStats`, which also swaps the row's per-block λ into the evaluator).
+  A time fold (`fit.mode: fold` + `fold.by: time`) rides the same series: `Forward.of` also accepts the coordinates
+  `foldBy` / `purgeBlocks` / `embargoBlocks` (`FeaturePlanCompiler.timeFoldCoordinates`, purge defaulting to the
+  target label's horizon via `labelHorizon`) and `FitApplyDoFn.timeFoldStats` reads totals minus the blocks
+  `[b − purge, b + embargo]` with the whole-input λ.
 
 ### Beam engine (`FeatureStages`)
 

@@ -38,6 +38,8 @@ public final class FeaturePlanCompiler {
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
+    /** The calendar clocks declared in the sources document ({@code clocks:}). */
+    private final Map<String, Clock> clocks;
     private final FeatureSpec spec;
     private final List<Schema.Field> inputSchemaFields;
     private final Map<String, FieldContract> inputFields = new LinkedHashMap<>();
@@ -60,6 +62,7 @@ public final class FeaturePlanCompiler {
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
                                 final List<Schema.Field> inputSchemaFields) {
         this.sources = SourceContract.parseAll(sourcesDocument, diagnostics);
+        this.clocks = Clock.parseAll(sourcesDocument, diagnostics);
         this.spec = FeatureSpec.parse(parameters, diagnostics);
         this.inputSchemaFields = inputSchemaFields;
     }
@@ -1204,7 +1207,8 @@ public final class FeaturePlanCompiler {
                                 continue;
                             }
                             final String decayBy = op.decayBy == null ? "events" : op.decayBy;
-                            if (!List.of("events", "time").contains(decayBy)) diagnostics.error("sequence.ewma.decayBy", loc, "decayBy must be events | time");
+                            final Clock decayClock = Clock.BUILT_IN.contains(decayBy) ? null : clock(decayBy, loc, "decayBy");
+                            if (!Clock.BUILT_IN.contains(decayBy) && decayClock == null) continue;
                             for (final Double h : op.halflife) {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "ewma" + number(h), Schema.FieldType.FLOAT64, computeAt);
                                 // sugar: the order-0 exponential dynamics of the general form (one running state, O(1) per row)
@@ -1213,6 +1217,7 @@ public final class FeaturePlanCompiler {
                                 c.coordinates.put("component", "0");
                                 c.coordinates.put("halflife", plainNumber(h));
                                 c.coordinates.put("decayBy", decayBy);
+                                if (decayClock != null) c.clocks.put(decayBy, decayClock);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
@@ -1387,10 +1392,7 @@ public final class FeaturePlanCompiler {
             valid = false;
         }
         final String decayBy = d.decayBy == null ? "events" : d.decayBy;
-        if (!List.of("events", "time").contains(decayBy)) {
-            diagnostics.error("sequence.dynamics.decayBy", loc, "decayBy (the clock) must be events | time: " + decayBy);
-            valid = false;
-        }
+        if (!Clock.BUILT_IN.contains(decayBy) && clock(decayBy, loc, "decayBy") == null) valid = false;
         if (def.lift == null || def.lift.fields.isEmpty() && def.lift.exprs.isEmpty() && !def.lift.timeAugment) {
             diagnostics.error("sequence.lift", loc, "the general form requires lift: {fields: [...]} (and / or exprs, timeAugment)");
             return null;
@@ -1483,6 +1485,7 @@ public final class FeaturePlanCompiler {
                     if (h != null) c.coordinates.put("halflife", plainNumber(h));
                     if (form.period() != null) c.coordinates.put("period", plainNumber(form.period()));
                     c.coordinates.put("decayBy", form.decayBy());
+                    if (clocks.containsKey(form.decayBy())) c.clocks.put(form.decayBy(), clocks.get(form.decayBy()));
                     c.coordinates.put("stateKey", stateKey);
                     if (channel != null) {
                         c.coordinates.put("field", canonicalOf(channel));
@@ -1698,6 +1701,7 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("entity", entity.name());
         c.coordinates.put("window", window.token());
         if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
+        calendarWindow(c, window, def.location());
         if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
         if (reducedKey != null) {
             final List<String> stageKeys = new ArrayList<>(entity.keys());
@@ -1740,6 +1744,12 @@ public final class FeaturePlanCompiler {
                 return false;
             }
             return true;
+        }
+        if (window.onCalendar()) {
+            if (directionReported.add(def.name + ":clock:" + window.token())) {
+                diagnostics.error("clock.direction", loc, "a future window measures its horizon on wall time (maxAge as an ISO-8601 duration): window " + window.token());
+            }
+            return false;
         }
         if (window.maxAge == null) {
             if (directionReported.add(def.name + ":maxAge:" + window.token())) {
@@ -2128,10 +2138,13 @@ public final class FeaturePlanCompiler {
             if (!modeDeclared && spec.fit.mode == FitMode.forward) mode = FitMode.forward;
             fitSpec.blockBucket = spec.fit.blockBucket;
             fitSpec.blockSize = spec.fit.blockSize;
+            fitSpec.blockClock = spec.fit.blockClock;
+            fitSpec.blockTicks = spec.fit.blockTicks;
             fitSpec.minBlocks = spec.fit.minBlocks;
             fitSpec.window = spec.fit.window;
             fitSpec.minHistory = spec.fit.minHistory;
             FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+            resolveBlockClock(fitSpec, loc);
             if (mode == FitMode.statik && defFit != null && defFit.has("window")) {
                 diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
             }
@@ -2304,10 +2317,13 @@ public final class FeaturePlanCompiler {
         }
         fitSpec.blockBucket = spec.fit.blockBucket;
         fitSpec.blockSize = spec.fit.blockSize;
+        fitSpec.blockClock = spec.fit.blockClock;
+        fitSpec.blockTicks = spec.fit.blockTicks;
         fitSpec.minBlocks = spec.fit.minBlocks;
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+        resolveBlockClock(fitSpec, loc);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
         if (mode == FitMode.fold && folds < 2) {
@@ -2316,6 +2332,18 @@ public final class FeaturePlanCompiler {
         }
         fitSpec.groupBy = groupBy;
         fitSpec.folds = folds;
+        fitSpec.foldBy = spec.fit.foldBy;
+        fitSpec.purge = spec.fit.purge;
+        fitSpec.embargo = spec.fit.embargo;
+        FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
+        if (fitSpec.purge != null && fitSpec.purge.isNegative() || fitSpec.embargo != null && fitSpec.embargo.isNegative()) {
+            diagnostics.error("fit.fold.purge", loc, "fit.fold.purge / embargo must not be negative: purge=" + fitSpec.purge + " embargo=" + fitSpec.embargo);
+        }
+        if (mode != FitMode.fold && (fitSpec.foldBy != null || fitSpec.purge != null || fitSpec.embargo != null) && hintedBlocks.add(def.name + "#foldIgnored")) {
+            diagnostics.warning("fit.fold.ignored", loc, "fit.fold applies to fit.mode fold only (mode " + mode.token() + "): by / purge / embargo are ignored");
+        } else if (mode == FitMode.fold && !fitSpec.isTimeFold() && (fitSpec.purge != null || fitSpec.embargo != null)) {
+            diagnostics.warning("fit.fold.ignored", loc, "purge / embargo need fit.fold.by: time (hash folds have no time order): they are ignored");
+        }
         // static and fold both fit sufficient statistics over the input and apply them by lookup; fold
         // subtracts the row's own fold so a row never sees its own contribution (out-of-fold statistics)
         final boolean isStatic = mode.isLookup();
@@ -2323,6 +2351,12 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.static", loc, "fit.mode static fits the statistics on the whole input"
                     + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persists them under " + fitSpec.artifactUri + "/<planHash>/")
                     + "; training rows include their own outcome, so use expanding for leak-safe backfill and static for serving / offline analysis");
+        } else if (mode == FitMode.fold && fitSpec.isTimeFold()) {
+            diagnostics.info("fit.mode.fold", loc, "fit.mode fold by time: every time block (" + fitSpec.forwardBlocks().describe() + ") is a fold — a row reads the"
+                    + " statistics of the whole input minus its own block"
+                    + (fitSpec.embargo == null ? "" : ", the embargo " + fitSpec.embargo + " after it")
+                    + " and the purge before it (rounded up to whole blocks); the other blocks include rows AFTER it (cross-fit, not time-ordered)"
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else if (mode == FitMode.fold) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
                     + (groupBy == null ? "row identity (time.field + orderTieBreak)" : "entity " + groupBy) + "): a row never sees its own fold, "
@@ -2463,6 +2497,9 @@ public final class FeaturePlanCompiler {
                 if (additiveAt != levels.size() - 1) {
                     diagnostics.error("encoding.hierarchy.additive", loc, "'additive' must be the last entry before the global level");
                 }
+            }
+            if (shrinkage.estimator == Shrinkage.Estimator.joint && mode == FitMode.fold && fitSpec.isTimeFold()) {
+                diagnostics.error("fit.fold.time.joint", loc, "estimator: joint solves hash folds only: fit.fold.by: time is not implemented for the joint cell table (use backoff / sequential, or by: row)");
             }
             if (shrinkage.estimator == Shrinkage.Estimator.joint && !isStatic) {
                 // the joint solve needs the whole cell table of the lattice: a fit-stage estimator, not a row-local replay
@@ -2682,9 +2719,12 @@ public final class FeaturePlanCompiler {
         if ((declared.maxEvents != null || declared.filter != null) && hintedBlocks.add(def.name + "#forwardWindowIgnored")) {
             diagnostics.warning("fit.mode.forward.windowIgnored", def.location(), "maxEvents / filter windows are ignored in fit.mode forward (statistics are per block; only maxAge applies, rounded to blocks)");
         }
-        if (declared.maxAge == null) return null;
+        if (declared.maxAge == null && !declared.onCalendar()) return null;
         final Window window = new Window();
         window.maxAge = declared.maxAge;
+        // a window on a calendar clock is counted in the blocks' ticks (forwardCoordinates)
+        window.clock = declared.clock;
+        window.maxAgeTicks = declared.maxAgeTicks;
         return window;
     }
 
@@ -2923,7 +2963,9 @@ public final class FeaturePlanCompiler {
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
         }
-        if (mode == FitMode.fold) {
+        if (mode == FitMode.fold && fitSpec.isTimeFold()) {
+            timeFoldCoordinates(c, targetReference, def, fitSpec);
+        } else if (mode == FitMode.fold) {
             // fold unit: the groupBy entity's keys, else the row identity (time.field + orderTieBreak; time.field
             // alone without a tie-break, so rows sharing a timestamp share a fold). Read at apply time only —
             // not a lineage input of the column (hashing must never involve outcome fields)
@@ -2942,6 +2984,7 @@ public final class FeaturePlanCompiler {
         if (window != null) {
             c.coordinates.put("window", window.token());
             if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
+            calendarWindow(c, window, def.location());
             if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
             if (window.filter != null) {
                 final String filterText = conditionText(window.filter, def.location(), "filter");
@@ -2997,12 +3040,8 @@ public final class FeaturePlanCompiler {
                                     final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
         final String loc = def.location();
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
-        if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
-        else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        blockCoordinates(c, blocks);
         c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocksOf(blocks)));
-        c.coordinates.put("blockField", spec.timeField);
-        final FieldContract time = inputFields.get(spec.timeField);
-        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
         long lag = 0;
         for (final String reference : references) {
             if (reference == null) continue;
@@ -3018,6 +3057,15 @@ public final class FeaturePlanCompiler {
         }
         c.coordinates.put("forwardLagMillis", Long.toString(lag));
         // the blocks a row reads: the keySet's maxAge, else the block-level fit.window
+        if (window != null && window.onCalendar()) {
+            if (blocks.clock() == null || !blocks.clock().name().equals(window.clock)) {
+                diagnostics.error("clock.fit", loc, "a keySet window on the clock '" + window.clock + "' under fit.mode forward needs fit.blocks on the same clock ({size: <ticks>, clock: "
+                        + window.clock + "}); the blocks are " + blocks.describe());
+            } else {
+                c.coordinates.put("windowBlocks", Long.toString(Math.max(1, (window.maxAgeTicks + blocks.ticks() - 1) / blocks.ticks())));
+            }
+            return;
+        }
         final Duration maxAge = window != null && window.maxAge != null ? window.maxAge : fitSpec.window;
         if (maxAge != null) {
             final int k = blocks.windowBlocks(maxAge);
@@ -3027,6 +3075,91 @@ public final class FeaturePlanCompiler {
                         + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
             }
         }
+    }
+
+    /**
+     * A declared calendar clock by name, or null after reporting {@code clock.unknown} ({@code what} names the parameter:
+     * {@code window.clock}, {@code decayBy}, {@code fit.blocks.clock}).
+     */
+    private Clock clock(final String name, final String loc, final String what) {
+        final Clock clock = clocks.get(name);
+        if (clock == null) {
+            diagnostics.error("clock.unknown", loc, what + " '" + name + "' is neither a built-in clock " + Clock.BUILT_IN
+                    + " nor declared in the sources' clocks" + (clocks.isEmpty() ? "" : " (declared: " + String.join(", ", clocks.keySet()) + ")"));
+        }
+        return clock;
+    }
+
+    /** A window on a calendar clock: its tick count and clock name in the coordinates, the calendar attached to the column. */
+    private void calendarWindow(final OutputColumn c, final Window window, final String loc) {
+        if (!window.onCalendar()) return;
+        final Clock clock = clock(window.clock, loc, "window.clock");
+        if (clock == null) return;
+        c.coordinates.put("maxAgeTicks", Long.toString(window.maxAgeTicks));
+        c.coordinates.put("windowClock", window.clock);
+        c.clocks.put(window.clock, clock);
+    }
+
+    /** Resolves {@code fit.blocks.clock} of a block's fit to the declared calendar (reported once per block). */
+    private void resolveBlockClock(final FeatureSpec.FitSpec fitSpec, final String loc) {
+        if (fitSpec.blockClock == null) {
+            fitSpec.blockCalendar = null;
+            return;
+        }
+        fitSpec.blockCalendar = clocks.get(fitSpec.blockClock);
+        if (fitSpec.blockCalendar == null && hintedBlocks.add(loc + "#blockClock")) clock(fitSpec.blockClock, loc, "fit.blocks.clock");
+    }
+
+    /** The time blocks of a forward fit or a time fold, and the time field (and its type) the engine reads a row's block from. */
+    private void blockCoordinates(final OutputColumn c, final ForwardBlocks blocks) {
+        if (blocks.clock() != null) {
+            c.coordinates.put("blockClock", blocks.clock().name());
+            c.coordinates.put("blockTicks", Integer.toString(blocks.ticks()));
+            c.clocks.put(blocks.clock().name(), blocks.clock());
+        } else if (blocks.bucket() != null) {
+            c.coordinates.put("blockBucket", blocks.bucket());
+        } else {
+            c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        }
+        c.coordinates.put("blockField", spec.timeField);
+        final FieldContract time = inputFields.get(spec.timeField);
+        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
+    }
+
+    /**
+     * {@code fit.fold.by: time}: the blocks, and the blocks left out around the row's own — the purge before it (a
+     * training row whose label reaches into the row's block describes the same period; default = the horizon of the
+     * target's label, info {@code fit.fold.purge}) and the embargo after it, both rounded up to whole blocks.
+     */
+    private void timeFoldCoordinates(final OutputColumn c, final String targetReference, final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
+        final ForwardBlocks blocks = fitSpec.forwardBlocks();
+        blockCoordinates(c, blocks);
+        c.coordinates.put("foldBy", "time");
+        Duration purge = fitSpec.purge;
+        if (purge == null && targetReference != null) {
+            purge = labelHorizon(canonicalOf(targetReference), new HashSet<>());
+            if (purge != null && hintedBlocks.add(def.name + "#purge:" + purge)) {
+                diagnostics.info("fit.fold.purge", def.location(), "fit.fold.purge defaults to " + purge + ", the horizon of the label '" + targetReference
+                        + "' (a training row whose label window reaches into a row's block is left out of it); declare fit.fold.purge to override");
+            }
+        }
+        c.coordinates.put("purgeBlocks", Integer.toString(purge == null || purge.isZero() ? 0 : blocks.windowBlocks(purge)));
+        final Duration embargo = fitSpec.embargo;
+        c.coordinates.put("embargoBlocks", Integer.toString(embargo == null || embargo.isZero() ? 0 : blocks.windowBlocks(embargo)));
+    }
+
+    /** The longest future-window horizon a column reads, directly or through the row / anonymous columns it derives from; null when none. */
+    private Duration labelHorizon(final String canonical, final Set<String> visited) {
+        if (canonical == null || !visited.add(canonical)) return null;
+        final OutputColumn c = columnsByCanonical.get(canonical);
+        if (c == null) return null;
+        if ("future".equals(c.coordinates.get("direction")) && c.coordinates.containsKey("maxAge")) return Duration.parse(c.coordinates.get("maxAge"));
+        Duration horizon = null;
+        for (final String input : c.inputs) {
+            final Duration h = labelHorizon(input, visited);
+            if (h != null && (horizon == null || h.compareTo(horizon) > 0)) horizon = h;
+        }
+        return horizon;
     }
 
     private static JsonObject parseJsonObject(final String json) {
@@ -3079,9 +3212,9 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
-            // a column declared as the label (output.roles.label) is post-event by declaration, like a future window's
+            // a column declared as the label or the training weight (output.roles.label / weight) is post-event by declaration, like a future window's
             // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
-            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && "label".equals(c.role)) c.status = Status.label;
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role))) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;

@@ -46,11 +46,21 @@ public class FeatureSpec implements Serializable {
         public Integer maxEvents;
         public Duration maxAge;
         public String filter;
+        /** The clock {@code maxAge} is measured on: null / {@code time} (wall time) or a calendar declared in the sources. */
+        public String clock;
+        /** {@code maxAge} on a calendar clock: a number of ticks. */
+        public Long maxAgeTicks;
 
-        /** Short token for generated names (§4.3): 365d, n20, 365d_n20, all. */
+        /** A window measured on a calendar clock. */
+        public boolean onCalendar() {
+            return maxAgeTicks != null;
+        }
+
+        /** Short token for generated names (§4.3): 365d, n20, 365d_n20, 20trading, all. */
         public String token() {
             final List<String> parts = new ArrayList<>();
             if (maxAge != null) parts.add(Durations.shortName(maxAge));
+            if (maxAgeTicks != null) parts.add(maxAgeTicks + clock);
             if (maxEvents != null) parts.add("n" + maxEvents);
             return parts.isEmpty() ? "all" : String.join("_", parts);
         }
@@ -272,6 +282,45 @@ public class FeatureSpec implements Serializable {
         public String groupBy;
         /** Number of folds for {@code fit.mode: fold} (out-of-fold statistics). */
         public Integer folds = 5;
+        /**
+         * {@code fit.fold.by}: {@code row} (default — {@code folds} hash folds of the row identity or the groupBy entity)
+         * or {@code time} — every time block ({@code fit.blocks}) is a fold, and a row reads the totals minus its own
+         * block, the {@code purge} before it and the {@code embargo} after it.
+         */
+        public String foldBy;
+        /** {@code fit.fold.purge}: the span before the row's block left out (default: the target label's horizon). */
+        public Duration purge;
+        /** {@code fit.fold.embargo}: the span after the row's block left out (default none). */
+        public Duration embargo;
+
+        public boolean isTimeFold() {
+            return "time".equals(foldBy);
+        }
+
+        /** Parses {@code fold: {by: row | time, purge, embargo}} of a fit block (top level or per feature). */
+        static void parseFold(final JsonObject fit, final FitSpec spec, final Diagnostics diagnostics, final String loc) {
+            if (fit == null || !fit.has("fold") || fit.get("fold").isJsonNull()) return;
+            if (!fit.get("fold").isJsonObject()) {
+                diagnostics.error("fit.fold", loc, "fit.fold must be an object: {by: row | time, purge: <ISO-8601 duration>, embargo: <ISO-8601 duration>}");
+                return;
+            }
+            final JsonObject fold = fit.getAsJsonObject("fold");
+            final String by = Json.string(fold, "by");
+            if (by != null && !List.of("row", "time").contains(by)) {
+                diagnostics.error("fit.fold.by", loc, "fit.fold.by must be row | time: " + by);
+            } else if (by != null) {
+                spec.foldBy = by;
+            }
+            final Duration purge = Json.duration(fold, "purge", null, diagnostics, loc);
+            final Duration embargo = Json.duration(fold, "embargo", null, diagnostics, loc);
+            if (purge != null) spec.purge = purge;
+            if (embargo != null) spec.embargo = embargo;
+            for (final String key : fold.keySet()) {
+                if (!List.of("by", "purge", "embargo").contains(key)) {
+                    diagnostics.error("fit.fold", loc, "unknown fit.fold key '" + key + "' (accepted: by, purge, embargo)");
+                }
+            }
+        }
         /** Root URI of fit artifacts ({@code <uri>/<planHash>/<block>.avro}); null = fit in-pipeline only. */
         public String artifactUri;
         /** Re-fit and overwrite even when an artifact for the plan hash exists. */
@@ -281,6 +330,10 @@ public class FeatureSpec implements Serializable {
         /** fit.mode forward: the time blocks ({@code blocks.bucket} calendar bucket, else {@code blocks.size}; default P90D). */
         public String blockBucket;
         public Duration blockSize;
+        /** fit.blocks on a calendar clock: {@code blocks: {size: <ticks>, clock: <name>}} (resolved to {@link #blockCalendar} by the compiler). */
+        public String blockClock;
+        public Integer blockTicks;
+        public Clock blockCalendar;
         /** fit.mode forward: rows with fewer usable preceding blocks (with data for the key) read null. */
         public Integer minBlocks;
         /**
@@ -299,6 +352,7 @@ public class FeatureSpec implements Serializable {
 
         /** The forward blocks of this spec (defaults applied). */
         public ForwardBlocks forwardBlocks() {
+            if (blockCalendar != null && blockTicks != null) return ForwardBlocks.ofClock(blockCalendar, blockTicks);
             return blockBucket != null ? ForwardBlocks.ofBucket(blockBucket) : ForwardBlocks.ofSize(blockSize == null ? ForwardBlocks.DEFAULT_SIZE : blockSize);
         }
 
@@ -315,8 +369,24 @@ public class FeatureSpec implements Serializable {
                         diagnostics.error("fit.blocks.field", loc, "fit.blocks.field must be time.field (" + timeField + "): " + field);
                     }
                     final String bucket = Json.string(blocks, "bucket");
-                    final Duration size = Json.duration(blocks, "size", null, diagnostics, loc);
-                    if (bucket != null && size != null) {
+                    final String clock = Json.string(blocks, "clock");
+                    if (clock != null && !"time".equals(clock)) {
+                        // blocks of n ticks of a calendar clock
+                        final JsonElement ticks = blocks.get("size");
+                        if (bucket != null || ticks == null || !ticks.isJsonPrimitive() || !ticks.getAsJsonPrimitive().isNumber()
+                                || ticks.getAsDouble() != Math.floor(ticks.getAsDouble()) || ticks.getAsInt() < 1) {
+                            diagnostics.error("fit.blocks.clock", loc, "fit.blocks on the clock '" + clock + "' takes size: <whole number of ticks >= 1> (no bucket): " + blocks);
+                        } else {
+                            spec.blockClock = clock;
+                            spec.blockTicks = ticks.getAsInt();
+                            spec.blockBucket = null;
+                            spec.blockSize = null;
+                        }
+                    }
+                    final Duration size = clock != null && !"time".equals(clock) ? null : Json.duration(blocks, "size", null, diagnostics, loc);
+                    if (clock != null && !"time".equals(clock)) {
+                        // handled above
+                    } else if (bucket != null && size != null) {
                         diagnostics.error("fit.blocks", loc, "fit.blocks takes either bucket or size, not both");
                     } else if (bucket != null) {
                         if (!ForwardBlocks.BUCKETS.contains(bucket)) {
@@ -324,6 +394,8 @@ public class FeatureSpec implements Serializable {
                         } else {
                             spec.blockBucket = bucket;
                             spec.blockSize = null;
+                            spec.blockClock = null;
+                            spec.blockTicks = null;
                         }
                     } else if (size != null) {
                         if (size.isZero() || size.isNegative()) {
@@ -331,6 +403,8 @@ public class FeatureSpec implements Serializable {
                         } else {
                             spec.blockSize = size;
                             spec.blockBucket = null;
+                            spec.blockClock = null;
+                            spec.blockTicks = null;
                         }
                     } else {
                         diagnostics.error("fit.blocks", loc, "fit.blocks requires bucket or size");
@@ -524,6 +598,7 @@ public class FeatureSpec implements Serializable {
             // minHistory / window / blocks / minBlocks are parsed (and validated) by parseForward below
             spec.fit.groupBy = Json.string(fit, "groupBy");
             if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
+            FitSpec.parseFold(fit, spec.fit, diagnostics, "fit");
             FitSpec.parseArtifact(fit, spec.fit);
             FitSpec.parseForward(fit, spec.fit, diagnostics, "fit", spec.timeField);
         }
@@ -834,10 +909,23 @@ public class FeatureSpec implements Serializable {
             final JsonObject w = e.getAsJsonObject();
             final Window window = new Window();
             window.maxEvents = Json.integer(w, "maxEvents");
-            window.maxAge = Json.duration(w, "maxAge", null, diagnostics, loc);
+            window.clock = Json.string(w, "clock");
+            if ("events".equals(window.clock)) {
+                diagnostics.error("window.clock", loc, "a window counts events with maxEvents (clock: events has no maxAge)");
+            } else if (window.clock != null && !"time".equals(window.clock)) {
+                // a calendar clock: maxAge counts its ticks (the clock itself is resolved against the sources' clocks by the compiler)
+                final JsonElement ticks = w.get("maxAge");
+                if (ticks == null || !ticks.isJsonPrimitive() || !ticks.getAsJsonPrimitive().isNumber() || ticks.getAsDouble() != Math.floor(ticks.getAsDouble()) || ticks.getAsLong() < 0) {
+                    diagnostics.error("window.clock", loc, "on the calendar clock '" + window.clock + "' maxAge is a whole number of ticks: " + ticks);
+                } else {
+                    window.maxAgeTicks = ticks.getAsLong();
+                }
+            } else {
+                window.maxAge = Json.duration(w, "maxAge", null, diagnostics, loc);
+            }
             window.filter = Json.string(w, "filter");
             for (final String key : w.keySet()) {
-                if (!List.of("maxEvents", "maxAge", "filter").contains(key)) {
+                if (!List.of("maxEvents", "maxAge", "filter", "clock").contains(key)) {
                     diagnostics.error("window.nearEdge", loc,
                             "window." + key + " is not allowed: the near edge is derived from sources.ingestionLag (§4.3)");
                 }

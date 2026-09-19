@@ -595,15 +595,26 @@ public final class FeatureStages {
         }
     }
 
-    /** fit.mode forward geometry of a level (from the column coordinates, see FeaturePlanCompiler.forwardCoordinates). */
-    record Forward(ForwardBlocks blocks, int minBlocks, long lagMillis, int windowBlocks, String blockField, String blockFieldType) implements Serializable {
-        static Forward of(final Map<String, String> coordinates) {
-            if (!"forward".equals(coordinates.get("fit"))) return null;
-            return new Forward(ForwardBlocks.fromCoordinates(coordinates.get("blockBucket"), coordinates.get("blockSizeMillis")),
+    /**
+     * The per-block geometry of a level (from the column coordinates, see FeaturePlanCompiler.forwardCoordinates /
+     * timeFoldCoordinates): {@code fit.mode forward} reads the blocks before the row's usable one; a time fold
+     * ({@code fit.mode fold} with {@code fit.fold.by: time}) reads every block but the row's own, the
+     * {@code purgeBlocks} before it and the {@code embargoBlocks} after it — both from the same per-(key, block) series.
+     */
+    record Forward(ForwardBlocks blocks, int minBlocks, long lagMillis, int windowBlocks, String blockField, String blockFieldType,
+                   boolean timeFold, int purgeBlocks, int embargoBlocks) implements Serializable {
+        static Forward of(final OutputColumn column) {
+            final Map<String, String> coordinates = column.getCoordinates();
+            final boolean timeFold = "fold".equals(coordinates.get("fit")) && "time".equals(coordinates.get("foldBy"));
+            if (!"forward".equals(coordinates.get("fit")) && !timeFold) return null;
+            return new Forward(ForwardBlocks.fromCoordinates(coordinates, column.getClocks()),
                     Integer.parseInt(coordinates.getOrDefault("minBlocks", "1")),
                     Long.parseLong(coordinates.getOrDefault("forwardLagMillis", "0")),
                     Integer.parseInt(coordinates.getOrDefault("windowBlocks", "0")),
-                    coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"));
+                    coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"),
+                    timeFold,
+                    Integer.parseInt(coordinates.getOrDefault("purgeBlocks", "0")),
+                    Integer.parseInt(coordinates.getOrDefault("embargoBlocks", "0")));
         }
     }
 
@@ -630,7 +641,7 @@ public final class FeatureStages {
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
                     foldKeys != null ? Integer.parseInt(c.getCoordinates().get("folds")) : 0,
-                    Forward.of(c.getCoordinates())));
+                    Forward.of(c)));
         }
         return new ArrayList<>(levels.values());
     }
@@ -1303,12 +1314,13 @@ public final class FeatureStages {
         for (final OutputColumn c : stageColumns) {
             if (!"quantileTransform".equals(c.getOperator())) continue;
             final Map<String, String> k = c.getCoordinates();
+            final Forward forward = Forward.of(c);
             specs.add(new QuantileTransformSpec(c.getBlock(), c.getCanonicalName(), k.get("field"),
                     Integer.parseInt(k.getOrDefault("bins", Integer.toString(QuantileTransform.DEFAULT_BINS))),
                     k.getOrDefault("distribution", QuantileTransform.UNIFORM),
                     Double.parseDouble(k.getOrDefault("clip", Double.toString(QuantileTransform.DEFAULT_CLIP))),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
-                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }
@@ -1528,12 +1540,13 @@ public final class FeatureStages {
         final List<SvdSpec> specs = new ArrayList<>();
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final Forward forward = Forward.of(e.getValue().get(0));
             final int[] components = new int[e.getValue().size()];
             for (int i = 0; i < components.length; i++) components[i] = SvdSpec.output(e.getValue().get(i).getCoordinates());
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }
@@ -1639,13 +1652,14 @@ public final class FeatureStages {
         final List<JointSpec> specs = new ArrayList<>();
         for (final Map.Entry<String, List<OutputColumn>> e : groups.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final Forward forward = Forward.of(e.getValue().get(0));
             final String foldKeys = k.get("foldKeys");
             specs.add(new JointSpec(e.getKey(), JointFit.parseLevels(k.get("jointLevels")), k.get("field"),
                     k.containsKey("offset") ? "__baseline_" + k.get("offset") : null,
                     Shrinkage.Scale.valueOf(k.get("scale")), k.get("weights"), Double.parseDouble(k.get("priorWeight")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
                     foldKeys != null ? Integer.parseInt(k.get("folds")) : 0,
-                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
         }
         return specs;
@@ -2005,6 +2019,7 @@ public final class FeatureStages {
                                                           final String entry, final long eventMillis, final Map<String, Double> rowLambdas) {
             final Forward f = level.forward();
             final ForwardBlocks.Series s = series.get(entry);
+            if (f.timeFold()) return timeFoldStats(level, s, eventMillis, rowLambdas);
             final long usable = f.blocks().usableBlock(eventMillis, predictOffsetMillis, f.lagMillis());
             if (rowLambdas != null && forwardLambdas != null && forwardLambdas.containsKey(level.id())) {
                 final Map.Entry<Long, Double> lambda = forwardLambdas.get(level.id()).floorEntry(usable);
@@ -2016,6 +2031,24 @@ public final class FeatureStages {
             if (position < 0 || position + 1 < f.minBlocks()) return null;
             final int from = f.windowBlocks() > 0 ? s.floor(usable - f.windowBlocks()) : -1;
             return s.statsBetween(from, position);
+        }
+
+        /**
+         * A time fold: the totals minus the blocks {@code [b − purge, b + embargo]} around the row's block {@code b} —
+         * one prefix difference of the series. λ is the whole input's (the last block of the step function), as for a
+         * hash fold.
+         */
+        private VarianceComponents.KeyStats timeFoldStats(final FitLevel level, final ForwardBlocks.Series s, final long eventMillis,
+                                                          final Map<String, Double> rowLambdas) {
+            final Forward f = level.forward();
+            if (rowLambdas != null && forwardLambdas != null && forwardLambdas.containsKey(level.id())) {
+                final Map.Entry<Long, Double> lambda = forwardLambdas.get(level.id()).lastEntry();
+                if (lambda != null) rowLambdas.put(level.id(), lambda.getValue());
+            }
+            if (s == null) return null;
+            final long block = f.blocks().indexOf(eventMillis);
+            final VarianceComponents.KeyStats excluded = s.statsBetween(s.floor(block - f.purgeBlocks() - 1), s.floor(block + f.embargoBlocks()));
+            return VarianceComponents.subtract(s.totals(), excluded);
         }
 
         @ProcessElement

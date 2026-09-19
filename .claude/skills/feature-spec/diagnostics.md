@@ -52,6 +52,10 @@ not expand because another block failed).
 | `fit.orderBy` | error | must equal `time.field` |
 | `fit.groupBy` | error | must name an entity |
 | `fit.folds` | error | at least 2 |
+| `fit.fold` / `fit.fold.by` / `fit.fold.purge` (error) | error | `fold` is `{by: row \| time, purge, embargo}` with non-negative durations |
+| `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` without `by: time` — ignored |
+| `fit.fold.purge` (info) | info | the time fold's purge defaults to the horizon of the label the target reads; declare `fold.purge` to override |
+| `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential |
 | `fit.minHistory` | info | the minimum history of a `fit.mode: forward` block, rounded up to whole blocks (`minBlocks` wins); ignored by the other modes |
 | `engine.rowId` | error | every `rowId` field must be an input field |
 | `engine.spill.memoryMB` | error | integer ≥ 1 |
@@ -153,7 +157,12 @@ not expand because another block failed).
 | `sequence.weightBy.op` / `sequence.weightBy.func` | error | `weightBy` is only defined on `aggregate`, for count / sum / mean / avg / rate / std (min / max / first / last have no weighted form) |
 | `sequence.weightBy.type` / `sequence.weightBy.parse` | error | the weight is a numeric expression: operands (past fields by name, `$self.<field>` for the current row) must be numeric / bool |
 | `sequence.weightBy.scan` | info | a weighted aggregate has no running state and scans its window per row: give the window `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`) |
-| `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required and positive; `decayBy` is `events` or `time` |
+| `sequence.ewma.halflife` | error | `halflife` required and positive |
+| `clock.unknown` | error | `window.clock` / `decayBy` / `fit.blocks.clock` names neither a built-in clock (`time`, `events`) nor a calendar declared in the sources' `clocks:` |
+| `clock.fit` | error | a keySet window on a calendar under `fit.mode: forward` needs `fit.blocks` on the same clock (`{size: <ticks>, clock: <name>}`) |
+| `clock.direction` | error | a `direction: future` window measures its horizon on wall time (an ISO-8601 `maxAge`) |
+| `window.clock` / `fit.blocks.clock` | error | on a calendar, `maxAge` / `blocks.size` are whole numbers of ticks (`clock: events` is spelled `maxEvents`; blocks on a clock take no `bucket`) |
+| `sources.clocks` / `.name` / `.type` / `.dates` / `.uri` | error | `clocks:` entries are `{name, type: calendar, dates: [yyyy-MM-dd, ...] \| uri}`; the name is not `time` / `events` |
 | `sequence.form` | error | a block has both `ops` and `lift` / `summarize`: split it into two blocks |
 | `sequence.lift` / `sequence.lift.type` | error | the general form needs `lift: {fields / exprs / timeAugment}`; channels must be numeric (or bool) |
 | `sequence.lift.timeAugment` | warning | `timeAugment` at order 0 adds no column (the constant channel's component 0 is always 1) |
@@ -163,7 +172,7 @@ not expand because another block failed).
 | `sequence.lift.name` | error | two channels of a block share a name (a field and an `as`, or two `as`): set a distinct `as` |
 | `sequence.summarize` | error | the general form needs `summarize: {dynamics: {family: lti, measure: ...}}` |
 | `sequence.dynamics.family` | error | only `family: lti` is implemented (`bilinear` log-signatures and `probabilistic` are not) |
-| `sequence.dynamics.measure` / `.order` / `.halflife` / `.period` / `.decayBy` / `.parameter` | error | `measure` exponential / fourier / legendre; order 0..16 (legendre 0..8, fourier from 1); exponential needs `halflife`, legendre has none; fourier needs `period`; `decayBy` events / time; no other keys |
+| `sequence.dynamics.measure` / `.order` / `.halflife` / `.period` / `.decayBy` / `.parameter` | error | `measure` exponential / fourier / legendre; order 0..16 (legendre 0..8, fourier from 1); exponential needs `halflife`, legendre has none; fourier needs `period`; `decayBy` events / time / a declared calendar (`clock.unknown` otherwise); no other keys |
 | `sequence.dynamics.size` | error | the block emits more than 64 component columns: lower `order`, fewer halflifes / windows, or split the channels over blocks |
 | `sequence.compress` | error | `compress` is not implemented: feed the component columns to a population `svd` block (`fields: [...]`) |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
