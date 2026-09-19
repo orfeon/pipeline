@@ -27,7 +27,7 @@ and review a spec quickly.
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
-| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd), `artifact: {uri, refit, id}` or the URI string |
+| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `fold: {by: row | time, purge, embargo}` (time: every block is a fold, a row reads all blocks but its own, the purge before and the embargo after — purge defaults to the target label's horizon), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd), `artifact: {uri, refit, id}` or the URI string |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
 | `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
 | `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
@@ -134,7 +134,9 @@ array — the way to get "the composition of the others" as a per-row feature.
 ```
 
 Windows are strictly past (`t' < t`); the near edge is derived from `ingestionLag`, so `window` keys
-other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names: `n5`, `365d`,
+other than `maxEvents` / `maxAge` / `filter` / `clock` are rejected. `clock: <calendar>` (declared in the sources'
+`clocks:`) counts `maxAge` in ticks (`{maxAge: 20, clock: business}` → token `20business`); `decayBy: <calendar>`
+and `fit.blocks: {size: <ticks>, clock: <calendar>}` count on it too; availability stays on wall time. Window token in names: `n5`, `365d`,
 `365d_n5`, `all`.
 
 | op | keys | output name / type |
@@ -175,8 +177,14 @@ the gap; add `sinceEvent` `unit: [days]` for the gap). `lift.exprs` entries are 
 (`as`), since an unnamed one is `<name>__e{n}`, numbered across the whole spec. `timeAugment` adds the constant
 channel `time` (components 1.. only), shifted like the latest of the block's channels. Every measure keeps no history
 without a window; `legendre` re-reads its window under `maxAge`. At most 64 component columns per block
-(windows × halflifes × channels × components). Channels must be numeric / bool. `compress` and
-`family: bilinear` are not implemented.
+(windows × halflifes × channels × components). Channels must be numeric / bool.
+
+`dynamics: {family: bilinear, type: logsignature, depth: 1..4 (default 2), decayBy}` summarises the joint path
+through all channels (+ `timeAugment` = the event's clock position as the last channel): one column per Lyndon word
+`<name>_<w>_logsig_<word>`, channels lettered a, b, c… in lift order (`a` = total increment of channel a, `ab` = the
+Lévy area of a and b). Null with fewer than two complete points; bounded windows re-read their events.
+`compress: {svd: {rank, center, standardize, outputs, fit}, keep: false}` fits an svd over the block's component
+columns: scores `<name>_svd_<k>`, the components become intermediate unless `keep: true`.
 
 `as:` on an op names the field segment (or replaces the op suffix for `sinceEvent` / `countMatch`).
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and
@@ -221,7 +229,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
     leaveNodeOut: true
     output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
   smoothing: {type: bayesian, priorWeight: N}    # legacy sugar for fixed weights
-  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
+  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, fold: {by: time, purge: P20D, embargo: P7D}, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
   maxFeatures: 200
 ```
 

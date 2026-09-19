@@ -422,7 +422,7 @@ public class FeaturePlanCompilerTest {
         final String exp = "{family: lti, measure: exponential, order: 2, halflife: [7, 30.5], decayBy: time}";
         Assertions.assertTrue(spec.contains(exp));
         final Map<String, String> rejected = new java.util.LinkedHashMap<>();
-        rejected.put("{family: bilinear, type: logsignature, depth: 2}", "sequence.dynamics.family");
+        rejected.put("{family: probabilistic}", "sequence.dynamics.family");
         rejected.put("{measure: exponential, halflife: [7]}", "sequence.dynamics.family");
         rejected.put("{family: lti, measure: laplace, halflife: [7]}", "sequence.dynamics.measure");
         rejected.put("{family: lti, measure: exponential, order: 2}", "sequence.dynamics.halflife");
@@ -433,7 +433,7 @@ public class FeaturePlanCompilerTest {
         rejected.put("{family: lti, measure: fourier, order: 2}", "sequence.dynamics.period");
         rejected.put("{family: lti, measure: fourier, order: 0, period: 7}", "sequence.dynamics.order");
         rejected.put("{family: lti, measure: exponential, halflife: [7], period: 7}", "sequence.dynamics.period");
-        rejected.put("{family: lti, measure: exponential, halflife: [7], decayBy: trading}", "sequence.dynamics.decayBy");
+        rejected.put("{family: lti, measure: exponential, halflife: [7], decayBy: trading}", "clock.unknown");
         rejected.put("{family: lti, measure: exponential, halflife: [7], depth: 2}", "sequence.dynamics.parameter");
         rejected.put("{family: lti, measure: exponential, order: 8, halflife: [7, 30.5]}", "sequence.dynamics.size");
         for (final Map.Entry<String, String> e : rejected.entrySet()) {
@@ -2898,5 +2898,196 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {type: aggregate, field: sold, funcs: [count, mean]}",
                 "- {type: barrier, field: start_price, up: 0.05}")), "sequence.barrier.direction"));
         Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("    expr: \"start_price / quantity\"\n", "    expr: \"start_price / quantity\"\n    direction: future\n")), "features.direction"));
+    }
+
+    /**
+     * {@code fit.fold: {by: time, purge, embargo}}: the time-fold coordinates (blocks, purge / embargo rounded up to
+     * whole blocks), the purge defaulting to the horizon of the label the target reads, and the validation.
+     */
+    @Test
+    public void testTimeFold() {
+        final String label = """
+                  - name: horizon
+                    scope: sequence
+                    entity: seller
+                    direction: future
+                    windows: [{maxAge: P20D}]
+                    ops:
+                      - {type: aggregate, field: sold, funcs: [mean]}
+                  - name: enc_label
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [category]
+                    targets:
+                      - {field: horizon_20d_sold_mean, stats: [mean]}
+                    fit: {mode: fold, blocks: {size: P7D}, fold: {by: time}}
+                """;
+        final String anchor = "  - name: vs_market\n";
+        final String spec = SPEC.replace(anchor, label + anchor)
+                .replace("output:\n  prefix: f_\n", "fit: {mode: fold, blocks: {bucket: month}, fold: {by: time, embargo: P40D}}\noutput:\n  prefix: f_\n");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        // the top-level fold: month blocks, no label in the target → no purge, embargo 40 days → 2 blocks
+        final OutputColumn mean = plan.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
+        Assertions.assertEquals("fold", mean.getCoordinates().get("fit"));
+        Assertions.assertEquals("time", mean.getCoordinates().get("foldBy"));
+        Assertions.assertEquals("month", mean.getCoordinates().get("blockBucket"));
+        Assertions.assertEquals("0", mean.getCoordinates().get("purgeBlocks"));
+        Assertions.assertEquals("2", mean.getCoordinates().get("embargoBlocks"));
+        Assertions.assertNull(mean.getCoordinates().get("foldKeys"), "time folds have no hash unit");
+        // a label target: the purge defaults to its horizon (20 days of 7-day blocks → 3), the block's own fit overrides the blocks
+        final OutputColumn labelMean = plan.getColumns().stream().filter(c -> "enc_label".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
+        Assertions.assertEquals(Long.toString(java.time.Duration.ofDays(7).toMillis()), labelMean.getCoordinates().get("blockSizeMillis"));
+        Assertions.assertEquals("3", labelMean.getCoordinates().get("purgeBlocks"));
+        // the top-level embargo (40 days) is inherited and rounded to the block's own 7-day blocks
+        Assertions.assertEquals("6", labelMean.getCoordinates().get("embargoBlocks"));
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.fold.purge".equals(m.code()) && m.location().contains("enc_label")), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.fold"));
+
+        // a declared purge wins over the label's horizon and is inherited by the blocks (10 days of 7-day blocks → 2)
+        final FeaturePlan declared = compile(SOURCES, spec.replace("fold: {by: time, embargo: P40D}", "fold: {by: time, purge: P10D, embargo: P40D}"));
+        Assertions.assertEquals("2", declared.getColumns().stream().filter(c -> "enc_label".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow().getCoordinates().get("purgeBlocks"));
+
+        final String fold = "fold: {by: time, embargo: P40D}";
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: calendar}")), "fit.fold.by"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: -P1D}")), "fit.fold.purge"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, gap: P1D}")), "fit.fold"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, purge: P1D}")), "fit.fold.ignored"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: static, blocks: {bucket: month}")), "fit.fold.ignored"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                "- {expr: \"sold >= 1\", stats: [mean]}\n    shrinkage: {estimator: joint}")), "fit.fold.time.joint"));
+    }
+
+    /**
+     * Calendar clocks: a window / decay / fit blocks measured in ticks of a clock declared in the sources — the
+     * coordinates, the calendar attached to the columns, the plan hash covering the dates, and the validation.
+     */
+    @Test
+    public void testCalendarClocks() {
+        final String sources = SOURCES + "clocks:\n  - {name: business, type: calendar, dates: [2025-01-06, 2025-01-07, 2025-01-08, 2025-01-09, 2025-01-10]}\n";
+        final String blocks = """
+                  - name: days
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxAge: 3, clock: business}]
+                    ops:
+                      - {type: aggregate, field: start_price, funcs: [mean]}
+                      - {type: ewma, field: start_price, halflife: [2], decayBy: business}
+                  - name: enc_days
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [category]
+                        windows: [{maxAge: 7, clock: business}]
+                    targets:
+                      - {field: sold, stats: [mean]}
+                    fit: {mode: forward, blocks: {size: 5, clock: business}}
+                """;
+        final String anchor = "  - name: vs_market\n";
+        final String spec = SPEC.replace(anchor, blocks + anchor);
+        final FeaturePlan plan = compile(sources, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        final OutputColumn mean = column(plan, "days_3business_start_price_mean");
+        Assertions.assertEquals("3", mean.getCoordinates().get("maxAgeTicks"));
+        Assertions.assertEquals("business", mean.getCoordinates().get("windowClock"));
+        Assertions.assertNull(mean.getCoordinates().get("maxAge"));
+        Assertions.assertEquals(5, mean.getClocks().get("business").size());
+        final OutputColumn ewma = column(plan, "days_3business_start_price_ewma2");
+        Assertions.assertEquals("business", ewma.getCoordinates().get("decayBy"));
+        Assertions.assertNotNull(ewma.getClocks().get("business"));
+        // forward blocks of 5 ticks; the keySet window of 7 ticks reads 2 blocks
+        final OutputColumn level = plan.getColumns().stream().filter(c -> "enc_days".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && "category".equals(c.getCoordinates().get("keys"))
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
+        Assertions.assertEquals("business", level.getCoordinates().get("blockClock"));
+        Assertions.assertEquals("5", level.getCoordinates().get("blockTicks"));
+        Assertions.assertEquals("2", level.getCoordinates().get("windowBlocks"));
+        Assertions.assertNull(level.getCoordinates().get("blockSizeMillis"));
+        Assertions.assertNotNull(level.getClocks().get("business"));
+
+        // the calendar is part of the plan: another holiday, another hash
+        Assertions.assertNotEquals(plan.getHash(), compile(sources.replace("2025-01-08, ", ""), spec).getHash());
+
+        final Map<String, String> rejected = new java.util.LinkedHashMap<>();
+        rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 3, clock: exchange}]"), "clock.unknown");
+        rejected.put(spec.replace("decayBy: business}", "decayBy: exchange}"), "clock.unknown");
+        rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {size: 5, clock: exchange}"), "clock.unknown");
+        rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {size: P7D}"), "clock.fit");
+        rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {bucket: month, clock: business}"), "fit.blocks.clock");
+        rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: P3D, clock: business}]"), "window.clock");
+        rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 3, clock: events}]"), "window.clock");
+        rejected.put(spec.replace("    entity: seller\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}\n      - {type: ewma, field: start_price, halflife: [2], decayBy: business}",
+                "    entity: seller\n    direction: future\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}"), "clock.direction");
+        for (final Map.Entry<String, String> e : rejected.entrySet()) {
+            Assertions.assertNotEquals(spec, e.getKey(), e.getValue());
+            final FeaturePlan bad = compile(sources, e.getKey());
+            Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e.getValue() + "\n" + bad.describe());
+        }
+    }
+
+    /**
+     * {@code family: bilinear}: one log-signature state per window over every channel, a column per Lyndon word (named by
+     * channel letters); {@code compress: {svd}} fits an svd block over the component columns, which become intermediate.
+     */
+    @Test
+    public void testLogSignatureAndCompress() {
+        final String block = """
+                  - name: path
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxEvents: 10}]
+                    lift: {fields: [start_price, quantity], timeAugment: true}
+                    summarize:
+                      dynamics: {family: bilinear, type: logsignature, depth: 2, decayBy: time}
+                    compress:
+                      svd: {rank: 2}
+                """;
+        final String anchor = "  - name: vs_market\n";
+        final String spec = SPEC.replace(anchor, block + anchor);
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        // three letters (a = start_price, b = quantity, c = time), depth 2: a b c ab ac bc
+        final List<String> components = plan.getColumns().stream().filter(c -> "path".equals(c.getBlock()) && "dynamics".equals(c.getOperator()))
+                .map(OutputColumn::getCanonicalName).toList();
+        Assertions.assertEquals(List.of("path_n10_logsig_a", "path_n10_logsig_b", "path_n10_logsig_c", "path_n10_logsig_ab", "path_n10_logsig_ac", "path_n10_logsig_bc"), components);
+        final OutputColumn area = column(plan, "path_n10_logsig_ab");
+        Assertions.assertEquals("bilinear", area.getCoordinates().get("family"));
+        Assertions.assertEquals("start_price,quantity", area.getCoordinates().get("fields"));
+        Assertions.assertEquals("true", area.getCoordinates().get("timeAugment"));
+        Assertions.assertEquals("path_n10_logsig", area.getCoordinates().get("stateKey"));
+        Assertions.assertEquals(Set.of("start_price", "quantity"), area.getPastInputs());
+        Assertions.assertTrue(area.isIntermediate(), "compressed away");
+        Assertions.assertTrue(hasCode(plan, "sequence.dynamics.logsignature"));
+        // the svd block over the six components: two score columns, emitted
+        final OutputColumn score = column(plan, "path_svd_1");
+        Assertions.assertEquals("svd", score.getOperator());
+        Assertions.assertEquals(String.join(",", components), score.getCoordinates().get("fields"));
+        Assertions.assertFalse(score.isIntermediate());
+        Assertions.assertTrue(hasCode(plan, "sequence.compress"));
+        // keep: true emits the components too
+        Assertions.assertFalse(column(compile(SOURCES, spec.replace("svd: {rank: 2}", "svd: {rank: 2}\n      keep: true")), "path_n10_logsig_ab").isIntermediate());
+
+        final String dynamics = "dynamics: {family: bilinear, type: logsignature, depth: 2, decayBy: time}";
+        final Map<String, String> rejected = new java.util.LinkedHashMap<>();
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, type: signature, depth: 2}"), "sequence.dynamics.type");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, depth: 5}"), "sequence.dynamics.depth");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, depth: 2, halflife: [3]}"), "sequence.dynamics.parameter");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: lti, measure: exponential, halflife: [3], depth: 2}"), "sequence.dynamics.parameter");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: probabilistic}"), "sequence.dynamics.family");
+        rejected.put(spec.replace(dynamics, "dynamics: {family: bilinear, depth: 4}").replace("lift: {fields: [start_price, quantity], timeAugment: true}",
+                "lift: {fields: [start_price, quantity, current_bid_t10], timeAugment: true}"), "sequence.dynamics.size");
+        rejected.put(spec.replace("      svd: {rank: 2}", "      pca: {rank: 2}"), "sequence.compress");
+        for (final Map.Entry<String, String> e : rejected.entrySet()) {
+            Assertions.assertNotEquals(spec, e.getKey(), e.getValue());
+            final FeaturePlan bad = compile(SOURCES, e.getKey());
+            Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e.getValue() + "\n" + bad.describe());
+        }
+        // one channel: its total increment only
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("lift: {fields: [start_price, quantity], timeAugment: true}", "lift: {fields: [start_price]}")
+                .replace("    compress:\n      svd: {rank: 2}\n", "")), "sequence.dynamics.channels"));
     }
 }

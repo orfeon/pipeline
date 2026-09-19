@@ -38,6 +38,8 @@ public final class FeaturePlanCompiler {
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
+    /** The calendar clocks declared in the sources document ({@code clocks:}). */
+    private final Map<String, Clock> clocks;
     private final FeatureSpec spec;
     private final List<Schema.Field> inputSchemaFields;
     private final Map<String, FieldContract> inputFields = new LinkedHashMap<>();
@@ -60,6 +62,7 @@ public final class FeaturePlanCompiler {
     private FeaturePlanCompiler(final JsonElement sourcesDocument, final JsonObject parameters,
                                 final List<Schema.Field> inputSchemaFields) {
         this.sources = SourceContract.parseAll(sourcesDocument, diagnostics);
+        this.clocks = Clock.parseAll(sourcesDocument, diagnostics);
         this.spec = FeatureSpec.parse(parameters, diagnostics);
         this.inputSchemaFields = inputSchemaFields;
     }
@@ -1204,7 +1207,8 @@ public final class FeaturePlanCompiler {
                                 continue;
                             }
                             final String decayBy = op.decayBy == null ? "events" : op.decayBy;
-                            if (!List.of("events", "time").contains(decayBy)) diagnostics.error("sequence.ewma.decayBy", loc, "decayBy must be events | time");
+                            final Clock decayClock = Clock.BUILT_IN.contains(decayBy) ? null : clock(decayBy, loc, "decayBy");
+                            if (!Clock.BUILT_IN.contains(decayBy) && decayClock == null) continue;
                             for (final Double h : op.halflife) {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "ewma" + number(h), Schema.FieldType.FLOAT64, computeAt);
                                 // sugar: the order-0 exponential dynamics of the general form (one running state, O(1) per row)
@@ -1213,6 +1217,7 @@ public final class FeaturePlanCompiler {
                                 c.coordinates.put("component", "0");
                                 c.coordinates.put("halflife", plainNumber(h));
                                 c.coordinates.put("decayBy", decayBy);
+                                if (decayClock != null) c.clocks.put(decayBy, decayClock);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                             }
@@ -1315,13 +1320,23 @@ public final class FeaturePlanCompiler {
                 }
             }
         }
+        if (form != null && form.compress() != null) expandCompress(def, form, computeAt);
     }
 
     /** Upper bound on the component columns one general-form block emits (windows × halflifes × channels × components). */
     static final int MAX_DYNAMICS_COLUMNS = 64;
 
-    /** The validated general form of a sequence block: channels (a null reference = the constant time channel) and the dynamics. */
-    private record GeneralForm(List<Channel> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period, String decayBy) {}
+    /**
+     * The validated general form of a sequence block: channels (a null reference = the constant time channel), the
+     * dynamics ({@code lti}: measure / order / halflifes / period; {@code bilinear}: the log-signature depth) and the
+     * component columns the windows emitted, which {@code compress} reads.
+     */
+    private record GeneralForm(String family, List<Channel> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period,
+                               String decayBy, int depth, boolean timeAugment, JsonObject compress, List<OutputColumn> components) {
+        boolean bilinear() {
+            return "bilinear".equals(family);
+        }
+    }
 
     /** A lift channel: the column it reads ({@code null} = the constant time channel) and its name segment. */
     private record Channel(String reference, String name) {}
@@ -1333,64 +1348,86 @@ public final class FeaturePlanCompiler {
     private GeneralForm generalForm(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
         boolean valid = true;
-        if (def.compress) {
-            diagnostics.error("sequence.compress", loc, "compress is not implemented yet: feed the component columns to a population svd block (fields: [...])");
-            valid = false;
-        }
         if (!def.summarize || def.dynamics == null) {
-            diagnostics.error("sequence.summarize", loc, "the general form requires summarize: {dynamics: {family: lti, measure: exponential | legendre | fourier, ...}}");
+            diagnostics.error("sequence.summarize", loc, "the general form requires summarize: {dynamics: {family: lti | bilinear, ...}}");
             return null;
         }
         final DynamicsSpec d = def.dynamics;
-        if (!"lti".equals(d.family)) {
+        if (!"lti".equals(d.family) && !"bilinear".equals(d.family)) {
             diagnostics.error("sequence.dynamics.family", loc, d.family == null
-                    ? "summarize.dynamics requires 'family' (available: lti)"
-                    : "dynamics family '" + d.family + "' is " + (List.of("bilinear", "probabilistic").contains(d.family) ? "not implemented yet" : "unknown") + " (available: lti)");
+                    ? "summarize.dynamics requires 'family' (available: lti | bilinear)"
+                    : "dynamics family '" + d.family + "' is " + ("probabilistic".equals(d.family) ? "not implemented yet" : "unknown") + " (available: lti | bilinear)");
             return null;
         }
+        final boolean bilinear = "bilinear".equals(d.family);
         if (!d.unknown.isEmpty()) {
-            diagnostics.error("sequence.dynamics.parameter", loc, "unknown lti parameter(s) " + d.unknown + " (accepted: measure, order, halflife, period, decayBy)");
+            diagnostics.error("sequence.dynamics.parameter", loc, "unknown " + d.family + " parameter(s) " + d.unknown + " (accepted: "
+                    + (bilinear ? "type, depth, decayBy" : "measure, order, halflife, period, decayBy") + ")");
             valid = false;
         }
-        final Dynamics.Measure measure;
-        try {
-            measure = Dynamics.Measure.valueOf(String.valueOf(d.measure));
-        } catch (final IllegalArgumentException e) {
-            diagnostics.error("sequence.dynamics.measure", loc, "lti requires 'measure': exponential | legendre | fourier (got " + d.measure + ")");
-            return null;
-        }
-        final int order = d.order != null ? d.order : switch (measure) {
-            case exponential -> 0;
-            case fourier -> 1;
-            case legendre -> 3;
-        };
-        final int minOrder = measure == Dynamics.Measure.fourier ? 1 : 0;
-        if (order < minOrder || order > Dynamics.maxOrder(measure)) {
-            diagnostics.error("sequence.dynamics.order", loc, measure + " order must be in [" + minOrder + ", " + Dynamics.maxOrder(measure) + "]: " + order);
-            valid = false;
-        }
-        if (d.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
-            diagnostics.error("sequence.dynamics.halflife", loc, "halflife must be a positive number (clock units): " + d.halflife);
-            valid = false;
-        } else if (measure == Dynamics.Measure.exponential && d.halflife.isEmpty()) {
-            diagnostics.error("sequence.dynamics.halflife", loc, "the exponential measure requires 'halflife' (clock units; one state per value)");
-            valid = false;
-        } else if (measure == Dynamics.Measure.legendre && !d.halflife.isEmpty()) {
-            diagnostics.error("sequence.dynamics.halflife", loc, "legendre has no halflife: its measure is uniform over the window's span");
-            valid = false;
-        }
-        if (measure == Dynamics.Measure.fourier && (d.period == null || !(d.period > 0) || d.period.isInfinite())) {
-            diagnostics.error("sequence.dynamics.period", loc, "fourier requires a positive 'period' (clock units) for its first harmonic: " + d.period);
-            valid = false;
-        } else if (measure != Dynamics.Measure.fourier && d.period != null) {
-            diagnostics.error("sequence.dynamics.period", loc, "period is a fourier parameter (measure " + measure + ")");
-            valid = false;
+        Dynamics.Measure measure = null;
+        int order = 0;
+        int depth = 0;
+        if (bilinear) {
+            final List<String> foreign = new ArrayList<>();
+            if (d.measure != null) foreign.add("measure");
+            if (d.order != null) foreign.add("order");
+            if (!d.halflife.isEmpty()) foreign.add("halflife");
+            if (d.period != null) foreign.add("period");
+            if (!foreign.isEmpty()) {
+                diagnostics.error("sequence.dynamics.parameter", loc, foreign + " are lti parameters: a bilinear summary takes type, depth, decayBy");
+                valid = false;
+            }
+            if (d.type != null && !"logsignature".equals(d.type)) {
+                diagnostics.error("sequence.dynamics.type", loc, "bilinear type must be logsignature: " + d.type);
+                valid = false;
+            }
+            depth = d.depth == null ? 2 : d.depth;
+            if (depth < 1 || depth > Signature.MAX_DEPTH) {
+                diagnostics.error("sequence.dynamics.depth", loc, "logsignature depth must be in [1, " + Signature.MAX_DEPTH + "]: " + depth);
+                valid = false;
+            }
+        } else {
+            if (d.type != null || d.depth != null) {
+                diagnostics.error("sequence.dynamics.parameter", loc, "type / depth are bilinear parameters: an lti summary takes measure, order, halflife, period, decayBy");
+                valid = false;
+            }
+            try {
+                measure = Dynamics.Measure.valueOf(String.valueOf(d.measure));
+            } catch (final IllegalArgumentException e) {
+                diagnostics.error("sequence.dynamics.measure", loc, "lti requires 'measure': exponential | legendre | fourier (got " + d.measure + ")");
+                return null;
+            }
+            order = d.order != null ? d.order : switch (measure) {
+                case exponential -> 0;
+                case fourier -> 1;
+                case legendre -> 3;
+            };
+            final int minOrder = measure == Dynamics.Measure.fourier ? 1 : 0;
+            if (order < minOrder || order > Dynamics.maxOrder(measure)) {
+                diagnostics.error("sequence.dynamics.order", loc, measure + " order must be in [" + minOrder + ", " + Dynamics.maxOrder(measure) + "]: " + order);
+                valid = false;
+            }
+            if (d.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
+                diagnostics.error("sequence.dynamics.halflife", loc, "halflife must be a positive number (clock units): " + d.halflife);
+                valid = false;
+            } else if (measure == Dynamics.Measure.exponential && d.halflife.isEmpty()) {
+                diagnostics.error("sequence.dynamics.halflife", loc, "the exponential measure requires 'halflife' (clock units; one state per value)");
+                valid = false;
+            } else if (measure == Dynamics.Measure.legendre && !d.halflife.isEmpty()) {
+                diagnostics.error("sequence.dynamics.halflife", loc, "legendre has no halflife: its measure is uniform over the window's span");
+                valid = false;
+            }
+            if (measure == Dynamics.Measure.fourier && (d.period == null || !(d.period > 0) || d.period.isInfinite())) {
+                diagnostics.error("sequence.dynamics.period", loc, "fourier requires a positive 'period' (clock units) for its first harmonic: " + d.period);
+                valid = false;
+            } else if (measure != Dynamics.Measure.fourier && d.period != null) {
+                diagnostics.error("sequence.dynamics.period", loc, "period is a fourier parameter (measure " + measure + ")");
+                valid = false;
+            }
         }
         final String decayBy = d.decayBy == null ? "events" : d.decayBy;
-        if (!List.of("events", "time").contains(decayBy)) {
-            diagnostics.error("sequence.dynamics.decayBy", loc, "decayBy (the clock) must be events | time: " + decayBy);
-            valid = false;
-        }
+        if (!Clock.BUILT_IN.contains(decayBy) && clock(decayBy, loc, "decayBy") == null) valid = false;
         if (def.lift == null || def.lift.fields.isEmpty() && def.lift.exprs.isEmpty() && !def.lift.timeAugment) {
             diagnostics.error("sequence.lift", loc, "the general form requires lift: {fields: [...]} (and / or exprs, timeAugment)");
             return null;
@@ -1420,12 +1457,12 @@ public final class FeaturePlanCompiler {
             diagnostics.info("sequence.lift.anonymous", loc, "an unnamed lift expression is named by the spec-wide anonymous counter ("
                     + def.name + "__e{n}), which renumbers when an earlier expression is added or removed: name it with {expr: \"...\", as: name}");
         }
-        final int perChannel = Dynamics.dimension(measure, order);
+        final int perChannel = bilinear ? 0 : Dynamics.dimension(measure, order);
         if (def.lift.timeAugment) {
-            if (perChannel == 1) {
+            if (!bilinear && perChannel == 1) {
                 diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
             }
-            channels.add(new Channel(null, "time"));
+            if (!bilinear) channels.add(new Channel(null, "time"));
             // the time channel reads no field: it takes the most delayed channel's availability, so it describes the
             // events the value channels see (a shifted window) rather than the events the entity had
             final Set<AvailableAt> availabilities = new LinkedHashSet<>();
@@ -1433,7 +1470,7 @@ public final class FeaturePlanCompiler {
                 final Ref ref = channel.reference() == null ? null : resolve(channel.reference());
                 if (ref != null) availabilities.add(ref.availableAt() == null ? AvailableAt.atEventTime() : ref.availableAt());
             }
-            if (availabilities.size() > 1) {
+            if (!bilinear && availabilities.size() > 1) {
                 diagnostics.info("sequence.lift.align", loc, "the lift channels are available at different times " + availabilities
                         + ": the time channel follows the latest one (its window is shifted like that channel's)");
             }
@@ -1445,23 +1482,59 @@ public final class FeaturePlanCompiler {
                 valid = false;
             }
         }
-        final int columns = Math.max(1, def.windows.size()) * Math.max(1, d.halflife.size())
-                * (perChannel * channels.size() - (def.lift.timeAugment ? 1 : 0));
+        final int columns;
+        if (bilinear) {
+            // one joint path over every channel (+ time): a column per Lyndon word up to the depth
+            final int letters = channels.size() + (def.lift.timeAugment ? 1 : 0);
+            if (letters < 2) {
+                diagnostics.warning("sequence.dynamics.channels", loc, "a log-signature of one channel is its total increment only: lift two channels or add timeAugment");
+            }
+            if (letters > 26) {
+                diagnostics.error("sequence.dynamics.size", loc, "a log-signature takes at most 26 channels (words are named by letters): " + letters);
+                valid = false;
+            }
+            columns = Math.max(1, def.windows.size()) * Signature.lyndonWords(Math.min(letters, 26), Math.max(1, Math.min(depth, Signature.MAX_DEPTH))).size();
+        } else {
+            columns = Math.max(1, def.windows.size()) * Math.max(1, d.halflife.size())
+                    * (perChannel * channels.size() - (def.lift.timeAugment ? 1 : 0));
+        }
         if (columns > MAX_DYNAMICS_COLUMNS) {
-            diagnostics.error("sequence.dynamics.size", loc, "the block would emit " + columns + " component columns (windows × halflifes × channels × "
-                    + perChannel + " components), over " + MAX_DYNAMICS_COLUMNS + ": lower the order or split the channels over several blocks");
+            diagnostics.error("sequence.dynamics.size", loc, "the block would emit " + columns + " component columns (" + (bilinear
+                    ? "windows × the Lyndon words of the channels up to depth " + depth : "windows × halflifes × channels × " + perChannel + " components")
+                    + "), over " + MAX_DYNAMICS_COLUMNS + ": lower the " + (bilinear ? "depth" : "order") + " or split the channels over several blocks");
             valid = false;
         }
-        return valid ? new GeneralForm(channels, measure, order, d.halflife, d.period, decayBy) : null;
+        JsonObject compress = null;
+        if (def.compress) {
+            compress = parseJsonObject(def.compressJson);
+            if (compress == null || !compress.has("svd") || !compress.get("svd").isJsonObject()) {
+                diagnostics.error("sequence.compress", loc, "compress must be {svd: {rank, center, standardize, fit}, keep: false}");
+                valid = false;
+            } else {
+                for (final String key : compress.keySet()) {
+                    if (!List.of("svd", "keep").contains(key)) {
+                        diagnostics.error("sequence.compress", loc, "unknown compress key '" + key + "' (accepted: svd, keep)");
+                        valid = false;
+                    }
+                }
+            }
+        }
+        return valid ? new GeneralForm(d.family, channels, measure, order, d.halflife, d.period, decayBy, depth, def.lift.timeAugment,
+                compress, new ArrayList<>()) : null;
     }
 
     /**
      * One window of a general-form block: per channel and halflife one running state (the {@code stateKey} its component
      * columns share) and one FLOAT64 column per component, {@code {block}_{window}_{channel}_{measure}_{component}}.
-     * The constant time channel skips its component 0 (always 1).
+     * The constant time channel skips its component 0 (always 1). A {@code bilinear} summary is one path over every
+     * channel: one state per window and a column per Lyndon word, {@code {block}_{window}_logsig_{word}}.
      */
     private void expandDynamics(final FeatureDef def, final EntityDef entity, final Window window, final References filterRefs,
                                 final String reducedKey, final GeneralForm form, final AvailableAt computeAt) {
+        if (form.bilinear()) {
+            expandSignature(def, entity, window, filterRefs, reducedKey, form, computeAt);
+            return;
+        }
         final List<Double> halflifes = form.halflifes().isEmpty() ? Collections.singletonList(null) : form.halflifes();
         final List<String> valueChannels = form.channels().stream().map(Channel::reference).filter(Objects::nonNull).toList();
         for (final Channel ch : form.channels()) {
@@ -1483,15 +1556,78 @@ public final class FeaturePlanCompiler {
                     if (h != null) c.coordinates.put("halflife", plainNumber(h));
                     if (form.period() != null) c.coordinates.put("period", plainNumber(form.period()));
                     c.coordinates.put("decayBy", form.decayBy());
+                    if (clocks.containsKey(form.decayBy())) c.clocks.put(form.decayBy(), clocks.get(form.decayBy()));
                     c.coordinates.put("stateKey", stateKey);
                     if (channel != null) {
                         c.coordinates.put("field", canonicalOf(channel));
                         addPastInput(c, channel);
                     }
                     finishSequence(c, def, entity, window, filterRefs, reducedKey, null, channel == null ? valueChannels : List.of());
+                    form.components().add(c);
                 }
             }
         }
+    }
+
+    /** One window of a {@code bilinear} block: the log-signature of the joint path, a column per Lyndon word (channels a, b, …). */
+    private void expandSignature(final FeatureDef def, final EntityDef entity, final Window window, final References filterRefs,
+                                 final String reducedKey, final GeneralForm form, final AvailableAt computeAt) {
+        final List<String> fields = form.channels().stream().map(ch -> canonicalOf(ch.reference())).toList();
+        final int letters = fields.size() + (form.timeAugment() ? 1 : 0);
+        final List<int[]> words = Signature.lyndonWords(letters, form.depth());
+        final String stateKey = def.name + "_" + window.token() + "_logsig";
+        if (hintedBlocks.add(def.name + "#logsigLetters")) {
+            final List<String> legend = new ArrayList<>();
+            for (int i = 0; i < form.channels().size(); i++) legend.add((char) ('a' + i) + "=" + form.channels().get(i).name());
+            if (form.timeAugment()) legend.add((char) ('a' + fields.size()) + "=time (" + form.decayBy() + ")");
+            diagnostics.info("sequence.dynamics.logsignature", def.location(), "log-signature columns are named by Lyndon words over the channels " + legend
+                    + " (e.g. _ab = the Lévy area of a and b); an unbounded window folds each event in, a bounded one re-reads its events");
+        }
+        for (int w = 0; w < words.size(); w++) {
+            final OutputColumn c = newColumn(def.name, Scope.sequence, "dynamics", stateKey + "_" + Signature.wordName(words.get(w)), Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("family", "bilinear");
+            c.coordinates.put("type", "logsignature");
+            c.coordinates.put("depth", Integer.toString(form.depth()));
+            c.coordinates.put("word", Integer.toString(w));
+            c.coordinates.put("fields", String.join(",", fields));
+            if (form.timeAugment()) c.coordinates.put("timeAugment", "true");
+            c.coordinates.put("decayBy", form.decayBy());
+            if (clocks.containsKey(form.decayBy())) c.clocks.put(form.decayBy(), clocks.get(form.decayBy()));
+            c.coordinates.put("stateKey", stateKey);
+            for (final Channel ch : form.channels()) addPastInput(c, ch.reference());
+            finishSequence(c, def, entity, window, filterRefs, reducedKey, null);
+            form.components().add(c);
+        }
+    }
+
+    /**
+     * {@code compress: {svd: {...}}}: a population svd block {@code {block}_svd} over every component column of the
+     * general form (all windows), fitted like any svd block (its own {@code fit}, else the top level). The components
+     * become intermediate unless {@code keep: true}.
+     */
+    private void expandCompress(final FeatureDef def, final GeneralForm form, final AvailableAt computeAt) {
+        final JsonObject svd = form.compress().getAsJsonObject("svd");
+        final FeatureDef compress = new FeatureDef();
+        compress.name = def.name + "_svd";
+        compress.scope = Scope.population;
+        compress.type = "svd";
+        compress.inputs = form.components().stream().map(c -> c.canonicalName).toList();
+        compress.rank = SourceContract.Json.integer(svd, "rank");
+        compress.center = svd.has("center") && !svd.get("center").isJsonNull() ? SourceContract.Json.bool(svd, "center", true) : null;
+        compress.standardize = SourceContract.Json.bool(svd, "standardize", false);
+        compress.outputs = SourceContract.Json.strings(svd, "outputs");
+        compress.fitJson = svd.has("fit") && svd.get("fit").isJsonObject() ? svd.get("fit").toString() : null;
+        compress.validFor = def.validFor;
+        if (compress.inputs.size() < 2) {
+            diagnostics.error("sequence.compress", def.location(), "compress needs two or more component columns (the block emits " + compress.inputs.size() + ")");
+            return;
+        }
+        expandSvd(compress, computeAt);
+        if (!SourceContract.Json.bool(form.compress(), "keep", false)) {
+            for (final OutputColumn c : form.components()) c.intermediate = true;
+        }
+        diagnostics.info("sequence.compress", def.location(), "compress fits an svd of the " + compress.inputs.size() + " component columns as block " + compress.name
+                + (SourceContract.Json.bool(form.compress(), "keep", false) ? "; the components are emitted too (keep: true)" : "; the components are intermediate (keep: true emits them)"));
     }
 
     /** Validated weightBy references per (block, expression): an op is expanded once per window, reported once. */
@@ -1698,6 +1834,7 @@ public final class FeaturePlanCompiler {
         c.coordinates.put("entity", entity.name());
         c.coordinates.put("window", window.token());
         if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
+        calendarWindow(c, window, def.location());
         if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
         if (reducedKey != null) {
             final List<String> stageKeys = new ArrayList<>(entity.keys());
@@ -1740,6 +1877,12 @@ public final class FeaturePlanCompiler {
                 return false;
             }
             return true;
+        }
+        if (window.onCalendar()) {
+            if (directionReported.add(def.name + ":clock:" + window.token())) {
+                diagnostics.error("clock.direction", loc, "a future window measures its horizon on wall time (maxAge as an ISO-8601 duration): window " + window.token());
+            }
+            return false;
         }
         if (window.maxAge == null) {
             if (directionReported.add(def.name + ":maxAge:" + window.token())) {
@@ -2128,10 +2271,13 @@ public final class FeaturePlanCompiler {
             if (!modeDeclared && spec.fit.mode == FitMode.forward) mode = FitMode.forward;
             fitSpec.blockBucket = spec.fit.blockBucket;
             fitSpec.blockSize = spec.fit.blockSize;
+            fitSpec.blockClock = spec.fit.blockClock;
+            fitSpec.blockTicks = spec.fit.blockTicks;
             fitSpec.minBlocks = spec.fit.minBlocks;
             fitSpec.window = spec.fit.window;
             fitSpec.minHistory = spec.fit.minHistory;
             FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+            resolveBlockClock(fitSpec, loc);
             if (mode == FitMode.statik && defFit != null && defFit.has("window")) {
                 diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window applies to fit.mode forward only (" + fitted + " on the whole input in static)");
             }
@@ -2304,10 +2450,13 @@ public final class FeaturePlanCompiler {
         }
         fitSpec.blockBucket = spec.fit.blockBucket;
         fitSpec.blockSize = spec.fit.blockSize;
+        fitSpec.blockClock = spec.fit.blockClock;
+        fitSpec.blockTicks = spec.fit.blockTicks;
         fitSpec.minBlocks = spec.fit.minBlocks;
         fitSpec.window = spec.fit.window;
         fitSpec.minHistory = spec.fit.minHistory;
         FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
+        resolveBlockClock(fitSpec, loc);
         Integer folds = spec.fit.folds;
         if (defFit != null && SourceContract.Json.integer(defFit, "folds") != null) folds = SourceContract.Json.integer(defFit, "folds");
         if (mode == FitMode.fold && folds < 2) {
@@ -2316,6 +2465,18 @@ public final class FeaturePlanCompiler {
         }
         fitSpec.groupBy = groupBy;
         fitSpec.folds = folds;
+        fitSpec.foldBy = spec.fit.foldBy;
+        fitSpec.purge = spec.fit.purge;
+        fitSpec.embargo = spec.fit.embargo;
+        FeatureSpec.FitSpec.parseFold(defFit, fitSpec, diagnostics, loc);
+        if (fitSpec.purge != null && fitSpec.purge.isNegative() || fitSpec.embargo != null && fitSpec.embargo.isNegative()) {
+            diagnostics.error("fit.fold.purge", loc, "fit.fold.purge / embargo must not be negative: purge=" + fitSpec.purge + " embargo=" + fitSpec.embargo);
+        }
+        if (mode != FitMode.fold && (fitSpec.foldBy != null || fitSpec.purge != null || fitSpec.embargo != null) && hintedBlocks.add(def.name + "#foldIgnored")) {
+            diagnostics.warning("fit.fold.ignored", loc, "fit.fold applies to fit.mode fold only (mode " + mode.token() + "): by / purge / embargo are ignored");
+        } else if (mode == FitMode.fold && !fitSpec.isTimeFold() && (fitSpec.purge != null || fitSpec.embargo != null)) {
+            diagnostics.warning("fit.fold.ignored", loc, "purge / embargo need fit.fold.by: time (hash folds have no time order): they are ignored");
+        }
         // static and fold both fit sufficient statistics over the input and apply them by lookup; fold
         // subtracts the row's own fold so a row never sees its own contribution (out-of-fold statistics)
         final boolean isStatic = mode.isLookup();
@@ -2323,6 +2484,12 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.static", loc, "fit.mode static fits the statistics on the whole input"
                     + (fitSpec.artifactUri == null ? " (no artifact: in-pipeline only)" : " and persists them under " + fitSpec.artifactUri + "/<planHash>/")
                     + "; training rows include their own outcome, so use expanding for leak-safe backfill and static for serving / offline analysis");
+        } else if (mode == FitMode.fold && fitSpec.isTimeFold()) {
+            diagnostics.info("fit.mode.fold", loc, "fit.mode fold by time: every time block (" + fitSpec.forwardBlocks().describe() + ") is a fold — a row reads the"
+                    + " statistics of the whole input minus its own block"
+                    + (fitSpec.embargo == null ? "" : ", the embargo " + fitSpec.embargo + " after it")
+                    + " and the purge before it (rounded up to whole blocks); the other blocks include rows AFTER it (cross-fit, not time-ordered)"
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input statistics are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else if (mode == FitMode.fold) {
             diagnostics.info("fit.mode.fold", loc, "fit.mode fold applies out-of-fold statistics (" + folds + " folds by "
                     + (groupBy == null ? "row identity (time.field + orderTieBreak)" : "entity " + groupBy) + "): a row never sees its own fold, "
@@ -2463,6 +2630,9 @@ public final class FeaturePlanCompiler {
                 if (additiveAt != levels.size() - 1) {
                     diagnostics.error("encoding.hierarchy.additive", loc, "'additive' must be the last entry before the global level");
                 }
+            }
+            if (shrinkage.estimator == Shrinkage.Estimator.joint && mode == FitMode.fold && fitSpec.isTimeFold()) {
+                diagnostics.error("fit.fold.time.joint", loc, "estimator: joint solves hash folds only: fit.fold.by: time is not implemented for the joint cell table (use backoff / sequential, or by: row)");
             }
             if (shrinkage.estimator == Shrinkage.Estimator.joint && !isStatic) {
                 // the joint solve needs the whole cell table of the lattice: a fit-stage estimator, not a row-local replay
@@ -2682,9 +2852,12 @@ public final class FeaturePlanCompiler {
         if ((declared.maxEvents != null || declared.filter != null) && hintedBlocks.add(def.name + "#forwardWindowIgnored")) {
             diagnostics.warning("fit.mode.forward.windowIgnored", def.location(), "maxEvents / filter windows are ignored in fit.mode forward (statistics are per block; only maxAge applies, rounded to blocks)");
         }
-        if (declared.maxAge == null) return null;
+        if (declared.maxAge == null && !declared.onCalendar()) return null;
         final Window window = new Window();
         window.maxAge = declared.maxAge;
+        // a window on a calendar clock is counted in the blocks' ticks (forwardCoordinates)
+        window.clock = declared.clock;
+        window.maxAgeTicks = declared.maxAgeTicks;
         return window;
     }
 
@@ -2923,7 +3096,9 @@ public final class FeaturePlanCompiler {
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
         }
-        if (mode == FitMode.fold) {
+        if (mode == FitMode.fold && fitSpec.isTimeFold()) {
+            timeFoldCoordinates(c, targetReference, def, fitSpec);
+        } else if (mode == FitMode.fold) {
             // fold unit: the groupBy entity's keys, else the row identity (time.field + orderTieBreak; time.field
             // alone without a tie-break, so rows sharing a timestamp share a fold). Read at apply time only —
             // not a lineage input of the column (hashing must never involve outcome fields)
@@ -2942,6 +3117,7 @@ public final class FeaturePlanCompiler {
         if (window != null) {
             c.coordinates.put("window", window.token());
             if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
+            calendarWindow(c, window, def.location());
             if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
             if (window.filter != null) {
                 final String filterText = conditionText(window.filter, def.location(), "filter");
@@ -2997,12 +3173,8 @@ public final class FeaturePlanCompiler {
                                     final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
         final String loc = def.location();
         final ForwardBlocks blocks = fitSpec.forwardBlocks();
-        if (blocks.bucket() != null) c.coordinates.put("blockBucket", blocks.bucket());
-        else c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        blockCoordinates(c, blocks);
         c.coordinates.put("minBlocks", Integer.toString(fitSpec.minBlocksOf(blocks)));
-        c.coordinates.put("blockField", spec.timeField);
-        final FieldContract time = inputFields.get(spec.timeField);
-        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
         long lag = 0;
         for (final String reference : references) {
             if (reference == null) continue;
@@ -3018,6 +3190,15 @@ public final class FeaturePlanCompiler {
         }
         c.coordinates.put("forwardLagMillis", Long.toString(lag));
         // the blocks a row reads: the keySet's maxAge, else the block-level fit.window
+        if (window != null && window.onCalendar()) {
+            if (blocks.clock() == null || !blocks.clock().name().equals(window.clock)) {
+                diagnostics.error("clock.fit", loc, "a keySet window on the clock '" + window.clock + "' under fit.mode forward needs fit.blocks on the same clock ({size: <ticks>, clock: "
+                        + window.clock + "}); the blocks are " + blocks.describe());
+            } else {
+                c.coordinates.put("windowBlocks", Long.toString(Math.max(1, (window.maxAgeTicks + blocks.ticks() - 1) / blocks.ticks())));
+            }
+            return;
+        }
         final Duration maxAge = window != null && window.maxAge != null ? window.maxAge : fitSpec.window;
         if (maxAge != null) {
             final int k = blocks.windowBlocks(maxAge);
@@ -3027,6 +3208,91 @@ public final class FeaturePlanCompiler {
                         + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
             }
         }
+    }
+
+    /**
+     * A declared calendar clock by name, or null after reporting {@code clock.unknown} ({@code what} names the parameter:
+     * {@code window.clock}, {@code decayBy}, {@code fit.blocks.clock}).
+     */
+    private Clock clock(final String name, final String loc, final String what) {
+        final Clock clock = clocks.get(name);
+        if (clock == null) {
+            diagnostics.error("clock.unknown", loc, what + " '" + name + "' is neither a built-in clock " + Clock.BUILT_IN
+                    + " nor declared in the sources' clocks" + (clocks.isEmpty() ? "" : " (declared: " + String.join(", ", clocks.keySet()) + ")"));
+        }
+        return clock;
+    }
+
+    /** A window on a calendar clock: its tick count and clock name in the coordinates, the calendar attached to the column. */
+    private void calendarWindow(final OutputColumn c, final Window window, final String loc) {
+        if (!window.onCalendar()) return;
+        final Clock clock = clock(window.clock, loc, "window.clock");
+        if (clock == null) return;
+        c.coordinates.put("maxAgeTicks", Long.toString(window.maxAgeTicks));
+        c.coordinates.put("windowClock", window.clock);
+        c.clocks.put(window.clock, clock);
+    }
+
+    /** Resolves {@code fit.blocks.clock} of a block's fit to the declared calendar (reported once per block). */
+    private void resolveBlockClock(final FeatureSpec.FitSpec fitSpec, final String loc) {
+        if (fitSpec.blockClock == null) {
+            fitSpec.blockCalendar = null;
+            return;
+        }
+        fitSpec.blockCalendar = clocks.get(fitSpec.blockClock);
+        if (fitSpec.blockCalendar == null && hintedBlocks.add(loc + "#blockClock")) clock(fitSpec.blockClock, loc, "fit.blocks.clock");
+    }
+
+    /** The time blocks of a forward fit or a time fold, and the time field (and its type) the engine reads a row's block from. */
+    private void blockCoordinates(final OutputColumn c, final ForwardBlocks blocks) {
+        if (blocks.clock() != null) {
+            c.coordinates.put("blockClock", blocks.clock().name());
+            c.coordinates.put("blockTicks", Integer.toString(blocks.ticks()));
+            c.clocks.put(blocks.clock().name(), blocks.clock());
+        } else if (blocks.bucket() != null) {
+            c.coordinates.put("blockBucket", blocks.bucket());
+        } else {
+            c.coordinates.put("blockSizeMillis", Long.toString(blocks.sizeMillis()));
+        }
+        c.coordinates.put("blockField", spec.timeField);
+        final FieldContract time = inputFields.get(spec.timeField);
+        c.coordinates.put("blockFieldType", time == null || time.getType() == null ? "timestamp" : time.getType().getType().name());
+    }
+
+    /**
+     * {@code fit.fold.by: time}: the blocks, and the blocks left out around the row's own — the purge before it (a
+     * training row whose label reaches into the row's block describes the same period; default = the horizon of the
+     * target's label, info {@code fit.fold.purge}) and the embargo after it, both rounded up to whole blocks.
+     */
+    private void timeFoldCoordinates(final OutputColumn c, final String targetReference, final FeatureDef def, final FeatureSpec.FitSpec fitSpec) {
+        final ForwardBlocks blocks = fitSpec.forwardBlocks();
+        blockCoordinates(c, blocks);
+        c.coordinates.put("foldBy", "time");
+        Duration purge = fitSpec.purge;
+        if (purge == null && targetReference != null) {
+            purge = labelHorizon(canonicalOf(targetReference), new HashSet<>());
+            if (purge != null && hintedBlocks.add(def.name + "#purge:" + purge)) {
+                diagnostics.info("fit.fold.purge", def.location(), "fit.fold.purge defaults to " + purge + ", the horizon of the label '" + targetReference
+                        + "' (a training row whose label window reaches into a row's block is left out of it); declare fit.fold.purge to override");
+            }
+        }
+        c.coordinates.put("purgeBlocks", Integer.toString(purge == null || purge.isZero() ? 0 : blocks.windowBlocks(purge)));
+        final Duration embargo = fitSpec.embargo;
+        c.coordinates.put("embargoBlocks", Integer.toString(embargo == null || embargo.isZero() ? 0 : blocks.windowBlocks(embargo)));
+    }
+
+    /** The longest future-window horizon a column reads, directly or through the row / anonymous columns it derives from; null when none. */
+    private Duration labelHorizon(final String canonical, final Set<String> visited) {
+        if (canonical == null || !visited.add(canonical)) return null;
+        final OutputColumn c = columnsByCanonical.get(canonical);
+        if (c == null) return null;
+        if ("future".equals(c.coordinates.get("direction")) && c.coordinates.containsKey("maxAge")) return Duration.parse(c.coordinates.get("maxAge"));
+        Duration horizon = null;
+        for (final String input : c.inputs) {
+            final Duration h = labelHorizon(input, visited);
+            if (h != null && (horizon == null || h.compareTo(horizon) > 0)) horizon = h;
+        }
+        return horizon;
     }
 
     private static JsonObject parseJsonObject(final String json) {
@@ -3079,9 +3345,9 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
-            // a column declared as the label (output.roles.label) is post-event by declaration, like a future window's
+            // a column declared as the label or the training weight (output.roles.label / weight) is post-event by declaration, like a future window's
             // (a dynamic availability too: labels are not filtered per row, so the engine must not reject it)
-            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && "label".equals(c.role)) c.status = Status.label;
+            if ((c.status == Status.violation || c.status == Status.runtimeFilter) && ("label".equals(c.role) || "weight".equals(c.role))) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;

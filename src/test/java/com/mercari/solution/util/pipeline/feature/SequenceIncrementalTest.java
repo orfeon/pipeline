@@ -110,6 +110,13 @@ public class SequenceIncrementalTest {
                 lift: {fields: [start_price]}
                 summarize:
                   dynamics: {family: lti, measure: legendre, order: 6}
+              - name: sig
+                scope: sequence
+                entity: seller
+                windows: [{}, {maxEvents: 6}]
+                lift: {fields: [start_price, sold], timeAugment: true}
+                summarize:
+                  dynamics: {family: bilinear, type: logsignature, depth: 3, decayBy: time}
               - name: similar
                 scope: sequence
                 entity: seller
@@ -722,5 +729,47 @@ public class SequenceIncrementalTest {
         int withPrice = 0;
         for (int i = 0; i < trimmed.size(); i++) if (trimmed.get(i).values().containsKey("start_price")) withPrice++;
         Assertions.assertTrue(withPrice < trimmed.size() / 4, () -> "entries still holding start_price: " + trimmed.size());
+    }
+
+    /** {@code trend} is sugar over the regression family: the beta of the last k present values on their order equals the former slope. */
+    @Test
+    public void testTrendIsTheRegressionBeta() {
+        final JsonObject sources = Config.convertConfigJson(SOURCES, Config.Format.yaml);
+        final FeaturePlan plan = FeaturePlanCompiler.compile(sources, Config.convertConfigJson("""
+                lineage:
+                  - {fields: [session_id, seller_id, condition_grade, start_price, sold], from: listings}
+                time: {field: session_time}
+                predictAt: "event_time - PT10M"
+                entities:
+                  - {name: seller, keys: [seller_id]}
+                features:
+                  - name: tail
+                    scope: sequence
+                    entity: seller
+                    ops:
+                      - {type: trend, field: start_price, k: 6}
+                """, Config.Format.yaml), null);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final OutputColumn trend = plan.getColumn("tail_all_start_price_trend6");
+        final SequenceEvaluator evaluator = new SequenceEvaluator(List.of(trend));
+        evaluator.setup();
+        final Random random = new Random(41);
+        final List<SequenceEvaluator.Past> history = new ArrayList<>();
+        long millis = 1_700_000_000_000L;
+        for (int i = 0; i < 300; i++) {
+            millis += 3_600_000L;
+            final List<Double> ys = new ArrayList<>();
+            for (int j = Math.max(0, history.size() - 6); j < history.size(); j++) {
+                final Object v = history.get(j).values().get("start_price");
+                if (v != null) ys.add((Double) v);
+            }
+            final Double former = SequenceEvaluator.slope(ys);
+            final Object value = evaluator.evaluateColumn(trend, new HashMap<>(Map.of("seller_id", "s1")), millis, history, null);
+            assertSame("trend@" + i, former, value);
+            final Map<String, Object> row = new HashMap<>();
+            row.put("seller_id", "s1");
+            row.put("start_price", random.nextInt(7) == 0 ? null : 1000 + random.nextGaussian() * 30);
+            history.add(new SequenceEvaluator.Past(millis, row));
+        }
     }
 }

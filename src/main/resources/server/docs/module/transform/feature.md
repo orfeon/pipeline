@@ -102,6 +102,34 @@ sources:
 | `kind`            | Free lineage tag (`market`, `outcome`, `attribute`, ...), propagated to every derived column as `derivedFrom`. |
 | `validFor`        | How long the value stays meaningful (freshness). |
 
+**Calendar clocks (`clocks:`).** Next to `sources`, the document may declare calendars — business days, trading
+sessions — on which windows, decay and fit blocks are counted instead of wall time:
+
+```yaml
+sources: [...]
+clocks:
+  - {name: business, type: calendar, dates: [2025-01-06, 2025-01-07, ...]}   # UTC dates, any order
+  - {name: trading, type: calendar, uri: "gs://bucket/calendars/trading_days.csv"}   # one date per line / first CSV column, or a JSON array
+```
+
+- A row's **position** on a calendar is the ordinal of the last tick on or before its (UTC) date: a Sunday sits on
+  the Friday before it. A date before the first tick sits before tick 0 and a date after the last tick on the last
+  one, so a calendar must cover the data's range (plus the longest window).
+- `window: {maxAge: 20, clock: business}` keeps the past rows whose position is at least the row's minus 20 (the
+  row's own tick included, as `maxAge` on wall time includes `t − maxAge`); the window token is `20business`. Also on a
+  keySet window. `maxEvents` / `filter` combine as usual; a `direction: future` window stays on wall time
+  (`clock.direction`).
+- `decayBy: business` (`ewma`, `summarize.dynamics`) measures ages in ticks: a halflife of 5 is five business days,
+  whatever falls in between.
+- `fit.blocks: {size: 20, clock: business}` makes blocks of 20 ticks (`fit.mode: forward`, time folds); a keySet
+  window on the same clock is then counted in those ticks (`clock.fit` when the blocks are on another clock), and
+  `fit.window` / `minHistory` / `purge` durations round with the calendar's mean tick spacing.
+- **Availability stays on wall time**: `availableAt`, `ingestionLag` and the window shift they cause are durations —
+  a clock measures windows, not knowledge.
+- A `uri` is read at assembly (like `output.include`); the dates are part of the plan hash, so a new holiday is a new
+  plan. `clock.unknown` names an undeclared clock (`time` and `events` are built in); `window.clock`,
+  `fit.blocks.clock` and `sources.clocks.*` report malformed declarations.
+
 ### Feature scopes
 
 ```yaml
@@ -331,6 +359,28 @@ With `artifact.uri` the whole-input (not out-of-fold) statistics are persisted e
 would; pin the version with `artifact.id` so a serving config with `mode: static` (a different plan
 hash) loads them. A fold run itself always re-fits (it needs the per-fold tags, which an artifact does
 not hold).
+
+**Time folds (`fold: {by: time}`).** Hash folds mix every period into every fold, so a row's out-of-fold statistics
+still contain its neighbours in time — the rows whose labels describe the same days. With `by: time` every time block
+is a fold:
+
+```yaml
+  fit:
+    mode: fold
+    blocks: {bucket: month}                       # the folds (as fit.mode forward: bucket or size, default P90D)
+    fold: {by: time, purge: P20D, embargo: P7D}
+```
+
+- A row in block `b` reads the statistics of the whole input minus the blocks `[b − purge, b + embargo]`: its own
+  block, the **purge** before it (the rows whose label window reaches into the row's block) and the **embargo** after
+  it. Both are rounded up to whole blocks (`purge: P20D` with 7-day blocks leaves 3 blocks out).
+- `purge` defaults to the horizon of the label the target reads — a `direction: future` column, directly or through a
+  row expression (info `fit.fold.purge`); other targets default to no purge. `embargo` defaults to none.
+- `folds` and `groupBy` do not apply (every block is a fold); `purge` / `embargo` without `by: time` are ignored with
+  a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`). `estimator: joint` solves hash folds only
+  (`fit.fold.time.joint`).
+- Like every fold the result is a cross-fit (later blocks are read), batch only; the per-block statistics are one
+  parallel Combine per (key, block), as in `fit.mode: forward`, and an `artifact` holds the whole-input totals.
 
 ### Factorization (population, type: factorization)
 
@@ -810,13 +860,34 @@ projection of the path onto a basis `b_j` under the measure `w`:
   `sequence.window.unbounded` hint, `ewma` included) — except under a `filter` without `maxAge`, as for any op.
 - Availability, windows (`maxEvents` / `maxAge` / `filter`), the window shift of an outcome channel and the
   naming prefix `{block}_{window}_{channel}` are those of the ops.
+- **Log-signatures (`family: bilinear`).** Instead of one summary per channel, `bilinear` summarises the *joint*
+  path the events trace through all the channels:
+
+  ```yaml
+  summarize:
+    dynamics: {family: bilinear, type: logsignature, depth: 3, decayBy: time}   # depth 1..4 (default 2)
+  ```
+
+  The path is piecewise linear through the events' points (an event contributes when every channel is present;
+  `timeAugment` adds the event's time — days on `time`, its ordinal on `events`, ticks on a calendar — as the last
+  channel). Its truncated log-signature is emitted in the Lyndon basis, one column per word:
+  `{block}_{window}_logsig_{word}`, the channels lettered `a, b, c, …` in lift order (info
+  `sequence.dynamics.logsignature` prints the legend). Words of one letter are the channels' total increments over the
+  window, `ab` the Lévy area between channels a and b (signed: which moved first), longer words the higher-order
+  interactions. Fewer than two points read null. The state is folded once per event on an unbounded window; a
+  `maxAge` / `maxEvents` window re-reads its events (the oldest point cannot be removed from a signature without the
+  one after it). One channel alone is only its increment (`sequence.dynamics.channels`), at most 26 channels.
+- **Compress (`compress: {svd: {...}}`).** The component columns of the block (every window) feed an svd block
+  `{block}_svd` — `rank`, `center`, `standardize`, `outputs` and its own `fit` (static by default, `mode: forward` to
+  walk forward) as for `type: svd` — whose scores `{block}_svd_<k>` are emitted instead of the components; `keep: true`
+  emits the components too.
 - **Diagnostics**: a block uses either `ops` or `lift` + `summarize` (`sequence.form`); `summarize` needs
-  `dynamics` (`sequence.summarize`) with `family: lti` (`sequence.dynamics.family`: `bilinear` log-signatures are
-  not implemented yet) and a `measure` (`sequence.dynamics.measure`); `sequence.dynamics.order` /
-  `.halflife` / `.period` / `.decayBy` / `.parameter` check the parameters; channels must be numeric
-  (`sequence.lift.type`); a block emitting more than 64 component columns (windows × halflifes × channels ×
-  components) is `sequence.dynamics.size`; `compress` is not implemented (`sequence.compress` — feed the
-  component columns to a population `svd` block).
+  `dynamics` (`sequence.summarize`) with `family: lti | bilinear` (`sequence.dynamics.family`) — lti a `measure`
+  (`sequence.dynamics.measure`), bilinear `type: logsignature` (`sequence.dynamics.type`) and a `depth`
+  (`sequence.dynamics.depth`); `sequence.dynamics.order` / `.halflife` / `.period` / `.parameter` (a parameter of
+  the other family included) check the parameters; channels must be numeric (`sequence.lift.type`); a block emitting
+  more than 64 component columns is `sequence.dynamics.size`; a malformed `compress` is `sequence.compress`.
+- `trend` (an op) is the same arithmetic as `regression`: the beta of the last `k` present values on their order.
 
 ### Availability check
 
@@ -943,6 +1014,21 @@ output:
   general form (`lift` + `summarize`), which reads the past window only.
 - **Engine.** The block runs in a keyed stage of its own (`future` in the plan report), replaying each key's rows
   latest first: one more GroupByKey, in the same wave as the past stages it does not depend on.
+- **Overlapping labels and uniqueness weights.** Labels of neighbouring rows describe overlapping periods, so they
+  are not independent samples. The number of the entity's rows whose `h`-window overlaps a row's is a past and a
+  future `COUNT(1)` over `maxAge: h`; its inverse is a training weight, declared as `output.roles.weight` — a weight
+  derived from labels is post-event too, and is emitted like a label (status `label`, never a feature):
+
+  ```yaml
+  - {name: before, scope: sequence, entity: seller, windows: [{maxAge: P20D}], ops: [{type: aggregate, funcs: [count]}]}
+  - {name: after, scope: sequence, entity: seller, direction: future, windows: [{maxAge: P20D}], ops: [{type: aggregate, funcs: [count]}]}
+  - {name: uniqueness, scope: row, expr: "1 / (1 + before_20d_count + after_20d_count)"}
+  output:
+    roles: {label: ret, weight: uniqueness}
+  ```
+
+  Rows sharing the row's timestamp are counted by neither window. The matching cross-validation leaves out the same
+  neighbours: a time fold with `purge` = the horizon (above).
 
 ### observedAt audit (declaration vs. data)
 

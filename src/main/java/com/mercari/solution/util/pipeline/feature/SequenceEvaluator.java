@@ -46,6 +46,9 @@ public class SequenceEvaluator implements Serializable {
     static final class ColumnPlan implements Serializable {
         long shiftMillis;
         Long maxAgeMillis;
+        /** A window on a calendar clock: its {@code maxAge} in ticks and the calendar (null on wall time). */
+        Long maxAgeTicks;
+        Clock windowClock;
         Integer maxEvents;
         String filterText;
         EqualityFilter equality;
@@ -307,7 +310,7 @@ public class SequenceEvaluator implements Serializable {
     }
 
     private static boolean unbounded(final ColumnPlan plan, final OutputColumn c) {
-        return !plan.incremental && plan.maxAgeMillis == null && tailSize(plan, c) == null;
+        return !plan.incremental && !hasMaxAge(plan) && tailSize(plan, c) == null;
     }
 
     /**
@@ -334,16 +337,30 @@ public class SequenceEvaluator implements Serializable {
         final ColumnPlan plan = plans.get(c.canonicalName);
         if (plan.incremental) {
             final ColumnState cs = state.columns.get(plan.stateKey);
-            return cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
+            return cs == null ? 0 : (!hasMaxAge(plan) ? cs.foldIndex : cs.evictIndex);
         }
-        if (plan.maxAgeMillis == null) {
+        if (!hasMaxAge(plan)) {
             final Integer tail = tailSize(plan, c);
             if (tail == null) return 0;
             // the window is the suffix of the history before the near edge; the near edge only moves
             // forward, so rows more than `tail` behind it are never read again
             return Math.max(0, upperBound(history, nowMillis - plan.shiftMillis) - tail);
         }
-        return lowerBound(history, nowMillis - plan.maxAgeMillis);
+        return lowerBound(history, farEdge(plan, nowMillis));
+    }
+
+    /** Whether the window has a far edge ({@code maxAge} on wall time or on a calendar clock). */
+    static boolean hasMaxAge(final ColumnPlan plan) {
+        return plan.maxAgeMillis != null || plan.maxAgeTicks != null;
+    }
+
+    /**
+     * The window's far edge at {@code nowMillis}: the earliest event time still inside ({@code now − maxAge} on wall
+     * time; on a calendar clock the start of the tick {@code maxAge} ticks before the row's, which only moves forward
+     * with {@code now} — the eviction pointers rely on that).
+     */
+    static long farEdge(final ColumnPlan plan, final long nowMillis) {
+        return plan.maxAgeTicks != null ? plan.windowClock.farEdgeMillis(nowMillis, plan.maxAgeTicks) : nowMillis - plan.maxAgeMillis;
     }
 
     private final List<OutputColumn> columns;
@@ -396,6 +413,12 @@ public class SequenceEvaluator implements Serializable {
         plan.shiftMillis = c.windowShift == null ? 0L : c.windowShift.toMillis();
         final String maxAge = c.coordinates.get("maxAge");
         plan.maxAgeMillis = maxAge == null ? null : Duration.parse(maxAge).toMillis();
+        final String maxAgeTicks = c.coordinates.get("maxAgeTicks");
+        if (maxAgeTicks != null) {
+            plan.maxAgeTicks = Long.parseLong(maxAgeTicks);
+            plan.windowClock = c.clocks.get(c.coordinates.get("windowClock"));
+            if (plan.windowClock == null) throw new IllegalStateException("the calendar clock '" + c.coordinates.get("windowClock") + "' of " + c.canonicalName + " is not attached to the column");
+        }
         final String maxEvents = c.coordinates.get("maxEvents");
         plan.maxEvents = maxEvents == null ? null : Integer.parseInt(maxEvents);
         plan.filterText = c.coordinates.get("filter");
@@ -429,7 +452,7 @@ public class SequenceEvaluator implements Serializable {
                 && plan.maxEvents == null
                 && (plan.filterText == null || plan.equality != null)
                 // a window evicts: only a group (invertible family) can remove a contribution again
-                && (plan.maxAgeMillis == null || plan.summary.family().invertible());
+                && (!hasMaxAge(plan) || plan.summary.family().invertible());
         return plan;
     }
 
@@ -462,7 +485,8 @@ public class SequenceEvaluator implements Serializable {
      */
     Summary.Spec summaryOf(final OutputColumn c) {
         return switch (c.operator) {
-            case "ewma", "dynamics" -> Dynamics.spec(c.coordinates);
+            case "ewma", "dynamics" -> "bilinear".equals(c.coordinates.get("family"))
+                    ? Signature.spec(c.coordinates, c.clocks) : Dynamics.spec(c.coordinates, c.clocks);
             case "aggregate" -> OperatorCatalog.summary(func(c));
             case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(func(c));
             default -> null;
@@ -498,8 +522,8 @@ public class SequenceEvaluator implements Serializable {
             apply(plan, cs, history.get(cs.foldIndex), 1);
             cs.foldIndex++;
         }
-        if (plan.maxAgeMillis != null) {
-            final long farEdge = nowMillis - plan.maxAgeMillis;
+        if (hasMaxAge(plan)) {
+            final long farEdge = farEdge(plan, nowMillis);
             while (cs.evictIndex < cs.foldIndex && history.get(cs.evictIndex).millis() < farEdge) {
                 apply(plan, cs, history.get(cs.evictIndex), -1);
                 cs.evictIndex++;
@@ -525,6 +549,8 @@ public class SequenceEvaluator implements Serializable {
     Object contribution(final ColumnPlan plan, final Past p) {
         // a path event: missing values still advance the events clock (a field-less channel is the constant 1)
         if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
+        // a point of a multi-channel path (none when a channel is missing)
+        if (plan.summary.family() instanceof Signature signature) return signature.event(p);
         if (plan.field == null) return 0d;
         if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
         return finite(p.values().get(plan.field));
@@ -578,16 +604,21 @@ public class SequenceEvaluator implements Serializable {
                 return a == null || b == null ? null : a - b;
             }
             case "trend" -> {
+                // sugar: the regression of the last k present values on their order (0, 1, …) — the beta readout of the
+                // same family the regression op folds, over a bounded tail
                 final int k = Integer.parseInt(c.coordinates.get("k"));
-                final List<Double> ys = new ArrayList<>();
+                final Summary<Summary.Regression.State> family = Summary.Summaries.REGRESSION;
+                final Summary.Regression.State state = family.create();
+                int x = 0;
                 for (int i = Math.max(0, window.size() - k); i < window.size(); i++) {
-                    final Double y = FeatureValues.toDouble(window.get(i).values().get(field));
-                    if (y != null) ys.add(y);
+                    final Double y = finite(window.get(i).values().get(field));
+                    if (y != null) family.update(state, new double[]{x++, y}, 1);
                 }
-                return slope(ys);
+                return family.read(state, Summary.Readout.of("beta"));
             }
             case "ewma", "dynamics" -> {
                 // the direct projection of the window: the reference the running state is equal to
+                if (plan.summary.family() instanceof Signature signature) return signature.project(window, plan.summary.readout().parameter().intValue());
                 return ((Dynamics) plan.summary.family()).project(window, field, nowMillis, plan.summary.readout().parameter().intValue());
             }
             case "runLength" -> {
@@ -670,7 +701,7 @@ public class SequenceEvaluator implements Serializable {
         final long nearEdge = nowMillis - plan.shiftMillis;
         // rows sharing the current timestamp are excluded upstream (history holds strictly-past rows only)
         final int hi = upperBound(history, nearEdge);
-        final int lo = plan.maxAgeMillis == null ? 0 : lowerBound(history, nowMillis - plan.maxAgeMillis);
+        final int lo = !hasMaxAge(plan) ? 0 : lowerBound(history, farEdge(plan, nowMillis));
         if (lo >= hi) return List.of();
         List<Past> ranged = history.subList(lo, hi);
         if (plan.filterText != null) {
