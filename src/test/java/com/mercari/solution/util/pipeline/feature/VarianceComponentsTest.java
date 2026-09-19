@@ -142,7 +142,10 @@ public class VarianceComponentsTest {
             if (last == null) {
                 Assertions.assertNull(whole, "trial " + trial);
             } else {
-                Assertions.assertEquals(last.getValue(), whole, Math.abs(last.getValue()) * 1e-9, "trial " + trial);
+                Assertions.assertNotNull(whole, "trial " + trial);
+                // λ = ∞ (full shrinkage) must match exactly: a relative delta of ∞ would accept any value
+                final double delta = Double.isInfinite(last.getValue()) ? 0d : Math.abs(last.getValue()) * 1e-9;
+                Assertions.assertEquals(last.getValue(), whole, delta, "trial " + trial);
             }
         }
     }

@@ -756,14 +756,15 @@ public final class FeatureStages {
                 if (!writeTimeFoldBlocks.isEmpty()) writeArtifacts(totals, writeTimeFoldBlocks, timeFolds, planHash, null, label + "_WriteTimeFold");
             }
             if (!forward.isEmpty()) {
-                final PCollection<KV<String, ForwardBlocks.Series>> series = timeFolds.isEmpty()
-                        ? allSeries : seriesOf(allSeries, levelIds(forward), label + "_ForwardOnly");
                 if (needsLambdas || !writeForwardBlocks.isEmpty()) {
+                    // only the forward levels enter the per-block λ Combine (built only when something reads it)
+                    final PCollection<KV<String, ForwardBlocks.Series>> series = timeFolds.isEmpty()
+                            ? allSeries : seriesOf(allSeries, levelIds(forward), label + "_ForwardOnly");
                     forwardLambdasView = VarianceComponents.lambdasByBlockView(series, label + "_ForwardVc");
                 }
                 if (needsLambdas) sideInputs.add(forwardLambdasView);
                 if (!writeForwardBlocks.isEmpty()) {
-                    writeArtifacts(seriesTotals(series, levelIds(forward), label + "_ForwardTotals"), writeForwardBlocks, forward, planHash,
+                    writeArtifacts(seriesTotals(allSeries, levelIds(forward), label + "_ForwardTotals"), writeForwardBlocks, forward, planHash,
                             forwardLambdasView, label + "_WriteForward");
                 }
             }
@@ -1983,7 +1984,7 @@ public final class FeatureStages {
 
         private final List<FitLevel> levels;
         private final PCollectionView<Map<String, VarianceComponents.KeyStats>> statsView;
-        /** fit.mode forward: cumulative per-block statistics per (level, key), read once per instance into {@link #forwardSeries} */
+        /** fit.mode forward and time folds: cumulative per-block statistics per (level, key), read once per instance into {@link #forwardSeries} */
         private final PCollectionView<List<KV<String, ForwardBlocks.Series>>> seriesView;
         /** fit.mode forward: λ per level per block (present when a lattice column of the stage reads variance components) */
         private final PCollectionView<List<VarianceComponents.LevelLambdas>> forwardLambdasView;
@@ -2002,6 +2003,13 @@ public final class FeatureStages {
         private transient Map<String, Serializable> summaryModels;
         private transient Map<String, VarianceComponents.KeyStats> loaded;
         private transient Map<String, Double> loadedLambdas;
+        /**
+         * The whole-input λ (loaded artifacts, the static fit's and the time folds'), merged once per DoFn instance: the
+         * side inputs exist in a batch run only (a streaming fit requires artifacts) and are global-window values, so
+         * they never change for an instance — re-reading and re-scanning the map side inputs per row would be one state
+         * fetch per entry per row on a portable runner.
+         */
+        private transient Map<String, Double> mergedLambdas;
         private transient Map<String, Object> loadedModels;
         /**
          * fit.mode forward: the series by entry and λ per level per block, each read once per DoFn instance from its
@@ -2084,10 +2092,13 @@ public final class FeatureStages {
 
         @Override
         protected void prepare(final ProcessContext c) {
-            final Map<String, Double> merged = new HashMap<>(loadedLambdas);
-            if (lambdas != null) merged.putAll(c.sideInput(lambdas));
-            if (timeFoldLambdasView != null) merged.putAll(c.sideInput(timeFoldLambdasView));
-            evaluator.setLambdas(merged);
+            if (mergedLambdas == null) {
+                final Map<String, Double> merged = new HashMap<>(loadedLambdas);
+                if (lambdas != null) merged.putAll(c.sideInput(lambdas));
+                if (timeFoldLambdasView != null) merged.putAll(c.sideInput(timeFoldLambdasView));
+                mergedLambdas = merged;
+            }
+            evaluator.setLambdas(mergedLambdas);
         }
 
         /** fit.mode forward: the row's statistics = the series up to its usable block (minus the window's older blocks). */

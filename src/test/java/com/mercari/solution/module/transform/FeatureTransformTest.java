@@ -2436,6 +2436,24 @@ public class FeatureTransformTest {
             Assertions.assertEquals(e.getValue(), ((Number) row.get("f_enc_tf__seller_id__count")).longValue(), e.getKey());
             Assertions.assertNotNull(row.get("f_enc_tf__seller_id__e2__mean__neff"), row::toString);
         }
+        // D's time fold reads A, B and C — the rows its forward read sees — and the whole input's λ (s1: 3 of 4 sold,
+        // s2: 1 of 2) is ∞ as well: the same full-shrinkage values. A missing λ would fall back to priorWeight 1
+        // ((2 + 0.5) / 4 = 0.625), so these pin the _TimeFoldVc side input reaching the evaluator
+        Assertions.assertEquals(0.5, ((Number) d.get("f_enc_tf__seller_id__e2__mean")).doubleValue(), 1e-9, d::toString);
+        Assertions.assertEquals(5.0, ((Number) d.get("f_enc_tf__seller_id__e2__mean__neff")).doubleValue(), 1e-9, d::toString);
+        // the time-fold artifact (the top-level artifact uri is inherited) is written like a hash fold's: the totals and
+        // their whole-input λ, no per-block λ; the forward manifest records its own levels' per-block λ only
+        final java.io.File[] files = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(files, "artifact directory missing: " + dir);
+        final com.google.gson.JsonObject timeFoldManifest = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(new java.io.File(files[0], "enc_tf.manifest.json").toPath())).getAsJsonObject();
+        Assertions.assertFalse(timeFoldManifest.has("lambdasByBlock"), timeFoldManifest::toString);
+        Assertions.assertEquals("Infinity", timeFoldManifest.getAsJsonObject("lambdas").get("enc_tf__seller_id__e2__n").getAsString(), timeFoldManifest::toString);
+        final com.google.gson.JsonObject forwardManifest = com.google.gson.JsonParser.parseString(
+                java.nio.file.Files.readString(new java.io.File(files[0], "enc.manifest.json").toPath())).getAsJsonObject();
+        for (final String level : forwardManifest.getAsJsonObject("lambdasByBlock").keySet()) {
+            Assertions.assertTrue(level.startsWith("enc__"), forwardManifest::toString);
+        }
     }
 
     @Test
