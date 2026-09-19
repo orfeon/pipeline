@@ -1059,10 +1059,17 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.entity", loc, "sequence feature requires 'entity' referencing entities[].name: " + def.entity);
             return;
         }
-        if (def.ops.isEmpty()) {
-            diagnostics.error("sequence.ops", loc, "sequence feature requires 'ops' (general lift/summarize form is v1)");
+        final boolean general = def.lift != null || def.summarize || def.compress;
+        if (general && !def.ops.isEmpty()) {
+            diagnostics.error("sequence.form", loc, "use either 'ops' (the sugar) or the general form 'lift' + 'summarize', not both in one block");
             return;
         }
+        if (def.ops.isEmpty() && !general) {
+            diagnostics.error("sequence.ops", loc, "sequence feature requires 'ops' or the general form 'lift' + 'summarize'");
+            return;
+        }
+        final GeneralForm form = general ? generalForm(def, computeAt) : null;
+        if (general && form == null) return;
         final List<Window> windows = def.windows.isEmpty() ? List.of(new Window()) : def.windows;
         for (final Window window : windows) {
             // a same-field $self equality filter is a partition of the entity: reduce it to a stage key
@@ -1072,6 +1079,10 @@ public final class FeaturePlanCompiler {
             if (reducedKey != null) {
                 diagnostics.info("sequence.filter.reduced", loc,
                         "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")");
+            }
+            if (form != null) {
+                expandDynamics(def, entity, window, filterRefs, reducedKey, form, computeAt);
+                continue;
             }
             for (final Op op : def.ops) {
                 final Operator operator = OperatorCatalog.get(Scope.sequence, op.type);
@@ -1162,11 +1173,19 @@ public final class FeaturePlanCompiler {
                                 diagnostics.error("sequence.ewma.halflife", loc, "ewma requires 'halflife'");
                                 continue;
                             }
+                            if (op.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
+                                diagnostics.error("sequence.ewma.halflife", loc, "halflife must be a positive number (events, or days under decayBy: time): " + op.halflife);
+                                continue;
+                            }
                             final String decayBy = op.decayBy == null ? "events" : op.decayBy;
                             if (!List.of("events", "time").contains(decayBy)) diagnostics.error("sequence.ewma.decayBy", loc, "decayBy must be events | time");
                             for (final Double h : op.halflife) {
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "ewma" + number(h), Schema.FieldType.FLOAT64, computeAt);
-                                c.coordinates.put("halflife", number(h));
+                                // sugar: the order-0 exponential dynamics of the general form (one running state, O(1) per row)
+                                c.coordinates.put("measure", Dynamics.Measure.exponential.name());
+                                c.coordinates.put("order", "0");
+                                c.coordinates.put("component", "0");
+                                c.coordinates.put("halflife", plainNumber(h));
                                 c.coordinates.put("decayBy", decayBy);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -1252,6 +1271,154 @@ public final class FeaturePlanCompiler {
                         }
                         default -> diagnostics.error("sequence.op", loc, "unsupported sequence op: " + op.type);
                     }
+                }
+            }
+        }
+    }
+
+    /** Upper bound on the component columns one general-form block emits (windows × halflifes × channels × components). */
+    static final int MAX_DYNAMICS_COLUMNS = 64;
+
+    /** The validated general form of a sequence block: channels (a null reference = the constant time channel) and the dynamics. */
+    private record GeneralForm(List<String> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period, String decayBy) {}
+
+    /**
+     * Validates {@code lift} / {@code summarize} / {@code compress} once per block (expressions are desugared once, not
+     * per window) and returns the form, or null after reporting.
+     */
+    private GeneralForm generalForm(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        boolean valid = true;
+        if (def.compress) {
+            diagnostics.error("sequence.compress", loc, "compress is not implemented yet: feed the component columns to a population svd block (fields: [...])");
+            valid = false;
+        }
+        if (!def.summarize || def.dynamics == null) {
+            diagnostics.error("sequence.summarize", loc, "the general form requires summarize: {dynamics: {family: lti, measure: exponential | legendre | fourier, ...}}");
+            return null;
+        }
+        final DynamicsSpec d = def.dynamics;
+        if (!"lti".equals(d.family)) {
+            diagnostics.error("sequence.dynamics.family", loc, d.family == null
+                    ? "summarize.dynamics requires 'family' (available: lti)"
+                    : "dynamics family '" + d.family + "' is " + (List.of("bilinear", "probabilistic").contains(d.family) ? "not implemented yet" : "unknown") + " (available: lti)");
+            return null;
+        }
+        if (!d.unknown.isEmpty()) {
+            diagnostics.error("sequence.dynamics.parameter", loc, "unknown lti parameter(s) " + d.unknown + " (accepted: measure, order, halflife, period, decayBy)");
+            valid = false;
+        }
+        final Dynamics.Measure measure;
+        try {
+            measure = Dynamics.Measure.valueOf(String.valueOf(d.measure));
+        } catch (final IllegalArgumentException e) {
+            diagnostics.error("sequence.dynamics.measure", loc, "lti requires 'measure': exponential | legendre | fourier (got " + d.measure + ")");
+            return null;
+        }
+        final int order = d.order != null ? d.order : switch (measure) {
+            case exponential -> 0;
+            case fourier -> 1;
+            case legendre -> 3;
+        };
+        final int minOrder = measure == Dynamics.Measure.fourier ? 1 : 0;
+        if (order < minOrder || order > Dynamics.maxOrder(measure)) {
+            diagnostics.error("sequence.dynamics.order", loc, measure + " order must be in [" + minOrder + ", " + Dynamics.maxOrder(measure) + "]: " + order);
+            valid = false;
+        }
+        if (d.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
+            diagnostics.error("sequence.dynamics.halflife", loc, "halflife must be a positive number (clock units): " + d.halflife);
+            valid = false;
+        } else if (measure == Dynamics.Measure.exponential && d.halflife.isEmpty()) {
+            diagnostics.error("sequence.dynamics.halflife", loc, "the exponential measure requires 'halflife' (clock units; one state per value)");
+            valid = false;
+        } else if (measure == Dynamics.Measure.legendre && !d.halflife.isEmpty()) {
+            diagnostics.error("sequence.dynamics.halflife", loc, "legendre has no halflife: its measure is uniform over the window's span");
+            valid = false;
+        }
+        if (measure == Dynamics.Measure.fourier && (d.period == null || !(d.period > 0) || d.period.isInfinite())) {
+            diagnostics.error("sequence.dynamics.period", loc, "fourier requires a positive 'period' (clock units) for its first harmonic: " + d.period);
+            valid = false;
+        } else if (measure != Dynamics.Measure.fourier && d.period != null) {
+            diagnostics.error("sequence.dynamics.period", loc, "period is a fourier parameter (measure " + measure + ")");
+            valid = false;
+        }
+        final String decayBy = d.decayBy == null ? "events" : d.decayBy;
+        if (!List.of("events", "time").contains(decayBy)) {
+            diagnostics.error("sequence.dynamics.decayBy", loc, "decayBy (the clock) must be events | time: " + decayBy);
+            valid = false;
+        }
+        if (def.lift == null || def.lift.fields.isEmpty() && def.lift.exprs.isEmpty() && !def.lift.timeAugment) {
+            diagnostics.error("sequence.lift", loc, "the general form requires lift: {fields: [...]} (and / or exprs, timeAugment)");
+            return null;
+        }
+        final List<String> channels = new ArrayList<>();
+        for (final String field : def.lift.fields) {
+            final Ref ref = resolve(field);
+            if (ref == null) {
+                valid = false;
+                continue;
+            }
+            if (!OperatorCatalog.isNumeric(ref.type()) && (ref.type() == null || ref.type().getType() != Schema.Type.bool)) {
+                diagnostics.error("sequence.lift.type", loc, "lift channel '" + field + "' must be numeric (is " + (ref.type() == null ? "unknown" : ref.type().getType()) + ")");
+                valid = false;
+                continue;
+            }
+            channels.add(field);
+        }
+        for (final String expr : def.lift.exprs) {
+            final OutputColumn anonymous = desugarExpression(def, expr, computeAt);
+            if (anonymous == null) valid = false;
+            else channels.add(anonymous.canonicalName);
+        }
+        final int perChannel = Dynamics.dimension(measure, order);
+        if (def.lift.timeAugment) {
+            if (perChannel == 1) {
+                diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
+            }
+            channels.add(null);
+        }
+        final int columns = Math.max(1, def.windows.size()) * Math.max(1, d.halflife.size())
+                * (perChannel * channels.size() - (def.lift.timeAugment ? 1 : 0));
+        if (columns > MAX_DYNAMICS_COLUMNS) {
+            diagnostics.error("sequence.dynamics.size", loc, "the block would emit " + columns + " component columns (windows × halflifes × channels × "
+                    + perChannel + " components), over " + MAX_DYNAMICS_COLUMNS + ": lower the order or split the channels over several blocks");
+            valid = false;
+        }
+        return valid ? new GeneralForm(channels, measure, order, d.halflife, d.period, decayBy) : null;
+    }
+
+    /**
+     * One window of a general-form block: per channel and halflife one running state (the {@code stateKey} its component
+     * columns share) and one FLOAT64 column per component, {@code {block}_{window}_{channel}_{measure}_{component}}.
+     * The constant time channel skips its component 0 (always 1).
+     */
+    private void expandDynamics(final FeatureDef def, final EntityDef entity, final Window window, final References filterRefs,
+                                final String reducedKey, final GeneralForm form, final AvailableAt computeAt) {
+        final List<Double> halflifes = form.halflifes().isEmpty() ? Collections.singletonList(null) : form.halflifes();
+        for (final String channel : form.channels()) {
+            for (final Double h : halflifes) {
+                final String measureToken = switch (form.measure()) {
+                    case exponential -> "exp" + number(h);
+                    case legendre -> "leg";
+                    case fourier -> "fourier" + number(form.period()) + (h == null ? "" : "h" + number(h));
+                };
+                final String stateKey = def.name + "_" + window.token() + "_" + (channel == null ? "time" : displayName(channel)) + "_" + measureToken;
+                for (int component = channel == null ? 1 : 0; component < Dynamics.dimension(form.measure(), form.order()); component++) {
+                    final OutputColumn c = newColumn(def.name, Scope.sequence, "dynamics",
+                            stateKey + "_" + Dynamics.componentName(form.measure(), component), Schema.FieldType.FLOAT64, computeAt);
+                    c.coordinates.put("family", "lti");
+                    c.coordinates.put("measure", form.measure().name());
+                    c.coordinates.put("order", Integer.toString(form.order()));
+                    c.coordinates.put("component", Integer.toString(component));
+                    if (h != null) c.coordinates.put("halflife", plainNumber(h));
+                    if (form.period() != null) c.coordinates.put("period", plainNumber(form.period()));
+                    c.coordinates.put("decayBy", form.decayBy());
+                    c.coordinates.put("stateKey", stateKey);
+                    if (channel != null) {
+                        c.coordinates.put("field", canonicalOf(channel));
+                        addPastInput(c, channel);
+                    }
+                    finishSequence(c, def, entity, window, filterRefs, reducedKey, null);
                 }
             }
         }
@@ -1406,6 +1573,11 @@ public final class FeaturePlanCompiler {
     private static String displayName(final String reference) {
         final int dot = reference.lastIndexOf('.');
         return dot < 0 ? reference : reference.substring(dot + 1);
+    }
+
+    /** A parameter as a coordinate the evaluator parses back ({@link #number} is the name token: {@code 1.5 → 1p5}). */
+    private static String plainNumber(final Double d) {
+        return d == Math.floor(d) && !Double.isInfinite(d) ? Long.toString(d.longValue()) : d.toString();
     }
 
     private static String number(final Double d) {

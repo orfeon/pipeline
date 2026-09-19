@@ -650,6 +650,85 @@ public class FeatureTransformTest {
      * prices themselves are known at once, so D's first difference reads C − B = 80 − 200.
      */
     @Test
+    public void testSequenceDynamics() throws java.io.IOException {
+        final String blocks = """
+                    - name: path
+                      scope: sequence
+                      entity: seller
+                      lift: {fields: [start_price], timeAugment: true}
+                      summarize:
+                        dynamics: {family: lti, measure: legendre, order: 1, decayBy: time}
+                    - name: laguerre
+                      scope: sequence
+                      entity: seller
+                      lift: {fields: [start_price]}
+                      summarize:
+                        dynamics: {family: lti, measure: exponential, order: 1, halflife: [2]}
+                    - name: smooth
+                      scope: sequence
+                      entity: seller
+                      ops:
+                        - {type: ewma, field: start_price, halflife: [2]}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals("legendre", output.getSchema().getField("f_path_all_start_price_leg_1").getOptions().get("feature.coord.measure"));
+        Assertions.assertEquals(Schema.Type.float64, output.getSchema().getField("f_laguerre_all_start_price_exp2_1").getFieldType().getType());
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                switch (id) {
+                    case "D/s1" -> {
+                        // s1's past: 100 on day 0, 200 on day 2, 80 on day 19; the row is on day 31
+                        final double[] x = {100, 200, 80}, day = {0, 2, 19};
+                        double p1 = 0, t1 = 0;
+                        for (int i = 0; i < 3; i++) {
+                            p1 += x[i] * (2 * day[i] / 31 - 1);
+                            t1 += 2 * day[i] / 31 - 1;
+                        }
+                        Assertions.assertEquals(380.0 / 3, row.getAsDouble("f_path_all_start_price_leg_0"), 1e-9);
+                        Assertions.assertEquals(p1 / 3, row.getAsDouble("f_path_all_start_price_leg_1"), 1e-9);
+                        Assertions.assertEquals(t1 / 3, row.getAsDouble("f_path_all_time_leg_1"), 1e-9);
+                        // events clock: the newest event is 0 events old, the oldest 2 (halflife 2)
+                        final double[] w = {0.5, Math.sqrt(0.5), 1}, age = {2, 1, 0};
+                        double num = 0, den = 0, l1 = 0;
+                        for (int i = 0; i < 3; i++) {
+                            num += w[i] * x[i];
+                            den += w[i];
+                            l1 += w[i] * x[i] * (1 - Math.log(2) / 2 * age[i]);
+                        }
+                        Assertions.assertEquals(num / den, row.getAsDouble("f_smooth_all_start_price_ewma2"), 1e-9);
+                        Assertions.assertEquals(num / den, row.getAsDouble("f_laguerre_all_start_price_exp2_0"), 1e-9);
+                        Assertions.assertEquals(l1 / den, row.getAsDouble("f_laguerre_all_start_price_exp2_1"), 1e-9);
+                    }
+                    case "B/s1" -> {
+                        // one past event on day 0, the row on day 2: u = 0, P1 = −1
+                        Assertions.assertEquals(100.0, row.getAsDouble("f_path_all_start_price_leg_0"), 1e-9);
+                        Assertions.assertEquals(-100.0, row.getAsDouble("f_path_all_start_price_leg_1"), 1e-9);
+                        Assertions.assertEquals(100.0, row.getAsDouble("f_smooth_all_start_price_ewma2"), 1e-9);
+                        Assertions.assertEquals(100.0, row.getAsDouble("f_laguerre_all_start_price_exp2_1"), 1e-9);
+                    }
+                    case "C/s1" -> Assertions.assertEquals(row.getAsDouble("f_smooth_all_start_price_ewma2"),
+                            row.getAsDouble("f_laguerre_all_start_price_exp2_0"), 1e-9);
+                    case "A/s1", "A/s2" -> {
+                        Assertions.assertNull(row.getPrimitiveValue("f_path_all_start_price_leg_0"), id + ": no past event");
+                        Assertions.assertNull(row.getPrimitiveValue("f_laguerre_all_start_price_exp2_1"), id + ": no past event");
+                        Assertions.assertNull(row.getPrimitiveValue("f_smooth_all_start_price_ewma2"), id + ": no past event");
+                    }
+                    case "C/s2" -> Assertions.assertEquals(50.0, row.getAsDouble("f_laguerre_all_start_price_exp2_0"), 1e-9);
+                    default -> Assertions.fail("unexpected row " + id);
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
     public void testSequenceRegressionAndFracdiff() throws java.io.IOException {
         final String blocks = """
                     - name: pair

@@ -321,6 +321,115 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("k: 10}", "k: 1}")), "sequence.fracdiff.k"));
     }
 
+    /**
+     * The general form (§4.3): lift channels × halflifes × components, one FLOAT64 column per component sharing one
+     * running state per channel; ewma is the order-0 exponential measure over the same coordinates; the validation of
+     * the dynamics parameters and the size bound.
+     */
+    @Test
+    public void testDynamicsGeneralForm() {
+        final String block = """
+                  - name: hist
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxAge: P365D}]
+                    lift: {fields: [start_price, final_price], exprs: ["quantity * 2"], timeAugment: true}
+                    summarize:
+                      dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30.5], decayBy: time}
+                  - name: shape
+                    scope: sequence
+                    entity: seller
+                    lift: {fields: [start_price]}
+                    summarize:
+                      dynamics: {family: lti, measure: legendre, order: 3}
+                  - name: season
+                    scope: sequence
+                    entity: seller
+                    window: {maxEvents: 20}
+                    lift: {fields: [start_price]}
+                    summarize:
+                      dynamics: {family: lti, measure: fourier, order: 2, period: 7, decayBy: time}
+                """;
+        final String anchor = "  - name: vs_market\n";
+        Assertions.assertTrue(SPEC.contains(anchor));
+        final String spec = SPEC.replace(anchor, block + anchor);
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        // exponential: 3 components per channel and halflife; the fractional halflife names as 30p5 and parses as 30.5
+        final OutputColumn laguerre = column(plan, "hist_365d_start_price_exp7_1");
+        Assertions.assertEquals("dynamics", laguerre.getOperator());
+        Assertions.assertEquals(Schema.Type.float64, laguerre.getFieldType().getType());
+        Assertions.assertEquals(Map.of("family", "lti", "measure", "exponential", "order", "2", "component", "1", "halflife", "7",
+                "decayBy", "time", "stateKey", "hist_365d_start_price_exp7", "field", "start_price"),
+                Map.of("family", laguerre.getCoordinates().get("family"), "measure", laguerre.getCoordinates().get("measure"),
+                        "order", laguerre.getCoordinates().get("order"), "component", laguerre.getCoordinates().get("component"),
+                        "halflife", laguerre.getCoordinates().get("halflife"), "decayBy", laguerre.getCoordinates().get("decayBy"),
+                        "stateKey", laguerre.getCoordinates().get("stateKey"), "field", laguerre.getCoordinates().get("field")));
+        Assertions.assertEquals("30.5", column(plan, "hist_365d_start_price_exp30p5_2").getCoordinates().get("halflife"));
+        Assertions.assertEquals(column(plan, "hist_365d_start_price_exp7_0").getCoordinates().get("stateKey"),
+                column(plan, "hist_365d_start_price_exp7_2").getCoordinates().get("stateKey"), "the components of a channel share one state");
+        // an outcome channel shifts its window like an aggregate of it; the expression channel is desugared once
+        Assertions.assertEquals(OutputColumn.Status.windowShift, column(plan, "hist_365d_final_price_exp7_0").getStatus());
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, laguerre.getStatus());
+        Assertions.assertEquals(1, plan.getColumns().stream().filter(c -> c.getCanonicalName().startsWith("hist__e")).count(), plan::describe);
+        // the constant time channel skips its component 0 (always 1)
+        Assertions.assertNull(plan.getColumn("hist_365d_time_exp7_0"));
+        Assertions.assertNull(column(plan, "hist_365d_time_exp7_1").getCoordinates().get("field"));
+        Assertions.assertEquals(2 * (3 * 4 - 1), plan.getColumns().stream().filter(c -> "hist".equals(c.getBlock()) && "dynamics".equals(c.getOperator())).count());
+
+        // legendre over an unbounded window runs on a running state (no unbounded hint); fourier names c0 / c<k> / s<k>
+        final OutputColumn legendre = column(plan, "shape_all_start_price_leg_3");
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(legendre));
+        Assertions.assertEquals("7", column(plan, "season_n20_start_price_fourier7_s2").getCoordinates().get("period"));
+        Assertions.assertNotNull(column(plan, "season_n20_start_price_fourier7_c0"));
+
+        // ewma is the order-0 exponential measure: running state, no unbounded hint, the plain halflife coordinate
+        final OutputColumn ewma = plan.getColumns().stream().filter(c -> c.getCanonicalName().startsWith("recent_365d_recent__e")
+                && c.getCanonicalName().endsWith("_ewma5")).findFirst().orElseThrow();
+        Assertions.assertEquals("exponential", ewma.getCoordinates().get("measure"));
+        Assertions.assertEquals("0", ewma.getCoordinates().get("order"));
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream()
+                .noneMatch(m -> "sequence.window.unbounded".equals(m.code()) && m.message().contains("ewma")), plan::describe);
+        final FeaturePlan fractional = compile(SOURCES, SPEC.replace("halflife: [5]", "halflife: [1.5]"));
+        Assertions.assertTrue(fractional.getColumns().stream().filter(c -> c.getCanonicalName().endsWith("_ewma1p5"))
+                .allMatch(c -> "1.5".equals(c.getCoordinates().get("halflife"))), fractional::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("halflife: [5]", "halflife: [0]")), "sequence.ewma.halflife"));
+
+        // validation
+        final String exp = "{family: lti, measure: exponential, order: 2, halflife: [7, 30.5], decayBy: time}";
+        Assertions.assertTrue(spec.contains(exp));
+        final Map<String, String> rejected = new java.util.LinkedHashMap<>();
+        rejected.put("{family: bilinear, type: logsignature, depth: 2}", "sequence.dynamics.family");
+        rejected.put("{measure: exponential, halflife: [7]}", "sequence.dynamics.family");
+        rejected.put("{family: lti, measure: laplace, halflife: [7]}", "sequence.dynamics.measure");
+        rejected.put("{family: lti, measure: exponential, order: 2}", "sequence.dynamics.halflife");
+        rejected.put("{family: lti, measure: exponential, halflife: [-1]}", "sequence.dynamics.halflife");
+        rejected.put("{family: lti, measure: legendre, halflife: [7]}", "sequence.dynamics.halflife");
+        rejected.put("{family: lti, measure: exponential, order: 17, halflife: [7]}", "sequence.dynamics.order");
+        rejected.put("{family: lti, measure: legendre, order: 9}", "sequence.dynamics.order");
+        rejected.put("{family: lti, measure: fourier, order: 2}", "sequence.dynamics.period");
+        rejected.put("{family: lti, measure: fourier, order: 0, period: 7}", "sequence.dynamics.order");
+        rejected.put("{family: lti, measure: exponential, halflife: [7], period: 7}", "sequence.dynamics.period");
+        rejected.put("{family: lti, measure: exponential, halflife: [7], decayBy: trading}", "sequence.dynamics.decayBy");
+        rejected.put("{family: lti, measure: exponential, halflife: [7], depth: 2}", "sequence.dynamics.parameter");
+        rejected.put("{family: lti, measure: exponential, order: 8, halflife: [7, 30.5]}", "sequence.dynamics.size");
+        for (final Map.Entry<String, String> e : rejected.entrySet()) {
+            final FeaturePlan bad = compile(SOURCES, spec.replace(exp, e.getKey()));
+            Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e + "\n" + bad.describe());
+        }
+        final String lift = "lift: {fields: [start_price, final_price], exprs: [\"quantity * 2\"], timeAugment: true}";
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [condition_grade]}")), "sequence.lift.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: []}")), "sequence.lift"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [\"$self.quantity\"]}")), "sequence.self"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, lift + "\n    compress: {svd: {rank: 2}}")), "sequence.compress"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, lift + "\n    ops: [{type: lag, fields: [sold]}]")), "sequence.form"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("    summarize:\n      dynamics: " + exp + "\n", "")), "sequence.summarize"));
+        final FeaturePlan timeOnly = compile(SOURCES, spec.replace(exp, "{family: lti, measure: exponential, halflife: [7]}"));
+        Assertions.assertTrue(hasCode(timeOnly, "sequence.lift.timeAugment"), timeOnly::describe);
+        Assertions.assertFalse(timeOnly.getDiagnostics().hasErrors(), timeOnly::describe);
+    }
+
     @Test
     public void testUnresolvedReferenceAndCycle() {
         final String spec = SPEC.replace("expr: \"start_price / quantity\"", "expr: \"start_price / nosuchfield\"");

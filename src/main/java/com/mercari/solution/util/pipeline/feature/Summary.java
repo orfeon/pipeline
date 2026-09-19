@@ -51,6 +51,15 @@ public interface Summary<S extends Serializable> extends Serializable {
     /** Reads a statistic from the state; null when the state cannot answer it (too few contributions). */
     Object read(S state, Readout readout);
 
+    /**
+     * Reads a statistic as of a clock position ({@code clockMillis}, the current row's time): a summary over a path
+     * ({@link Dynamics}) moves its state from the newest event to that position first. Every other family is
+     * position-free and reads {@link #read}.
+     */
+    default Object readAt(final S state, final Readout readout, final long clockMillis) {
+        return read(state, readout);
+    }
+
     /** Number of contributions currently summarised. */
     double count(S state);
 
@@ -96,6 +105,7 @@ public interface Summary<S extends Serializable> extends Serializable {
         public static final Summary<Order.State> ORDER = new Order();
         /** Cross moments of a pair (x, y): cov / corr / beta / intercept / r2 of y on x. Invertible. */
         public static final Summary<Regression.State> REGRESSION = new Regression();
+        // the linear summaries of a path (lti: exponential / fourier / legendre) are parameterised per column: Dynamics.spec
     }
 
     /** (n, Σx, Σx²) — the sufficient statistics of a mean and a variance. */

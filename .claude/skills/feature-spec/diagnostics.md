@@ -153,7 +153,15 @@ not expand because another block failed).
 | `sequence.weightBy.op` / `sequence.weightBy.func` | error | `weightBy` is only defined on `aggregate`, for count / sum / mean / avg / rate / std (min / max / first / last have no weighted form) |
 | `sequence.weightBy.type` / `sequence.weightBy.parse` | error | the weight is a numeric expression: operands (past fields by name, `$self.<field>` for the current row) must be numeric / bool |
 | `sequence.weightBy.scan` | info | a weighted aggregate has no running state and scans its window per row: give the window `maxAge` or `maxEvents` (otherwise `sequence.window.unbounded`) |
-| `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required; `decayBy` is `events` or `time` |
+| `sequence.ewma.halflife` / `sequence.ewma.decayBy` | error | `halflife` required and positive; `decayBy` is `events` or `time` |
+| `sequence.form` | error | a block has both `ops` and `lift` / `summarize`: split it into two blocks |
+| `sequence.lift` / `sequence.lift.type` | error | the general form needs `lift: {fields / exprs / timeAugment}`; channels must be numeric (or bool) |
+| `sequence.lift.timeAugment` | warning | `timeAugment` at order 0 adds no column (the constant channel's component 0 is always 1) |
+| `sequence.summarize` | error | the general form needs `summarize: {dynamics: {family: lti, measure: ...}}` |
+| `sequence.dynamics.family` | error | only `family: lti` is implemented (`bilinear` log-signatures and `probabilistic` are not) |
+| `sequence.dynamics.measure` / `.order` / `.halflife` / `.period` / `.decayBy` / `.parameter` | error | `measure` exponential / fourier / legendre; order 0..16 (legendre 0..8, fourier from 1); exponential needs `halflife`, legendre has none; fourier needs `period`; `decayBy` events / time; no other keys |
+| `sequence.dynamics.size` | error | the block emits more than 64 component columns: lower `order`, fewer halflifes / windows, or split the channels over blocks |
+| `sequence.compress` | error | `compress` is not implemented: feed the component columns to a population `svd` block (`fields: [...]`) |
 | `sequence.runLength.value` | error | `runLength` needs `value` |
 | `sequence.regression.against` / `.func` / `.lag` | error | `regression` needs a numeric `against` field (the key is `against`, a bare `on` is a YAML boolean); funcs are cov / corr / beta / intercept / r2; `lag` ≥ 0 (swap the fields for the other direction) |
 | `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |

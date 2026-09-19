@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, quantile stats; of §1.4 the sugar ops, not yet the general lift / summarize form). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` family — not yet `bilinear` / `probabilistic` or `compress`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
@@ -637,12 +637,38 @@ premise of the availability propagation rule (§6.1).
   summarize:
     dynamics: {family: lti, measure: legendre, order: 4, decayBy: time}
 
+- name: hist_decay
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P1Y}]
+  lift: {fields: [start_price], exprs: ["sold >= 1"]}
+  summarize:
+    dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
+
 - name: pair_history             # an entity pair uses the same mechanism
   scope: sequence
   entity: pair
   ops:
     - {type: aggregate, field: sold, funcs: [count, mean, min]}
 ```
+
+**The `lti` family.** An event is an impulse `x` at its clock position; a channel's state is the projection of the
+window's path onto a basis `b_j` under a measure `w`, read as the weighted mean `Σ w_i x_i b_j(age_i) / Σ w_i` over
+the present values — one output column per component `{block}_{window}_{channel}_{measure}_{j}`:
+
+| `measure` | measure w | basis | parameters |
+|---|---|---|---|
+| `exponential` | `2^(−age / halflife)` | Laguerre `L_j(ln 2 · age / halflife)` (HiPPO-LagT); order 0 is `ewma` | `halflife` (list: one state each), `order` |
+| `fourier` | uniform, or exponential under a `halflife` | constant, then `cos` / `sin(2πk · age / period)` (FouT) | `period`, `order` (harmonics), `halflife` |
+| `legendre` | uniform over the window's span | shifted Legendre `P_j(2u − 1)`, u = position in the span (HiPPO-LegS) | `order` |
+
+`decayBy` is the clock: `events` (the newest past event is age 0) or `time` (days from the current row). `ewma` is
+sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are the channels (an
+expression desugars like an op's `expr`); `lift.timeAugment` adds the constant channel 1, whose components describe
+when the events happened. A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
+are bounded (`sequence.dynamics.size`). The measures differ in algebra: the exponential and Fourier states move
+exactly under any spacing and evict (groups), the Legendre state rescales with its span, so it evicts nothing and a
+`maxAge` window re-reads it.
 
 **Aggregate functions.** `aggregate` takes `funcs` from four groups: moments (`count / sum / mean / avg / rate /
 std`), distribution shape (`skew`, `kurt` — excess kurtosis; population moments), extremes and ends (`min / max /
@@ -656,11 +682,12 @@ may be left unbounded:
 
 | op | evaluated | retention without `maxAge` |
 |---|---|---|
-| `aggregate` moments / shape, same-event `regression` | incrementally (evicting under `maxAge`) | none beyond the state |
+| `aggregate` moments / shape, same-event `regression`, `ewma` and the `exponential` / `fourier` dynamics | incrementally (evicting under `maxAge`) | none beyond the state |
+| `legendre` dynamics | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
 | `aggregate` `min / max` | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
 | `lag`, `delta`, `trend`, `fracdiff` without a `filter` | by re-reading a fixed tail | k (k + 1) events |
 | any op under `maxEvents`, without a `filter` | by re-reading | `maxEvents` events |
-| series readouts, `first / last`, lagged `regression`, `weightBy`, `ewma`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
+| series readouts, `first / last`, lagged `regression`, `weightBy`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
 
 **Several windows (`windows`)**: `windows` is a list, an expandable field expanded as the product
 `windows × fields × funcs` (`× halflife` for ewma; positional under `combine: zip`; counts towards
