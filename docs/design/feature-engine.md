@@ -240,6 +240,20 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   history only once the timestamp advances, so they are never visible to each other; `orderTieBreak`
   therefore only needs to be declared, not enforced. The DoFn re-emits at the original timestamp
   (`getAllowedTimestampSkew` = max).
+- **Strictly future (`direction: future`, label columns)**: the same replay run backwards. The compiler gives the
+  block's columns the stage kind `future` (a slot of its own: never fused with a past stage of the same key, since the
+  sort differs); `SortKeyDoFn` keys the rows by `~millis` (the bitwise complement: descending, no overflow) and
+  `KeyedHistoryDoFn` hands the evaluators the mirrored clock `−t` for the row and for every history entry. On that
+  clock the strictly-past machinery reads `(t, t + maxAge]` unchanged — the `maxAge` far edge, `decayBy: time`
+  distances, the `pending` exclusion of same-timestamp rows, eviction and trimming — and the output keeps the real
+  event time. What reads the window in one direction is decided at compile time: `aggregate first / last` swap in the
+  coordinates (the replay's newest event is the nearest one), `lag` is named `lead`, `sinceEvent` `until`, and the
+  ops that would need the real order (`delta`, `trend`, `fracdiff`, lagged `regression`) are rejected. `barrier`
+  (the first-touch label) scans the window from its newest (nearest) end against the current row's value. The
+  columns carry `Status.label` and the role `label` (`classifyFuture`: `availableAt` = the horizon plus the read
+  fields' own availability, no window shift); `finalizeColumns` exempts labels — and a column declared as
+  `output.roles.label` — from the violation check and from `_isnull` indicators, so the only way a label reaches a
+  feature is through `availableAt`, where it is an ordinary `availability.violation`.
 - **Availability filter (spec §6.2 tier 3)** is not implemented: `runtimeFilter` columns are rejected
   by `engineConstraints`. Tiers 1 (near-edge shift, `windowShift` / `shiftMillis`) and 2 (`minInterval`)
   are implemented in the compiler and evaluator.
@@ -1126,9 +1140,9 @@ that. A request that changes the row set belongs upstream:
 - **Clock**: windows, decay, fit blocks measured on one declared clock — wall time (today), event ordinal
   (`maxEvents`, `decayBy: events`), or a calendar of ticks (business days) declared in the sources document.
   Availability stays on wall time: a clock measures windows, not knowledge.
-- **Labels as future windows**: `direction: future` is a mirrored keyed replay (descending sort, strictly-future
-  `pending`), its `availableAt` = t + horizon + settlement, so a label referenced as a feature is an ordinary
-  `availability.violation` and the purge range of a time fold follows from the label's own horizon.
+- **Time folds from the labels' horizon**: the labels of `direction: future` (§4.3) carry their horizon in
+  `availableAt`, so the purge range of a time fold (`fold: {by: time, purge, embargo}`) can default to it, and an
+  overlap count of the future window gives the uniqueness weight.
 - **Ratings**: a sequence op under the global key whose state is a map entity → (μ, σ), updated when a group of
   same-timestamp rows closes (the `pending` flush). Order-dependent, hence replay-only — declared non-mergeable.
 - **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold and

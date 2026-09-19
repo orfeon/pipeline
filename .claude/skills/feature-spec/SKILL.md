@@ -164,6 +164,7 @@ parameters:
 | the entity's past: lag, delta, trend, EWMA, run length, time since, counts, deterministic aggregates | `sequence` | strictly past rows; windows `maxEvents` / `maxAge` / `filter` with `$self` |
 | a **target mean / rate per key**, shrunk toward coarser keys, optionally windowed | `population`, `type: encoding` | never `sequence.aggregate mean` over an outcome (no shrinkage; the validator hints `sequence.aggregate.encoding`) |
 | per-key counts / shares (frequency encoding), std, quantiles of a value | `population`, `type: encoding` with `stats: [count, share]` / `std` / `quantile`, `q25` | quantiles / distribution are expanding-only |
+| forward-looking **labels** (the value / return / first barrier touched over the next horizon) | `sequence` with `direction: future` and a `maxAge` | label columns (role `label`), never features — a feature reading one is `availability.violation`; declare a derived label in `output.roles.label` |
 | a key's category distribution as flat columns (for BigQuery / a model) | `population`, `type: encoding` with `stats: [distribution], values: [a, b, c]` on the target | one FLOAT64 share column per listed category (`<column>_<value>`) replaces the map column; unlisted categories are dropped |
 | low-rank interaction scores for sparse crosses | `population`, `type: factorization` | always static; whole training set on one worker |
 | learned bin edges (to key an encoding) | `population`, `type: discretize` (`method: quantile`) | always static; bins `-1` missing, `0` below, `1..B`, `B+1` above |

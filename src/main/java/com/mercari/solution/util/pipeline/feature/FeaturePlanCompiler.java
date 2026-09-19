@@ -1079,6 +1079,8 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("sequence.op", loc, "unknown sequence op: " + op.type);
                     continue;
                 }
+                if (!directionAccepts(def, window, op)) continue;
+                final boolean future = isFuture(def);
                 final List<String> fields = new ArrayList<>(op.fields);
                 if (op.expr != null) {
                     final OutputColumn anonymous = desugarExpression(def, op.expr, computeAt);
@@ -1096,7 +1098,7 @@ public final class FeaturePlanCompiler {
                     final List<String> units = "sinceEvent".equals(op.type) ? (op.unit.isEmpty() ? List.of("events") : op.unit) : List.of("");
                     for (final String unit : units) {
                         final String suffix = op.as != null ? op.as + (units.size() > 1 ? "_" + unit : "")
-                                : "sinceEvent".equals(op.type) ? "since_" + unit : op.type.toLowerCase();
+                                : "sinceEvent".equals(op.type) ? (future ? "until_" : "since_") + unit : op.type.toLowerCase();
                         final Schema.FieldType type = "sinceEvent".equals(op.type) && !"events".equals(unit) ? Schema.FieldType.FLOAT64 : Schema.FieldType.INT64;
                         final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, def.name + "_" + window.token() + "_" + suffix, type, computeAt);
                         final String predicate = conditionText(op.predicate, loc, "predicate");
@@ -1137,7 +1139,7 @@ public final class FeaturePlanCompiler {
                         case "lag" -> {
                             final int k = op.k == null ? 1 : op.k;
                             for (int i = 1; i <= k; i++) {
-                                final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "lag" + i, ref.type(), computeAt);
+                                final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + (future ? "lead" : "lag") + i, ref.type(), computeAt);
                                 c.coordinates.put("k", Integer.toString(i));
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -1191,13 +1193,14 @@ public final class FeaturePlanCompiler {
                                     diagnostics.error("sequence.aggregate.func", loc, "unknown aggregate func: " + func + " (available: " + OperatorCatalog.AVAILABLE_AGGREGATES + ")");
                                     continue;
                                 }
-                                if (List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {
+                                if (!future && List.of("mean", "avg", "rate").contains(func) && isOutcomeLike(ref) && hintedBlocks.add("sequence.aggregate.encoding:" + def.name)) {
                                     // once per block: the same hint for every window × field × func would drown the report
                                     diagnostics.hint("sequence.aggregate.encoding", loc,
                                             "aggregate " + func + " over outcome field '" + field + "' (and other outcome means in this block) has no shrinkage; consider population encoding with a windowed keySet (§4.3 役割分担)");
                                 }
                                 final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + func, type, computeAt);
-                                c.coordinates.put("func", func);
+                                // a future window is replayed on a mirrored clock: its nearest event is the replay's newest
+                                c.coordinates.put("func", future && "first".equals(func) ? "last" : future && "last".equals(func) ? "first" : func);
                                 c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
                                 addWeight(c, op, weightRefs);
                                 finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
@@ -1248,6 +1251,20 @@ public final class FeaturePlanCompiler {
                             c.coordinates.put("d", Double.toString(op.d));
                             c.coordinates.put("k", Integer.toString(k));
                             c.coordinates.put("field", canonicalOf(field)); addPastInput(c, field);
+                            finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
+                        }
+                        case "barrier" -> {
+                            if (op.up == null && op.down == null || op.up != null && !(op.up > 0) || op.down != null && !(op.down < 0)) {
+                                diagnostics.error("sequence.barrier.levels", loc, "barrier requires 'up' > 0 and / or 'down' < 0 (relative moves from the current row's value): up=" + op.up + " down=" + op.down);
+                                continue;
+                            }
+                            final OutputColumn c = newColumn(def.name, Scope.sequence, op.type, base + "barrier", Schema.FieldType.INT64, computeAt);
+                            if (op.up != null) c.coordinates.put("up", Double.toString(op.up));
+                            if (op.down != null) c.coordinates.put("down", Double.toString(op.down));
+                            c.coordinates.put("field", canonicalOf(field));
+                            addPastInput(c, field);
+                            // the entry value: the current row's own value of the path
+                            addSelfInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
                         default -> diagnostics.error("sequence.op", loc, "unsupported sequence op: " + op.type);
@@ -1465,9 +1482,79 @@ public final class FeaturePlanCompiler {
             for (final String s : filterRefs.self) addSelfInput(c, s);
             for (final String o : filterRefs.others) addPastInput(c, o);
         }
-        classifyPast(c, entity.minInterval());
+        if (isFuture(def)) classifyFuture(c, window);
+        else classifyPast(c, entity.minInterval());
         c.validFor = def.validFor;
         register(c);
+    }
+
+    private static boolean isFuture(final FeatureDef def) {
+        return "future".equals(def.direction);
+    }
+
+    /** Blocks whose direction problems were reported (once per block, not per window × op). */
+    private final Set<String> directionReported = new HashSet<>();
+
+    /**
+     * Whether an op of a sequence block can be expanded in the block's direction: {@code future} windows need a
+     * {@code maxAge} (the label horizon) and accept the ops of {@link OperatorCatalog#FUTURE_OPS} (a lagged
+     * regression reads the window in one direction and is rejected); {@code barrier} exists only there.
+     */
+    private boolean directionAccepts(final FeatureDef def, final Window window, final Op op) {
+        final String loc = def.location();
+        if (def.direction != null && !List.of("past", "future").contains(def.direction)) {
+            if (directionReported.add(def.name + ":value")) diagnostics.error("sequence.direction", loc, "direction must be past | future: " + def.direction);
+            return false;
+        }
+        if (!isFuture(def)) {
+            if ("barrier".equals(op.type)) {
+                if (directionReported.add(def.name + ":barrier")) diagnostics.error("sequence.barrier.direction", loc, "barrier labels the path after the row: it needs direction: future");
+                return false;
+            }
+            return true;
+        }
+        if (window.maxAge == null) {
+            if (directionReported.add(def.name + ":maxAge:" + window.token())) {
+                diagnostics.error("sequence.direction.maxAge", loc, "a future window needs maxAge (the label horizon): window " + window.token());
+            }
+            return false;
+        }
+        if (!OperatorCatalog.FUTURE_OPS.contains(op.type) || ("regression".equals(op.type) && op.lag != null && op.lag > 0)) {
+            if (directionReported.add(def.name + ":op:" + op.type)) {
+                diagnostics.error("sequence.direction.op", loc, "op " + op.type + (op.lag != null && op.lag > 0 ? " with lag" : "")
+                        + " is not defined over a future window (available: " + String.join(" | ", OperatorCatalog.FUTURE_OPS) + "; regression without lag)");
+            }
+            return false;
+        }
+        if (directionReported.add(def.name + ":future")) {
+            diagnostics.info("sequence.direction.future", loc, "block " + def.name + " reads the strictly-future window (t, t + maxAge] of each row: its columns are labels"
+                    + " (role label, post-event by construction) — a feature referencing one is an availability violation");
+        }
+        return true;
+    }
+
+    /**
+     * A future window's column: a label. Its value is known once the last event of the horizon is available —
+     * {@code availableAt = maxAge + the past inputs' own availability} (a pre-event field adds nothing); it is never
+     * shifted (the window reads what happens, not what is known) and carries the role {@code label}.
+     */
+    private void classifyFuture(final OutputColumn c, final Window window) {
+        AvailableAt past = null;
+        for (final String p : c.pastInputs) {
+            final Ref ref = resolve(p);
+            if (ref != null) past = AvailableAt.max(past, ref.availableAt());
+        }
+        final Duration horizon = window.maxAge;
+        if (past == null || past.isPreEvent()) {
+            c.availableAt = AvailableAt.eventRelative(horizon);
+        } else if (past.isStatic()) {
+            c.availableAt = AvailableAt.eventRelative(horizon.plus(past.getOffset()));
+        } else {
+            c.availableAt = AvailableAt.max(AvailableAt.eventRelative(horizon), past);
+        }
+        c.coordinates.put("direction", "future");
+        c.status = Status.label;
+        if (c.role == null) c.role = "label";
     }
 
     private void classifyPast(final OutputColumn c, final Duration minInterval) {
@@ -2760,6 +2847,8 @@ public final class FeaturePlanCompiler {
                             c.canonicalName + " keeps every past row of its key on the worker (" + reason + "): the retained row count is unbounded, with only its own fields " + c.pastInputs + " kept that far back; give the window a maxAge to bound it");
                 }
             }
+            // a column declared as the label (output.roles.label) is post-event by declaration, like a future window's
+            if (c.status == Status.violation && "label".equals(c.role)) c.status = Status.label;
             if (c.status == Status.violation) {
                 if (consumed.contains(c.canonicalName) || c.intermediate) {
                     lint = true;
@@ -2794,7 +2883,9 @@ public final class FeaturePlanCompiler {
             if (spec.output.groupBy == null) c.placement = Placement.child;
             // a column kept only as a role gets no indicator: the flag would be a feature column the projection
             // never admitted (the role's null-ness is the value itself)
-            final boolean indicator = !c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && !keptByRole.contains(c.canonicalName);
+            // nor does a label: its null-ness is post-event too, and the flag would be a feature
+            final boolean indicator = !c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && !keptByRole.contains(c.canonicalName)
+                    && c.status != Status.label;
             if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || "softmax".equals(c.operator))) {
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_isnull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_isnull";
@@ -3066,7 +3157,8 @@ public final class FeaturePlanCompiler {
                 final ContextDef context = contexts.get(c.coordinates.get("context"));
                 stageKeys = context == null ? List.of() : context.keys();
             } else if (c.scope == Scope.sequence) {
-                k = FeaturePlan.StageKind.sequence;
+                // a future window replays the key in descending time: its own stage, never fused with the past ones
+                k = "future".equals(c.coordinates.get("direction")) ? FeaturePlan.StageKind.future : FeaturePlan.StageKind.sequence;
                 if (c.coordinates.containsKey("stageKeys")) {
                     stageKeys = keyList(c.coordinates.get("stageKeys"));
                 } else {

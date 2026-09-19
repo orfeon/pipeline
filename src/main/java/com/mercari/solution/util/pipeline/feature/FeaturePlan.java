@@ -29,7 +29,8 @@ public class FeaturePlan implements Serializable {
         return type.getType() == Schema.Type.array ? "array<" + typeName(type.getArrayValueType()) + ">" : type.getType().name();
     }
 
-    public enum StageKind { row, context, sequence, population, fit, groupBy }
+    /** {@code future}: a sequence replay in descending time — strictly-future windows (label columns). */
+    public enum StageKind { row, context, sequence, population, fit, groupBy, future }
 
     /**
      * One evaluation stage: the columns evaluated under one key in one pass (docs/design/feature-engine.md §3.1).
@@ -45,9 +46,9 @@ public class FeaturePlan implements Serializable {
         public boolean isKeyed() {
             return kind != StageKind.row && kind != StageKind.fit;
         }
-        /** Sequence / population stages replay each key's rows in time order (batch only). */
+        /** Sequence / population / future stages replay each key's rows in time order (batch only; future: descending). */
         public boolean isReplay() {
-            return kind == StageKind.sequence || kind == StageKind.population;
+            return kind == StageKind.sequence || kind == StageKind.population || kind == StageKind.future;
         }
         /**
          * A key-less replay stage: every row under ONE key — one worker thread (a shrinkage lattice's
@@ -170,6 +171,16 @@ public class FeaturePlan implements Serializable {
         final Map<String, String> roles = new java.util.LinkedHashMap<>();
         for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
             if (inputFields.containsKey(e.getValue())) roles.put(e.getKey(), e.getValue());
+        }
+        // a declared role wins over the other columns carrying the same role (every future-window column is a label)
+        for (final Map.Entry<String, String> e : spec.output.roles.entrySet()) {
+            if (roles.containsKey(e.getKey())) continue;
+            for (final OutputColumn c : columns) {
+                if (!c.intermediate && e.getKey().equals(c.role) && (c.canonicalName.equals(e.getValue()) || c.outputName.equals(e.getValue()))) {
+                    roles.put(e.getKey(), c.outputName);
+                    break;
+                }
+            }
         }
         for (final OutputColumn c : columns) {
             if (!c.intermediate && c.role != null) roles.putIfAbsent(c.role, c.outputName);

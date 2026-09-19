@@ -616,6 +616,25 @@ public class SequenceEvaluator implements Serializable {
                 }
                 return Double.isFinite(value) ? value : null;
             }
+            case "barrier" -> {
+                // a future window on the mirrored clock: the nearest event is the window's newest, so the path runs
+                // from the end of the list; the entry is the current row's own value
+                final Double entry = finite(row.get(field));
+                if (entry == null || entry == 0) return null;
+                final String up = c.coordinates.get("up"), down = c.coordinates.get("down");
+                final double upper = up == null ? Double.POSITIVE_INFINITY : Double.parseDouble(up);
+                final double lower = down == null ? Double.NEGATIVE_INFINITY : Double.parseDouble(down);
+                boolean path = false;
+                for (int i = window.size() - 1; i >= 0; i--) {
+                    final Double x = finite(window.get(i).values().get(field));
+                    if (x == null) continue;
+                    path = true;
+                    final double move = x / entry - 1;
+                    if (move >= upper) return 1L;
+                    if (move <= lower) return -1L;
+                }
+                return path ? 0L : null;
+            }
             default -> throw new IllegalStateException("unsupported sequence operator: " + c.operator);
         }
     }

@@ -46,16 +46,20 @@ public final class FeatureLineage implements Serializable {
     public static FeatureLineage fromSchema(final Schema schema) {
         final FeatureLineage l = new FeatureLineage();
         if (schema == null) return l;
+        final Set<String> ambiguous = new LinkedHashSet<>();
         for (final Schema.Field f : schema.getFields()) {
             final Map<String, String> o = f.getOptions();
             if (o == null || !o.containsKey("feature.scope")) continue;
             l.columns.put(f.getName(), new Entry(o.get("feature.scope"), o.get("feature.block"), split(o.get("feature.derivedFrom")), o.get("feature.evidence"), o.get("feature.kind")));
             final String role = o.get("feature.role");
             if (role != null) {
-                l.roles.putIfAbsent(role, f.getName());
+                if (l.roles.putIfAbsent(role, f.getName()) != null) ambiguous.add(role);
                 if ("time".equals(role) && l.timeField == null) l.timeField = f.getName();
             }
         }
+        // several fields carry the role (the label columns of future windows): the schema cannot tell which one is
+        // declared — the manifest's roles (merged as the fallback) or the consumer's own parameter decide
+        for (final String role : ambiguous) l.roles.remove(role);
         return l;
     }
 

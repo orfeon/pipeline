@@ -2323,4 +2323,76 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    private static final String FUTURE_BLOCKS = """
+                - name: next
+                  scope: sequence
+                  entity: seller
+                  direction: future
+                  windows: [{maxAge: P20D}]
+                  ops:
+                    - {type: aggregate, field: final_price, funcs: [count, first, last]}
+                    - {type: lag, field: start_price, k: 1}
+                    - {type: barrier, field: start_price, up: 0.5, down: -0.3}
+                    - {type: sinceEvent, predicate: "sold = 1", unit: [days]}
+                - name: ret
+                  scope: row
+                  expr: "next_20d_start_price_lead1 / start_price - 1"
+            """.replaceAll("(?m)^", "    ");
+
+    /**
+     * {@code direction: future}: the seller's next 20 days after each listing, replayed latest first in its own
+     * keyed stage; the label columns and a declared label over them are emitted with the role {@code label}.
+     */
+    @Test
+    public void testFutureLabels() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n", FUTURE_BLOCKS + "      output:\n")
+                .replace("        prefix: f_\n", "        prefix: f_\n        roles: {label: ret}\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        final Map<String, String> options = output.getSchema().getField("f_next_20d_final_price_last").getOptions();
+        Assertions.assertEquals("label", options.get("feature.role"));
+        Assertions.assertEquals("label", options.get("feature.status"));
+        Assertions.assertEquals("label", output.getSchema().getField("f_ret").getOptions().get("feature.role"));
+        Assertions.assertTrue(transformNames().stream().anyMatch(n -> n.startsWith("features/") && n.contains("_future")));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                // count, first, last final_price, next start_price, barrier, days until the next sale, ret
+                final Object[] expected = switch (id) {
+                    case "A/s1" -> new Object[]{2L, 0.0, 95.0, 200.0, 1L, 19.0, 1.0};         // B (day 2) and C (day 19)
+                    case "B/s1" -> new Object[]{1L, 95.0, 95.0, 80.0, -1L, 17.0, -0.6};       // C only: 80 / 200 − 1 ≤ −0.3
+                    case "C/s1" -> new Object[]{1L, 140.0, 140.0, 120.0, 1L, 12.0, 0.5};      // D: 120 / 80 − 1 = 0.5 ≥ 0.5
+                    case "A/s2" -> new Object[]{1L, 72.0, 72.0, 60.0, 0L, 19.0, 0.2};         // 60 / 50 − 1 touches neither
+                    case "D/s1", "C/s2" -> new Object[]{0L, null, null, null, null, null, null}; // nothing within 20 days
+                    default -> throw new AssertionError("unexpected row " + id);
+                };
+                final String[] columns = {"f_next_20d_final_price_count", "f_next_20d_final_price_first", "f_next_20d_final_price_last",
+                        "f_next_20d_start_price_lead1", "f_next_20d_start_price_barrier", "f_next_20d_until_days", "f_ret"};
+                for (int i = 0; i < columns.length; i++) {
+                    final Object actual = row.getPrimitiveValue(columns[i]);
+                    if (expected[i] == null) {
+                        Assertions.assertNull(actual, id + " " + columns[i]);
+                    } else if (expected[i] instanceof Double d) {
+                        Assertions.assertEquals(d, ((Number) actual).doubleValue(), 1e-9, id + " " + columns[i]);
+                    } else {
+                        Assertions.assertEquals(expected[i], ((Number) actual).longValue(), id + " " + columns[i]);
+                    }
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testFutureLabelsParallelMatchesLinear() throws java.io.IOException {
+        // the future stage is one more keyed branch of wave 1 (same key as the past seller stage, its own replay)
+        // (ret reads a label: undeclared, it would be a feature over the future — an availability violation)
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", FUTURE_BLOCKS + "      output:\n")
+                        .replace("        prefix: f_\n", "        prefix: f_\n        roles: {label: ret}\n"), 6,
+                List.of("Wave1_FanIn", "_future"), List.of());
+    }
 }

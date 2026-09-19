@@ -413,11 +413,12 @@ public final class FeatureStages {
                 // deleted once the key is replayed) so a hot key — or the global level of a shrinkage
                 // lattice, which is ONE key holding every row — is never materialised as a list; the replay
                 // streams the sorted rows and trims its history
-                case sequence, population -> current
-                        .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys()))).setCoder(sortKvCoder)
+                // a future stage is the same replay in descending time on a mirrored clock (strictly-future windows)
+                case sequence, population, future -> current
+                        .apply(label + "_Key", ParDo.of(new SortKeyDoFn(stage.keys(), stage.kind() == StageKind.future))).setCoder(sortKvCoder)
                         .apply(label + "_Group", GroupByKey.create())
                         .apply(label, ParDo
-                                .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label))
+                                .of(new KeyedHistoryDoFn(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, stage.kind() == StageKind.future))
                                 .withSideInputs(sideInputs)
                                 .withOutputTags(outputTag, TupleTagList.of(failureTag)));
                 case fit -> applyFit(current, stageColumns, evaluator, plan.getArtifactVersion(), plan.getSpec().predictAt.getOffset().toMillis(),
@@ -2461,9 +2462,16 @@ public final class FeatureStages {
     /** Keys like {@link KeyDoFn} and pairs each row with a sortable event time for {@link KeyedSpillSorter}. */
     static class SortKeyDoFn extends DoFn<MElement, KV<String, KV<Long, MElement>>> {
         private final List<String> keys;
+        /** Sort the key's rows latest first (a future stage). */
+        private final boolean descending;
 
         SortKeyDoFn(final List<String> keys) {
+            this(keys, false);
+        }
+
+        SortKeyDoFn(final List<String> keys, final boolean descending) {
             this.keys = keys;
+            this.descending = descending;
         }
 
         /** The sort key: the epoch millis themselves (compared as a signed long by {@link KeyedSpillSorter}). */
@@ -2471,11 +2479,17 @@ public final class FeatureStages {
             return millis;
         }
 
+        /** The descending sort key: the bitwise complement reverses the signed order without overflowing. */
+        static long sortableDescending(final long millis) {
+            return ~millis;
+        }
+
         @ProcessElement
         public void processElement(final ProcessContext c) {
             final MElement element = c.element();
             if (element == null) return;
-            final KV<Long, MElement> value = KV.of(sortable(element.getEpochMillis()), element);
+            final long millis = element.getEpochMillis();
+            final KV<Long, MElement> value = KV.of(descending ? sortableDescending(millis) : sortable(millis), element);
             final StringBuilder sb = new StringBuilder();
             for (final String k : keys) {
                 final Object v = element.getPrimitiveValue(k);
@@ -2600,13 +2614,31 @@ public final class FeatureStages {
 
         private final KeyedSpillSorter sorter;
         private final String label;
+        /**
+         * A future stage: the rows arrive latest first and the evaluators see the mirrored clock {@code −t}, so the
+         * strictly-past machinery (windows, decay, pending same-timestamp rows, trimming) reads the strictly-future
+         * window {@code (t, t + maxAge]}; the output keeps the real event time.
+         */
+        private final boolean mirrored;
 
         KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
                          final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
                          final KeyedSpillSorter sorter, final String label) {
+            this(evaluator, lambdas, loggings, failFast, failureTag, sorter, label, false);
+        }
+
+        KeyedHistoryDoFn(final StageEvaluator evaluator, final PCollectionView<Map<String, Double>> lambdas,
+                         final List<Logging> loggings, final boolean failFast, final TupleTag<BadRecord> failureTag,
+                         final KeyedSpillSorter sorter, final String label, final boolean mirrored) {
             super(evaluator, lambdas, loggings, failFast, failureTag);
             this.sorter = sorter;
             this.label = label;
+            this.mirrored = mirrored;
+        }
+
+        /** The replay clock of an event time: itself, or {@code −t} for a future stage (ascending in replay order). */
+        private long clock(final long millis) {
+            return mirrored ? -millis : millis;
         }
 
         /** "Stage3_sequence key=a|b" (key components joined by '|', abbreviated) for the spill log. */
@@ -2686,7 +2718,7 @@ public final class FeatureStages {
             long pendingMillis = Long.MIN_VALUE;
             for (final KV<Long, MElement> row : rows) {
                 final MElement input = row.getValue();
-                final long millis = input.getTimestamp().getMillis();
+                final long millis = clock(input.getTimestamp().getMillis());
                 if (millis != pendingMillis) {
                     history.addAll(pending);
                     pending.clear();
@@ -2707,12 +2739,13 @@ public final class FeatureStages {
                     c.outputWithTimestamp(MElement.of(values, now), now);
                     return;
                 }
-                evaluator.evaluateKeyed(values, now.getMillis(), history, sequenceState, populationState);
-                pending.add(new Past(now.getMillis(), evaluator.project(values)));
+                final long clock = clock(now.getMillis());
+                evaluator.evaluateKeyed(values, clock, history, sequenceState, populationState);
+                pending.add(new Past(clock, evaluator.project(values)));
                 // absolute indices: the fold / evict pointers stay valid across trims; fields are dropped per
                 // column window, so an unbounded column keeps only its own inputs for the whole history.
                 // trimmed before the output so a trim failure does not double-route an already-emitted row
-                history.trim(evaluator.watermarks(now.getMillis(), history, sequenceState, populationState));
+                history.trim(evaluator.watermarks(clock, history, sequenceState, populationState));
                 c.outputWithTimestamp(MElement.of(values, now), now);
             } catch (final Throwable e) {
                 c.output(failureTag, Module.processError("Failed to evaluate keyed features", input, e, failFast));

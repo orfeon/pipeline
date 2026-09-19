@@ -742,6 +742,15 @@ combinations in practice), so `window.filter` accepts a predicate referencing th
   filter is a same-field pre-event equality, reduces it to an additional partition key at compile
   time (see feature-engine.md).
 
+**Labels over the future (`direction: future`)**: the same block read forwards — the window of a row is the
+entity's strictly-future `(t, t + maxAge]` (`maxAge` required: the horizon). Its columns are *labels by
+construction*: role `label`, status `label`, `availableAt` = the horizon plus the availability of what they read,
+so the availability algebra (§6) rejects any feature that references one, and a column derived from labels becomes a
+label only when `output.roles.label` declares it. Ops read from the row outwards (`first` = the nearest event, `lag`
+= the k-th next event named `lead<k>`, `sinceEvent` = until), plus the label op `barrier` (the first barrier the path
+touches, relative to the row's own value: 1 / −1 / 0); ops that would read the window in one direction only are
+rejected. Labels and features then come from one pass over one row set, with one set of keys.
+
 **Division of labour between sequence and encoding**: sequence = **deterministic sequence
 operations** (lag, delta, slope, decay, count, min / max, signatures); encoding (§5) = **shrunk
 conditional statistics** (per-key target means and rates). Most history aggregates are "windowed

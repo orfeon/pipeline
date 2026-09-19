@@ -157,6 +157,11 @@ not expand because another block failed).
 | `sequence.runLength.value` | error | `runLength` needs `value` |
 | `sequence.regression.against` / `.func` / `.lag` | error | `regression` needs a numeric `against` field (the key is `against`, a bare `on` is a YAML boolean); funcs are cov / corr / beta / intercept / r2; `lag` ≥ 0 (swap the fields for the other direction) |
 | `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |
+| `sequence.direction` / `features.direction` | error | `direction` is `past` (default) or `future`, on sequence blocks only |
+| `sequence.direction.maxAge` | error | a `direction: future` window needs `maxAge` (the label horizon) |
+| `sequence.direction.op` | error | the op reads the window in one direction (`delta`, `trend`, `fracdiff`, a lagged `regression`) — not defined over the future; the message lists what is |
+| `sequence.direction.future` | info | the block's columns are labels (role `label`): referencing one from a feature is a violation |
+| `sequence.barrier.levels` / `sequence.barrier.direction` | error | `barrier` needs `up` > 0 and / or `down` < 0, and exists only under `direction: future` |
 | `sequence.filter.reduced` | info | a same-field `$self` equality filter became an extra partition key (good: hot entities split) |
 | `sequence.aggregate.func` (series) | error | also raised for `acf<j>` / `pacf<j>` / `ar<p>_<i>` with j, p outside 1..20 or i outside 1..p; the message lists every available func |
 | `sequence.aggregate.encoding` | hint | `mean` / `rate` over an outcome field has no shrinkage: use a population encoding with a windowed keySet |

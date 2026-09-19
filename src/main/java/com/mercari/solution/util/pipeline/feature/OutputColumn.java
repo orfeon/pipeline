@@ -22,7 +22,12 @@ public class OutputColumn implements Serializable {
         /** provable at compile time: availableAt ≤ computeAt */ staticSafe,
         /** sequence/encoding: safe after shifting the window near edge by windowShift */ windowShift,
         /** the engine must filter contributions by effectiveAvailableAt ≤ computeAt per row */ runtimeFilter,
-        /** availableAt > computeAt; only allowed as a consumed intermediate */ violation
+        /** availableAt > computeAt; only allowed as a consumed intermediate */ violation,
+        /**
+         * a label: post-event by construction (a {@code direction: future} window) or by declaration
+         * ({@code output.roles.label}); emitted with the role {@code label}, never a feature — a feature reading it
+         * is a violation
+         */ label
     }
 
     public enum Placement { child, parent }

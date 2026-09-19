@@ -219,6 +219,14 @@ reads what the compile layer wrote into each column's `coordinates`.
      semantics without tie-break dependence) → `evaluateKeyed` → `history.trim(watermarks)` →
      `outputWithTimestamp` (needs `getAllowedTimestampSkew` = max). Rows with a null key
      (`NULL_KEY`) bypass evaluation (keyed columns null).
+   - `future` (a `direction: future` block — label columns) → the same chain with `SortKeyDoFn(keys, true)`
+     (`~millis`, latest first) and `KeyedHistoryDoFn(..., mirrored = true)`: the evaluators see the clock `−t`
+     for the row and the history, so the strictly-past `SequenceEvaluator` reads `(t, t + maxAge]` unchanged; the
+     order-dependent readings are fixed at compile time (`first` / `last` swapped in the coordinates, `lag` named
+     `lead`, `sinceEvent` `until`; `delta` / `trend` / `fracdiff` / lagged `regression` rejected —
+     `OperatorCatalog.FUTURE_OPS`). The columns are `Status.label` with role `label` (`classifyFuture`), exempt
+     from the violation check and from `_isnull`; a feature reading one is a violation through `availableAt`.
+     `FeatureLineage.fromSchema` leaves a role carried by several fields unresolved (the manifest decides).
    - `fit` → `applyFit`: encoding levels (`fitLevels` → `VarianceComponents.perKeyStats` over the
      stage input re-windowed into `GlobalWindows` → `View.asMap`; artifact load via `FitArtifact`,
      artifact write through `writeArtifacts` = the entries grouped under their block + an empty marker →

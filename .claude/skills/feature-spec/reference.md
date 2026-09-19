@@ -155,6 +155,14 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and
 filters use the Filter grammar (`module/common/filter.md`); expressions are numeric.
 
+**Labels (`direction: future`)** — the block reads the strictly-future window `(t, t + maxAge]` (`maxAge`
+required). Every column is a label (role / status `label`, emitted whatever the projection, no `_isnull`); a
+feature referencing one is `availability.violation`; a row expression over labels is a label only when
+`output.roles.label` names it. Ops: `aggregate` (`first` = nearest, `last` = furthest), `lag` → `..._lead<k>`,
+`ewma`, `sinceEvent` → `..._until_<unit>`, `countMatch`, `runLength`, `regression` (no `lag`), and
+`barrier: {field, up: 0.1, down: -0.05}` → `..._barrier` int64: 1 / -1 when the path first moves up / down by
+that fraction of the current row's value, 0 when neither, null without a future value.
+
 ## `scope: population`
 
 ### `type: encoding`
