@@ -439,6 +439,11 @@ public final class FeaturePlanCompiler {
                 refs.addAll(w.self);
             }
         }
+        // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
+        if (def.lift != null) {
+            refs.addAll(def.lift.fields);
+            for (final LiftExpr expr : def.lift.exprs) refs.addAll(expressionReferences(expr.expr()).others);
+        }
         for (final Window w : def.windows) {
             if (w.filter != null) {
                 final References r = expressionReferences(w.filter);
@@ -1090,6 +1095,11 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("sequence.op", loc, "unknown sequence op: " + op.type);
                     continue;
                 }
+                if ("dynamics".equals(op.type)) {
+                    // catalogued for its column operator; as an op it has no sugar (only ewma = order-0 exponential)
+                    diagnostics.error("sequence.op", loc, "dynamics is not an op: use the general form 'lift' + 'summarize: {dynamics: {...}}' instead of 'ops'");
+                    continue;
+                }
                 final List<String> fields = new ArrayList<>(op.fields);
                 if (op.expr != null) {
                     final OutputColumn anonymous = desugarExpression(def, op.expr, computeAt);
@@ -1280,7 +1290,10 @@ public final class FeaturePlanCompiler {
     static final int MAX_DYNAMICS_COLUMNS = 64;
 
     /** The validated general form of a sequence block: channels (a null reference = the constant time channel) and the dynamics. */
-    private record GeneralForm(List<String> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period, String decayBy) {}
+    private record GeneralForm(List<Channel> channels, Dynamics.Measure measure, int order, List<Double> halflifes, Double period, String decayBy) {}
+
+    /** A lift channel: the column it reads ({@code null} = the constant time channel) and its name segment. */
+    private record Channel(String reference, String name) {}
 
     /**
      * Validates {@code lift} / {@code summarize} / {@code compress} once per block (expressions are desugared once, not
@@ -1351,10 +1364,12 @@ public final class FeaturePlanCompiler {
             diagnostics.error("sequence.lift", loc, "the general form requires lift: {fields: [...]} (and / or exprs, timeAugment)");
             return null;
         }
-        final List<String> channels = new ArrayList<>();
+        final List<Channel> channels = new ArrayList<>();
         for (final String field : def.lift.fields) {
             final Ref ref = resolve(field);
             if (ref == null) {
+                // unreachable through the expansion loop (blockReferences waits for it), reported rather than dropped
+                diagnostics.error("reference.unknown", loc, "unknown lift channel: " + field);
                 valid = false;
                 continue;
             }
@@ -1363,19 +1378,41 @@ public final class FeaturePlanCompiler {
                 valid = false;
                 continue;
             }
-            channels.add(field);
+            channels.add(new Channel(field, displayName(field)));
         }
-        for (final String expr : def.lift.exprs) {
-            final OutputColumn anonymous = desugarExpression(def, expr, computeAt);
+        for (final LiftExpr expr : def.lift.exprs) {
+            final OutputColumn anonymous = desugarExpression(def, expr.expr(), computeAt);
             if (anonymous == null) valid = false;
-            else channels.add(anonymous.canonicalName);
+            else channels.add(new Channel(anonymous.canonicalName, expr.as() != null ? expr.as() : displayName(anonymous.canonicalName)));
+        }
+        if (!def.lift.exprs.isEmpty() && def.lift.exprs.stream().anyMatch(e -> e.as() == null)) {
+            diagnostics.info("sequence.lift.anonymous", loc, "an unnamed lift expression is named by the spec-wide anonymous counter ("
+                    + def.name + "__e{n}), which renumbers when an earlier expression is added or removed: name it with {expr: \"...\", as: name}");
         }
         final int perChannel = Dynamics.dimension(measure, order);
         if (def.lift.timeAugment) {
             if (perChannel == 1) {
                 diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
             }
-            channels.add(null);
+            channels.add(new Channel(null, "time"));
+            // the time channel reads no field: it takes the most delayed channel's availability, so it describes the
+            // events the value channels see (a shifted window) rather than the events the entity had
+            final Set<AvailableAt> availabilities = new LinkedHashSet<>();
+            for (final Channel channel : channels) {
+                final Ref ref = channel.reference() == null ? null : resolve(channel.reference());
+                if (ref != null) availabilities.add(ref.availableAt() == null ? AvailableAt.atEventTime() : ref.availableAt());
+            }
+            if (availabilities.size() > 1) {
+                diagnostics.info("sequence.lift.align", loc, "the lift channels are available at different times " + availabilities
+                        + ": the time channel follows the latest one (its window is shifted like that channel's)");
+            }
+        }
+        final Set<String> names = new HashSet<>();
+        for (final Channel channel : channels) {
+            if (!names.add(channel.name())) {
+                diagnostics.error("sequence.lift.name", loc, "two lift channels are named '" + channel.name() + "': set a distinct 'as' on the expression");
+                valid = false;
+            }
         }
         final int columns = Math.max(1, def.windows.size()) * Math.max(1, d.halflife.size())
                 * (perChannel * channels.size() - (def.lift.timeAugment ? 1 : 0));
@@ -1395,14 +1432,16 @@ public final class FeaturePlanCompiler {
     private void expandDynamics(final FeatureDef def, final EntityDef entity, final Window window, final References filterRefs,
                                 final String reducedKey, final GeneralForm form, final AvailableAt computeAt) {
         final List<Double> halflifes = form.halflifes().isEmpty() ? Collections.singletonList(null) : form.halflifes();
-        for (final String channel : form.channels()) {
+        final List<String> valueChannels = form.channels().stream().map(Channel::reference).filter(Objects::nonNull).toList();
+        for (final Channel ch : form.channels()) {
+            final String channel = ch.reference();
             for (final Double h : halflifes) {
                 final String measureToken = switch (form.measure()) {
                     case exponential -> "exp" + number(h);
                     case legendre -> "leg";
                     case fourier -> "fourier" + number(form.period()) + (h == null ? "" : "h" + number(h));
                 };
-                final String stateKey = def.name + "_" + window.token() + "_" + (channel == null ? "time" : displayName(channel)) + "_" + measureToken;
+                final String stateKey = def.name + "_" + window.token() + "_" + ch.name() + "_" + measureToken;
                 for (int component = channel == null ? 1 : 0; component < Dynamics.dimension(form.measure(), form.order()); component++) {
                     final OutputColumn c = newColumn(def.name, Scope.sequence, "dynamics",
                             stateKey + "_" + Dynamics.componentName(form.measure(), component), Schema.FieldType.FLOAT64, computeAt);
@@ -1418,7 +1457,7 @@ public final class FeaturePlanCompiler {
                         c.coordinates.put("field", canonicalOf(channel));
                         addPastInput(c, channel);
                     }
-                    finishSequence(c, def, entity, window, filterRefs, reducedKey, null);
+                    finishSequence(c, def, entity, window, filterRefs, reducedKey, null, channel == null ? valueChannels : List.of());
                 }
             }
         }
@@ -1577,11 +1616,12 @@ public final class FeaturePlanCompiler {
 
     /** A parameter as a coordinate the evaluator parses back ({@link #number} is the name token: {@code 1.5 → 1p5}). */
     private static String plainNumber(final Double d) {
-        return d == Math.floor(d) && !Double.isInfinite(d) ? Long.toString(d.longValue()) : d.toString();
+        // an integral value beyond the long range keeps its own spelling (longValue() would saturate)
+        return d == Math.floor(d) && Math.abs(d) < 0x1p63 ? Long.toString(d.longValue()) : d.toString();
     }
 
     private static String number(final Double d) {
-        return d == Math.floor(d) && !Double.isInfinite(d) ? Long.toString(d.longValue()) : d.toString().replace('.', 'p');
+        return plainNumber(d).replace('.', 'p');
     }
 
     /** Anonymous row feature {block}__e{n} for an inline expression (§4.3 脱糖規則). */
@@ -1618,6 +1658,12 @@ public final class FeaturePlanCompiler {
      */
     private void finishSequence(final OutputColumn c, final FeatureDef def, final EntityDef entity,
                                 final Window window, final References filterRefs, final String reducedKey, final Op op) {
+        finishSequence(c, def, entity, window, filterRefs, reducedKey, op, List.of());
+    }
+
+    /** {@code alignWith}: references whose availability the window takes without reading them (the time channel). */
+    private void finishSequence(final OutputColumn c, final FeatureDef def, final EntityDef entity, final Window window,
+                                final References filterRefs, final String reducedKey, final Op op, final List<String> alignWith) {
         c.coordinates.put("entity", entity.name());
         c.coordinates.put("window", window.token());
         if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
@@ -1637,14 +1683,20 @@ public final class FeaturePlanCompiler {
             for (final String s : filterRefs.self) addSelfInput(c, s);
             for (final String o : filterRefs.others) addPastInput(c, o);
         }
-        classifyPast(c, entity.minInterval());
+        classifyPast(c, entity.minInterval(), alignWith);
         c.validFor = def.validFor;
         register(c);
     }
 
     private void classifyPast(final OutputColumn c, final Duration minInterval) {
+        classifyPast(c, minInterval, List.of());
+    }
+
+    private void classifyPast(final OutputColumn c, final Duration minInterval, final List<String> alignWith) {
+        final Set<String> pastSide = new LinkedHashSet<>(c.pastInputs);
+        pastSide.addAll(alignWith);
         AvailableAt past = null;
-        for (final String p : c.pastInputs) {
+        for (final String p : pastSide) {
             final Ref ref = resolve(p);
             if (ref != null) past = AvailableAt.max(past, ref.availableAt());
         }

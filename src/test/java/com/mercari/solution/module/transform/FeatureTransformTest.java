@@ -645,9 +645,8 @@ public class FeatureTransformTest {
     }
 
     /**
-     * The two-series {@code regression} and {@code fracdiff} in the keyed stage. Seller s1's sessions A, B, C are
-     * visible to D (their outcomes arrived): final_price (150, 0, 95) against start_price (100, 200, 80); the start
-     * prices themselves are known at once, so D's first difference reads C − B = 80 − 200.
+     * The general form end to end: a Legendre summary on the time clock (with its time channel), a Laguerre summary
+     * on the events clock, and the {@code ewma} sugar reading the same state as the order-0 Laguerre component.
      */
     @Test
     public void testSequenceDynamics() throws java.io.IOException {
@@ -728,6 +727,11 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    /**
+     * The two-series {@code regression} and {@code fracdiff} in the keyed stage. Seller s1's sessions A, B, C are
+     * visible to D (their outcomes arrived): final_price (150, 0, 95) against start_price (100, 200, 80); the start
+     * prices themselves are known at once, so D's first difference reads C − B = 80 − 200.
+     */
     @Test
     public void testSequenceRegressionAndFracdiff() throws java.io.IOException {
         final String blocks = """

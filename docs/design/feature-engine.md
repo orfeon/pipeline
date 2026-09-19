@@ -294,7 +294,7 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   coordinate (`ColumnPlan.stateKey` keys the `KeyState`, so the second component column finds its state already
   advanced). The contribution of an event is `Dynamics.Event(millis, value)` — a missing value is still an event
   (it advances the events clock); `Summary.readAt(state, readout, now)` reads the state moved to the current row's
-  time. Measures (§9.6.6): `exponential` (Laguerre basis under `e^(−θ·age)`, `ewma` = order 0 — the `ewma` op is
+  time (fourier / legendre; exponential reads at the newest event — §9.6.6 read position). Measures (§9.6.6): `exponential` (Laguerre basis under `e^(−θ·age)`, `ewma` = order 0 — the `ewma` op is
   sugar: its columns carry `measure: exponential, order: 0` and run on the same state, so it is no longer an
   unbounded scan), `fourier` (rotation per harmonic, optionally damped) — both groups — and `legendre` (power
   sums about the first event, rescaled to the window's span at read; a monoid, so a `maxAge` window re-reads).
@@ -1139,9 +1139,19 @@ component is a weighted mean:
 | `fourier` | `e^(−θa) (1, cos kωa, sin kωa)`, ω = 2π / period, θ = 0 without halflife | a rotation per harmonic × the decay | group |
 | `legendre` | `P_j(2u − 1)`, u = position over the window's span (HiPPO-LegS, uniform) | none: power sums `Σ x s^k` about the first event, re-expressed through the shifted-Legendre coefficients at read | monoid |
 
-- **Read position.** The time clock reads at the current row's time: the state (kept at its newest event) is moved
-  by `T(θΔ)` / the rotation without the decay factor, which cancels in the ratio — so the newest event never
-  underflows and order 0 is independent of Δ, as `ewma` was. The events clock reads at the newest event (age 0).
+- **Read position.** The events clock reads at the newest event (age 0). On the time clock fourier reads at the
+  current row's time — the state (kept at its newest event) is rotated by Δ without the decay factor, which cancels
+  in the ratio, so the newest event never underflows — and legendre measures its span to the row; both stay bounded.
+  Exponential reads at the newest event on the time clock too: moved by `T(θΔ)`, the weighted mean of `L_j` over
+  events all at least Δ old grows like `(θΔ)^j / j!` with the entity's inactivity (order 16 reaches ~1e20 after
+  half a year at a 7-day halflife), so the gap is left to its own feature (`sinceEvent`); order 0 — `ewma` — is
+  independent of the read position either way.
+- **The time channel** (`timeAugment`) reads no field, so on its own its window would never be shifted. It
+  describes the events the value channels see, so the compiler classifies it with the latest availability among
+  the block's channels (`classifyPast`'s `alignWith`: aligned, not a past input — no lineage, no projection).
+- **Channel names.** A `lift.exprs` entry `{expr, as}` names its channel segment; an unnamed one keeps the
+  anonymous `{block}__e{n}` (a spec-wide counter — `sequence.lift.anonymous`), and two channels of one block with
+  one name are `sequence.lift.name`.
 - **Eviction** subtracts `x K(age)`; the state resets exactly when its window holds no present value. **No periodic
   re-fold** (the earlier design note): `Φ` is contractive (exponential) or a rotation (fourier), so the rounding an
   eviction leaves decays with the state or stays at the scale of the values folded in — `DynamicsTest` runs 20 000

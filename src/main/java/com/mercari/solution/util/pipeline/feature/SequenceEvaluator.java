@@ -498,9 +498,7 @@ public class SequenceEvaluator implements Serializable {
      */
     Object contribution(final ColumnPlan plan, final Past p) {
         // a path event: missing values still advance the events clock (a field-less channel is the constant 1)
-        if (plan.summary.family() instanceof Dynamics dynamics) {
-            return dynamics.event(p.millis(), plan.field == null ? Double.valueOf(1d) : finite(p.values().get(plan.field)));
-        }
+        if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
         if (plan.field == null) return 0d;
         if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
         return finite(p.values().get(plan.field));

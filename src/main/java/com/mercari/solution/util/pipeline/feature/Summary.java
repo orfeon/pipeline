@@ -53,7 +53,7 @@ public interface Summary<S extends Serializable> extends Serializable {
 
     /**
      * Reads a statistic as of a clock position ({@code clockMillis}, the current row's time): a summary over a path
-     * ({@link Dynamics}) moves its state from the newest event to that position first. Every other family is
+     * ({@link Dynamics}: fourier / legendre on the time clock) measures its ages from that position. Every other family is
      * position-free and reads {@link #read}.
      */
     default Object readAt(final S state, final Readout readout, final long clockMillis) {

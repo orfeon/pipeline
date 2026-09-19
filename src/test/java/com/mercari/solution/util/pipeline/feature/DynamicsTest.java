@@ -173,21 +173,35 @@ public class DynamicsTest {
     }
 
     /**
-     * Known values: the Laguerre kernel of one event is e^(−u) L_j(u) with L_1 = 1 − u, L_2 = 1 − 2u + u²/2 (the
-     * readout divides by the mass e^(−u), leaving L_j(u) · x); the Legendre components of a linear path x = a + b·u
+     * Known values: the Laguerre kernel of an event u older than the newest is e^(−u) L_j(u) with L_1 = 1 − u,
+     * L_2 = 1 − 2u + u²/2 and the newest event's is 1 (the readout divides by the mass 1 + e^(−u)), read at the newest
+     * event also on the time clock — the gap since it does not move the readout; the Legendre components of a linear path x = a + b·u
      * over its own span are a + b/2 (j = 0) and the discrete Legendre moment b · mean(u·P_1(2u − 1)) + a · mean(P_1)
      * (j = 1); a fourier harmonic reads cos / sin of the event's phase.
      */
     @Test
     public void testKnownValues() {
         final Dynamics laguerre = new Dynamics(Dynamics.Measure.exponential, 2, 1d, null, true);
-        final Dynamics.State one = laguerre.create();
-        laguerre.update(one, laguerre.event(T0, 4d), 1);
+        final Dynamics.State two = laguerre.create();
+        laguerre.update(two, laguerre.event(T0, 4d), 1);
+        laguerre.update(two, laguerre.event(T0 + 3 * 86_400_000L, 0d), 1);
         final double u = Math.log(2) * 3; // three days at a one-day halflife
-        final long now = T0 + 3 * 86_400_000L;
-        assertClose("L0", 4d, laguerre.readAt(one, Summary.Readout.of("component", 0), now), 1e-12);
-        assertClose("L1", 4 * (1 - u), laguerre.readAt(one, Summary.Readout.of("component", 1), now), 1e-12);
-        assertClose("L2", 4 * (1 - 2 * u + u * u / 2), laguerre.readAt(one, Summary.Readout.of("component", 2), now), 1e-12);
+        final double w = Math.exp(-u);
+        for (final long now : new long[]{T0 + 3 * 86_400_000L, T0 + 180 * 86_400_000L}) {
+            assertClose("L0", 4 * w / (1 + w), laguerre.readAt(two, Summary.Readout.of("component", 0), now), 1e-12);
+            assertClose("L1", 4 * w * (1 - u) / (1 + w), laguerre.readAt(two, Summary.Readout.of("component", 1), now), 1e-12);
+            assertClose("L2", 4 * w * (1 - 2 * u + u * u / 2) / (1 + w), laguerre.readAt(two, Summary.Readout.of("component", 2), now), 1e-12);
+        }
+        // a stale entity: every component of a single event stays its value (L_j(0) = 1), not ~(θ·gap)^j / j!
+        final Dynamics high = new Dynamics(Dynamics.Measure.exponential, 16, 7d, null, true);
+        final Dynamics.State stale = high.create();
+        high.update(stale, high.event(T0, 4d), 1);
+        final long later = T0 + 180 * 86_400_000L;
+        final List<SequenceEvaluator.Past> single = List.of(new SequenceEvaluator.Past(T0, Map.of("x", 4d)));
+        for (int j = 0; j <= 16; j++) {
+            assertClose("stale L" + j, 4d, high.readAt(stale, Summary.Readout.of("component", j), later), 1e-12);
+            assertClose("stale scan L" + j, 4d, high.project(single, "x", later, j), 1e-12);
+        }
 
         // events clock: x_i = 10 + 2·i at ordinals 0..4, u_i = i / 4
         final Dynamics legendre = new Dynamics(Dynamics.Measure.legendre, 1, null, null, false);

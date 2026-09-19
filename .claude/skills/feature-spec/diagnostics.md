@@ -157,6 +157,9 @@ not expand because another block failed).
 | `sequence.form` | error | a block has both `ops` and `lift` / `summarize`: split it into two blocks |
 | `sequence.lift` / `sequence.lift.type` | error | the general form needs `lift: {fields / exprs / timeAugment}`; channels must be numeric (or bool) |
 | `sequence.lift.timeAugment` | warning | `timeAugment` at order 0 adds no column (the constant channel's component 0 is always 1) |
+| `sequence.lift.align` | info | the block's channels are available at different times; the `time` channel follows the latest (its window is shifted like that channel's) |
+| `sequence.lift.anonymous` | info | an unnamed `lift.exprs` entry is named `<block>__e{n}` by a spec-wide counter (renumbers when another expression is added / removed): write `{expr: "...", as: name}` |
+| `sequence.lift.name` | error | two channels of a block share a name (a field and an `as`, or two `as`): set a distinct `as` |
 | `sequence.summarize` | error | the general form needs `summarize: {dynamics: {family: lti, measure: ...}}` |
 | `sequence.dynamics.family` | error | only `family: lti` is implemented (`bilinear` log-signatures and `probabilistic` are not) |
 | `sequence.dynamics.measure` / `.order` / `.halflife` / `.period` / `.decayBy` / `.parameter` | error | `measure` exponential / fourier / legendre; order 0..16 (legendre 0..8, fourier from 1); exponential needs `halflife`, legendre has none; fourier needs `period`; `decayBy` events / time; no other keys |

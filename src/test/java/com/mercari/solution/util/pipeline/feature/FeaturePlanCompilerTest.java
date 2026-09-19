@@ -376,6 +376,23 @@ public class FeaturePlanCompilerTest {
         // the constant time channel skips its component 0 (always 1)
         Assertions.assertNull(plan.getColumn("hist_365d_time_exp7_0"));
         Assertions.assertNull(column(plan, "hist_365d_time_exp7_1").getCoordinates().get("field"));
+        // the time channel reads no field but describes the events the value channels see: the outcome channel's shift
+        final OutputColumn time = column(plan, "hist_365d_time_exp7_1");
+        Assertions.assertEquals(OutputColumn.Status.windowShift, time.getStatus());
+        Assertions.assertEquals(column(plan, "hist_365d_final_price_exp7_0").getWindowShift(), time.getWindowShift());
+        Assertions.assertTrue(time.getPastInputs().isEmpty(), "aligned, not an input");
+        Assertions.assertTrue(hasCode(plan, "sequence.lift.align"), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "sequence.lift.anonymous"), plan::describe);
+        final FeaturePlan preEvent = compile(SOURCES, spec.replace("fields: [start_price, final_price]", "fields: [start_price]")
+                .replace("exprs: [\"quantity * 2\"], ", ""));
+        Assertions.assertFalse(preEvent.getDiagnostics().hasErrors(), preEvent::describe);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(preEvent, "hist_365d_time_exp7_1").getStatus());
+        Assertions.assertFalse(hasCode(preEvent, "sequence.lift.align"), preEvent::describe);
+        // `as` names an expression channel (stable, unlike the spec-wide __e{n})
+        final FeaturePlan named = compile(SOURCES, spec.replace("exprs: [\"quantity * 2\"]", "exprs: [{expr: \"quantity * 2\", as: qty2}]"));
+        Assertions.assertFalse(named.getDiagnostics().hasErrors(), named::describe);
+        Assertions.assertEquals("hist_365d_qty2_exp7", column(named, "hist_365d_qty2_exp7_1").getCoordinates().get("stateKey"));
+        Assertions.assertFalse(hasCode(named, "sequence.lift.anonymous"), named::describe);
         Assertions.assertEquals(2 * (3 * 4 - 1), plan.getColumns().stream().filter(c -> "hist".equals(c.getBlock()) && "dynamics".equals(c.getOperator())).count());
 
         // legendre over an unbounded window runs on a running state (no unbounded hint); fourier names c0 / c<k> / s<k>
@@ -425,6 +442,21 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, lift + "\n    compress: {svd: {rank: 2}}")), "sequence.compress"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, lift + "\n    ops: [{type: lag, fields: [sold]}]")), "sequence.form"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("    summarize:\n      dynamics: " + exp + "\n", "")), "sequence.summarize"));
+        // lift channels are block references: a typo is reported (not a silently empty block), a later block's column is waited for
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_prize]}")), "reference.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [\"start_prize * 2\"]}")), "reference.unresolved"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], timeaugment: true}")), "sequence.lift"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [{expr: \"quantity * 2\", as: start_price}]}")), "sequence.lift.name"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [{as: qty2}]}")), "sequence.lift"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [{expr: \"quantity * 2\", name: qty2}]}")), "sequence.lift"));
+        final String shapeLift = "lift: {fields: [start_price]}\n    summarize:\n      dynamics: {family: lti, measure: legendre, order: 3}";
+        Assertions.assertTrue(spec.contains(shapeLift));
+        final FeaturePlan forward = compile(SOURCES, spec.replace(shapeLift, shapeLift.replace("[start_price]", "[start_price, vs_market]")));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertNotNull(forward.getColumn("shape_all_vs_market_leg_3"), forward::describe);
+        // dynamics has no op sugar (ewma is the order-0 exponential one)
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {type: aggregate, field: sold, funcs: [count, mean]}",
+                "- {type: dynamics, field: sold}")), "sequence.op"));
         final FeaturePlan timeOnly = compile(SOURCES, spec.replace(exp, "{family: lti, measure: exponential, halflife: [7]}"));
         Assertions.assertTrue(hasCode(timeOnly, "sequence.lift.timeAugment"), timeOnly::describe);
         Assertions.assertFalse(timeOnly.getDiagnostics().hasErrors(), timeOnly::describe);

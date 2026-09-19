@@ -771,11 +771,13 @@ vector per channel, emitted as one FLOAT64 column per component.
   windows: [{maxAge: P365D}]
   lift:
     fields: [start_price, final_price]      # numeric (or boolean) fields / block columns
-    exprs: ["final_price / start_price"]    # expression channels (desugared like an op's expr)
+    exprs:                                  # expression channels (desugared like an op's expr)
+      - {expr: "final_price / start_price", as: ratio}   # as: names the channel (a bare string gets the anonymous <block>__e{n})
     timeAugment: true                       # adds the constant channel `time`
   summarize:
     dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
-# price_path_365d_start_price_exp7_0 .. _2, price_path_365d_start_price_exp30_0 .. _2, ..., price_path_365d_time_exp7_1 .. _2
+# price_path_365d_start_price_exp7_0 .. _2, price_path_365d_start_price_exp30_0 .. _2, ..., price_path_365d_ratio_exp7_0 .. _2,
+# price_path_365d_time_exp7_1 .. _2
 ```
 
 Each component is a weighted mean over the window's present values, `Σ w_i · x_i · b_j(age_i) / Σ w_i` — a
@@ -788,14 +790,18 @@ projection of the path onto a basis `b_j` under the measure `w`:
 | `legendre` | 1 | shifted Legendre polynomial `P_j(2u − 1)`, u = position over the window's own span (first event → 0, now → 1) | `order` 0..8 (default 3) | order + 1: `_leg_<j>` |
 
 - **The clock** (`decayBy`): `events` (default) measures age in events — the newest past event is 0, as `ewma`
-  counts — and `time` in days from the current row's time (`legendre` on `time`: u = (event − first event) /
-  (row − first event)). A missing value (null / NaN / ±Infinity) is still an event on the `events` clock; it adds no
+  counts — and `time` in days. On `time`, `fourier` and `legendre` measure age from the current row's time
+  (`legendre`: u = (event − first event) / (row − first event)), while `exponential` measures it from the newest
+  past event: its higher components would otherwise grow with the entity's inactivity (≈ (gap / halflife)^j), so the
+  gap is a feature of its own (`sinceEvent` with `unit: [days]`); component 0 (`ewma`) is the same either way. A missing value (null / NaN / ±Infinity) is still an event on the `events` clock; it adds no
   weight.
 - **Reading the components.** Component 0 is the (decay-weighted) mean. The higher Laguerre components weigh
   recent and older events with opposite signs (`L_1 = 1 − u`): a trend of the value against its age. The Fourier
   components pick up periodicity at `period`, `period / 2`, …; the Legendre ones the shape of the path over the
   window (level, slope, curvature, …). The `time` channel's components describe *when* the events happened
-  (its component 0 is always 1 and is not emitted).
+  (its component 0 is always 1 and is not emitted). It reads no field, but it summarises the same events as the
+  block's value channels: when a channel is an outcome whose window is shifted, the `time` channel takes the
+  latest channel's shift too (`sequence.lift.align` when the channels differ).
 - **Cost.** Every measure is a running state: `exponential` and `fourier` are exact under any spacing and evict
   under `maxAge` in O(1) per row; `legendre` rescales with the window's span, so it runs on a running state without
   `maxAge` and re-reads the window under one. None of them keeps the key's history without a window (no

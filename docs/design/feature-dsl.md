@@ -641,7 +641,7 @@ premise of the availability propagation rule (§6.1).
   scope: sequence
   entity: seller
   windows: [{maxAge: P1Y}]
-  lift: {fields: [start_price], exprs: ["sold >= 1"]}
+  lift: {fields: [start_price], exprs: [{expr: "sold >= 1", as: won}]}
   summarize:
     dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
 
@@ -662,10 +662,15 @@ the present values — one output column per component `{block}_{window}_{channe
 | `fourier` | uniform, or exponential under a `halflife` | constant, then `cos` / `sin(2πk · age / period)` (FouT) | `period`, `order` (harmonics), `halflife` |
 | `legendre` | uniform over the window's span | shifted Legendre `P_j(2u − 1)`, u = position in the span (HiPPO-LegS) | `order` |
 
-`decayBy` is the clock: `events` (the newest past event is age 0) or `time` (days from the current row). `ewma` is
-sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are the channels (an
-expression desugars like an op's `expr`); `lift.timeAugment` adds the constant channel 1, whose components describe
-when the events happened. A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
+`decayBy` is the clock: `events` (the newest past event is age 0) or `time` (days). On the time clock `fourier` and
+`legendre` measure age from the current row (a phase and a span, both bounded) and `exponential` from the newest past
+event: read from the row, the weighted mean of `L_j` over events all at least the gap old grows like
+`(θ·gap)^j / j!`, so the gap stays a feature of its own (`sinceEvent`); order 0 does not depend on the readout
+position. `ewma` is sugar for the order-0 exponential measure over the same state. `lift.fields` / `lift.exprs` are
+the channels (an expression desugars like an op's `expr`; `{expr, as}` names its channel, which is otherwise the
+spec-wide anonymous `{block}__e{n}`); `lift.timeAugment` adds the constant channel 1, whose components describe when
+the events happened — the same events the value channels see, so it takes the latest channel's availability (§6.2
+window shift) although it reads no field. A block uses either `ops` or `lift` + `summarize`; the channels × components a block emits
 are bounded (`sequence.dynamics.size`). The measures differ in algebra: the exponential and Fourier states move
 exactly under any spacing and evict (groups), the Legendre state rescales with its span, so it evicts nothing and a
 `maxAge` window re-reads it.

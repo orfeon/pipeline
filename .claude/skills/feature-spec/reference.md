@@ -158,7 +158,7 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
   scope: sequence
   entity: <entities[].name>
   windows: [{maxAge: P365D}]
-  lift: {fields: [start_price], exprs: ["final_price / start_price"], timeAugment: true}
+  lift: {fields: [start_price], exprs: [{expr: "final_price / start_price", as: ratio}], timeAugment: true}
   summarize:
     dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
 ```
@@ -169,8 +169,11 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `fourier` | `period` (required), `order` 1..16 (default 1), optional `halflife` | `..._fourier<P>[h<h>]_c0`, `_c<k>`, `_s<k>` | mean of x · cos / sin(2πk · age / P) (damped by a halflife) |
 | `legendre` | `order` 0..8 (default 3) | `..._leg_<j>` | mean of x · P_j(2u − 1), u = position over the window's own span |
 
-`decayBy` = the clock (`events` default: newest past event = age 0; `time`: days to the current row).
-`timeAugment` adds the constant channel `time` (components 1.. only). Every measure keeps no history
+`decayBy` = the clock (`events` default: newest past event = age 0; `time`: days — to the current row for
+fourier / legendre, to the newest past event for exponential, whose higher components would otherwise grow with
+the gap; add `sinceEvent` `unit: [days]` for the gap). `lift.exprs` entries are strings or `{expr, as}`; name them
+(`as`), since an unnamed one is `<name>__e{n}`, numbered across the whole spec. `timeAugment` adds the constant
+channel `time` (components 1.. only), shifted like the latest of the block's channels. Every measure keeps no history
 without a window; `legendre` re-reads its window under `maxAge`. At most 64 component columns per block
 (windows × halflifes × channels × components). Channels must be numeric / bool. `compress` and
 `family: bilinear` are not implemented.

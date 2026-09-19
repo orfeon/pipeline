@@ -27,10 +27,13 @@ import java.util.Map;
  *       contribution — the family is a monoid, and a {@code maxAge} window re-reads (the scan path).</li>
  * </ul>
  *
- * <p>The clock is {@code time} (positions in days from the event millis, the readout taken at the current row's
- * time) or {@code events} (positions are event ordinals, the newest event at age 0, the readout taken at the newest
- * event — as {@code ewma} counts). A row with a missing value is still an event: on the events clock it advances the
- * position; it contributes no mass.
+ * <p>The clock is {@code time} (positions in days from the event millis) or {@code events} (positions are event
+ * ordinals, the newest event at age 0 — as {@code ewma} counts). On the time clock the fourier and legendre readouts
+ * are taken at the current row's time (a phase / a span measured from now, both bounded); the exponential readout is
+ * taken at the newest event, like the events clock: its weighted mean of {@code L_j(θ·age)} would grow as
+ * {@code (θ·gap)^j / j!} with the gap since the entity's last event, so the gap is left to its own feature
+ * ({@code sinceEvent}) and order 0 — {@code ewma} — is unchanged (it does not depend on the readout position). A row
+ * with a missing value is still an event: on the events clock it advances the position; it contributes no mass.
  *
  * <p>No periodic re-fold: {@code Φ} is contractive (exponential) or a rotation (fourier), so the rounding an
  * eviction leaves decays with the state or stays at the scale of the values folded in, and a state whose window
@@ -81,6 +84,14 @@ public final class Dynamics implements Summary<Dynamics.State> {
     private final double omega;
     /** legendre: {@code coefficients[j][k]} of u^k in P_j(2u − 1). */
     private final double[][] coefficients;
+    /**
+     * The propagator of one clock unit (every fold on the events clock), computed once: its decay, and the Laguerre
+     * values {@code L_0..L_order(θ)} (exponential) or {@code cos / sin(hω)} per harmonic h (fourier, index h).
+     */
+    private final double unitDecay;
+    private final double[] unitLaguerre;
+    private final double[] unitCos;
+    private final double[] unitSin;
 
     public Dynamics(final Measure measure, final int order, final Double halflife, final Double period, final boolean byTime) {
         this.measure = measure;
@@ -89,6 +100,16 @@ public final class Dynamics implements Summary<Dynamics.State> {
         this.theta = halflife == null ? 0d : Math.log(2) / halflife;
         this.omega = period == null ? 0d : 2 * Math.PI / period;
         this.coefficients = measure == Measure.legendre ? shiftedLegendre(order) : null;
+        this.unitDecay = Math.exp(-theta);
+        this.unitLaguerre = measure == Measure.exponential ? laguerre(theta, order) : null;
+        this.unitCos = measure == Measure.fourier ? new double[order + 1] : null;
+        this.unitSin = measure == Measure.fourier ? new double[order + 1] : null;
+        if (measure == Measure.fourier) {
+            for (int h = 1; h <= order; h++) {
+                unitCos[h] = Math.cos(h * omega);
+                unitSin[h] = Math.sin(h * omega);
+            }
+        }
     }
 
     /**
@@ -121,6 +142,11 @@ public final class Dynamics implements Summary<Dynamics.State> {
 
     public Event event(final long millis, final Double value) {
         return new Event(millis, value == null ? Double.NaN : value);
+    }
+
+    /** The event a past row contributes to a channel ({@code field} null = the constant channel 1, time augmentation). */
+    public Event event(final SequenceEvaluator.Past p, final String field) {
+        return event(p.millis(), value(p, field));
     }
 
     @Override
@@ -208,46 +234,41 @@ public final class Dynamics implements Summary<Dynamics.State> {
         return k;
     }
 
-    /** Moves an exponential / fourier state {@code delta} clock units forward: {@code s ← Φ(Δ) s}, the mass decays alike. */
+    /**
+     * Moves an exponential / fourier state {@code delta} clock units forward in place: {@code s ← Φ(Δ) s}, the mass
+     * decays alike. One clock unit (every fold on the events clock) reuses the precomputed propagator.
+     */
     private void propagate(final State st, final double delta) {
         if (delta == 0) return;
-        final double decay = Math.exp(-theta * delta);
+        final boolean unit = delta == 1;
+        final double decay = unit ? unitDecay : Math.exp(-theta * delta);
         if (decay == 0) {
             java.util.Arrays.fill(st.s, 0);
             st.den = 0;
             return;
         }
         if (measure == Measure.exponential) {
-            final double[] shifted = toeplitz(st.s, theta * delta);
-            for (int j = 0; j <= order; j++) st.s[j] = decay * shifted[j];
+            final double[] l = unit ? unitLaguerre : laguerre(theta * delta, order);
+            // T(u) is lower-triangular: from the top down, component j only reads the not yet moved s_{j−m}
+            for (int j = order; j >= 0; j--) st.s[j] = decay * shifted(st.s, l, j);
         } else {
-            rotate(st.s, delta, st.s);
+            for (int h = 1; h <= order; h++) {
+                final double angle = h * omega * delta;
+                final double cos = unit ? unitCos[h] : Math.cos(angle), sin = unit ? unitSin[h] : Math.sin(angle);
+                final double c = st.s[2 * h - 1], d = st.s[2 * h];
+                st.s[2 * h - 1] = c * cos - d * sin;
+                st.s[2 * h] = d * cos + c * sin;
+            }
             for (int j = 0; j < st.s.length; j++) st.s[j] *= decay;
         }
         st.den *= decay;
     }
 
-    /** {@code T(u) s}: component j = Σ_{m ≤ j} φ_m(u) s_{j−m}, φ_m = L_m − L_{m−1} (φ_0 = 1). */
-    private double[] toeplitz(final double[] s, final double u) {
-        final double[] l = laguerre(u, order);
-        final double[] out = new double[order + 1];
-        for (int j = 0; j <= order; j++) {
-            double v = s[j];
-            for (int m = 1; m <= j; m++) v += (l[m] - l[m - 1]) * s[j - m];
-            out[j] = v;
-        }
-        return out;
-    }
-
-    /** Rotates every harmonic of a fourier state by {@code k ω delta} (into {@code out}, which may be {@code s}). */
-    private void rotate(final double[] s, final double delta, final double[] out) {
-        out[0] = s[0];
-        for (int h = 1; h <= order; h++) {
-            final double angle = h * omega * delta, cos = Math.cos(angle), sin = Math.sin(angle);
-            final double c = s[2 * h - 1], d = s[2 * h];
-            out[2 * h - 1] = c * cos - d * sin;
-            out[2 * h] = d * cos + c * sin;
-        }
+    /** Component j of {@code T(u) s} = Σ_{m ≤ j} φ_m(u) s_{j−m}, φ_m = L_m − L_{m−1} (φ_0 = 1), from {@code l} = L_0..L_j(u). */
+    private static double shifted(final double[] s, final double[] l, final int j) {
+        double v = s[j];
+        for (int m = 1; m <= j; m++) v += (l[m] - l[m - 1]) * s[j - m];
+        return v;
     }
 
     /**
@@ -354,18 +375,22 @@ public final class Dynamics implements Summary<Dynamics.State> {
                     value = sum / st.n;
                 }
             }
+            // read at the newest event on either clock (the class comment: bounded in the gap since it)
             case exponential -> {
                 if (!(st.den > 0)) return null;
-                final double delta = byTime ? Math.max(0, (nowMillis - st.newest) / DAY_MILLIS) : 0;
-                final double[] moved = delta == 0 ? st.s : toeplitz(st.s, theta * delta);
-                value = moved[j] / st.den;
+                value = st.s[j] / st.den;
             }
             default -> {
                 if (!(st.den > 0)) return null;
                 final double delta = byTime ? Math.max(0, (nowMillis - st.newest) / DAY_MILLIS) : 0;
-                final double[] moved = new double[st.s.length];
-                rotate(st.s, delta, moved);
-                value = moved[j] / st.den;
+                if (j == 0 || delta == 0) {
+                    value = st.s[j] / st.den;
+                } else {
+                    final int h = (j + 1) / 2;
+                    final double angle = h * omega * delta, cos = Math.cos(angle), sin = Math.sin(angle);
+                    final double c = st.s[2 * h - 1], d = st.s[2 * h];
+                    value = (j % 2 == 1 ? c * cos - d * sin : d * cos + c * sin) / st.den;
+                }
             }
         }
         return Double.isFinite(value) ? value : null;
@@ -392,7 +417,8 @@ public final class Dynamics implements Summary<Dynamics.State> {
             }
         } else {
             final long newest = window.get(size - 1).millis();
-            final double delta = byTime ? Math.max(0, (nowMillis - newest) / DAY_MILLIS) : 0;
+            // the exponential readout is taken at the newest event (the class comment), fourier's at now
+            final double delta = byTime && measure == Measure.fourier ? Math.max(0, (nowMillis - newest) / DAY_MILLIS) : 0;
             for (int i = 0; i < size; i++) {
                 final Double x = value(window.get(i), field);
                 if (x == null) continue;
@@ -410,7 +436,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
 
     /** The unweighted basis function of a component at an age: L_j(θ·age), or the constant / cos / sin of fourier. */
     private double basis(final double age, final int component) {
-        if (measure == Measure.exponential) return laguerre(theta * age, component)[component];
+        if (measure == Measure.exponential) return laguerreAt(theta * age, component);
         if (component == 0) return 1;
         final int h = (component + 1) / 2;
         return component % 2 == 1 ? Math.cos(h * omega * age) : Math.sin(h * omega * age);
@@ -427,6 +453,18 @@ public final class Dynamics implements Summary<Dynamics.State> {
         if (order >= 1) l[1] = 1 - u;
         for (int j = 1; j < order; j++) l[j + 1] = ((2 * j + 1 - u) * l[j] - j * l[j - 1]) / (j + 1);
         return l;
+    }
+
+    /** L_j(u) alone (the same recurrence, no array: the scan path evaluates it per event). */
+    static double laguerreAt(final double u, final int j) {
+        if (j == 0) return 1;
+        double previous = 1, current = 1 - u;
+        for (int k = 1; k < j; k++) {
+            final double next = ((2 * k + 1 - u) * current - k * previous) / (k + 1);
+            previous = current;
+            current = next;
+        }
+        return current;
     }
 
     /** P_j(y) (Bonnet's recurrence). */
