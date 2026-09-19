@@ -172,6 +172,11 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(anonymous.isIntermediate());
         Assertions.assertTrue(anonymous.isAnonymous());
         Assertions.assertTrue(ewma.getInputs().contains("recent__e1"));
+        // an unnamed op expr is hinted once (not per window); as: names its columns and silences it
+        Assertions.assertEquals(1, plan.getDiagnostics().getMessages().stream().filter(m -> "sequence.expr.anonymous".equals(m.code())).count(), plan::describe);
+        final FeaturePlan named = compile(SOURCES, SPEC.replace("expr: \"sold >= 1\", halflife: [5]", "expr: \"sold >= 1\", halflife: [5], as: won"));
+        Assertions.assertNotNull(named.getColumn("recent_n5_won_ewma5"), named::describe);
+        Assertions.assertFalse(hasCode(named, "sequence.expr.anonymous"), named::describe);
 
         // mean over an outcome field → hint to use encoding
         Assertions.assertTrue(hasCode(plan, "sequence.aggregate.encoding"), plan::describe);

@@ -1082,6 +1082,13 @@ public final class FeaturePlanCompiler {
         }
         final GeneralForm form = general ? generalForm(def, computeAt) : null;
         if (general && form == null) return;
+        // reported once per op, not per window: the anonymous name is the column's field segment
+        for (final Op op : def.ops) {
+            if (op.expr != null && op.as == null) {
+                diagnostics.info("sequence.expr.anonymous", loc, "op " + op.type + " expr '" + op.expr + "' is named by the spec-wide anonymous counter ("
+                        + def.name + "__e{n}), which renumbers when an earlier expression is added or removed: name its columns with as:");
+            }
+        }
         final List<Window> windows = def.windows.isEmpty() ? List.of(new Window()) : def.windows;
         for (final Window window : windows) {
             // a same-field $self equality filter is a partition of the entity: reduce it to a stage key
