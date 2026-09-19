@@ -144,12 +144,39 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `trend` | `field`, `k` (default 5) | `..._trend<k>` float64 (regression slope) |
 | `regression` | `field` (y), `against` (x — not `on`, a YAML 1.1 boolean), `funcs: [cov, corr, beta, intercept, r2]` (default `[beta, corr]`), optional `lag: k` (pairs `field` with `against` k events earlier: lead-lag) | `..._<field>_vs_<against>_[lag<k>_]<func>` float64; two contributing events at least; `corr` / `r2` null when a series is constant, `beta` / `intercept` when x is. Same-event form is incremental; with `lag` it scans the window per row (bound it with `maxAge` / `maxEvents`) |
 | `fracdiff` | `field`, `d` (required, 0 < d ≤ 2), `k` (terms, default 20) | `..._fracdiff<d>` float64: `(1 − B)^d` truncated to `k` coefficients over the last `k` past events; null when fewer than `k` events or one of them is missing; `d: 1` = first difference |
-| `ewma` | `field` / `expr`, `halflife: [h1, h2]`, `decayBy: events \| time` | `..._ewma<h>` float64 |
+| `ewma` | `field` / `expr`, `halflife: [h1, h2]` (> 0; events, or days under `decayBy: time`), `decayBy: events \| time` | `..._ewma<h>` float64; a running state (no history kept) — the order-0 `exponential` path summary below |
 | `runLength` | `field`, `value` | `..._runlength` int64 |
 | `aggregate` shape / series funcs | in `funcs`: `skew`, `kurt` (excess; population moments), `zeroCross` (sign changes, zeros ignored), `peaks` (strict local maxima), `acf<j>`, `pacf<j>`, `ar<p>_<i>` (Yule–Walker; j, p in 1..20, i in 1..p) | `..._<func>`: float64 (`zeroCross` / `peaks` int64). `skew` / `kurt` run incrementally; the others scan the window per row — bound it with `maxEvents` / `maxAge`. Null on too few values or a constant series; for a level other than 0 use `expr: "x - level"` with `zeroCross` |
 | `sinceEvent` | `predicate`, `unit: [events, days]` | `<name>_<w>_since_events` int64 / `_since_days` float64 |
 | `countMatch` | `predicate` | `<name>_<w>_countmatch` int64 |
 | `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1). Optional `weightBy: "<numeric expr>"` — the past event's fields by name, the current row's as `$self.<field>` (a similarity kernel, e.g. `exp(-abs(start_price - $self.start_price) / 50)`): `count` = Σw (float64), `sum` = Σw·x, `mean` = Σw·x / Σw, `std` weighted; no `min / max / first / last`; null / NaN / ≤ 0 weights contribute nothing; `$self` fields must be known at `predictAt`; always scanned per row, so bound the window (`maxAge` / `maxEvents`); use `as:` when the block also has the plain aggregate of the field | `..._<func>`; count int64 (float64 under `weightBy`), mean / std / sum / rate float64, min / max / first / last input type |
+
+**General form (path summaries)** — instead of `ops` (never both in one block):
+
+```yaml
+- name: price_path
+  scope: sequence
+  entity: <entities[].name>
+  windows: [{maxAge: P365D}]
+  lift: {fields: [start_price], exprs: [{expr: "final_price / start_price", as: ratio}], timeAugment: true}
+  summarize:
+    dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
+```
+
+| `measure` | parameters | columns per channel (float64) | component j |
+|---|---|---|---|
+| `exponential` | `halflife` list (required), `order` 0..16 (default 0) | `<name>_<w>_<channel>_exp<h>_<j>`, j = 0..order | weighted mean of x · Laguerre `L_j(ln2 · age / h)`, weights `2^(−age/h)`; j = 0 is `ewma` |
+| `fourier` | `period` (required), `order` 1..16 (default 1), optional `halflife` | `..._fourier<P>[h<h>]_c0`, `_c<k>`, `_s<k>` | mean of x · cos / sin(2πk · age / P) (damped by a halflife) |
+| `legendre` | `order` 0..8 (default 3) | `..._leg_<j>` | mean of x · P_j(2u − 1), u = position over the window's own span |
+
+`decayBy` = the clock (`events` default: newest past event = age 0; `time`: days — to the current row for
+fourier / legendre, to the newest past event for exponential, whose higher components would otherwise grow with
+the gap; add `sinceEvent` `unit: [days]` for the gap). `lift.exprs` entries are strings or `{expr, as}`; name them
+(`as`), since an unnamed one is `<name>__e{n}`, numbered across the whole spec. `timeAugment` adds the constant
+channel `time` (components 1.. only), shifted like the latest of the block's channels. Every measure keeps no history
+without a window; `legendre` re-reads its window under `maxAge`. At most 64 component columns per block
+(windows × halflifes × channels × components). Channels must be numeric / bool. `compress` and
+`family: bilinear` are not implemented.
 
 `as:` on an op names the field segment (or replaces the op suffix for `sinceEvent` / `countMatch`).
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and
