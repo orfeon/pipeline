@@ -1,6 +1,6 @@
 # Feature Transform Engine (Design Document)
 
-Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6, the prefix-scan of §9.4.4 and the planned items of §9.6.6 are design notes, not code.**
+Status: **Implemented — describes the engine as it is (§9.2 lists the deferred items); the streaming keyed stages and merge of §9.4.6, the prefix-scan of §9.4.4 and the planned items of §9.6.7 are design notes, not code.**
 
 How the DSL of [feature-dsl.md](feature-dsl.md) (below: "the spec") is implemented as `module:
 feature` on Apache Beam: what is reused from the framework, what is new, where the spec and the
@@ -259,7 +259,7 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   are implemented in the compiler and evaluator.
 - Operators: `lag` / `delta` / `trend` (`slope`) / `ewma` (halflife list, `decayBy: events | time`) /
   `runLength` / `sinceEvent` / `countMatch` / `aggregate` (count / mean / min / max / sum / std / rate /
-  first / last). `window.maxEvents` / `maxAge` select the window by binary search over the history;
+  first / last), and the general form's `dynamics` columns (below). `window.maxEvents` / `maxAge` select the window by binary search over the history;
   `filter` is evaluated per row unless it is a same-field pre-event `$self` equality, which the compiler
   reduces to an **additional partition key** (`stageKeys`; hot entities split across workers, rows with a
   null filter value bypass the stage) — outcome-like fields stay filters because keying on them would leak.
@@ -272,7 +272,7 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   the `regression` op's cov / corr / beta / intercept / r2). Its algebra decides the
   path: every family is a monoid (summaries of disjoint row sets merge), an *invertible* family is a
   group (a window can evict), so max / min run incrementally over an unbounded past but take the scan
-  path under `maxAge`. Operators without a family (lag / trend / ewma / predicates) and windows with
+  path under `maxAge`. Operators without a family (lag / trend / predicates) and windows with
   `maxEvents` or a general filter take the scan path over a sublist view. So does an aggregate under
   `weightBy`: its weight reads the current row (`$self`), a different number for every (row, event) pair,
   so nothing folded once per event can serve it — *self-dependent* statistics have no family by
@@ -294,8 +294,8 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   ordered family only pays off for the streaming state).
 - **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
   (scan), or the near edge minus a bounded tail (`lag` / `trend` / `fracdiff` = k, `delta` = k + 1, unfiltered
-  `maxEvents`); `ewma`, `runLength` / `sinceEvent` / `countMatch` and filtered windows without `maxAge`
-  are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
+  `maxEvents`); `runLength` / `sinceEvent` / `countMatch`, the other scan-only readouts and filtered windows without
+  `maxAge` are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
 - **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
   into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored
   on merge) so a price level does not cancel the covariance away; invertible, so it evicts under `maxAge` like
@@ -303,8 +303,18 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   per-event contribution — evicting the far edge would need the rows before it — so `summaryOf` gives it no
   family and it folds the same family over the scanned window. `fracdiff` is a fixed FIR over the last k events
   (`fracdiffWeights`, resolved once into the column plan): a bounded tail, no state.
-- The general form (lift / summarize / compress, lti / bilinear) is v1; the LTI family is a recurrence
-  over a fixed matrix and would keep a vector state per key rather than a buffer.
+- **The general form** (`lift` + `summarize.dynamics`, family `lti`): each (channel, halflife) of a block is one
+  `Dynamics` state — a vector, one entry per component — shared by the component columns through the `stateKey`
+  coordinate (`ColumnPlan.stateKey` keys the `KeyState`, so the second component column finds its state already
+  advanced). The contribution of an event is `Dynamics.Event(millis, value)` — a missing value is still an event
+  (it advances the events clock); `Summary.readAt(state, readout, now)` reads the state moved to the current row's
+  time (fourier / legendre; exponential reads at the newest event — §9.6.6 read position). Measures (§9.6.6): `exponential` (Laguerre basis under `e^(−θ·age)`, `ewma` = order 0 — the `ewma` op is
+  sugar: its columns carry `measure: exponential, order: 0` and run on the same state, so it is no longer an
+  unbounded scan), `fourier` (rotation per harmonic, optionally damped) — both groups — and `legendre` (power
+  sums about the first event, rescaled to the window's span at read; a monoid, so a `maxAge` window re-reads).
+  `Dynamics.project` is the direct projection of a window: the scan path (`maxEvents`, general filters) and the
+  reference of `DynamicsTest` / `SequenceIncrementalTest`. `compress` and the `bilinear` family (log-signatures)
+  are rejected at compile time (not implemented yet).
 
 ### 4.4 population (encoding) — expanding fits map onto the time-ordered replay
 
@@ -503,7 +513,7 @@ ALS, `pair` / `embedding` / `sum` outputs, r-matrix lineage), `type: discretize`
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
 the `quantile` stats, `output.groupBy`, hot-key audit queries, `--dryRun` and the server exposure of
 `validate --expand`, `estimator: joint` (static / fold / forward), the conjugate families (`family`,
-with the Dirichlet-Multinomial shrinkage of `distribution`). Everything else is parsed and rejected with a
+with the Dirichlet-Multinomial shrinkage of `distribution`), the general sequence form with `lti` dynamics. Everything else is parsed and rejected with a
 diagnostic (§9.2 "deferred").
 
 ### 9.2 Implementation status and decisions
@@ -667,9 +677,9 @@ roughly linear in the input).
 λ for a shrunk `distribution`; `structure: sequence`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
-types: they need the per-entity value sequence, i.e. a keyed pass before the fit); `svd` on the general
-sequence form's vector outputs (§1.4 Lift / Summarize; today the vector is a list of scalar columns or an
-array field); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
+types: they need the per-entity value sequence, i.e. a keyed pass before the fit); the general sequence
+form's `compress` stage and `bilinear` / `probabilistic` dynamics (`sequence.compress`,
+`sequence.dynamics.family`; the `lti` components are scalar columns an `svd` block can take as `fields`); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
 bounded-size) per-key quantile / distribution stats in static / fold — quantileTransform, static and forward,
 keeps the exact values (decision 11); the run-time availability
 filter (`atRowCreation`, `event_date THH:MM`); streaming keyed stages and the stateful merge (§9.4.6);
@@ -1130,13 +1140,51 @@ that. A request that changes the row set belongs upstream:
 | pairwise rows ((event, a) → (event, a, b)) and their reduction | row expansion and its inverse | upstream expansion → feature (entity = pair) → a second feature step (context reduce) |
 | as-of joins across sources | a join, and the DSL (spec §2.7) gives joins to the enrichment layer | the `query` transform's lookups |
 
-#### 9.6.6 Planned on the same line (design positions, not implemented)
+#### 9.6.6 Dynamics — summaries over a path (`lti` implemented)
 
-- **Dynamics** (spec §1.4 Summarize): `lti` (s ← A(Δ) s + B(Δ) x: exponential / Legendre / Fourier measures) and
-  `bilinear` (log-signature; Chen's identity makes it a group) are summaries over a *path*; `ewma` becomes
-  `lti(exponential, order 0)` and `trend` a `REGRESSION` readout, as sugar over coordinates. Component outputs are
-  scalar columns; a size diagnostic bounds `depth × channels`. An exponential state evicts by an inverse that
-  accumulates rounding, so the window is re-folded every N evictions.
+The Summarize stage of spec §1.4 as a `Summary` family, `Dynamics`, parameterised per column (measure, order,
+halflife, period, clock) rather than a singleton. An event is an impulse `x` at a clock position; component j of the
+state is `Σ x_i K_j(age_i)` and a readout divides by the measure's mass `Σ w_i` over the present values, so every
+component is a weighted mean:
+
+| measure | kernel `K_j(a)` | propagation by Δ | algebra |
+|---|---|---|---|
+| `exponential` | `e^(−θa) L_j(θa)`, θ = ln 2 / halflife (HiPPO-LagT) | `Φ(Δ) = e^(−θΔ) T(θΔ)`, `T` lower-triangular Toeplitz of `φ_m = L_m − L_{m−1}` (= `e^(−uN)`, N strictly-lower all-ones) — exact for any spacing | group |
+| `fourier` | `e^(−θa) (1, cos kωa, sin kωa)`, ω = 2π / period, θ = 0 without halflife | a rotation per harmonic × the decay | group |
+| `legendre` | `P_j(2u − 1)`, u = position over the window's span (HiPPO-LegS, uniform) | none: power sums `Σ x s^k` about the first event, re-expressed through the shifted-Legendre coefficients at read | monoid |
+
+- **Read position.** The events clock reads at the newest event (age 0). On the time clock fourier reads at the
+  current row's time — the state (kept at its newest event) is rotated by Δ without the decay factor, which cancels
+  in the ratio, so the newest event never underflows — and legendre measures its span to the row; both stay bounded.
+  Exponential reads at the newest event on the time clock too: moved by `T(θΔ)`, the weighted mean of `L_j` over
+  events all at least Δ old grows like `(θΔ)^j / j!` with the entity's inactivity (order 16 reaches ~1e20 after
+  half a year at a 7-day halflife), so the gap is left to its own feature (`sinceEvent`); order 0 — `ewma` — is
+  independent of the read position either way.
+- **The time channel** (`timeAugment`) reads no field, so on its own its window would never be shifted. It
+  describes the events the value channels see, so the compiler classifies it with the latest availability among
+  the block's channels (`classifyPast`'s `alignWith`: aligned, not a past input — no lineage, no projection).
+- **Channel names.** A `lift.exprs` entry `{expr, as}` names its channel segment; an unnamed one keeps the
+  anonymous `{block}__e{n}` (a spec-wide counter — `sequence.lift.anonymous`), and two channels of one block with
+  one name are `sequence.lift.name`.
+- **Eviction** subtracts `x K(age)`; the state resets exactly when its window holds no present value. **No periodic
+  re-fold** (the earlier design note): `Φ` is contractive (exponential) or a rotation (fourier), so the rounding an
+  eviction leaves decays with the state or stays at the scale of the values folded in — `DynamicsTest` runs 20 000
+  events through a sliding window against the direct projection at 1e-8. The Legendre power sums would need a
+  re-anchoring once the window slides far from its first event, so the family declares itself a monoid instead and
+  a `maxAge` window re-reads — the path rule (§9.6.1) does the rest.
+- **Merge** (the fit-stage / prefix-scan use): the older state is moved to the newer's position and added; on the
+  events clock `other` holds the later events (the order of blocks and partitions).
+- **Limits.** Order ≤ 16 (exponential / fourier) and ≤ 8 (legendre: the monomial readout loses digits like its
+  coefficients `C(j,k) C(j+k,k)` grow); a block emits at most 64 component columns (`sequence.dynamics.size`).
+- **Sugar.** `ewma` columns carry `measure: exponential, order: 0, component: 0`; the old formula
+  (`0.5^(steps / halflife)` from the current row) agrees to 1e-12 (`DynamicsTest.testEwmaMatchesTheFormerFormula`).
+  A NaN / ±∞ value is now missing for `ewma` as for every aggregate. `trend` stays a scan over its last k events
+  (its regression-on-index form is a `REGRESSION` readout, planned with the bilinear family).
+
+#### 9.6.7 Planned on the same line (design positions, not implemented)
+
+- **Dynamics `bilinear`** (log-signature; Chen's identity makes it a group) and `compress: {svd}` wired to the
+  component columns; `timeAugment` as a path channel (the increments of time) for signatures.
 - **Clock**: windows, decay, fit blocks measured on one declared clock — wall time (today), event ordinal
   (`maxEvents`, `decayBy: events`), or a calendar of ticks (business days) declared in the sources document.
   Availability stays on wall time: a clock measures windows, not knowledge.

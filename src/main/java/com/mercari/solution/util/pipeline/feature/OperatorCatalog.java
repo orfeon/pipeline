@@ -78,6 +78,7 @@ public final class OperatorCatalog {
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
         register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2; lag pairs the field with the other series k events earlier (lead-lag)");
         register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
+        register(Scope.sequence, "dynamics", InputKind.numeric, F64, false, "general form lift -> summarize.dynamics (lti: exponential | legendre | fourier measure, order, halflife / period, decayBy): one column per state component");
 
         // population (fit)
         register(Scope.population, "encoding", InputKind.any, F64, true, "shrinkage-smoothed conditional statistics over structured key space");

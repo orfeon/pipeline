@@ -92,7 +92,7 @@ public class PopulationEvaluator extends SequenceEvaluator {
 
     /** The hidden {@code sum} / {@code sumoff} of a level reads 0 (not null) when nothing contributed: the composition adds sums. */
     @Override
-    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state) {
+    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state, final long nowMillis) {
         final Object value = plan.summary.<Serializable>typed().read(state, plan.summary.readout());
         return value == null && ("sum".equals(plan.stat) || SUM_OFFSET.equals(plan.stat)) ? 0d : value;
     }

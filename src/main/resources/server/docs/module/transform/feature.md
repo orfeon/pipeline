@@ -26,7 +26,8 @@ Supports:
 - **sequence** scope — per-entity strictly-past history: lag, delta, trend, EWMA (decay by events or
   time), run length, events/days since a predicate last held, count of matching rows, windowed aggregates
   (count / mean / min / max / sum / std / first / last, the shape and series summaries skew / kurt / zeroCross /
-  peaks / acf / pacf / ar). Windows combine `maxEvents`, `maxAge` and a
+  peaks / acf / pacf / ar), and path summaries (the general form `lift` + `summarize`: exponential / Laguerre,
+  Fourier and Legendre projections of the window). Windows combine `maxEvents`, `maxAge` and a
   `filter` that can reference the current row through `$self.<field>`.
 - **population** scope — expanding-fit encoding: conditional statistics of a target per key set
   (count / share / mean / rate / std / distribution / quantile), optionally windowed and offset by a baseline, with
@@ -757,6 +758,64 @@ distributed and ordered — the descriptive statistics of a short series:
 - An unknown func — or a lag / order outside 1..20, an `ar` index outside 1..p — is `sequence.aggregate.func`;
   the message lists what is available.
 
+### Path summaries (sequence general form: `lift` + `summarize`)
+
+Instead of `ops`, a sequence block can summarise its window as a **path**: `lift` names the channels read from
+every past event, `summarize.dynamics` the linear recurrence folded over them. The result is a fixed-length
+vector per channel, emitted as one FLOAT64 column per component.
+
+```yaml
+- name: price_path
+  scope: sequence
+  entity: seller
+  windows: [{maxAge: P365D}]
+  lift:
+    fields: [start_price, final_price]      # numeric (or boolean) fields / block columns
+    exprs:                                  # expression channels (desugared like an op's expr)
+      - {expr: "final_price / start_price", as: ratio}   # as: names the channel (a bare string gets the anonymous <block>__e{n})
+    timeAugment: true                       # adds the constant channel `time`
+  summarize:
+    dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
+# price_path_365d_start_price_exp7_0 .. _2, price_path_365d_start_price_exp30_0 .. _2, ..., price_path_365d_ratio_exp7_0 .. _2,
+# price_path_365d_time_exp7_1 .. _2
+```
+
+Each component is a weighted mean over the window's present values, `Σ w_i · x_i · b_j(age_i) / Σ w_i` — a
+projection of the path onto a basis `b_j` under the measure `w`:
+
+| `measure` | weight w | basis b_j (component j) | parameters | columns per channel |
+|---|---|---|---|---|
+| `exponential` | `2^(−age / halflife)` | Laguerre polynomial `L_j(ln 2 · age / halflife)` — component 0 is exactly `ewma` | `halflife` (required, a list: one state each), `order` 0..16 (default 0) | order + 1: `_exp<h>_<j>` |
+| `fourier` | 1, or `2^(−age / halflife)` with a `halflife` | the constant (`c0`), then `cos` / `sin(2π k · age / period)` for k = 1..order | `period` (required), `order` 1..16 (default 1), `halflife` (optional) | 2·order + 1: `_fourier<P>_c0`, `_c<k>`, `_s<k>` (`_fourier<P>h<h>_…` when damped) |
+| `legendre` | 1 | shifted Legendre polynomial `P_j(2u − 1)`, u = position over the window's own span (first event → 0, now → 1) | `order` 0..8 (default 3) | order + 1: `_leg_<j>` |
+
+- **The clock** (`decayBy`): `events` (default) measures age in events — the newest past event is 0, as `ewma`
+  counts — and `time` in days. On `time`, `fourier` and `legendre` measure age from the current row's time
+  (`legendre`: u = (event − first event) / (row − first event)), while `exponential` measures it from the newest
+  past event: its higher components would otherwise grow with the entity's inactivity (≈ (gap / halflife)^j), so the
+  gap is a feature of its own (`sinceEvent` with `unit: [days]`); component 0 (`ewma`) is the same either way. A missing value (null / NaN / ±Infinity) is still an event on the `events` clock; it adds no
+  weight.
+- **Reading the components.** Component 0 is the (decay-weighted) mean. The higher Laguerre components weigh
+  recent and older events with opposite signs (`L_1 = 1 − u`): a trend of the value against its age. The Fourier
+  components pick up periodicity at `period`, `period / 2`, …; the Legendre ones the shape of the path over the
+  window (level, slope, curvature, …). The `time` channel's components describe *when* the events happened
+  (its component 0 is always 1 and is not emitted). It reads no field, but it summarises the same events as the
+  block's value channels: when a channel is an outcome whose window is shifted, the `time` channel takes the
+  latest channel's shift too (`sequence.lift.align` when the channels differ).
+- **Cost.** Every measure is a running state: `exponential` and `fourier` are exact under any spacing and evict
+  under `maxAge` in O(1) per row; `legendre` rescales with the window's span, so it runs on a running state without
+  `maxAge` and re-reads the window under one. None of them keeps the key's history without a window (no
+  `sequence.window.unbounded` hint, `ewma` included) — except under a `filter` without `maxAge`, as for any op.
+- Availability, windows (`maxEvents` / `maxAge` / `filter`), the window shift of an outcome channel and the
+  naming prefix `{block}_{window}_{channel}` are those of the ops.
+- **Diagnostics**: a block uses either `ops` or `lift` + `summarize` (`sequence.form`); `summarize` needs
+  `dynamics` (`sequence.summarize`) with `family: lti` (`sequence.dynamics.family`: `bilinear` log-signatures are
+  not implemented yet) and a `measure` (`sequence.dynamics.measure`); `sequence.dynamics.order` /
+  `.halflife` / `.period` / `.decayBy` / `.parameter` check the parameters; channels must be numeric
+  (`sequence.lift.type`); a block emitting more than 64 component columns (windows × halflifes × channels ×
+  components) is `sequence.dynamics.size`; `compress` is not implemented (`sequence.compress` — feed the
+  component columns to a population `svd` block).
+
 ### Availability check
 
 For each column the module derives `availableAt` from its inputs (max over inputs; sequence / population
@@ -875,7 +934,8 @@ output:
   `1` when the path first moves up by `up` (relative to the current row's own value of the field), `-1` when it first
   moves down by `down`, `0` when it touches neither within the window, null without a future value or a current
   value (`up` > 0 and / or `down` < 0, `sequence.barrier.levels`; future windows only, `sequence.barrier.direction`).
-  `delta`, `trend`, `fracdiff` and a lagged `regression` read the window in one direction and are rejected.
+  `delta`, `trend`, `fracdiff` and a lagged `regression` read the window in one direction and are rejected, as is the
+  general form (`lift` + `summarize`), which reads the past window only.
 - **Engine.** The block runs in a keyed stage of its own (`future` in the plan report), replaying each key's rows
   latest first: one more GroupByKey, in the same wave as the past stages it does not depend on.
 
@@ -1008,8 +1068,10 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   What stays in memory per key is the running statistics plus the *projected* history (only the fields the
   windows read) behind the longest window: a `maxAge` window, or any incremental statistic, lets rows be
   dropped once they leave every window, and without `maxAge` the operators that read a fixed tail (`lag` /
-  `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail. Only `ewma`,
-  `runLength` / `sinceEvent` / `countMatch`, and any window with a `filter` but no `maxAge` read the key's
+  `delta` / `trend` by their `k`, unfiltered `maxEvents` windows) keep only that tail (`ewma` and the path
+  summaries are running states and keep none). Only the operators that re-read their window — `runLength` /
+  `sinceEvent` / `countMatch`, the series readouts and `first` / `last` of `aggregate`, a lagged `regression`,
+  `weightBy` — without `maxAge` or `maxEvents`, and any window with a `filter` but no `maxAge`, read the key's
   full history, and they keep only the fields they read for it (the history is trimmed per field, so the
   other columns' fields still leave with their own windows, though each retained row keeps a ~40-byte entry
   skeleton); the stage logs which columns do at startup — give such windows a `maxAge` to bound them. Local disk of the workers must have room for the keys being sorted concurrently: the chunk

@@ -162,6 +162,7 @@ parameters:
 | difference to a named baseline (market) | `row`, `type: residual`, `baseline: market`, `on: identity \| logit \| log` | the baseline is declared once in `baselines` |
 | rank / z-score / share / composition inside the event | `context` | `excludeSelf: true` for "vs. the others"; `values: [...]` for per-value columns |
 | the entity's past: lag, delta, trend, EWMA, run length, time since, counts, deterministic aggregates | `sequence` | strictly past rows; windows `maxEvents` / `maxAge` / `filter` with `$self` |
+| the *shape* of the entity's recent path as a few numbers: decay-weighted trend (Laguerre), periodicity (Fourier), level / slope / curvature over the window (Legendre) | `sequence` general form: `lift` + `summarize.dynamics` (`family: lti`) | one float64 column per component; running state (no history kept); at most 64 columns per block |
 | a **target mean / rate per key**, shrunk toward coarser keys, optionally windowed | `population`, `type: encoding` | never `sequence.aggregate mean` over an outcome (no shrinkage; the validator hints `sequence.aggregate.encoding`) |
 | per-key counts / shares (frequency encoding), std, quantiles of a value | `population`, `type: encoding` with `stats: [count, share]` / `std` / `quantile`, `q25` | quantiles / distribution are expanding-only |
 | forward-looking **labels** (the value / return / first barrier touched over the next horizon) | `sequence` with `direction: future` and a `maxAge` | label columns (role `label`), never features — a feature reading one is `availability.violation`; declare a derived label in `output.roles.label` |
@@ -316,7 +317,7 @@ not alter values).
 
 ## Pitfalls seen in production
 
-- A `sequence` op such as `sinceEvent` / `countMatch` / `runLength` / `ewma` or a filtered window
+- A `sequence` op such as `sinceEvent` / `countMatch` / `runLength` or a filtered window
   **without `maxAge`** keeps the entity's whole history on the worker (`sequence.window.unbounded`).
   Give it a `maxAge`.
 - Two ops of the same type in one block (two `countMatch` predicates) collide on the column name: name

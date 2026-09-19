@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
  *       (max / min cannot evict). Used for {@code aggregate} / encoding statistics; turns the per-key cost from
  *       O(n²) into O(n).</li>
  *   <li><b>Scan</b>: binary-searched window bounds + a {@code subList} view (no copying) for everything
- *       else (lag / trend / ewma / predicates / maxEvents windows / general filters / a {@code weightBy}
+ *       else (lag / trend / predicates / maxEvents windows / general filters / a {@code weightBy}
  *       aggregate, whose weights depend on the current row).</li>
  * </ul>
  *
@@ -66,6 +66,11 @@ public class SequenceEvaluator implements Serializable {
         Serializable empty;
         /** The aggregate's per-event weight expression ({@code weightBy}), or null. */
         String weightBy;
+        /**
+         * The key of the running state in {@link KeyState}: the column's canonical name, or the one shared by the
+         * components of a dynamics channel (one state, read out once per component column).
+         */
+        String stateKey;
     }
 
     /**
@@ -324,7 +329,7 @@ public class SequenceEvaluator implements Serializable {
     private int columnRetainFrom(final OutputColumn c, final KeyState state, final long nowMillis, final List<Past> history) {
         final ColumnPlan plan = plans.get(c.canonicalName);
         if (plan.incremental) {
-            final ColumnState cs = state.columns.get(c.canonicalName);
+            final ColumnState cs = state.columns.get(plan.stateKey);
             return cs == null ? 0 : (plan.maxAgeMillis == null ? cs.foldIndex : cs.evictIndex);
         }
         if (plan.maxAgeMillis == null) {
@@ -403,6 +408,7 @@ public class SequenceEvaluator implements Serializable {
         plan.offset = c.coordinates.containsKey("offset") ? "__baseline_" + c.coordinates.get("offset") : null;
         plan.stat = statToken(c);
         plan.weightBy = c.coordinates.get("weightBy");
+        plan.stateKey = c.coordinates.getOrDefault("stateKey", c.canonicalName);
         plan.summary = summaryOf(c);
         plan.empty = plan.summary == null ? null : plan.summary.family().create();
         plan.series = "aggregate".equals(c.operator) ? SeriesStats.parse(c.coordinates.get("func")) : null;
@@ -425,10 +431,12 @@ public class SequenceEvaluator implements Serializable {
     /**
      * The summary family the column's statistic runs on incrementally, or null when it is scan-only. A lagged
      * regression pairs an event with an earlier one: that pair is not a contribution of one event (evicting the
-     * far edge would need the rows before it), so it has no family.
+     * far edge would need the rows before it), so it has no family. {@code ewma} is the order-0 exponential
+     * {@link Dynamics} (sugar over the same coordinates as the general form's {@code dynamics} columns).
      */
     Summary.Spec summaryOf(final OutputColumn c) {
         return switch (c.operator) {
+            case "ewma", "dynamics" -> Dynamics.spec(c.coordinates);
             case "aggregate" -> OperatorCatalog.summary(c.coordinates.get("func"));
             case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(c.coordinates.get("func"));
             default -> null;
@@ -446,7 +454,7 @@ public class SequenceEvaluator implements Serializable {
         final ColumnPlan plan = plans.get(c.canonicalName);
         if (plan.incremental && state != null) {
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
-            return readStatistic(c, plan, summary == null ? plan.empty : summary);
+            return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
         }
         final List<Past> window = select(plan, row, nowMillis, history);
         return evaluateScan(c, plan, row, nowMillis, window);
@@ -458,7 +466,7 @@ public class SequenceEvaluator implements Serializable {
      */
     final Serializable advance(final OutputColumn c, final ColumnPlan plan, final KeyState state,
                                final long nowMillis, final List<Past> history, final Map<String, Object> row) {
-        final ColumnState cs = state.column(c.canonicalName);
+        final ColumnState cs = state.column(plan.stateKey);
         final long nearEdge = nowMillis - plan.shiftMillis;
         while (cs.foldIndex < history.size() && history.get(cs.foldIndex).millis() <= nearEdge) {
             apply(plan, cs, history.get(cs.foldIndex), 1);
@@ -489,6 +497,8 @@ public class SequenceEvaluator implements Serializable {
      * counts, nulls included); a field contributes its numeric value when it is {@link #finite}.
      */
     Object contribution(final ColumnPlan plan, final Past p) {
+        // a path event: missing values still advance the events clock (a field-less channel is the constant 1)
+        if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
         if (plan.field == null) return 0d;
         if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
         return finite(p.values().get(plan.field));
@@ -511,11 +521,13 @@ public class SequenceEvaluator implements Serializable {
     }
 
     /**
-     * Reads the column's value from a summary state (the family's empty state when the filter value has none);
-     * overridden by the population evaluator. Extrema are cast to the column type (they carry the input type).
+     * Reads the column's value from a summary state (the family's empty state when the filter value has none) as of
+     * the row's time; overridden by the population evaluator. Extrema are cast to the column type (they carry the
+     * input type).
      */
-    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state) {
-        final Object value = plan.summary.<Serializable>typed().read(state, plan.summary.readout());
+    Object readStatistic(final OutputColumn c, final ColumnPlan plan, final Serializable state, final long nowMillis) {
+        final Object value = plan.summary.<Serializable>typed().readAt(state, plan.summary.readout(), nowMillis);
+        if (plan.stat == null) return value;
         return switch (plan.stat) {
             case "max", "min" -> value == null ? null : FeatureValues.cast((Double) value, c.fieldType);
             default -> value;
@@ -548,20 +560,9 @@ public class SequenceEvaluator implements Serializable {
                 }
                 return slope(ys);
             }
-            case "ewma" -> {
-                final double halflife = Double.parseDouble(c.coordinates.get("halflife"));
-                final boolean byTime = "time".equals(c.coordinates.get("decayBy"));
-                double num = 0, den = 0;
-                for (int i = 0; i < window.size(); i++) {
-                    final Past p = window.get(i);
-                    final Double v = FeatureValues.toDouble(p.values().get(field));
-                    if (v == null) continue;
-                    final double steps = byTime ? (nowMillis - p.millis()) / 86_400_000d : (window.size() - 1 - i);
-                    final double w = Math.pow(0.5, steps / halflife);
-                    num += w * v;
-                    den += w;
-                }
-                return den == 0 ? null : num / den;
+            case "ewma", "dynamics" -> {
+                // the direct projection of the window: the reference the running state is equal to
+                return ((Dynamics) plan.summary.family()).project(window, field, nowMillis, plan.summary.readout().parameter().intValue());
             }
             case "runLength" -> {
                 final String value = c.coordinates.get("value");

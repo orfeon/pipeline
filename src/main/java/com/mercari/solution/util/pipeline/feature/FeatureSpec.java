@@ -99,6 +99,42 @@ public class FeatureSpec implements Serializable {
         public String weightBy;
     }
 
+    /**
+     * The general form of a sequence feature (§1.4, §4.3): {@code lift} maps an event to channels, {@code summarize}
+     * folds the channels of a window into a fixed-length state. Only {@code dynamics} summaries exist.
+     */
+    public static class Lift implements Serializable {
+        /** The channels: fields (or block columns) read from each event. */
+        public List<String> fields = new ArrayList<>();
+        /** Expression channels (each desugared into an anonymous row column, like an op's {@code expr}). */
+        public List<LiftExpr> exprs = new ArrayList<>();
+        /** Adds the constant channel 1 (named {@code time}): the measure's own components describe when events happened. */
+        public boolean timeAugment;
+    }
+
+    /**
+     * An expression channel: {@code "expr"} or {@code {expr: "...", as: name}} — {@code as} names the channel segment
+     * of its columns (otherwise the anonymous {@code {block}__e{n}}, numbered across the whole spec).
+     */
+    public record LiftExpr(String expr, String as) implements Serializable {}
+
+    /** {@code summarize.dynamics}: the recurrence summarising the lifted channels. */
+    public static class DynamicsSpec implements Serializable {
+        /** {@code lti} (implemented) | {@code bilinear} | {@code probabilistic}. */
+        public String family;
+        /** lti: {@code exponential} | {@code legendre} | {@code fourier}. */
+        public String measure;
+        public Integer order;
+        /** exponential (required) / fourier (optional damping): one state per halflife, in clock units. */
+        public List<Double> halflife = new ArrayList<>();
+        /** fourier: the period of the first harmonic, in clock units. */
+        public Double period;
+        /** The clock: {@code events} (default) | {@code time} (days). */
+        public String decayBy;
+        /** Keys other than the known ones (reported, so a misspelled parameter does not silently default). */
+        public List<String> unknown = new ArrayList<>();
+    }
+
     public static class KeySet implements Serializable {
         public List<String> keys = new ArrayList<>();
         public List<Window> windows = new ArrayList<>();
@@ -175,6 +211,14 @@ public class FeatureSpec implements Serializable {
          */
         public String direction;
         public List<Window> windows = new ArrayList<>();
+        /** sequence general form: null when absent. */
+        public Lift lift;
+        /** sequence general form: the {@code summarize.dynamics} block, null when absent. */
+        public DynamicsSpec dynamics;
+        /** sequence general form: {@code summarize} was declared (with or without a usable {@code dynamics}). */
+        public boolean summarize;
+        /** sequence general form: {@code compress} was declared (not implemented: a compile error). */
+        public boolean compress;
 
         // population
         public List<KeySet> keySets = new ArrayList<>();
@@ -649,6 +693,34 @@ public class FeatureSpec implements Serializable {
                 if (op != null) def.ops.add(op);
             }
         }
+        if (o.has("lift") && o.get("lift").isJsonObject()) {
+            final JsonObject lift = o.getAsJsonObject("lift");
+            def.lift = new Lift();
+            def.lift.fields = Json.strings(lift, "fields");
+            def.lift.exprs = parseLiftExprs(lift, diagnostics, loc);
+            def.lift.timeAugment = Json.bool(lift, "timeAugment", false);
+            // a misspelled key (field, timeaugment ...) would otherwise drop a channel silently
+            final List<String> unknown = lift.keySet().stream().filter(k -> !List.of("fields", "exprs", "timeAugment").contains(k)).toList();
+            if (!unknown.isEmpty()) diagnostics.error("sequence.lift", loc, "unknown lift key(s) " + unknown + " (accepted: fields, exprs, timeAugment)");
+        } else if (o.has("lift") && !o.get("lift").isJsonNull()) {
+            diagnostics.error("sequence.lift", loc, "lift must be an object with fields / exprs / timeAugment");
+        }
+        def.summarize = o.has("summarize") && !o.get("summarize").isJsonNull();
+        if (def.summarize && o.get("summarize").isJsonObject()
+                && o.getAsJsonObject("summarize").has("dynamics") && o.getAsJsonObject("summarize").get("dynamics").isJsonObject()) {
+            final JsonObject d = o.getAsJsonObject("summarize").getAsJsonObject("dynamics");
+            def.dynamics = new DynamicsSpec();
+            def.dynamics.family = Json.string(d, "family");
+            def.dynamics.measure = Json.string(d, "measure");
+            def.dynamics.order = Json.integer(d, "order");
+            def.dynamics.halflife = doubles(d, "halflife");
+            def.dynamics.period = doubleOf(d, "period", diagnostics, loc);
+            def.dynamics.decayBy = Json.string(d, "decayBy");
+            for (final String key : d.keySet()) {
+                if (!List.of("family", "measure", "order", "halflife", "period", "decayBy").contains(key)) def.dynamics.unknown.add(key);
+            }
+        }
+        def.compress = o.has("compress") && !o.get("compress").isJsonNull();
 
         for (final JsonObject ks : objects(o, "keySets")) {
             final KeySet keySet = new KeySet();
@@ -769,6 +841,28 @@ public class FeatureSpec implements Serializable {
             windows.add(window);
         }
         return windows;
+    }
+
+    /** {@code lift.exprs}: strings, or {@code {expr, as}} objects naming their channel. */
+    private static List<LiftExpr> parseLiftExprs(final JsonObject lift, final Diagnostics diagnostics, final String loc) {
+        final List<LiftExpr> exprs = new ArrayList<>();
+        if (!lift.has("exprs") || lift.get("exprs").isJsonNull()) return exprs;
+        for (final JsonElement e : arrayOf(lift.get("exprs"))) {
+            if (e.isJsonPrimitive()) {
+                exprs.add(new LiftExpr(e.getAsString(), null));
+                continue;
+            }
+            final JsonObject o = e.isJsonObject() ? e.getAsJsonObject() : null;
+            final String expr = o == null ? null : Json.string(o, "expr");
+            if (expr == null) {
+                diagnostics.error("sequence.lift", loc, "each lift.exprs entry must be an expression string or {expr: \"...\", as: name}");
+                continue;
+            }
+            final List<String> unknown = o.keySet().stream().filter(k -> !List.of("expr", "as").contains(k)).toList();
+            if (!unknown.isEmpty()) diagnostics.error("sequence.lift", loc, "unknown lift.exprs key(s) " + unknown + " (accepted: expr, as)");
+            exprs.add(new LiftExpr(expr, Json.string(o, "as")));
+        }
+        return exprs;
     }
 
     private static Op parseOp(final JsonElement e, final Diagnostics diagnostics, final String loc) {

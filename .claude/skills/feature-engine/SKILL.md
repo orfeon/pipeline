@@ -151,7 +151,14 @@ reads what the compile layer wrote into each column's `coordinates`.
   distribution), `ORDER` (`OrderStatistics`: quantiles), `SHAPE` (anchored power sums to order four: skew /
   kurt), `REGRESSION` (anchored cross moments of a pair
   `double[]{x, y}`: cov / corr / beta / intercept / r2 — the sequence `regression` op; its lagged form pairs two
-  events and is therefore scan-only). `OperatorCatalog.summary(stat)` maps a
+  events and is therefore scan-only). `Dynamics` (engine doc §9.6.6) is the family of the sequence general form
+  (`lift` + `summarize.dynamics`, `lti`: exponential = Laguerre, fourier, legendre) and of `ewma` (order-0
+  exponential sugar): parameterised per column from the coordinates (`Dynamics.spec`), a vector state shared by a
+  channel's component columns through the `stateKey` coordinate (= `ColumnPlan.stateKey`, the `KeyState` key), a
+  contribution `Event(millis, value)` that is never null (a missing value advances the events clock), read with
+  `Summary.readAt(state, readout, now)` (the only position-dependent read), and `project` as the direct
+  projection the scan path and the tests use. exponential / fourier are groups, legendre a monoid (it rescales
+  with its span: re-read under `maxAge`). `OperatorCatalog.summary(stat)` maps a
   statistic token to `(family, Readout)` and is **the** rule for what runs incrementally; the same
   families are the per-block Combine state of the fit stage (`Svd.SUMMARY`, `QuantileTransform.VALUES` —
   both monoids without inverse) and are meant to become the prefix-scan state and the streaming

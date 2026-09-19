@@ -65,6 +65,51 @@ public class SequenceIncrementalTest {
                 entity: seller
                 ops:
                   - {type: aggregate, field: start_price, funcs: [max, min, count]}
+                  - {type: ewma, field: start_price, halflife: [2, 6]}
+                  - {type: ewma, field: sold, halflife: [1.5], decayBy: time}
+              - name: laguerre
+                scope: sequence
+                entity: seller
+                windows:
+                  - {maxAge: P30D}
+                  - {maxEvents: 12}
+                  - {maxAge: P90D, filter: "start_price > 20"}
+                lift: {fields: [start_price], exprs: ["sold * 2"], timeAugment: true}
+                summarize:
+                  dynamics: {family: lti, measure: exponential, order: 3, halflife: [2.5], decayBy: time}
+              - name: laguerre_events
+                scope: sequence
+                entity: seller
+                lift: {fields: [start_price]}
+                summarize:
+                  dynamics: {family: lti, measure: exponential, order: 4, halflife: [3]}
+              - name: wave
+                scope: sequence
+                entity: seller
+                windows: [{maxAge: P30D}, {maxEvents: 12}, {}]
+                lift: {fields: [start_price, sold]}
+                summarize:
+                  dynamics: {family: lti, measure: fourier, order: 2, period: 7, decayBy: time}
+              - name: wave_events
+                scope: sequence
+                entity: seller
+                windows: [{maxAge: P20D}]
+                lift: {fields: [start_price]}
+                summarize:
+                  dynamics: {family: lti, measure: fourier, order: 2, period: 5, halflife: [4]}
+              - name: legs
+                scope: sequence
+                entity: seller
+                windows: [{}, {maxAge: P30D}, {maxEvents: 8}]
+                lift: {fields: [start_price, sold], timeAugment: true}
+                summarize:
+                  dynamics: {family: lti, measure: legendre, order: 4, decayBy: time}
+              - name: legs_events
+                scope: sequence
+                entity: seller
+                lift: {fields: [start_price]}
+                summarize:
+                  dynamics: {family: lti, measure: legendre, order: 6}
               - name: similar
                 scope: sequence
                 entity: seller
@@ -540,17 +585,36 @@ public class SequenceIncrementalTest {
         // trend k=5 is the longest tail; the trim is amortised (drops wait for a 1024-row or half-size prefix)
         Assertions.assertTrue(retainedPeak < 2100, () -> "retained " + retainedPeak);
 
-        // ewma and a filtered lag have no bounded tail
+        // a filtered window without maxAge has no bounded tail; ewma is a running state (the order-0 exponential
+        // dynamics) and keeps nothing, and so does a legendre summary without a window
         final String unbounded = bounded.replace("- {type: trend, fields: [start_price], k: 5}",
                 "- {type: ewma, fields: [start_price], halflife: [3]}")
-                .replace("windows: [{maxEvents: 3}]", "windows: [{maxEvents: 3, filter: \"start_price > 10\"}]");
+                .replace("windows: [{maxEvents: 3}]", "windows: [{maxEvents: 3, filter: \"start_price > 10\"}]")
+                + """
+                  - name: legs
+                    scope: sequence
+                    entity: seller
+                    lift: {fields: [start_price]}
+                    summarize:
+                      dynamics: {family: lti, measure: legendre, order: 2}
+                  - name: legs_filtered
+                    scope: sequence
+                    entity: seller
+                    window: {filter: "start_price > 10"}
+                    lift: {fields: [start_price]}
+                    summarize:
+                      dynamics: {family: lti, measure: legendre, order: 1}
+                """;
         final FeaturePlan plan2 = FeaturePlanCompiler.compile(sources, Config.convertConfigJson(unbounded, Config.Format.yaml), null);
         Assertions.assertFalse(plan2.getDiagnostics().hasErrors(), plan2::describe);
         final SequenceEvaluator e2 = new SequenceEvaluator(plan2.getColumns().stream().filter(c -> c.getScope() == FeatureSpec.Scope.sequence).toList());
         e2.setup();
         final List<String> pinned = e2.unboundedColumns();
-        Assertions.assertEquals(3, pinned.size(), pinned::toString); // ewma + 2 filtered aggregates
-        Assertions.assertTrue(pinned.stream().anyMatch(n -> n.contains("ewma")), pinned::toString);
+        // 2 filtered aggregates + the 2 components of the filtered legendre summary
+        Assertions.assertEquals(4, pinned.size(), pinned::toString);
+        Assertions.assertTrue(pinned.stream().noneMatch(n -> n.contains("ewma") || n.startsWith("legs_all")), pinned::toString);
+        Assertions.assertNull(SequenceEvaluator.unboundedReason(plan2.getColumn("tail_all_start_price_ewma3")));
+        Assertions.assertEquals("a window with a filter and no maxAge", SequenceEvaluator.unboundedReason(plan2.getColumn("legs_filtered_all_start_price_leg_1")));
     }
 
     @SuppressWarnings("unchecked")
