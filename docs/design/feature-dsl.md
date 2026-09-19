@@ -922,6 +922,7 @@ read* — and the model is what the merged state of those blocks solves to:
 | `mode: forward` + `window: P2Y` | of those, the blocks within the window (rounded up to whole blocks): the fit forgets |
 | `minBlocks: n` / `minHistory: P180D` | the row reads null until that many preceding blocks carry data |
 | `mode: fold` | every fold but the row's own (not leak-free in time: other folds include later events) |
+| `mode: fold` + `fold: {by: time, purge, embargo}` | every block but `[b − purge, b + embargo]` around the row's block `b` — the purged, embargoed cross-validation of time series; `purge` defaults to the horizon of the label the target reads |
 
 `blocks` (`bucket: year | quarter | month | week | day`, or `size: <duration>`, default `P90D`), `window`, `minBlocks`
 / `minHistory` are semantic parameters (in the plan hash). Support by type: `encoding` — all modes (`forward` for the
@@ -930,8 +931,12 @@ merged moments, a quantile transform from the very values of the readable blocks
 `static`. A block that declares no `mode` of its own follows a top-level `fit: {mode: forward}` when its type supports
 it, so a spec walks forward as a whole; `fit: {mode: static}` on the block opts out, with an info saying that this
 block alone sees the whole input. A forward fit is re-fitted on every run; its artifact keeps the whole-input model for
-a static serving run. Planned on the same footing: `fold: {by: time, purge, embargo}` (all blocks minus a range, the
-purge defaulting to a label's horizon) and warm starts (merge the new block into the stored ones).
+a static serving run. A time fold (`encoding` only, not with `estimator: joint`) is the same per-block state read as
+"all blocks minus a range". Planned on the same footing: warm starts (merge the new block into the stored ones).
+
+A training weight derived from labels (the uniqueness `1 / (1 + overlapping labels)`, from a past and a future count
+over the horizon) is post-event like the labels: declared as `output.roles.weight` it is emitted with the status
+`label`, and a feature reading it is a violation.
 
 ---
 

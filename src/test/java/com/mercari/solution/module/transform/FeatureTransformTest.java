@@ -2517,4 +2517,87 @@ public class FeatureTransformTest {
                         .replace("        prefix: f_\n", "        prefix: f_\n        roles: {label: ret}\n"), 6,
                 List.of("Wave1_FanIn", "_future"), List.of());
     }
+
+    /**
+     * {@code fit.fold.by: time}: every 7-day block (counted from the epoch) is a fold; a row reads the whole input minus
+     * its own block, one block of purge before it and one of embargo after it. s1's sessions fall in blocks 2869 (A),
+     * 2870 (B), 2872 (C) and 2874 (D), s2's in 2869 (A) and 2872 (C).
+     */
+    @Test
+    public void testTimeFoldFit() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n",
+                "      fit: {mode: fold, blocks: {size: P7D}, fold: {by: time, purge: P7D, embargo: P7D}}\n      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            // count of the seller's rows outside [b − 1, b + 1], and the share of them that sold
+            final Map<String, double[]> expected = Map.of(
+                    "A/s1", new double[]{2, 1.0},        // C, D
+                    "B/s1", new double[]{2, 1.0},        // C, D
+                    "C/s1", new double[]{3, 2.0 / 3},    // A, B, D
+                    "D/s1", new double[]{3, 2.0 / 3},    // A, B, C
+                    "A/s2", new double[]{1, 1.0},        // C
+                    "C/s2", new double[]{1, 0.0});       // A
+            for (final Map.Entry<String, double[]> e : expected.entrySet()) {
+                final MElement row = byKey.get(e.getKey());
+                Assertions.assertEquals((long) e.getValue()[0], ((Number) row.getPrimitiveValue("f_enc__seller_id__count")).longValue(), e.getKey());
+                Assertions.assertEquals(e.getValue()[1], row.getAsDouble("f_enc__seller_id__e2__mean"), 1e-9, e.getKey());
+            }
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * Uniqueness weights of overlapping labels: a row's 20-day label window overlaps the windows of the seller's rows
+     * within 20 days on either side, counted by a past and a future COUNT(1); the weight {@code 1 / (1 + overlaps)} is a
+     * post-event column declared as {@code output.roles.weight}. s1 lists on days 0, 2, 19 and 31, s2 on days 0 and 19.
+     */
+    @Test
+    public void testUniquenessWeight() throws java.io.IOException {
+        final String blocks = """
+                - name: before
+                  scope: sequence
+                  entity: seller
+                  windows: [{maxAge: P20D}]
+                  ops:
+                    - {type: aggregate, funcs: [count]}
+                - name: after
+                  scope: sequence
+                  entity: seller
+                  direction: future
+                  windows: [{maxAge: P20D}]
+                  ops:
+                    - {type: aggregate, funcs: [count]}
+                - name: uniqueness
+                  scope: row
+                  expr: "1 / (1 + before_20d_count + after_20d_count)"
+            """.replaceAll("(?m)^", "    ");
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks + "      output:\n")
+                .replace("        prefix: f_\n", "        prefix: f_\n        roles: {weight: uniqueness}\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals("weight", output.getSchema().getField("f_uniqueness").getOptions().get("feature.role"));
+        Assertions.assertEquals("label", output.getSchema().getField("f_uniqueness").getOptions().get("feature.status"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, Double> expected = Map.of(
+                    "A/s1", 1.0 / 3,   // after: days 2, 19
+                    "B/s1", 1.0 / 3,   // before: day 0; after: day 19
+                    "C/s1", 1.0 / 4,   // before: days 0, 2; after: day 31
+                    "D/s1", 1.0 / 2,   // before: day 19
+                    "A/s2", 1.0 / 2,   // after: day 19
+                    "C/s2", 1.0 / 2);  // before: day 0
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                Assertions.assertEquals(expected.get(id), row.getAsDouble("f_uniqueness"), 1e-9, id);
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
 }

@@ -27,7 +27,7 @@ and review a spec quickly.
 | `contexts` | for context | `{name, keys: [...]}` |
 | `baselines` | optional | `{name, expr, context, emit}`; `expr` may wrap a numeric expression in a context op (`share(1 / price)`); referenced by `residual.baseline`, encoding / factorization `offset` and the `softmax` op. `emit: <name>` also outputs the value as a column (nameable by the `baseline` role) |
 | `features` | yes | list of blocks (below), or a URI / path of a document with a `features` list |
-| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd), `artifact: {uri, refit, id}` or the URI string |
+| `fit` | optional | `orderBy` (= time.field), `mode: expanding \| static \| fold \| forward`, `groupBy: <entity>`, `folds` (default 5), `fold: {by: row | time, purge, embargo}` (time: every block is a fold, a row reads all blocks but its own, the purge before and the embargo after — purge defaults to the target label's horizon), `blocks: {bucket: year \| quarter \| month \| week \| day} \| {size: P90D}` + `minBlocks` \| `minHistory` (forward: minimum preceding blocks, as a count or a duration) + `window` (forward: the range of blocks a row reads, the default for keySets without `maxAge` and the range of a forward svd), `artifact: {uri, refit, id}` or the URI string |
 | `engine` | optional | `parallelWaves` (default true), `rowId: [input fields]`, `spill: {memoryMB, directory, compress}`. Outside the plan hash — never changes values |
 | `output` | optional | `prefix`, `nullPolicy: keep \| fillZero \| indicator`, `exclude: [globs / selectors]`, `groupBy: <context>`, `parentFields: [...]`, `childName` (default `rows`), `passThrough: all \| keys \| none`, `roles: {group, time, entity, label, baseline, weight}`, `include: [names] \| <uri>` (projection; replaces `exclude`), `manifest: <uri>` |
 | `audit` | optional | `observedAt: count \| fail \| off` — rows observed after their declared availability are counted (default), routed to the failure output, or not audited |
@@ -221,7 +221,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
     leaveNodeOut: true
     output: [composed, deviations, effectiveN]   # extra columns dev0.., <stat>__neff
   smoothing: {type: bayesian, priorWeight: N}    # legacy sugar for fixed weights
-  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
+  fit: {mode: expanding | static | fold | forward, groupBy: <entity>, folds: 5, fold: {by: time, purge: P20D, embargo: P7D}, blocks: {size: P90D}, minBlocks: 1 | minHistory: P180D, window: P2Y, artifact: {...}}
   maxFeatures: 200
 ```
 

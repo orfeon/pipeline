@@ -272,6 +272,45 @@ public class FeatureSpec implements Serializable {
         public String groupBy;
         /** Number of folds for {@code fit.mode: fold} (out-of-fold statistics). */
         public Integer folds = 5;
+        /**
+         * {@code fit.fold.by}: {@code row} (default — {@code folds} hash folds of the row identity or the groupBy entity)
+         * or {@code time} — every time block ({@code fit.blocks}) is a fold, and a row reads the totals minus its own
+         * block, the {@code purge} before it and the {@code embargo} after it.
+         */
+        public String foldBy;
+        /** {@code fit.fold.purge}: the span before the row's block left out (default: the target label's horizon). */
+        public Duration purge;
+        /** {@code fit.fold.embargo}: the span after the row's block left out (default none). */
+        public Duration embargo;
+
+        public boolean isTimeFold() {
+            return "time".equals(foldBy);
+        }
+
+        /** Parses {@code fold: {by: row | time, purge, embargo}} of a fit block (top level or per feature). */
+        static void parseFold(final JsonObject fit, final FitSpec spec, final Diagnostics diagnostics, final String loc) {
+            if (fit == null || !fit.has("fold") || fit.get("fold").isJsonNull()) return;
+            if (!fit.get("fold").isJsonObject()) {
+                diagnostics.error("fit.fold", loc, "fit.fold must be an object: {by: row | time, purge: <ISO-8601 duration>, embargo: <ISO-8601 duration>}");
+                return;
+            }
+            final JsonObject fold = fit.getAsJsonObject("fold");
+            final String by = Json.string(fold, "by");
+            if (by != null && !List.of("row", "time").contains(by)) {
+                diagnostics.error("fit.fold.by", loc, "fit.fold.by must be row | time: " + by);
+            } else if (by != null) {
+                spec.foldBy = by;
+            }
+            final Duration purge = Json.duration(fold, "purge", null, diagnostics, loc);
+            final Duration embargo = Json.duration(fold, "embargo", null, diagnostics, loc);
+            if (purge != null) spec.purge = purge;
+            if (embargo != null) spec.embargo = embargo;
+            for (final String key : fold.keySet()) {
+                if (!List.of("by", "purge", "embargo").contains(key)) {
+                    diagnostics.error("fit.fold", loc, "unknown fit.fold key '" + key + "' (accepted: by, purge, embargo)");
+                }
+            }
+        }
         /** Root URI of fit artifacts ({@code <uri>/<planHash>/<block>.avro}); null = fit in-pipeline only. */
         public String artifactUri;
         /** Re-fit and overwrite even when an artifact for the plan hash exists. */
@@ -524,6 +563,7 @@ public class FeatureSpec implements Serializable {
             // minHistory / window / blocks / minBlocks are parsed (and validated) by parseForward below
             spec.fit.groupBy = Json.string(fit, "groupBy");
             if (Json.integer(fit, "folds") != null) spec.fit.folds = Json.integer(fit, "folds");
+            FitSpec.parseFold(fit, spec.fit, diagnostics, "fit");
             FitSpec.parseArtifact(fit, spec.fit);
             FitSpec.parseForward(fit, spec.fit, diagnostics, "fit", spec.timeField);
         }

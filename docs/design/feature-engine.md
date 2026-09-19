@@ -1088,6 +1088,7 @@ merged state of those blocks solves to. `BlockSeries<S>` holds one `Summary` sta
 | `forward` | `(−∞, usable]` — the complete blocks whose inputs are known at predictAt, the row's own block excluded | merge of the prefix |
 | `forward` + `window` | `(usable − windowBlocks, usable]` | merge of the range |
 | `minBlocks` / `minHistory` | — | fewer observed blocks at or before `usable` → the row reads null |
+| `fold` by time | every block but `[b − purgeBlocks, b + embargoBlocks]` around the row's block `b` | the total minus the range |
 
 Only the monoid law is used (a range is *merged*, not differenced), which is what lets a non-invertible family
 — the gathered values of a quantile transform — walk forward exactly. A model that has to be *solved* from the
@@ -1098,8 +1099,13 @@ whole-input model (what a static serving run loads); a forward fit is re-fitted 
 
 `type: svd` and `type: quantileTransform` are on it. The encoding levels still carry their own
 `ForwardBlocks.Series` (prefix arrays of `KeyStats` + the per-block λ); moving them onto
-`BlockSeries<Moments>` is the remaining step, after which `fold` by time with purge / embargo is "all blocks minus
-a range" and a warm start is "merge the new block into the stored parts".
+`BlockSeries<Moments>` is the remaining step, after which a warm start is "merge the new block into the stored parts".
+A **time fold** (`fit.mode: fold` + `fold.by: time`) already reads those series: `Forward.of` accepts the fold
+coordinates (`foldBy`, `purgeBlocks`, `embargoBlocks` — the compiler's `timeFoldCoordinates`, with the purge defaulting
+to the horizon of a `direction: future` column the target reads, `labelHorizon`), the level is fitted like a forward
+one, and `FitApplyDoFn.timeFoldStats` returns the totals minus one prefix difference — the encoding levels' series are
+invertible, so the range is differenced. λ is the whole input's (the last entry of the per-block step function), as for
+a hash fold. `estimator: joint` keeps hash folds only (`fit.fold.time.joint`).
 
 #### 9.6.3 `SummaryFitBlock` — what a fitted block declares
 
@@ -1188,9 +1194,6 @@ component is a weighted mean:
 - **Clock**: windows, decay, fit blocks measured on one declared clock — wall time (today), event ordinal
   (`maxEvents`, `decayBy: events`), or a calendar of ticks (business days) declared in the sources document.
   Availability stays on wall time: a clock measures windows, not knowledge.
-- **Time folds from the labels' horizon**: the labels of `direction: future` (§4.3) carry their horizon in
-  `availableAt`, so the purge range of a time fold (`fold: {by: time, purge, embargo}`) can default to it, and an
-  overlap count of the future window gives the uniqueness weight.
 - **Ratings**: a sequence op under the global key whose state is a map entity → (μ, σ), updated when a group of
   same-timestamp rows closes (the `pending` flush). Order-dependent, hence replay-only — declared non-mergeable.
 - **Sketches** (KLL / t-digest) as a monoid family: per-key quantile / distribution stats under static / fold and

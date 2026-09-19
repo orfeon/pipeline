@@ -332,6 +332,28 @@ would; pin the version with `artifact.id` so a serving config with `mode: static
 hash) loads them. A fold run itself always re-fits (it needs the per-fold tags, which an artifact does
 not hold).
 
+**Time folds (`fold: {by: time}`).** Hash folds mix every period into every fold, so a row's out-of-fold statistics
+still contain its neighbours in time — the rows whose labels describe the same days. With `by: time` every time block
+is a fold:
+
+```yaml
+  fit:
+    mode: fold
+    blocks: {bucket: month}                       # the folds (as fit.mode forward: bucket or size, default P90D)
+    fold: {by: time, purge: P20D, embargo: P7D}
+```
+
+- A row in block `b` reads the statistics of the whole input minus the blocks `[b − purge, b + embargo]`: its own
+  block, the **purge** before it (the rows whose label window reaches into the row's block) and the **embargo** after
+  it. Both are rounded up to whole blocks (`purge: P20D` with 7-day blocks leaves 3 blocks out).
+- `purge` defaults to the horizon of the label the target reads — a `direction: future` column, directly or through a
+  row expression (info `fit.fold.purge`); other targets default to no purge. `embargo` defaults to none.
+- `folds` and `groupBy` do not apply (every block is a fold); `purge` / `embargo` without `by: time` are ignored with
+  a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`). `estimator: joint` solves hash folds only
+  (`fit.fold.time.joint`).
+- Like every fold the result is a cross-fit (later blocks are read), batch only; the per-block statistics are one
+  parallel Combine per (key, block), as in `fit.mode: forward`, and an `artifact` holds the whole-input totals.
+
 ### Factorization (population, type: factorization)
 
 ```yaml
@@ -943,6 +965,21 @@ output:
   general form (`lift` + `summarize`), which reads the past window only.
 - **Engine.** The block runs in a keyed stage of its own (`future` in the plan report), replaying each key's rows
   latest first: one more GroupByKey, in the same wave as the past stages it does not depend on.
+- **Overlapping labels and uniqueness weights.** Labels of neighbouring rows describe overlapping periods, so they
+  are not independent samples. The number of the entity's rows whose `h`-window overlaps a row's is a past and a
+  future `COUNT(1)` over `maxAge: h`; its inverse is a training weight, declared as `output.roles.weight` — a weight
+  derived from labels is post-event too, and is emitted like a label (status `label`, never a feature):
+
+  ```yaml
+  - {name: before, scope: sequence, entity: seller, windows: [{maxAge: P20D}], ops: [{type: aggregate, funcs: [count]}]}
+  - {name: after, scope: sequence, entity: seller, direction: future, windows: [{maxAge: P20D}], ops: [{type: aggregate, funcs: [count]}]}
+  - {name: uniqueness, scope: row, expr: "1 / (1 + before_20d_count + after_20d_count)"}
+  output:
+    roles: {label: ret, weight: uniqueness}
+  ```
+
+  Rows sharing the row's timestamp are counted by neither window. The matching cross-validation leaves out the same
+  neighbours: a time fold with `purge` = the horizon (above).
 
 ### observedAt audit (declaration vs. data)
 
