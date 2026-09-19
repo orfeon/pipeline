@@ -149,7 +149,7 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
 | `aggregate` shape / series funcs | in `funcs`: `skew`, `kurt` (excess; population moments), `zeroCross` (sign changes, zeros ignored), `peaks` (strict local maxima), `acf<j>`, `pacf<j>`, `ar<p>_<i>` (Yule–Walker; j, p in 1..20, i in 1..p) | `..._<func>`: float64 (`zeroCross` / `peaks` int64). `skew` / `kurt` run incrementally; the others scan the window per row — bound it with `maxEvents` / `maxAge`. Null on too few values or a constant series; for a level other than 0 use `expr: "x - level"` with `zeroCross` |
 | `sinceEvent` | `predicate`, `unit: [events, days]` | `<name>_<w>_since_events` int64 / `_since_days` float64 |
 | `countMatch` | `predicate` | `<name>_<w>_countmatch` int64 |
-| `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1). Optional `weightBy: "<numeric expr>"` — the past event's fields by name, the current row's as `$self.<field>` (a similarity kernel, e.g. `exp(-abs(start_price - $self.start_price) / 50)`): `count` = Σw (float64), `sum` = Σw·x, `mean` = Σw·x / Σw, `std` weighted; no `min / max / first / last`; null / NaN / ≤ 0 weights contribute nothing; `$self` fields must be known at `predictAt`; always scanned per row, so bound the window (`maxAge` / `maxEvents`); use `as:` when the block also has the plain aggregate of the field | `..._<func>`; count int64 (float64 under `weightBy`), mean / std / sum / rate float64, min / max / first / last input type |
+| `aggregate` | `field` / `expr`, `funcs: [count, mean, avg, sum, std, min, max, first, last, rate]`; no field + `funcs: [count]` = COUNT(1). Optional `weightBy: "<numeric expr>"` — the past event's fields by name, the current row's as `$self.<field>` (a similarity kernel, e.g. `exp(-abs(amount - $self.amount) / 50)`): `count` = Σw (float64), `sum` = Σw·x, `mean` = Σw·x / Σw, `std` weighted; no `min / max / first / last`; null / NaN / ≤ 0 weights contribute nothing; `$self` fields must be known at `predictAt`; always scanned per row, so bound the window (`maxAge` / `maxEvents`); use `as:` when the block also has the plain aggregate of the field | `..._<func>`; count int64 (float64 under `weightBy`), mean / std / sum / rate float64, min / max / first / last input type |
 
 **General form (path summaries)** — instead of `ops` (never both in one block):
 
@@ -158,7 +158,7 @@ other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names
   scope: sequence
   entity: <entities[].name>
   windows: [{maxAge: P365D}]
-  lift: {fields: [start_price], exprs: [{expr: "final_price / start_price", as: ratio}], timeAugment: true}
+  lift: {fields: [amount], exprs: [{expr: "realized_amount / amount", as: ratio}], timeAugment: true}
   summarize:
     dynamics: {family: lti, measure: exponential, order: 2, halflife: [7, 30], decayBy: time}
 ```

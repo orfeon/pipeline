@@ -61,29 +61,29 @@ For the input relation (one relation; joins happen upstream in the pipeline), wr
 
 ```yaml
 sources:
-  - name: listings
+  - name: events
     eventTime: session_time
     availability: atEventTime          # table default: pre-event
     mutability: corrections            # rows change later → say how training values are obtained
-    snapshotOf: {source: listings_snapshot, at: "event_date T08:00"}   # optional: archived point-in-time snapshot
-    keys: [session_id, seller_id]
+    snapshotOf: {source: events_snapshot, at: "event_date T08:00"}   # optional: archived point-in-time snapshot
+    keys: [session_id, account_id]
     fields:
-      - {name: start_price, type: float64, kind: attribute}
-      - {name: category,    type: string,  kind: attribute}
-  - name: price_snapshots
+      - {name: amount,   type: float64, kind: attribute}
+      - {name: category, type: string,  kind: attribute}
+  - name: signal_snapshots
     eventTime: session_time
     ingestionLag: PT1M
     fields:
-      - {name: current_bid_t10, type: float64, availableAt: "event_time - PT10M",
+      - {name: live_signal_t10, type: float64, availableAt: "event_time - PT10M",
          observedAtField: snapshot_time, kind: market, validFor: PT15M}
-  - name: auction_results
+  - name: outcomes
     eventTime: session_time
     settlementLag: PT30M               # after(event) = event_time + 30 min (the world knows)
     ingestionLag: P6D                  # ... and this system sees it up to 6 days later (upper bound!)
     mutability: corrections
     fields:
-      - {name: sold,        type: int32,   availableAt: after(event), kind: outcome}
-      - {name: final_price, type: float64, availableAt: after(event), kind: outcome}
+      - {name: converted,       type: int32,   availableAt: after(event), kind: outcome}
+      - {name: realized_amount, type: float64, availableAt: after(event), kind: outcome}
 ```
 
 Rules that decide correctness:
@@ -111,18 +111,18 @@ Rules that decide correctness:
 parameters:
   sources: gs://bucket/feature/sources.yaml   # or inline
   lineage:                                    # every field a feature uses, mapped to its source
-    - {fields: [session_id, seller_id, category, start_price], from: listings}
-    - {fields: [current_bid_t10], from: price_snapshots}
-    - {fields: [sold, final_price], from: auction_results}
+    - {fields: [session_id, account_id, category, amount], from: events}
+    - {fields: [live_signal_t10], from: signal_snapshots}
+    - {fields: [converted, realized_amount], from: outcomes}
   time: {field: session_time, orderTieBreak: [session_id]}
   predictAt: "event_time - PT10M"
   entities:
-    - {name: seller, keys: [seller_id]}
-    - {name: pair, keys: [seller_id, category]}
+    - {name: account, keys: [account_id]}
+    - {name: pair, keys: [account_id, category]}
   contexts:
     - {name: session, keys: [session_id]}
   baselines:
-    - {name: market, context: session, expr: "share(1 / current_bid_t10)"}
+    - {name: market, context: session, expr: "share(1 / live_signal_t10)"}
   features: [...]
   fit: {mode: expanding}
   output: {prefix: f_, passThrough: keys}
@@ -181,18 +181,18 @@ sequence ops never see the current row.
   scope: population
   type: encoding
   keySets:
-    - keys: [seller_id]                                   # flat: seller → global
+    - keys: [account_id]                                  # flat: account → global
     - keys: [category]
       windows: [{maxAge: P365D}]                          # windowed conditional statistics
-    - keys: [condition_grade]
-    - keys: [category, condition_grade]
+    - keys: [tier]
+    - keys: [category, tier]
       structure: cross                                    # cell → additive(main effects) → global
-    - keys: [seller_id]
-      hierarchy: [[seller_segment], []]                   # explicit lattice: seller → segment → global
+    - keys: [account_id]
+      hierarchy: [[account_segment], []]                  # explicit lattice: account → segment → global
   targets:
     - {stats: [count, share]}
-    - {field: sold, stats: [mean]}
-    - {expr: "final_price > start_price", stats: [mean], as: gain}
+    - {field: converted, stats: [mean]}
+    - {expr: "realized_amount > amount", stats: [mean], as: gain}
   shrinkage: {weights: varianceComponents, priorWeight: 20, scale: logit, output: [composed]}
   maxFeatures: 100
 ```
