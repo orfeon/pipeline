@@ -451,6 +451,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [{expr: \"quantity * 2\", name: qty2}]}")), "sequence.lift"));
         final String shapeLift = "lift: {fields: [start_price]}\n    summarize:\n      dynamics: {family: lti, measure: legendre, order: 3}";
         Assertions.assertTrue(spec.contains(shapeLift));
+        // the general form reads the past window only
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(shapeLift, "direction: future\n    " + shapeLift)), "sequence.direction.op"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(shapeLift, "direction: sideways\n    " + shapeLift)), "sequence.direction"));
         final FeaturePlan forward = compile(SOURCES, spec.replace(shapeLift, shapeLift.replace("[start_price]", "[start_price, vs_market]")));
         Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
         Assertions.assertNotNull(forward.getColumn("shape_all_vs_market_leg_3"), forward::describe);
@@ -2783,4 +2786,112 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals(12.0, VarianceComponents.forwardTotals(series).get(FitArtifact.entryKey("lvl__n", "a")).n + VarianceComponents.forwardTotals(series).get(FitArtifact.entryKey("lvl__n", "b")).n, 0d);
     }
 
+    /**
+     * {@code direction: future}: label columns over the strictly-future window — status label (no role: the role
+     * stays with the declared label), the availability of the horizon's last event, a stage of their own
+     * (descending replay); a declared label over them is emitted, a feature reading them is a violation; the ops a
+     * future window rejects.
+     */
+    @Test
+    public void testFutureLabels() {
+        final String labels = """
+                  - name: horizon
+                    scope: sequence
+                    entity: seller
+                    direction: future
+                    windows: [{maxAge: P7D}]
+                    ops:
+                      - {type: aggregate, field: final_price, funcs: [last, mean]}
+                      - {type: lag, field: start_price, k: 1}
+                      - {type: barrier, field: start_price, up: 0.05, down: -0.05}
+                      - {type: sinceEvent, predicate: "sold = 1", unit: [events]}
+                  - name: ret
+                    scope: row
+                    expr: "horizon_7d_start_price_lead1 / start_price - 1"
+                """;
+        final String anchor = "  - name: vs_market\n";
+        final String output = "output:\n  prefix: f_\n";
+        Assertions.assertTrue(SPEC.contains(anchor) && SPEC.contains(output));
+        final String spec = SPEC.replace(anchor, labels + anchor).replace(output, output + "  nullPolicy: indicator\n  roles: {label: ret}\n");
+        final FeaturePlan plan = compile(SOURCES, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "sequence.direction.future"), plan::describe);
+
+        // the horizon's last event is known after its own availability (final_price: settlement 30 min + ingestion 6 days)
+        final OutputColumn last = column(plan, "horizon_7d_final_price_last");
+        Assertions.assertEquals(OutputColumn.Status.label, last.getStatus());
+        Assertions.assertNull(last.getRole());
+        Assertions.assertEquals("future", last.getCoordinates().get("direction"));
+        Assertions.assertEquals("last", last.getCoordinates().get("func"), "the coordinates keep the declared func (the evaluator swaps it)");
+        Assertions.assertEquals(Duration.ofDays(13).plusMinutes(30), last.getAvailableAt().getOffset());
+        Assertions.assertNull(last.getWindowShift());
+        Assertions.assertFalse(last.isIntermediate());
+        // a pre-event field: the horizon itself; lag reads the next events (lead), sinceEvent the events until
+        Assertions.assertEquals(Duration.ofDays(7), column(plan, "horizon_7d_start_price_lead1").getAvailableAt().getOffset());
+        // the self side counts too: a $self filter field known after the horizon delays the label
+        final FeaturePlan selfSide = compile(SOURCES, spec.replace("windows: [{maxAge: P7D}]", "windows: [{maxAge: P1D, filter: \"start_price <= $self.final_price\"}]")
+                .replace("horizon_7d_", "horizon_1d_"));
+        Assertions.assertEquals(Duration.ofDays(6).plusMinutes(30), column(selfSide, "horizon_1d_start_price_lead1").getAvailableAt().getOffset(), selfSide::describe);
+        Assertions.assertEquals(Schema.Type.int64, column(plan, "horizon_7d_start_price_barrier").getFieldType().getType());
+        Assertions.assertTrue(column(plan, "horizon_7d_start_price_barrier").getInputs().contains("start_price"));
+        column(plan, "horizon_7d_until_events");
+        // labels get no _isnull indicator (a post-event flag would be a feature); the past blocks still do
+        Assertions.assertNull(plan.getColumn("horizon_7d_final_price_last_isnull"), plan::describe);
+        Assertions.assertTrue(plan.getColumns().stream().anyMatch(c -> c.getCanonicalName().startsWith("recent_") && c.getCanonicalName().endsWith("_isnull")));
+
+        // a stage of their own: the same entity, replayed in descending time
+        final FeaturePlan.Stage future = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.future).findFirst().orElseThrow();
+        Assertions.assertEquals(List.of("seller_id"), future.keys());
+        Assertions.assertTrue(future.isReplay() && future.isKeyed());
+        Assertions.assertTrue(future.columnNames().contains("horizon_7d_final_price_last"));
+        Assertions.assertTrue(plan.getStages().stream().anyMatch(s -> s.kind() != FeaturePlan.StageKind.future && s.columnNames().contains("recent_n5_sold_lag1")));
+
+        // the declared label over them is emitted as the label; the other future columns are status label only
+        final OutputColumn ret = column(plan, "ret");
+        Assertions.assertEquals(OutputColumn.Status.label, ret.getStatus());
+        Assertions.assertEquals("label", ret.getRole());
+        Assertions.assertFalse(ret.isIntermediate());
+        Assertions.assertEquals("f_ret", plan.getRoleColumns().get("label"));
+        Assertions.assertEquals(1, plan.getColumns().stream().filter(c -> "label".equals(c.getRole())).count());
+        // another role may name a future column: it is resolved, not dropped
+        final FeaturePlan weighted = compile(SOURCES, spec.replace("roles: {label: ret}", "roles: {label: ret, weight: horizon_7d_final_price_mean}"));
+        Assertions.assertFalse(weighted.getDiagnostics().hasErrors(), weighted::describe);
+        Assertions.assertEquals("f_horizon_7d_final_price_mean", weighted.getRoleColumns().get("weight"), weighted::describe);
+        Assertions.assertEquals("f_ret", weighted.getRoleColumns().get("label"));
+
+        // an encoding over past labels is fine: a past row's label counts once its horizon has passed (a window shift)
+        final String target = "- {expr: \"sold >= 1\", stats: [mean]}";
+        Assertions.assertTrue(spec.contains(target));
+        final FeaturePlan encoded = compile(SOURCES, spec.replace(target, target + "\n      - {field: horizon_7d_final_price_mean, stats: [mean]}"));
+        Assertions.assertFalse(encoded.getDiagnostics().hasErrors(), encoded::describe);
+        Assertions.assertTrue(encoded.getColumns().stream().anyMatch(c -> c.getCanonicalName().contains("horizon_7d_final_price_mean") && "encoding".equals(c.getOperator())
+                && c.getStatus() == OutputColumn.Status.windowShift && c.getWindowShift().compareTo(Duration.ofDays(13)) > 0), encoded::describe);
+
+        // a feature reading a label is a leak
+        final FeaturePlan leak = compile(SOURCES, spec.replace(anchor, "  - name: leak\n    scope: row\n    expr: \"horizon_7d_final_price_mean * 2\"\n" + anchor));
+        Assertions.assertTrue(leak.getDiagnostics().getErrorMessages().stream().anyMatch(m -> m.contains("leak")), leak::describe);
+        Assertions.assertTrue(hasCode(leak, "availability.violation"), leak::describe);
+
+        final Map<String, String> rejected = new java.util.LinkedHashMap<>();
+        rejected.put("direction: sideways", "sequence.direction");
+        rejected.put("windows: [{maxEvents: 5}]", "sequence.direction.maxAge");
+        rejected.put("- {type: lag, field: start_price, k: 1}", "sequence.direction.op");
+        final String lag = "- {type: lag, field: start_price, k: 1}";
+        for (final Map.Entry<String, String> e : rejected.entrySet()) {
+            final String replaced = switch (e.getValue()) {
+                case "sequence.direction" -> spec.replace("direction: future", e.getKey());
+                case "sequence.direction.maxAge" -> spec.replace("windows: [{maxAge: P7D}]", e.getKey());
+                default -> spec.replace(lag, "- {type: delta, field: start_price, k: 1}");
+            };
+            final FeaturePlan bad = compile(SOURCES, replaced);
+            Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e + "\n" + bad.describe());
+        }
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lag, "- {type: regression, field: final_price, against: start_price, lag: 1}")), "sequence.direction.op"));
+        final FeaturePlan sameEvent = compile(SOURCES, spec.replace(lag, lag + "\n      - {type: regression, field: final_price, against: start_price}"));
+        Assertions.assertFalse(sameEvent.getDiagnostics().hasErrors(), sameEvent::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("up: 0.05, down: -0.05", "up: -0.05")), "sequence.barrier.levels"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("- {type: aggregate, field: sold, funcs: [count, mean]}",
+                "- {type: barrier, field: start_price, up: 0.05}")), "sequence.barrier.direction"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("    expr: \"start_price / quantity\"\n", "    expr: \"start_price / quantity\"\n    direction: future\n")), "features.direction"));
+    }
 }

@@ -33,6 +33,8 @@ public class FeatureSpec implements Serializable {
     }
     public enum NullPolicy { keep, fillZero, indicator }
     public enum Combine { product, zip }
+    /** The values of a sequence block's {@code direction} (null = past). */
+    public static final List<String> DIRECTIONS = List.of("past", "future");
 
     public record LineageEntry(List<String> fields, String from, String eventTime) implements Serializable {}
     public record EntityDef(String name, List<String> keys, Duration minInterval) implements Serializable {}
@@ -71,6 +73,9 @@ public class FeatureSpec implements Serializable {
         public Integer lag;
         /** fracdiff: the differencing order (0 < d < 1 keeps memory; 1 = the first difference). */
         public Double d;
+        /** barrier (future windows): the relative move from the current row's value that counts as touching the upper / lower barrier. */
+        public Double up;
+        public Double down;
         /** Output name override (replaces the field / anonymous-expression segment, or the op suffix). */
         public String as;
         /** countByValue / ratioByValue: emit one column per listed value instead of a map. */
@@ -202,6 +207,11 @@ public class FeatureSpec implements Serializable {
         public boolean excludeSelf;
         public List<Op> ops = new ArrayList<>();
         public String entity;
+        /**
+         * sequence: {@code past} (default — strictly-past windows, features) or {@code future} — strictly-future
+         * windows {@code (t, t + maxAge]}: label columns, post-event by construction (§4.3 labels).
+         */
+        public String direction;
         public List<Window> windows = new ArrayList<>();
         /** sequence general form: null when absent. */
         public Lift lift;
@@ -674,6 +684,12 @@ public class FeatureSpec implements Serializable {
         def.context =Json.string(o, "context");
         def.excludeSelf = Json.bool(o, "excludeSelf", false);
         def.entity = Json.string(o, "entity");
+        def.direction = Json.string(o, "direction");
+        if (def.direction != null && def.scope != Scope.sequence) {
+            diagnostics.error("features.direction", loc, "direction is a sequence parameter (scope " + def.scope + ")");
+        } else if (def.direction != null && !DIRECTIONS.contains(def.direction)) {
+            diagnostics.error("sequence.direction", loc, "direction must be past | future: " + def.direction);
+        }
         def.windows = parseWindows(o, diagnostics, loc);
         if (o.has("ops")) {
             for (final JsonElement e : arrayOf(o.get("ops"))) {
@@ -878,6 +894,8 @@ public class FeatureSpec implements Serializable {
         op.against = Json.string(o, "against");
         op.lag = Json.integer(o, "lag");
         op.d = doubleOf(o, "d", diagnostics, loc);
+        op.up = doubleOf(o, "up", diagnostics, loc);
+        op.down = doubleOf(o, "down", diagnostics, loc);
         op.halflife = doubles(o, "halflife");
         op.funcs = Json.strings(o, "funcs");
         op.value = Json.string(o, "value");

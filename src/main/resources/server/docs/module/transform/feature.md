@@ -828,6 +828,8 @@ columns add the constraint that a past row at t' contributes only when
   (+ the predictAt offset) later. This is what makes training features reproducible at serving time.
 - **violation** — an emitted column would use information available after `predictAt`: assembly fails.
   Such a column may still exist as an intermediate consumed by a sequence feature (its past values are fine).
+- **label** — post-event by construction (a `direction: future` block) or by declaration (`output.roles.label`):
+  emitted as a label, never a feature (see "Labels over the future" below).
 
 ### Output contract (roles, include, manifest)
 
@@ -889,7 +891,56 @@ already carried when it came from another feature transform), `feature.sources`,
 `feature.evidence`, and a role's field or column `feature.role`. A consumer's `derivedFrom:market` or
 `scope:input` selector therefore drops a passed-through market input the same way it drops a column
 derived from one, and a `screen` directly downstream takes its `group` / `label` / `baseline` / `weight` /
-`time.field` defaults from `feature.role` as it would from the manifest's `roles`.
+`time.field` defaults from `feature.role` as it would from the manifest's `roles`. When several fields carry one
+role (the columns of a `direction: future` block are all labels, below), the schema cannot tell which one is
+declared: the role is then taken from the manifest, or the consumer names it itself.
+
+### Labels over the future (`direction: future`)
+
+A sequence block with `direction: future` reads, for every row, the entity's **strictly-future** window
+`(t, t + maxAge]` instead of its past — the forward-looking labels of a time-series task, computed by the same
+engine that computes the features, with the same keys and the same row identity:
+
+```yaml
+- name: next
+  scope: sequence
+  entity: seller
+  direction: future
+  windows: [{maxAge: P20D}]                               # the label horizon (required)
+  ops:
+    - {type: aggregate, field: final_price, funcs: [count, mean, last]}
+    - {type: lag, field: start_price, k: 1}                 # next_20d_start_price_lead1: the next event's value
+    - {type: barrier, field: start_price, up: 0.1, down: -0.05}   # first barrier touched
+    - {type: sinceEvent, predicate: "sold = 1", unit: [days]}      # next_20d_until_days
+- name: ret
+  scope: row
+  expr: "next_20d_start_price_lead1 / start_price - 1"
+output:
+  roles: {label: ret}
+```
+
+- **They are labels, never features.** Every column of the block gets the status `label` (the role `label` stays
+  with the one column `output.roles.label` names, so a downstream screen / evaluation defaults to it):
+  it is emitted (whatever `include` / `exclude` say), has no `_isnull` companion under `nullPolicy: indicator`,
+  and its `availableAt` is the horizon plus the availability of what it reads (`final_price`, known 6 days after
+  its own event, gives `event_time + P20D + P6DT30M`) — so any *feature* referencing it (a row expression, a
+  context op, another sequence block) is an `availability.violation`. A column derived from labels is a label only
+  when `output.roles.label` names it (`ret` above); `output.roles.label` names the one label consumers default to.
+  An encoding whose *target* is a label is fine: the past labels become visible once their horizon has passed.
+- **Window.** `maxAge` is required (`sequence.direction.maxAge`) and may combine with `maxEvents` (the next n
+  events) and `filter`. Rows sharing the row's timestamp are not in its future (as they are not in its past); the
+  window is never shifted.
+- **Ops read from the row outwards** (`sequence.direction.op` lists them): `aggregate` (every func; `first` is the
+  nearest event, `last` the furthest), `lag` — named `lead<k>`, the k-th next event —, `ewma` (weighted by the
+  distance ahead), `sinceEvent` — named `until_<unit>`: events / days until the predicate first holds —,
+  `countMatch`, `runLength` (the run starting with the next event), `regression` without `lag`, and **`barrier`**:
+  `1` when the path first moves up by `up` (relative to the current row's own value of the field), `-1` when it first
+  moves down by `down`, `0` when it touches neither within the window, null without a future value or a current
+  value (`up` > 0 and / or `down` < 0, `sequence.barrier.levels`; future windows only, `sequence.barrier.direction`).
+  `delta`, `trend`, `fracdiff` and a lagged `regression` read the window in one direction and are rejected, as is the
+  general form (`lift` + `summarize`), which reads the past window only.
+- **Engine.** The block runs in a keyed stage of its own (`future` in the plan report), replaying each key's rows
+  latest first: one more GroupByKey, in the same wave as the past stages it does not depend on.
 
 ### observedAt audit (declaration vs. data)
 

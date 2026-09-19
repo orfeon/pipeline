@@ -19,7 +19,7 @@ import java.util.Map;
     description= """
         Compile a `feature` transform specification without running a pipeline (validate --expand).
         Returns the expanded output columns with their derived availability time, leak-check status
-        (staticSafe / windowShift / runtimeFilter / violation), lineage (derivedFrom, evidence), the evaluation
+        (staticSafe / windowShift / runtimeFilter / violation / label), lineage (derivedFrom, evidence), the evaluation
         stages (key changes = shuffles) and structured diagnostics (errors, warnings, hints).
         Pass either the feature step's `parameters` block (with inline or URI `sources`) or a whole pipeline
         config containing a `module: feature` transform. Optional `inputSchema` ({fields: [...]}) enables the

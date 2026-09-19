@@ -66,7 +66,8 @@ public final class OperatorCatalog {
         register(Scope.context, "softmax", InputKind.numeric, F64, false, "probability within the group: offset * exp(score / temperature), normalised over the group");
         register(Scope.context, "shuffle", InputKind.any, null, false, "placebo: the field's values permuted within the group (deterministic from seed and group key)");
 
-        // sequence (deterministic, strictly-past window)
+        // sequence (deterministic; a strictly-past window, or a strictly-future one for labels)
+        register(Scope.sequence, "barrier", InputKind.numeric, I64, false, "future windows only: 1 / -1 when the path first moves up / down by the barrier from the current row's value, 0 when neither is touched within the window");
         register(Scope.sequence, "lag", InputKind.any, null, false, "value k events back");
         register(Scope.sequence, "delta", InputKind.numeric, F64, false, "difference between lag k and lag k+1");
         register(Scope.sequence, "trend", InputKind.numeric, F64, false, "regression slope over the last k events");
@@ -219,6 +220,14 @@ public final class OperatorCatalog {
         final int percent = Integer.parseInt(m.group(1));
         return percent > 100 ? null : percent / 100d;
     }
+
+    /**
+     * The sequence ops a {@code direction: future} window accepts: those whose value does not depend on reading the
+     * window forwards or backwards (moments, counts, extremes, distance decay), plus the ones that read naturally
+     * from the current row outwards — {@code lag} (the k-th next event), {@code sinceEvent} (until), {@code runLength}
+     * (the run starting next), {@code aggregate first / last} (nearest / furthest) — and the label op {@code barrier}.
+     */
+    public static final List<String> FUTURE_OPS = List.of("aggregate", "lag", "ewma", "sinceEvent", "countMatch", "runLength", "regression", "barrier");
 
     /** The readouts of the sequence {@code regression} op (the {@link Summary.Regression} family). */
     public static final List<String> REGRESSION_FUNCS = List.of("cov", "corr", "beta", "intercept", "r2");

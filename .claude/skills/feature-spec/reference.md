@@ -182,6 +182,14 @@ without a window; `legendre` re-reads its window under `maxAge`. At most 64 comp
 Op `expr` and `predicate` see past rows only (`$self` only inside `window.filter`). Predicates and
 filters use the Filter grammar (`module/common/filter.md`); expressions are numeric.
 
+**Labels (`direction: future`)** — the block reads the strictly-future window `(t, t + maxAge]` (`maxAge`
+required). Every column is a label (status `label`, emitted whatever the projection, no `_isnull`; the role `label` stays with `output.roles.label`); a
+feature referencing one is `availability.violation`; a row expression over labels is a label only when
+`output.roles.label` names it. Ops: `aggregate` (`first` = nearest, `last` = furthest), `lag` → `..._lead<k>`,
+`ewma`, `sinceEvent` → `..._until_<unit>`, `countMatch`, `runLength`, `regression` (no `lag`), and
+`barrier: {field, up: 0.1, down: -0.05}` → `..._barrier` int64: 1 / -1 when the path first moves up / down by
+that fraction of the current row's value, 0 when neither, null without a future value.
+
 ## `scope: population`
 
 ### `type: encoding`
@@ -285,6 +293,7 @@ Durations are ISO-8601 (`PT30M`, `P6D`, `P1Y`); window tokens abbreviate them (`
 | `windowShift` | history near edge moved back by the past inputs' settlement + ingestion lag (+ the predictAt offset) |
 | `runtimeFilter` | not decidable statically (`atRowCreation`, `event_date THH:MM`) — rejected by the engine today |
 | `violation` | needs post-event information: an error when emitted, an `_` intermediate when only consumed by a sequence / encoding |
+| `label` | post-event by construction (`direction: future`) or by declaration (`output.roles.label`): emitted as a label, never a feature |
 
 ## Generated names (summary)
 
