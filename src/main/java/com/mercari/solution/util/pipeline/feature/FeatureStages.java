@@ -1890,14 +1890,17 @@ public final class FeatureStages {
             return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
         }
 
-        /** {@code columns.get(i)} carries coordinate {@code components[i]} (resolved once in {@link #spectralSpecs}). */
+        /**
+         * {@code columns.get(i)} carries coordinate {@code components[i]} (resolved once in {@link #spectralSpecs}).
+         * The value's row is looked up once and its coordinates are read one by one: the model's arrays never leave it
+         * (one instance serves every thread of a worker) and no vector is copied per row.
+         */
         @Override
         public void apply(final SpectralModel model, final Map<String, Object> values) {
             final Spectral spectral = spectralFor(model, values);
-            final double[] coordinates = spectral == null ? null : spectral.embed(valueOf(values.get(applied)));
+            final Integer row = spectral == null ? null : spectral.indexOf(valueOf(values.get(applied)));
             for (int i = 0; i < components.length; i++) {
-                final int k = components[i];
-                values.put(columns.get(i).getCanonicalName(), coordinates == null || k >= coordinates.length ? null : (Object) coordinates[k]);
+                values.put(columns.get(i).getCanonicalName(), row == null ? null : spectral.coordinate(row, components[i]));
             }
         }
     }

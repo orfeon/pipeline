@@ -727,7 +727,8 @@ close together, which lets a model generalise across a high-cardinality state wi
 the columns are as available as the embedded value. `of: previous` embeds the state the entity comes from — the form
 to use when the field itself is an outcome (the row's own value would be an `availability.violation`). A value that
 is missing, unseen in the fit or beyond `maxValues` reads null, as do the surplus columns when there are fewer
-values than `rank`. The fit state is the pair counts — a sum of row contributions, so one Combine (per time block
+values than `rank`. A value the cap keeps but whose every co-occurrence partner it dropped reads null too: with no
+co-occurrence row it has no position, rather than the origin of the fitted space. The fit state is the pair counts — a sum of row contributions, so one Combine (per time block
 under `fit.mode: forward`, where a row reads the complete blocks before it and the usual `window` / `minBlocks` apply)
 — and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. Artifact
 `<planHash>/<block>.spectral.json` (values with their coordinates, eigenvalues, pair count).

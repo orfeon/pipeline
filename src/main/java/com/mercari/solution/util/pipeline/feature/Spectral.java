@@ -114,7 +114,10 @@ public final class Spectral implements Serializable {
     public final double[] eigenvalues;
     /** Pairs counted. */
     public final long pairs;
-    /** Distinct values left out by the {@code maxValues} cap (they read null). */
+    /**
+     * Distinct values the fit left out — they read null: beyond the {@code maxValues} cap, or kept by the cap but
+     * co-occurring only with values it dropped (no co-occurrence row, hence no position rather than the origin).
+     */
     public final int dropped;
     /**
      * Lazily built lookup of {@link #vocabulary}. One model instance is shared by every worker thread (the
@@ -141,10 +144,11 @@ public final class Spectral implements Serializable {
     }
 
     /**
-     * The coordinates of a value, or null (missing, unseen in the fit, beyond the vocabulary cap, nothing fitted).
-     * The returned array is the model's own row — read it, never modify it: one model serves every thread of a worker.
+     * The row of {@link #embedding} a value sits at, or null (missing, unseen in the fit, left out by the fit,
+     * nothing fitted). The row and {@link #coordinate} are what the apply path reads: no array leaves the model,
+     * which one worker shares across every one of its threads.
      */
-    public double[] embed(final String value) {
+    public Integer indexOf(final String value) {
         if (value == null || isEmpty()) return null;
         Map<String, Integer> at = index;
         if (at == null) {
@@ -152,8 +156,18 @@ public final class Spectral implements Serializable {
             for (int i = 0; i < vocabulary.length; i++) at.put(vocabulary[i], i);
             index = at;
         }
-        final Integer i = at.get(value);
-        return i == null ? null : embedding[i];
+        return at.get(value);
+    }
+
+    /** Coordinate {@code k} of the value at {@code row} ({@link #indexOf}), or null beyond the fitted rank. */
+    public Double coordinate(final int row, final int k) {
+        return k < 0 || k >= eigenvalues.length ? null : embedding[row][k];
+    }
+
+    /** A copy of the coordinates of a value, or null as {@link #indexOf}. */
+    public double[] embed(final String value) {
+        final Integer i = indexOf(value);
+        return i == null ? null : embedding[i].clone();
     }
 
     /**
@@ -178,12 +192,41 @@ public final class Spectral implements Serializable {
             final int byMass = Double.compare(mass.get(y), mass.get(x));
             return byMass != 0 ? byMass : x.compareTo(y);
         });
-        final int v = Math.min(ordered.size(), maxValues);
-        final int dropped = ordered.size() - v;
-        if (warn && dropped > 0) {
-            LOG.warn("spectralEmbedding: {} distinct values exceed maxValues {}; the {} with the least co-occurrence read null", ordered.size(), maxValues, dropped);
+        final int cap = Math.min(ordered.size(), maxValues);
+        if (warn && ordered.size() > cap) {
+            LOG.warn("spectralEmbedding: {} distinct values exceed maxValues {}; the {} with the least co-occurrence read null", ordered.size(), maxValues, ordered.size() - cap);
         }
-        final String[] vocabulary = ordered.subList(0, v).toArray(new String[0]);
+        // the co-occurrence mass a candidate keeps within the cap: a value whose every partner was dropped has an
+        // all-zero row, and its coordinates would be the origin — indistinguishable from a fitted position — so it
+        // is left out and reads null like the values beyond the cap. Removing a zero row changes no other row's
+        // mass, so one pass is exact (no cascade).
+        final Map<String, Integer> candidates = new HashMap<>();
+        for (int i = 0; i < cap; i++) candidates.put(ordered.get(i), i);
+        final double[] keptMass = new double[cap];
+        for (final Map.Entry<String, TreeMap<String, Long>> row : state.counts.entrySet()) {
+            final Integer i = candidates.get(row.getKey());
+            if (i == null) continue;
+            for (final Map.Entry<String, Long> e : row.getValue().entrySet()) {
+                final Integer j = candidates.get(e.getKey());
+                if (j == null) continue;
+                keptMass[i] += e.getValue();
+                keptMass[j] += e.getValue();
+            }
+        }
+        final List<String> kept = new ArrayList<>(cap);
+        for (int i = 0; i < cap; i++) if (keptMass[i] > 0) kept.add(ordered.get(i));
+        if (warn && kept.size() < cap) {
+            LOG.warn("spectralEmbedding: {} value(s) within maxValues {} co-occur only with values beyond it; without a co-occurrence row they read null too",
+                    cap - kept.size(), maxValues);
+        }
+        if (kept.size() < 2) {
+            if (warn) LOG.warn("spectralEmbedding: {} co-occurring value(s) among the {} distinct in {} pair(s); no embedding, every value maps to null",
+                    kept.size(), ordered.size(), state.pairs);
+            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, 0);
+        }
+        final int v = kept.size();
+        final int dropped = ordered.size() - v;
+        final String[] vocabulary = kept.toArray(new String[0]);
         final Map<String, Integer> at = new HashMap<>();
         for (int i = 0; i < v; i++) at.put(vocabulary[i], i);
         final double[][] c = new double[v][v];

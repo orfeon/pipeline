@@ -2415,11 +2415,15 @@ public final class FeaturePlanCompiler {
         final List<String> leaf = new ArrayList<>();
         if (perEntity) leaf.addAll(entities.get(def.sequenceEntity).keys());
         leaf.addAll(path);
+        // the coarser levels only: the global one is not declared here (expandEncoding appends it to any shrunk
+        // lattice, and an empty hierarchy entry is dropped there — declaring it would be dead weight in the plan)
+        final List<List<String>> coarser = new ArrayList<>();
+        for (int length = perEntity ? order : order - 1; length >= 1; length--) coarser.add(List.copyOf(path.subList(0, length)));
         final com.google.gson.JsonArray hierarchy = new com.google.gson.JsonArray();
-        for (int length = perEntity ? order : order - 1; length >= 0; length--) {
-            final com.google.gson.JsonArray level = new com.google.gson.JsonArray();
-            for (final String step : path.subList(0, length)) level.add(step);
-            hierarchy.add(level);
+        for (final List<String> level : coarser) {
+            final com.google.gson.JsonArray keys = new com.google.gson.JsonArray();
+            for (final String step : level) keys.add(step);
+            hierarchy.add(keys);
         }
         final FeatureDef encoding = new FeatureDef();
         encoding.name = def.name;
@@ -2448,9 +2452,14 @@ public final class FeaturePlanCompiler {
         // emit: [distribution, {toValueProb: …}] keeps the map next to its per-value columns
         final OutputColumn map = columnsByCanonical.get(def.name + "_to");
         if (map != null && def.emitDistribution) map.intermediate = false;
+        final List<String> chain = new ArrayList<>();
+        chain.add(leaf.toString());
+        for (final List<String> level : coarser) chain.add(level.toString());
+        chain.add("global");
         diagnostics.info("transitionStats.expansion", loc, "transitionStats is the expanding distribution of " + def.sequenceField + " keyed on "
                 + leaf + " (the previous " + (order == 1 ? "value" : order + " values") + " of entity " + def.sequenceEntity + (perEntity ? ", per entity" : ", pooled over entities")
-                + "), shrunk along " + hierarchy + " with pseudo-count " + priorWeight + " (Dirichlet-Multinomial); an event without a previous value reads the coarser levels");
+                + "), shrunk along " + String.join(" -> ", chain) + " with pseudo-count " + priorWeight
+                + " (Dirichlet-Multinomial); an event without a previous value reads the coarser levels");
     }
 
     /**

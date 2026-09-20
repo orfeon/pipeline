@@ -319,7 +319,8 @@ has no mass, null = nothing known yet; a first event reads the marginal. Interme
 `maxValues` (vocabulary cap by co-occurrence mass, 2..1024, default 256), `fit` as for svd. Output float64
 `<name>_0 .. <name>_{rank−1}`: the value's coordinates from the PPMI matrix of the co-occurrence counts
 (eigenvectors of largest |eigenvalue| × sqrt(|eigenvalue|), largest loading positive). No target is read. Null for
-a missing / unseen / capped value and for surplus columns when there are fewer values than `rank`. Artifact
+a missing / unseen / capped value — including one the cap keeps but whose every partner it dropped (no co-occurrence
+row, so no position rather than the origin) — and for surplus columns when there are fewer values than `rank`. Artifact
 `<block>.spectral.json`.
 
 ## Availability expressions

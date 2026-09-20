@@ -78,6 +78,13 @@ public class SpectralTest {
         Assertions.assertEquals(0, aa, 1e-12);
         Assertions.assertNull(spectral.embed("c"));
         Assertions.assertNull(spectral.embed(null));
+        // the apply path reads a row index and its coordinates one by one; embed hands out a copy, never the model's row
+        Assertions.assertNull(spectral.indexOf("c"));
+        Assertions.assertEquals(Integer.valueOf(0), spectral.indexOf("a"));
+        Assertions.assertEquals(a[1], spectral.coordinate(spectral.indexOf("a"), 1), 0);
+        Assertions.assertNull(spectral.coordinate(0, spectral.rank()));
+        a[0] = 42;
+        Assertions.assertNotEquals(42d, spectral.embed("a")[0]);
     }
 
     /** At full rank the signed factorisation reproduces the PPMI matrix computed by hand from the counts. */
@@ -143,6 +150,16 @@ public class SpectralTest {
         Assertions.assertEquals(1, capped.dropped);
         Assertions.assertNull(capped.embed("c"));
         Assertions.assertNotNull(capped.embed("b"));
+        // a value the cap keeps but whose every partner it dropped has no co-occurrence row: it reads null, not the
+        // origin of the space (all four values tie on mass, so the string order keeps a, b, x and drops y — leaving x
+        // with no partner at all)
+        final Spectral isolated = Spectral.fit(counts("a", "b", 10, "x", "y", 10), 2, 3, false);
+        Assertions.assertArrayEquals(new String[]{"a", "b"}, isolated.vocabulary);
+        Assertions.assertEquals(2, isolated.dropped);
+        Assertions.assertNull(isolated.embed("x"));
+        Assertions.assertNull(isolated.embed("y"));
+        // nothing co-occurring survives the cap (b's only partner is beyond it, a only repeats): no embedding at all
+        Assertions.assertTrue(Spectral.fit(counts("a", "a", 9, "b", "c", 1), 2, 2, false).isEmpty());
         // rank beyond the vocabulary is capped
         Assertions.assertEquals(2, Spectral.fit(counts("a", "b", 10), 8, 256, false).rank());
         // nothing, or a single value repeating: no embedding
