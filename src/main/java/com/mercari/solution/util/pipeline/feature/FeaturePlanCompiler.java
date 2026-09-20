@@ -2377,6 +2377,30 @@ public final class FeaturePlanCompiler {
     }
 
     /**
+     * Both sequence-of-values types build the blocks they stand for themselves — the lag path, and (transitionStats)
+     * the whole encoding: its keySet, its target, its shrinkage and its always-expanding fit. An encoding parameter
+     * declared on the block would be parsed onto the same {@link FeatureDef} and then overwritten in silence, so it
+     * is reported for the same reason a sibling type's parameter is. {@code fit} is a spectralEmbedding parameter.
+     *
+     * @return whether the block declares no parameter of the blocks it expands into
+     */
+    private boolean rejectEncodingParameters(final FeatureDef def, final boolean spectral) {
+        final List<String> ignored = new ArrayList<>();
+        if (!def.keySets.isEmpty()) ignored.add("keySets");
+        if (!def.targets.isEmpty()) ignored.add("targets");
+        if (def.shrinkageJson != null) ignored.add("shrinkage");
+        if (def.naming != null) ignored.add("naming");
+        if (!def.windows.isEmpty()) ignored.add("windows");
+        if (!spectral && def.fitJson != null) ignored.add("fit");
+        if (ignored.isEmpty()) return true;
+        diagnostics.error(def.type + ".parameters", def.location(), ignored + " are encoding parameters: " + def.type
+                + " builds the blocks it stands for and would drop them" + (spectral
+                ? "; spectralEmbedding takes sequenceOf, cooccur, rank, of, maxValues, maxFeatures, fit"
+                : " (its fit is always expanding); transitionStats takes sequenceOf, order, emit, blend, maxFeatures"));
+        return false;
+    }
+
+    /**
      * §4.4 transitionStats: the distribution of an entity's NEXT value given its previous one(s) — a desugaring, not an
      * estimator of its own. The state is the lag path of {@link #sequencePath}; the statistic is an encoding's
      * {@code distribution} of the field keyed on that state, expanding (strictly past) and shrunk along the chain
@@ -2410,6 +2434,7 @@ public final class FeaturePlanCompiler {
         }
         final List<String> path = sequencePath(def, order, computeAt);
         if (path == null) return;
+        if (!rejectEncodingParameters(def, false)) return;
 
         // the chain of coarser states under the leaf: the pooled state, then its shorter suffixes, then the marginal
         final List<String> leaf = new ArrayList<>();
@@ -2504,6 +2529,7 @@ public final class FeaturePlanCompiler {
         if (!valid) return;
         final List<String> path = sequencePath(def, window, computeAt);
         if (path == null) return;
+        if (!rejectEncodingParameters(def, true)) return;
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "spectralEmbedding", "the embedding is fitted", "eigendecomposition of the whole input's co-occurrence counts", true);
         final boolean forward = fitSpec.mode == FitMode.forward;
         final String applied = "previous".equals(of) ? path.get(0) : def.sequenceField;

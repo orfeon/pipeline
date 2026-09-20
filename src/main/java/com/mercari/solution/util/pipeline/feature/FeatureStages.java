@@ -1980,8 +1980,10 @@ public final class FeatureStages {
             if (vocabulary.size() < maxValues) {
                 LOG.info("spectralEmbedding {}: {} value(s) co-occur, all within maxValues {}; every pair is counted", block, vocabulary.size(), maxValues);
             } else {
-                LOG.warn("spectralEmbedding {}: the {} values of greatest co-occurrence mass (maxValues) are counted, from {} pairs down;"
-                        + " a value beyond them is not counted and reads null", block, vocabulary.size(), vocabulary.get(vocabulary.size() - 1).getValue());
+                // Top kept exactly maxValues: whether anything was left out is not visible here (the distinct
+                // values were never counted), so the line says what is counted, not how much it dropped
+                LOG.warn("spectralEmbedding {}: the co-occurrence vocabulary is capped at maxValues {}, from {} pair(s) down;"
+                        + " any value of lesser mass is not counted and reads null", block, vocabulary.size(), vocabulary.get(vocabulary.size() - 1).getValue());
             }
             for (final KV<String, Long> value : vocabulary) c.output(value);
         }

@@ -930,17 +930,27 @@ public class FeatureSpec implements Serializable {
                 diagnostics.error("smooth.penalty", loc, "penalty must be an object {order, lambda}: " + o.get("penalty"));
             }
         }
-        if (o.has("sequenceOf") && o.get("sequenceOf").isJsonObject()) {
-            final JsonObject sequenceOf = o.getAsJsonObject("sequenceOf");
-            def.sequenceEntity = Json.string(sequenceOf, "entity");
-            def.sequenceField = Json.string(sequenceOf, "field");
-            for (final String key : sequenceOf.keySet()) if (!List.of("entity", "field").contains(key)) def.sequenceUnknown.add("sequenceOf." + key);
+        // a block declared in another shape than an object would otherwise be dropped without a word (the
+        // defaults would then decide the state, the window or the shrinkage): it is reported like an unknown key
+        if (o.has("sequenceOf") && !o.get("sequenceOf").isJsonNull()) {
+            if (o.get("sequenceOf").isJsonObject()) {
+                final JsonObject sequenceOf = o.getAsJsonObject("sequenceOf");
+                def.sequenceEntity = Json.string(sequenceOf, "entity");
+                def.sequenceField = Json.string(sequenceOf, "field");
+                for (final String key : sequenceOf.keySet()) if (!List.of("entity", "field").contains(key)) def.sequenceUnknown.add("sequenceOf." + key);
+            } else {
+                def.sequenceUnknown.add("sequenceOf " + o.get("sequenceOf"));
+            }
         }
-        if (o.has("cooccur") && o.get("cooccur").isJsonObject()) {
-            final JsonObject cooccur = o.getAsJsonObject("cooccur");
-            def.cooccurWindow = Json.integer(cooccur, "window");
-            def.cooccurWeighting = Json.string(cooccur, "weighting");
-            for (final String key : cooccur.keySet()) if (!List.of("window", "weighting").contains(key)) def.sequenceUnknown.add("cooccur." + key);
+        if (o.has("cooccur") && !o.get("cooccur").isJsonNull()) {
+            if (o.get("cooccur").isJsonObject()) {
+                final JsonObject cooccur = o.getAsJsonObject("cooccur");
+                def.cooccurWindow = Json.integer(cooccur, "window");
+                def.cooccurWeighting = Json.string(cooccur, "weighting");
+                for (final String key : cooccur.keySet()) if (!List.of("window", "weighting").contains(key)) def.sequenceUnknown.add("cooccur." + key);
+            } else {
+                def.sequenceUnknown.add("cooccur " + o.get("cooccur"));
+            }
         }
         def.embedOf = Json.string(o, "of");
         def.maxValues = Json.integer(o, "maxValues");
@@ -960,11 +970,15 @@ public class FeatureSpec implements Serializable {
                 }
             }
         }
-        if (o.has("blend") && o.get("blend").isJsonObject()) {
-            final JsonObject blend = o.getAsJsonObject("blend");
-            def.blendPerEntity = Json.bool(blend, "perEntity", true);
-            def.blendPriorWeight = doubleOf(blend, "priorWeight", diagnostics, loc);
-            for (final String key : blend.keySet()) if (!List.of("perEntity", "priorWeight").contains(key)) def.sequenceUnknown.add("blend." + key);
+        if (o.has("blend") && !o.get("blend").isJsonNull()) {
+            if (o.get("blend").isJsonObject()) {
+                final JsonObject blend = o.getAsJsonObject("blend");
+                def.blendPerEntity = Json.bool(blend, "perEntity", true);
+                def.blendPriorWeight = doubleOf(blend, "priorWeight", diagnostics, loc);
+                for (final String key : blend.keySet()) if (!List.of("perEntity", "priorWeight").contains(key)) def.sequenceUnknown.add("blend." + key);
+            } else {
+                def.sequenceUnknown.add("blend " + o.get("blend"));
+            }
         }
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");

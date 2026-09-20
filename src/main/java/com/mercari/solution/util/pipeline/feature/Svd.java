@@ -8,7 +8,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.Arrays;
-import java.util.Map;
 
 /**
  * Truncated SVD / PCA of a numeric vector feature (docs/design/feature-dsl.md §4.4, {@code type: svd}; the

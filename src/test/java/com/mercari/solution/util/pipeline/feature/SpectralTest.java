@@ -200,6 +200,18 @@ public class SpectralTest {
             for (int i = 0; i <= Spectral.MAX_STATE_VALUES; i++) state.add("v" + String.format("%06d", i), "z", 1);
         });
         Assertions.assertTrue(thrown.getMessage().contains("capped before the pairs are counted"), thrown::getMessage);
+        // the counts key only the smaller value of a pair, so a shared value that sorts FIRST puts the whole state
+        // in one row: the ceiling is the distinct values, not the rows (which would stay at 1 here)
+        final Spectral.PairCounts fatRow = new Spectral.PairCounts();
+        Assertions.assertThrows(IllegalStateException.class, () -> {
+            for (int i = 0; i <= Spectral.MAX_STATE_VALUES; i++) fatRow.add("a", "v" + String.format("%06d", i), 1);
+        });
+        Assertions.assertEquals(1, fatRow.counts.size());
+        // the ceiling survives a merge too: neither side reaches it on its own
+        final Spectral.PairCounts left = new Spectral.PairCounts(), right = new Spectral.PairCounts();
+        for (int i = 0; i < Spectral.MAX_STATE_VALUES - 1; i++) left.add("a", "l" + String.format("%06d", i), 1);
+        for (int i = 0; i < Spectral.MAX_STATE_VALUES - 1; i++) right.add("a", "r" + String.format("%06d", i), 1);
+        Assertions.assertThrows(IllegalStateException.class, () -> left.merge(right));
     }
 
     @Test
@@ -220,6 +232,11 @@ public class SpectralTest {
         Assertions.assertNull(isolated.embed("y"));
         // nothing co-occurring survives the cap (b's only partner is beyond it, a only repeats): no embedding at all
         Assertions.assertTrue(Spectral.fit(counts("a", "a", 9, "b", "c", 1), 2, 2, false).isEmpty());
+        // perfect independence (C = [[2, 2], [2, 2]]): every PPMI cell is ln 1 = 0, so the factorisation would put
+        // every value at the origin — a position indistinguishable from a fitted one. Nothing was learnt: null
+        final Spectral independent = Spectral.fit(counts("a", "a", 1, "b", "b", 1, "a", "b", 2), 2, 256, false);
+        Assertions.assertTrue(independent.isEmpty());
+        Assertions.assertNull(independent.embed("a"));
         // rank beyond the vocabulary is capped
         Assertions.assertEquals(2, Spectral.fit(counts("a", "b", 10), 8, 256, false).rank());
         // nothing, or a single value repeating: no embedding

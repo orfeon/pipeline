@@ -9,7 +9,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.Arrays;
-import java.util.Map;
 
 /**
  * Fitted quantile transform of a numeric field (docs/design/feature-dsl.md §4.4, {@code type: quantileTransform}):

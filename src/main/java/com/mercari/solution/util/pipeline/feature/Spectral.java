@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Spectral embedding of a categorical state (docs/design/feature-dsl.md §4.4, {@code type: spectralEmbedding}): the
@@ -57,10 +58,18 @@ public final class Spectral implements Serializable, FitArtifact.Model {
     public static final class PairCounts implements Serializable {
         public final TreeMap<String, TreeMap<String, Long>> counts = new TreeMap<>();
         public long pairs;
+        /**
+         * Every distinct value the state holds. {@link #counts} keys only the smaller value of each pair, so its
+         * size is not the vocabulary: one value that sorts before every other absorbs the whole state into a
+         * single row ({@code counts.size() == 1}) however many partners it has. The ceiling is checked here.
+         */
+        final TreeSet<String> values = new TreeSet<>();
 
         public void add(final String a, final String b, final long n) {
             final boolean ordered = a.compareTo(b) <= 0;
             counts.computeIfAbsent(ordered ? a : b, k -> new TreeMap<>()).merge(ordered ? b : a, n, Long::sum);
+            values.add(a);
+            values.add(b);
             pairs += n;
             bound();
         }
@@ -70,13 +79,14 @@ public final class Spectral implements Serializable, FitArtifact.Model {
                 final TreeMap<String, Long> into = counts.computeIfAbsent(row.getKey(), k -> new TreeMap<>());
                 for (final Map.Entry<String, Long> e : row.getValue().entrySet()) into.merge(e.getKey(), e.getValue(), Long::sum);
             }
+            values.addAll(other.values);
             pairs += other.pairs;
             bound();
         }
 
         /** {@link Spectral#MAX_STATE_VALUES}, checked on the one number that is O(1) to read. */
         private void bound() {
-            if (counts.size() > MAX_STATE_VALUES) {
+            if (values.size() > MAX_STATE_VALUES) {
                 throw new IllegalStateException("spectralEmbedding: the co-occurrence counts hold more than " + MAX_STATE_VALUES
                         + " distinct values. The vocabulary must be capped before the pairs are counted: bucket or discretize the field"
                         + " upstream (a spectralEmbedding state is quadratic in the values it counts, and maxValues is at most " + MAX_VALUES + ")");
@@ -211,7 +221,8 @@ public final class Spectral implements Serializable, FitArtifact.Model {
         }
         if (mass.size() < 2) {
             if (warn) LOG.warn("spectralEmbedding: {} distinct value(s) in {} pair(s); no embedding, every value maps to null", mass.size(), state.pairs);
-            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, 0);
+            // nothing is fitted, so every value the state held is one the fit left out
+            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, mass.size());
         }
         final List<String> ordered = new ArrayList<>(mass.keySet());
         ordered.sort((x, y) -> {
@@ -248,7 +259,7 @@ public final class Spectral implements Serializable, FitArtifact.Model {
         if (kept.size() < 2) {
             if (warn) LOG.warn("spectralEmbedding: {} co-occurring value(s) among the {} distinct in {} pair(s); no embedding, every value maps to null",
                     kept.size(), ordered.size(), state.pairs);
-            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, 0);
+            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, ordered.size());
         }
         final int v = kept.size();
         final int dropped = ordered.size() - v;
@@ -274,10 +285,19 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             total += rowSum[i];
         }
         final double[][] ppmi = new double[v][v];
+        boolean informative = false;
         for (int i = 0; i < v; i++) {
             for (int j = 0; j < v; j++) {
                 if (c[i][j] > 0) ppmi[i][j] = Math.max(0, Math.log(c[i][j] * total / (rowSum[i] * rowSum[j])));
+                informative |= ppmi[i][j] > 0;
             }
+        }
+        // every co-occurrence at or below independence: the matrix is all zeros, and so would every coordinate be —
+        // the origin for every value, indistinguishable from a fitted position. Nothing was learnt: read null
+        if (!informative) {
+            if (warn) LOG.warn("spectralEmbedding: no pair of the {} value(s) co-occurs more than chance in {} pair(s) (the PPMI matrix is all zeros);"
+                    + " no embedding, every value maps to null", v, state.pairs);
+            return new Spectral(new String[0], new double[0][], new double[0], state.pairs, ordered.size());
         }
         // the symmetric factorisation keeps the components of largest |eigenvalue| (the singular values of the matrix)
         final double[][] eigen = Svd.jacobi(ppmi, true);
@@ -337,6 +357,12 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             final JsonObject row = rows.get(i).getAsJsonObject();
             vocabulary[i] = row.get("value").getAsString();
             final JsonArray coordinates = array(row, "embedding");
+            // the apply path indexes a row by component ({@link #coordinate}), which only bounds itself by the
+            // eigenvalue count: a row shorter than that would throw per row instead of naming the truncated artifact
+            if (coordinates.size() != eigenvalues.length) {
+                throw new IllegalStateException("spectralEmbedding artifact: value '" + vocabulary[i] + "' carries " + coordinates.size()
+                        + " coordinate(s) but the model has rank " + eigenvalues.length + ": " + json);
+            }
             embedding[i] = new double[coordinates.size()];
             for (int r = 0; r < embedding[i].length; r++) embedding[i][r] = coordinates.get(r).getAsDouble();
         }

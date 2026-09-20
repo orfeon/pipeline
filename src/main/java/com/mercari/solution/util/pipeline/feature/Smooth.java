@@ -7,7 +7,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
-import java.util.Map;
 
 /**
  * A smooth curve of a target over a numeric key (docs/design/feature-dsl.md §5.6, the linear-basis class;
