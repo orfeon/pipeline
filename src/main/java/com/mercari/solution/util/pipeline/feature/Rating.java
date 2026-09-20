@@ -157,8 +157,10 @@ public final class Rating implements Serializable {
 
     /**
      * Folds a time-ordered window from scratch (the scan reference of the running state). Every contest of the window
-     * is read, from its first entry: a rating has no bounded tail, which is why it counts as an unbounded column on
-     * the scan path and pins the key's history there ({@code SequenceEvaluator.unbounded}).
+     * is read, from its first entry: a rating has no bounded tail, which is why a rating evaluated on the scan path
+     * counts as an unbounded column and pins the key's history there ({@code SequenceEvaluator.unbounded}). A stage
+     * takes that path only under the equivalence tests' {@code forceScan} — in production the fold pointer serves the
+     * column, and its watermark is that pointer.
      */
     public State replay(final List<SequenceEvaluator.Past> window) {
         final State state = new State();

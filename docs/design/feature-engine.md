@@ -315,10 +315,13 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   pre-contest ratings over the entries sorted by player, and the contests of one event time are applied in
   context-key order (two of them may share a player). The scan path (`Rating.replay` over the visible window)
   is the reference `RatingTest` compares the running state with, bit for bit, over trimmed and untrimmed histories;
-  a rating there reads every contest of its window from the start, so it has no bounded tail and counts as an
-  unbounded column — it pins the key's history whatever its coordinates say. A window that evicts has no
-  implementation on either path, so the evaluator fails on a rating column carrying one instead of replaying it:
-  admitting `maxAge` / `maxEvents` / a general filter at the compile layer means implementing the eviction first.
+  a rating *on that path* reads every contest of its window from the start, so it has no bounded tail and counts as an
+  unbounded column — it pins the key's history whatever its coordinates say (a stage takes the scan path only under
+  the tests' `forceScan`; in production the fold pointer serves the column and the watermark is that pointer). Neither
+  path implements a window that evicts — the running state cannot take an update back, and truncating the scan window
+  would hand `Rating.replay` a contest cut in half — so `SequenceEvaluator.checkWindowContract` fails a rating column
+  carrying one at stage setup instead of replaying it: admitting `maxAge` / `maxEvents` / a general filter at the
+  compile layer means implementing both halves first.
 - **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
   into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored
   on merge) so a price level does not cancel the covariance away; invertible, so it evicts under `maxAge` like

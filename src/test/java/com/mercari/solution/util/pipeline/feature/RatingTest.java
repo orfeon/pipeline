@@ -412,7 +412,8 @@ public class RatingTest {
     /**
      * Neither path implements a window that evicts a contest: a rating column carrying one is a compile layer that
      * relaxed {@code sequence.rating.window} without implementing it, and the evaluator says so instead of replaying a
-     * window it cannot honour.
+     * window it cannot honour. The check belongs to {@code setup()} — the compile layer reads the same column through
+     * {@code unboundedReason}, where a throw would replace a diagnostic with a crash of the compiler.
      */
     @Test
     public void testWindowThatEvictsIsRejectedByTheEvaluator() {
@@ -423,6 +424,8 @@ public class RatingTest {
             final SequenceEvaluator evaluator = new SequenceEvaluator(List.of(c));
             final IllegalStateException e = Assertions.assertThrows(IllegalStateException.class, evaluator::setup, coordinate.getKey());
             Assertions.assertTrue(e.getMessage().contains("sequence.rating.window"), e.getMessage());
+            // describing the column stays total: the compile layer reports, it does not run the window
+            Assertions.assertDoesNotThrow(() -> SequenceEvaluator.unboundedReason(c), coordinate.getKey());
         }
     }
 
