@@ -35,7 +35,8 @@ public final class Rating implements Serializable {
 
     public enum Method { elo, bradleyTerry, plackettLuce }
 
-    public static final List<String> METHODS = List.of("elo", "bradleyTerry", "plackettLuce");
+    /** The method names as the DSL spells them, in declaration order (derived so it cannot drift from the enum). */
+    public static final List<String> METHODS = Arrays.stream(Method.values()).map(Method::name).toList();
 
     /** Readouts: the rating, its uncertainty (not for elo), the contests rated so far, the rating's last change. */
     public static final List<String> FUNCS = List.of("mu", "sigma", "count", "delta");
@@ -120,16 +121,13 @@ public final class Rating implements Serializable {
         return of(Method.valueOf(coordinates.get("method")), !"descending".equals(coordinates.get("order")),
                 number(coordinates, "mu"), number(coordinates, "sigma"), number(coordinates, "beta"), number(coordinates, "tau"),
                 number(coordinates, "kFactor"), number(coordinates, "scale"),
-                keys(coordinates.get("playerKeys")), keys(coordinates.get("contestKeys")), coordinates.get("field"));
+                FeaturePlanCompiler.keyList(coordinates.get("playerKeys")), FeaturePlanCompiler.keyList(coordinates.get("contestKeys")),
+                coordinates.get("field"));
     }
 
     private static Double number(final Map<String, String> coordinates, final String key) {
         final String text = coordinates.get(key);
         return text == null ? null : Double.valueOf(text);
-    }
-
-    private static List<String> keys(final String joined) {
-        return joined == null || joined.isEmpty() ? List.of() : List.of(joined.split(","));
     }
 
     /** The player a row is rated as (null when a key field is missing: the row reads null and joins no contest). */
@@ -218,20 +216,22 @@ public final class Rating implements Serializable {
 
     /** 1 when entry i did better than entry j, 0.5 on equal outcomes, else 0. */
     private double score(final Entry i, final Entry j) {
-        final int c = Double.compare(i.outcome(), j.outcome());
-        if (c == 0) return 0.5;
-        return (c < 0) == ascending ? 1d : 0d;
+        // numeric equality, not Double.compare: -0.0 and 0.0 are the same outcome (a tie), which compare denies
+        if (i.outcome() == j.outcome()) return 0.5;
+        return (Double.compare(i.outcome(), j.outcome()) < 0) == ascending ? 1d : 0d;
     }
 
     private void elo(final List<Entry> entries, final double[] m, final double[] dMu) {
         final int n = entries.size();
         for (int i = 0; i < n; i++) {
+            final Entry self = entries.get(i);
             double sum = 0;
             int opponents = 0;
             for (int j = 0; j < n; j++) {
-                if (entries.get(j).player().equals(entries.get(i).player())) continue;
+                final Entry other = entries.get(j);
+                if (other.player().equals(self.player())) continue;
                 final double expected = 1d / (1d + Math.pow(10d, (m[j] - m[i]) / scale));
-                sum += score(entries.get(i), entries.get(j)) - expected;
+                sum += score(self, other) - expected;
                 opponents++;
             }
             // kFactor is the change of a whole contest: shared over the opponents so it does not grow with the field
@@ -242,12 +242,14 @@ public final class Rating implements Serializable {
     private void bradleyTerry(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] shrink) {
         final int n = entries.size();
         for (int i = 0; i < n; i++) {
+            final Entry self = entries.get(i);
             double omega = 0, delta = 0;
             for (int q = 0; q < n; q++) {
-                if (entries.get(q).player().equals(entries.get(i).player())) continue;
+                final Entry other = entries.get(q);
+                if (other.player().equals(self.player())) continue;
                 final double c = Math.sqrt(v[i] + v[q] + 2 * beta * beta);
                 final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c));
-                omega += v[i] / c * (score(entries.get(i), entries.get(q)) - p);
+                omega += v[i] / c * (score(self, other) - p);
                 delta += Math.sqrt(v[i]) / c * (v[i] / (c * c)) * p * (1 - p);
             }
             dMu[i] = omega;
@@ -270,17 +272,19 @@ public final class Rating implements Serializable {
         final double[] remaining = new double[n];
         final int[] ties = new int[n];
         for (int q = 0; q < n; q++) {
+            final Entry place = entries.get(q);
             for (int s = 0; s < n; s++) {
-                final double sc = score(entries.get(s), entries.get(q));
+                final double sc = score(entries.get(s), place);
                 if (sc <= 0.5) remaining[q] += e[s];
                 if (sc == 0.5) ties[q]++;
             }
         }
         for (int i = 0; i < n; i++) {
+            final Entry self = entries.get(i);
             double omega = 0, delta = 0;
             for (int q = 0; q < n; q++) {
                 // the places decided while i was still in the race: q's own and every better one
-                if (q != i && score(entries.get(q), entries.get(i)) < 0.5) continue;
+                if (q != i && score(entries.get(q), self) < 0.5) continue;
                 final double quotient = e[i] / remaining[q];
                 omega += (q == i ? 1 - quotient : -quotient) / ties[q];
                 delta += quotient * (1 - quotient) / ties[q];

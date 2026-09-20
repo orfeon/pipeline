@@ -328,7 +328,9 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   the other players' contests fall inside it.
 - **One replay per pool.** An update reads the ratings the earlier contests left, so the contests must be
   folded in time order by one replay: the columns run under the **global key** (hint
-  `sequence.rating.globalKey`; a single worker thread, memory = one rating per player). When the contests fall
+  `sequence.rating.globalKey`; a single worker thread, memory = one rating per player **plus** the pool's rows
+  still inside the window shift — the replay only folds a contest once its outcome is available, so a long
+  availability lag times the whole pool's row rate is what sizes the worker). When the contests fall
   into independent pools, split them with `windows: [{filter: "category = $self.category"}]` on a pre-event
   field — it becomes the partition key and each pool is replayed on its own. Nothing else is a window here: an
   update cannot be taken back, so `maxAge` / `maxEvents` / any other filter are rejected
