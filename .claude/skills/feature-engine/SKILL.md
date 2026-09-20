@@ -149,7 +149,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   per-row inputs / need the group order (`softmax(c, rows)` in probability space with a max-shift;
   `shuffle(c, rows)` = Fisher–Yates from (seed, group key) over rows sorted by `order` + `tieBreak`
   coordinates — the tie-break over all input fields is what makes it engine-mode independent). Op
-  parameters that are not a single field go through `FeaturePlanCompiler.configureContextOp`.
+  parameters that are not a single field go through `FeaturePlanCompiler.configureContextOp`. The group
+  solvers `residualize` / `harville` go through `solve(c, rows)` → `GroupOps` (pure `double[][] channels →
+  double[]`, NaN = missing): several fields of the group at once, one value back per row. A new solver is a
+  `GroupOps` function + a branch in `solve`; it must take its sums in an order the *values* decide (`GroupOps.sort`)
+  — the rows of a group arrive in runner order, and the parallel / linear equality is compared bit for bit — and
+  declare its cost (`context.op.groupSolver`, `maxGroupSize`) when it is more than linear in the group size.
 - `Summary<S>` — the typed, mergeable accumulator behind every statistic the engine serves without
   re-reading rows: `create` / `update(state, contribution, ±1)` / `merge` / `read(state, Readout)`,
   with `invertible()` saying whether a contribution can be removed again (a group: windows can evict)

@@ -142,6 +142,10 @@ not expand because another block failed).
 | `context.softmax.temperature` / `.offsetScale` / `.scoreNull` | error | temperature must be a number > 0; offsetScale probability / log; scoreNull zero / null |
 | `context.softmax.temperatureFrom.unresolved` | error | `temperatureFrom` must be a URI (resolved before compile); a document that is neither a number nor JSON with `temperature` / `T` fails at resolve |
 | `context.softmax.excludeSelf` | warning | `excludeSelf` has no effect on softmax |
+| `context.residualize.against` | error | `residualize` needs `against` — one numeric field / column or a list of distinct ones, none of them the field itself (the key is `against`; a bare `on` is a YAML boolean) |
+| `context.harville.top` / `.discount` / `context.op.maxGroupSize` | error | `top` lists distinct integer places in 1..3; `discount` at most two positive exponents (2nd, 3rd place); `maxGroupSize` ≥ 2 |
+| `context.op.groupSolver` | info | `harville` is quadratic (2nd place) / cubic (3rd) in the group size and solved on one worker: a group with more than `maxGroupSize` valid rows reads null |
+| `context.harville.excludeSelf` | warning | `excludeSelf` has no effect on harville |
 | `context.shuffle.seed` | error | `shuffle` needs an integer `seed` |
 | `context.shuffle.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp are ordered by their input values only |
 

@@ -59,6 +59,10 @@ public class ContextEvaluator implements Serializable {
             shuffle(c, rows);
             return;
         }
+        if ("residualize".equals(c.operator) || "harville".equals(c.operator)) {
+            solve(c, rows);
+            return;
+        }
         final String op = "baseline".equals(c.operator) ? baselineOps.get(c.canonicalName) : c.operator;
         final boolean excludeSelf = "true".equals(c.coordinates.get("excludeSelf"));
         if (op == null) {
@@ -160,6 +164,35 @@ public class ContextEvaluator implements Serializable {
                 row.put(c.canonicalName, weights[i] == 0 ? 0d : weights[i] * Math.exp(scores[i] - max) / denominator);
             }
         }
+    }
+
+    /**
+     * The group solvers ({@link GroupOps}): the op's fields become one vector per channel over the rows of the group
+     * (a missing or non-finite value is NaN), the solver returns every row's value (NaN = null).
+     */
+    static void solve(final OutputColumn c, final List<Map<String, Object>> rows) {
+        final double[] field = channel(rows, c.coordinates.get("field"));
+        final double[] result;
+        if ("residualize".equals(c.operator)) {
+            final String[] against = c.coordinates.get("against").split(",");
+            final double[][] x = new double[against.length][];
+            for (int k = 0; k < against.length; k++) x[k] = channel(rows, against[k]);
+            result = GroupOps.residualize(field, x, "true".equals(c.coordinates.get("excludeSelf")));
+        } else {
+            final String discount = c.coordinates.get("discount");
+            final double[] exponents = discount == null ? new double[0] : Arrays.stream(discount.split(",")).mapToDouble(Double::parseDouble).toArray();
+            result = GroupOps.harville(field, Integer.parseInt(c.coordinates.get("top")), exponents, Integer.parseInt(c.coordinates.get("maxGroupSize")));
+        }
+        for (int i = 0; i < rows.size(); i++) rows.get(i).put(c.canonicalName, Double.isNaN(result[i]) ? null : (Object) result[i]);
+    }
+
+    private static double[] channel(final List<Map<String, Object>> rows, final String field) {
+        final double[] values = new double[rows.size()];
+        for (int i = 0; i < values.length; i++) {
+            final Double d = FeatureValues.toDouble(rows.get(i).get(field));
+            values[i] = d == null || !Double.isFinite(d) ? Double.NaN : d;
+        }
+        return values;
     }
 
     /**

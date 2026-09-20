@@ -441,6 +441,8 @@ public final class FeaturePlanCompiler {
                 refs.addAll(w.others);
                 refs.addAll(w.self);
             }
+            // the explanatory fields of a context residualize (a sequence regression's single series is op.against)
+            refs.addAll(op.regressors);
         }
         // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
         if (def.lift != null) {
@@ -936,6 +938,10 @@ public final class FeaturePlanCompiler {
                     }
                     continue;
                 }
+                if ("harville".equals(op.type)) {
+                    expandHarville(def, context, op, field, computeAt);
+                    continue;
+                }
                 final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type, operator.outputFor(ref.type()), computeAt);
                 c.coordinates.put("field", canonicalOf(field));
                 addSelfInput(c, field);
@@ -945,12 +951,76 @@ public final class FeaturePlanCompiler {
         }
     }
 
+    /** Groups with more valid rows than this read null under {@code harville} unless the op declares its own bound. */
+    static final int DEFAULT_MAX_GROUP_SIZE = 64;
+
+    /**
+     * The context {@code harville} op: one FLOAT64 column per place {@code k} of {@code top} (default {@code [2, 3]}),
+     * {@code {block}_{field}_harville_top{k}} — the probability of finishing within the first k places, from the
+     * field read as win probabilities (normalised over the group).
+     */
+    private void expandHarville(final FeatureDef def, final ContextDef context, final Op op, final String field, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final List<Integer> top = op.top.isEmpty() ? List.of(2, 3) : op.top;
+        if (top.stream().anyMatch(k -> k < 1 || k > GroupOps.MAX_TOP) || new HashSet<>(top).size() != top.size()) {
+            diagnostics.error("context.harville.top", loc, "harville top must list distinct places in [1, " + GroupOps.MAX_TOP + "]: " + top);
+            return;
+        }
+        if (op.discount.size() > GroupOps.MAX_TOP - 1 || op.discount.stream().anyMatch(d -> !(d > 0) || d.isInfinite())) {
+            diagnostics.error("context.harville.discount", loc, "harville discount lists the positive exponents of the 2nd and the 3rd place (at most "
+                    + (GroupOps.MAX_TOP - 1) + " values, 1 = plain Harville): " + op.discount);
+            return;
+        }
+        final int maxGroupSize = op.maxGroupSize == null ? DEFAULT_MAX_GROUP_SIZE : op.maxGroupSize;
+        if (maxGroupSize < 2) {
+            diagnostics.error("context.op.maxGroupSize", loc, "maxGroupSize must be >= 2: " + maxGroupSize);
+            return;
+        }
+        if (def.excludeSelf) diagnostics.warning("context.harville.excludeSelf", loc, "excludeSelf has no effect on harville (the row is part of its own field)");
+        if (hintedBlocks.add("context.op.groupSolver:" + def.name)) {
+            diagnostics.info("context.op.groupSolver", loc, "harville solves every group on one worker — quadratic in the group size for the 2nd place, cubic for the 3rd:"
+                    + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)");
+        }
+        for (final int k : top) {
+            final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_harville_top" + k, Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("field", canonicalOf(field));
+            c.coordinates.put("top", Integer.toString(k));
+            if (!op.discount.isEmpty()) c.coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
+            c.coordinates.put("maxGroupSize", Integer.toString(maxGroupSize));
+            addSelfInput(c, field);
+            finishContext(c, def, context, op);
+        }
+    }
+
     /**
      * Parameters of the context ops that take more than one field: {@code softmax} (offset / temperature /
-     * scales) and {@code shuffle} (seed / ordering). Returns false when the column must not be created.
+     * scales), {@code residualize} (the explanatory fields) and {@code shuffle} (seed / ordering). Returns false when
+     * the column must not be created.
      */
     private boolean configureContextOp(final OutputColumn c, final Op op, final FeatureDef def, final ContextDef context, final String loc) {
         switch (op.type) {
+            case "residualize" -> {
+                if (op.regressors.isEmpty()) {
+                    diagnostics.error("context.residualize.against", loc, "residualize requires 'against': the field(s) '" + c.coordinates.get("field") + "' is regressed on within the group");
+                    return false;
+                }
+                final List<String> against = new ArrayList<>();
+                for (final String regressor : op.regressors) {
+                    final Ref ref = resolve(regressor);
+                    if (ref == null || !OperatorCatalog.isNumeric(ref.type())) {
+                        diagnostics.error("context.residualize.against", loc, "residualize 'against' field '" + regressor + "' must be a numeric field or column"
+                                + (ref == null ? "" : " (is " + (ref.type() == null ? "unknown" : ref.type().getType()) + ")"));
+                        return false;
+                    }
+                    if (ref.canonical().equals(c.coordinates.get("field")) || against.contains(ref.canonical())) {
+                        diagnostics.error("context.residualize.against", loc, "residualize 'against' lists '" + regressor + "' twice or names the field itself");
+                        return false;
+                    }
+                    against.add(ref.canonical());
+                    addSelfInput(c, ref.canonical());
+                }
+                c.coordinates.put("against", String.join(",", against));
+            }
             case "softmax" -> {
                 if (op.offset != null) {
                     final String offsetColumn = baselineColumns.containsKey(op.offset) ? baselineColumns.get(op.offset) : op.offset;

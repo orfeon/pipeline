@@ -722,6 +722,50 @@ price expires; so does the probability). With f = 0 and T = 1 the output equals 
 `excludeSelf` has no effect. Row / context only, so the op works in streaming (an `onnx` → `feature`
 → sink serving chain).
 
+### Group solvers (context ops `residualize`, `harville`)
+
+Two context ops fit a small model over the rows of the group and hand each row its part of the solution:
+
+```yaml
+- name: neutral                     # what is left of the score once the group's dependence on the market is taken out
+  scope: context
+  context: session
+  ops:
+    - {type: residualize, field: model_score, against: [log_market, quantity]}   # neutral_model_score_residualize
+- name: placed                      # from win probabilities to "within the first k"
+  scope: context
+  context: session
+  ops:
+    - {type: harville, field: prob_pWin_softmax, as: p, top: [2, 3], discount: [0.81, 0.65]}   # placed_p_harville_top2 / _top3
+```
+
+- **`residualize`** regresses `field` on the `against` fields (one name or a list; input fields or columns),
+  with an intercept, **over the rows of the group**, and returns each row's residual — the *neutralised*
+  value: uncorrelated with every regressor within the group, mean 0. A row takes part when the field and every
+  regressor are present (null otherwise); a group needs at least `p + 2` such rows (`p` regressors) or every
+  row reads null — with fewer the fit passes through the points. A regressor that is constant in the group, or a
+  combination of the others, is left out (the residual is the same). Against a single constant the residual is
+  the deviation from the group mean. With the block's `excludeSelf: true` every row is fitted on the **other**
+  rows (leave-one-out: a prediction error rather than an in-sample residual; one more row is needed).
+  The key is `against`, not `on` (a YAML 1.1 boolean).
+- **`harville`** reads `field` as win probabilities (any non-negative strengths: they are normalised over the
+  group, so implied probabilities that sum past 1 are fine) and returns, for each `k` in `top` (1..3, default
+  `[2, 3]`), the probability of finishing **within the first k places** by the Harville forward computation —
+  the winner is drawn by `p`, the next place among the rest in proportion to their strengths, and so on.
+  `discount: [λ2, λ3]` raises the probabilities to `λ` when the 2nd / 3rd place is drawn (default 1 = plain
+  Harville; values below 1 flatten the later places, which plain Harville gives too readily to the
+  favourites). A null or negative value takes no part (null out), a 0 can only lose; in a group with fewer
+  rows than `k` everyone is within the first k. Columns: `{block}_{field}_harville_top{k}` (`as` replaces the
+  field segment). `excludeSelf` has no effect.
+- **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size
+  (quadratic with `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — a group with
+  more than `maxGroupSize` valid rows (default 64) reads null (info `context.op.groupSolver`). The result does
+  not depend on the order the rows of a group arrive in.
+- Both are row / context only (streaming-capable) and inherit the availability of every field they read.
+- Diagnostics: `context.residualize.against` (missing, non-numeric, repeated, or the field itself),
+  `context.harville.top` (distinct integers in 1..3), `context.harville.discount` (at most two positive
+  exponents), `context.op.maxGroupSize` (≥ 2).
+
 ### Array readouts (row, `type: vector`)
 
 A numeric array field (`type: array<float64>` in the sources contract — the within-event series a row

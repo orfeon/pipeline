@@ -1137,7 +1137,7 @@ share one operator set rather than grow three:
 |---|---|---|---|
 | a row's array field (`array<float64>`) | `RowEvaluator`, `type: vector` | index (or `unit`: index / (n − 1)) | implemented — `VectorOps`: slice → diff → normalize, then readouts incl. `polyfit` |
 | a sequence window's values in time order | `SequenceEvaluator`, the scan path | event order | implemented for `SeriesStats` (acf / pacf / ar / zeroCross / peaks), `trend`, `fracdiff` |
-| a context group's values | `ContextEvaluator.evaluateColumn` (`values`, `self`, `excludeSelf`) | position in the group | the existing ops (rank / zscore / …) already have this shape; group solvers (neutralisation residuals, within-group probability solvers) are the planned users |
+| a context group's values | `ContextEvaluator.evaluateColumn` (`values`, `self`, `excludeSelf`) | position in the group | the existing ops (rank / zscore / …) have this shape; the **group solvers** take several channels at once — `GroupOps`: `double[][] channels → double[]`, NaN = missing both ways — `residualize` (within-group OLS residuals by a pivoted sweep of the centred normal equations, redundant regressors left out; `excludeSelf` = leave-one-out) and `harville` (within-the-first-k probabilities from win probabilities, with per-place discount exponents; cubic for the third place, hence `maxGroupSize`). Both take their sums **in the order of the values**, so the result is a pure function of the group whatever order the GroupByKey delivers it in (the parallel / linear equality is bit for bit) |
 
 A vector *output* is always expanded into scalar columns (`<name>_<readout>`, `<name>_poly<k>`, svd `<name>_<k>`
 / `<name>_resid_<input>`): Avro round-trips `array<double>` at float precision on this classpath, and the
