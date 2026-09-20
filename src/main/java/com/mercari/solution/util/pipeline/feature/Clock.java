@@ -79,6 +79,17 @@ public final class Clock implements Serializable {
         return (days[days.length - 1] - days[0]) * DAY_MILLIS / (days.length - 1);
     }
 
+    /**
+     * The shortest spacing between two consecutive ticks: the length one tick is guaranteed to reach, for a span that
+     * must be rounded up to ticks without ever under-covering (a time fold's purge / embargo).
+     */
+    public long minSpacingMillis() {
+        if (days.length < 2) return DAY_MILLIS;
+        long min = Long.MAX_VALUE;
+        for (int i = 1; i < days.length; i++) min = Math.min(min, days[i] - days[i - 1]);
+        return min * DAY_MILLIS;
+    }
+
     public String describe() {
         return name + " (" + days.length + " ticks, " + first() + " .. " + last() + ")";
     }

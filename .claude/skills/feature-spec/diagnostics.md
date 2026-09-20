@@ -52,10 +52,11 @@ not expand because another block failed).
 | `fit.orderBy` | error | must equal `time.field` |
 | `fit.groupBy` | error | must name an entity |
 | `fit.folds` | error | at least 2 |
-| `fit.fold` / `fit.fold.by` / `fit.fold.purge` (error) | error | `fold` is `{by: row \| time, purge, embargo}` with non-negative durations |
+| `fit.fold` / `fit.fold.by` | error | `fold` is `{by: row \| time, purge, embargo}` |
+| `fit.fold.negative` | error | `fold.purge` / `fold.embargo` must be non-negative durations |
 | `fit.fold.ignored` | warning | `fold` settings outside `mode: fold`, or `purge` / `embargo` without `by: time` — ignored |
 | `fit.fold.purge` (info) | info | the time fold's purge defaults to the horizon of the label the target reads; declare `fold.purge` to override |
-| `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential |
+| `fit.fold.time.joint` | error | `estimator: joint` solves hash folds only: use `by: row`, or backoff / sequential (one error per block) |
 | `fit.minHistory` | info | the minimum history of a `fit.mode: forward` block, rounded up to whole blocks (`minBlocks` wins); ignored by the other modes |
 | `engine.rowId` | error | every `rowId` field must be an input field |
 | `engine.spill.memoryMB` | error | integer ≥ 1 |

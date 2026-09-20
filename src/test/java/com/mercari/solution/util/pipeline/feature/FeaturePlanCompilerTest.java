@@ -2945,6 +2945,9 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("6", labelMean.getCoordinates().get("embargoBlocks"));
         Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.fold.purge".equals(m.code()) && m.location().contains("enc_label")), plan::describe);
         Assertions.assertTrue(hasCode(plan, "fit.mode.fold"));
+        // the purge is two-sided and the embargo extends it (the info spells out the width left out)
+        Assertions.assertTrue(plan.getDiagnostics().getMessages().stream().anyMatch(m -> "fit.mode.fold".equals(m.code())
+                && m.message().contains("on both sides") && m.message().contains("2·purge + embargo + 1")), plan::describe);
 
         // a declared purge wins over the label's horizon and is inherited by the blocks (10 days of 7-day blocks → 2)
         final FeaturePlan declared = compile(SOURCES, spec.replace("fold: {by: time, embargo: P40D}", "fold: {by: time, purge: P10D, embargo: P40D}"));
@@ -2952,13 +2955,30 @@ public class FeaturePlanCompilerTest {
                 && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow().getCoordinates().get("purgeBlocks"));
 
         final String fold = "fold: {by: time, embargo: P40D}";
+        // purge / embargo round by the shortest block: 30 days of month blocks → 2 (a 28-day February may lie between)
+        final FeaturePlan monthly = compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: P30D, embargo: P40D}"));
+        Assertions.assertEquals("2", monthly.getColumns().stream().filter(c -> "enc".equals(c.getBlock()) && "encoding".equals(c.getOperator())
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow().getCoordinates().get("purgeBlocks"));
+        // a time fold has no hash folds to count
+        Assertions.assertFalse(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: fold, folds: 1, blocks: {bucket: month}")), "fit.folds"));
+        // groupBy does not silence the past-target key guard under a time fold (a time fold ignores groupBy), unlike under hash folds
+        final String pastTargetKey = spec.replace("      - keys: [seller_id]\n", "      - keys: [seller_id]\n      - keys: [recent_365d_sold_mean]\n")
+                .replace("fit: {mode: fold, blocks: {bucket: month}", "fit: {mode: fold, groupBy: seller, blocks: {bucket: month}");
+        Assertions.assertTrue(hasCode(compile(SOURCES, pastTargetKey), "fit.groupBy.required"));
+        Assertions.assertFalse(hasCode(compile(SOURCES, pastTargetKey.replace(fold, "fold: {by: row}")), "fit.groupBy.required"));
+
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: calendar}")), "fit.fold.by"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: -P1D}")), "fit.fold.purge"));
+        // a negative duration is its own error code, distinct from the fit.fold.purge info (reported once, where declared)
+        final FeaturePlan negative = compile(SOURCES, spec.replace(fold, "fold: {by: time, purge: -P1D}"));
+        Assertions.assertEquals(1, negative.getDiagnostics().getMessages().stream().filter(m -> "fit.fold.negative".equals(m.code())).count(), negative::describe);
+        Assertions.assertTrue(negative.getDiagnostics().getMessages().stream().noneMatch(m -> "fit.fold.purge".equals(m.code()) && m.level() == Diagnostics.Level.error), negative::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: time, gap: P1D}")), "fit.fold"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(fold, "fold: {by: row, purge: P1D}")), "fit.fold.ignored"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("mode: fold, blocks: {bucket: month}", "mode: static, blocks: {bucket: month}")), "fit.fold.ignored"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
-                "- {expr: \"sold >= 1\", stats: [mean]}\n    shrinkage: {estimator: joint}")), "fit.fold.time.joint"));
+        // joint under a time fold: one error for the block, not one per keySet (enc has two)
+        final FeaturePlan joint = compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
+                "- {expr: \"sold >= 1\", stats: [mean]}\n    shrinkage: {estimator: joint}"));
+        Assertions.assertEquals(1, joint.getDiagnostics().getMessages().stream().filter(m -> "fit.fold.time.joint".equals(m.code())).count(), joint::describe);
     }
 
     /**
@@ -3007,6 +3027,18 @@ public class FeaturePlanCompilerTest {
         Assertions.assertEquals("2", level.getCoordinates().get("windowBlocks"));
         Assertions.assertNull(level.getCoordinates().get("blockSizeMillis"));
         Assertions.assertNotNull(level.getClocks().get("business"));
+
+        // a time fold over the same calendar blocks: the purge rounds up by the clock's shortest tick spacing
+        // (5 ticks of consecutive days = 5 days, so P7D covers 2 blocks)
+        final FeaturePlan folded = compile(sources, spec.replace("fit: {mode: forward, blocks: {size: 5, clock: business}}",
+                "fit: {mode: fold, blocks: {size: 5, clock: business}, fold: {by: time, purge: P7D}}"));
+        Assertions.assertFalse(folded.getDiagnostics().hasErrors(), folded::describe);
+        final OutputColumn foldLevel = folded.getColumns().stream().filter(c -> "enc_days".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && "category".equals(c.getCoordinates().get("keys"))
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
+        Assertions.assertEquals("business", foldLevel.getCoordinates().get("blockClock"));
+        Assertions.assertEquals("5", foldLevel.getCoordinates().get("blockTicks"));
+        Assertions.assertEquals("time", foldLevel.getCoordinates().get("foldBy"));
+        Assertions.assertEquals("2", foldLevel.getCoordinates().get("purgeBlocks"));
 
         // the calendar is part of the plan: another holiday, another hash
         Assertions.assertNotEquals(plan.getHash(), compile(sources.replace("2025-01-08, ", ""), spec).getHash());

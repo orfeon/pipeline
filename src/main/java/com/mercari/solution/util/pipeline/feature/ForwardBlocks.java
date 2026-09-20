@@ -119,6 +119,29 @@ public final class ForwardBlocks implements Serializable {
         return (int) Math.max(1, (maxAge.toMillis() + nominal - 1) / nominal);
     }
 
+    /** Shortest length a block can have (a calendar bucket varies: a 28-day February, a 90-day quarter). */
+    public Duration shortestLength() {
+        if (clock != null) return Duration.ofMillis(clock.minSpacingMillis() * ticks);
+        if (bucket == null) return Duration.ofMillis(sizeMillis);
+        return switch (bucket) {
+            case "year" -> Duration.ofDays(365);
+            case "quarter" -> Duration.ofDays(90);
+            case "month" -> Duration.ofDays(28);
+            case "week" -> Duration.ofDays(7);
+            default -> Duration.ofDays(1);
+        };
+    }
+
+    /**
+     * Whole blocks that always span {@code span}: {@code ceil(span / shortest length)}, at least 1 — any that many
+     * consecutive blocks are at least {@code span} long, whatever the calendar. The rounding of a range that must
+     * never under-cover (a time fold's purge / embargo); {@link #windowBlocks} rounds by the nominal length.
+     */
+    public int coveringBlocks(final Duration span) {
+        final long shortest = shortestLength().toMillis();
+        return (int) Math.max(1, (span.toMillis() + shortest - 1) / shortest);
+    }
+
     public String describe() {
         if (clock != null) return "size " + ticks + " ticks of " + clock.name();
         return bucket != null ? "bucket " + bucket : "size " + Durations.shortName(Duration.ofMillis(sizeMillis));

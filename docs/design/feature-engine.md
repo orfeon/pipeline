@@ -1088,7 +1088,7 @@ merged state of those blocks solves to. `BlockSeries<S>` holds one `Summary` sta
 | `forward` | `(−∞, usable]` — the complete blocks whose inputs are known at predictAt, the row's own block excluded | merge of the prefix |
 | `forward` + `window` | `(usable − windowBlocks, usable]` | merge of the range |
 | `minBlocks` / `minHistory` | — | fewer observed blocks at or before `usable` → the row reads null |
-| `fold` by time | every block but `[b − purgeBlocks, b + embargoBlocks]` around the row's block `b` | the total minus the range |
+| `fold` by time | every block but `[b − purgeBlocks, b + purgeBlocks + embargoBlocks]` around the row's block `b` | the total minus the range |
 
 Only the monoid law is used (a range is *merged*, not differenced), which is what lets a non-invertible family
 — the gathered values of a quantile transform — walk forward exactly. A model that has to be *solved* from the
@@ -1100,12 +1100,22 @@ whole-input model (what a static serving run loads); a forward fit is re-fitted 
 `type: svd` and `type: quantileTransform` are on it. The encoding levels still carry their own
 `ForwardBlocks.Series` (prefix arrays of `KeyStats` + the per-block λ); moving them onto
 `BlockSeries<Moments>` is the remaining step, after which a warm start is "merge the new block into the stored parts".
-A **time fold** (`fit.mode: fold` + `fold.by: time`) already reads those series: `Forward.of` accepts the fold
+A **time fold** (`fit.mode: fold` + `fold.by: time`) already reads those series: `TimeFold.of` reads the fold
 coordinates (`foldBy`, `purgeBlocks`, `embargoBlocks` — the compiler's `timeFoldCoordinates`, with the purge defaulting
-to the horizon of a `direction: future` column the target reads, `labelHorizon`), the level is fitted like a forward
-one, and `FitApplyDoFn.timeFoldStats` returns the totals minus one prefix difference — the encoding levels' series are
-invertible, so the range is differenced. λ is the whole input's (the last entry of the per-block step function), as for
-a hash fold. `estimator: joint` keeps hash folds only (`fit.fold.time.joint`).
+to the horizon of a `direction: future` column the target reads, `labelHorizon`) into `FitLevel.timeFold` — a record of
+its own, apart from `Forward`, which keeps only the row-relative geometry of a forward level (usable block, lag, window,
+`minBlocks`). The level's series is fitted with the forward levels' (one `_Forward` Combine, one series side input),
+and `FitApplyDoFn.timeFoldStats` returns the totals minus one prefix difference — the encoding levels' series are
+invertible, so the range is differenced. λ is the whole input's, as for a hash fold: `lambdasFromKeyStats` over the
+time-fold levels' totals (`_TimeFoldTotals` → `_TimeFoldVc`, a map side input merged into the evaluator's λ with the
+static ones), never the per-block step function of `lambdasByBlockView`, which only the forward levels enter
+(`_ForwardOnly` splits the series when both kinds share a fit stage). Its value is the last step of that function
+(`VarianceComponentsTest.testWholeInputLambdaIsLastStep`). A time-fold artifact is written like a hash fold's: the
+totals, no `lambdasByBlock` in the manifest. The purge is two-sided (a label window overlaps its neighbours in both directions) and the embargo
+extends the range after it. Only the engine knows the input's block span (the first / last block over the level's
+series), so the leave-out-more-than-half check is a run-time one: `auditTimeFold` counts the rows in
+`feature/timeFold_<level>_excludedOverHalf` and logs one warning per level and DoFn instance.
+`estimator: joint` keeps hash folds only (`fit.fold.time.joint`).
 
 #### 9.6.3 `SummaryFitBlock` — what a fitted block declares
 

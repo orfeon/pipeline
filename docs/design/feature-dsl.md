@@ -937,7 +937,7 @@ read* — and the model is what the merged state of those blocks solves to:
 | `mode: forward` + `window: P2Y` | of those, the blocks within the window (rounded up to whole blocks): the fit forgets |
 | `minBlocks: n` / `minHistory: P180D` | the row reads null until that many preceding blocks carry data |
 | `mode: fold` | every fold but the row's own (not leak-free in time: other folds include later events) |
-| `mode: fold` + `fold: {by: time, purge, embargo}` | every block but `[b − purge, b + embargo]` around the row's block `b` — the purged, embargoed cross-validation of time series; `purge` defaults to the horizon of the label the target reads |
+| `mode: fold` + `fold: {by: time, purge, embargo}` | every block but `[b − purge, b + purge + embargo]` around the row's block `b` — the purged, embargoed cross-validation of time series (the purge is two-sided: label windows overlap both ways; the embargo is an extra buffer after it); `purge` defaults to the horizon of the label the target reads |
 
 `blocks` (`bucket: year | quarter | month | week | day`, or `size: <duration>`, default `P90D`), `window`, `minBlocks`
 / `minHistory` are semantic parameters (in the plan hash). Support by type: `encoding` — all modes (`forward` for the
