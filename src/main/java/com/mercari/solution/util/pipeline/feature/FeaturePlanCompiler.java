@@ -186,7 +186,24 @@ public final class FeaturePlanCompiler {
     private void hintGlobalKeyStages(final List<FeaturePlan.Stage> stages) {
         for (final FeaturePlan.Stage s : stages) {
             if (!s.runsUnderSingleKey()) continue;
-            diagnostics.hint("encoding.globalKey", "features." + String.join(",", s.blocks()),
+            // a rating's pool cannot move to a Combine (its state is not mergeable): its blocks get their own hint
+            final List<String> ratingBlocks = new ArrayList<>(), keyedBlocks = new ArrayList<>();
+            for (final String name : s.columnNames()) {
+                final OutputColumn c = columnsByCanonical.get(name);
+                if (c == null || isRowColumn(c)) continue;
+                final List<String> blocks = "rating".equals(c.operator) ? ratingBlocks : keyedBlocks;
+                if (!blocks.contains(c.block)) blocks.add(c.block);
+            }
+            if (!ratingBlocks.isEmpty()) {
+                diagnostics.hint("sequence.rating.globalKey", "features." + String.join(",", ratingBlocks),
+                        "stage #" + s.index() + " replays every row under one key (a single worker thread): a rating update reads the ratings the earlier"
+                                + " contests left, so a pool is one replay in time order and has no parallel form; when the contests fall into independent pools,"
+                                + " split them with window.filter \"<field> = $self.<field>\" on a pre-event field (it becomes the partition key)");
+            }
+            // without a rating the hint names the stage's blocks as before; with one, only the other keyed blocks
+            final List<String> otherBlocks = ratingBlocks.isEmpty() ? s.blocks() : keyedBlocks;
+            if (otherBlocks.isEmpty()) continue;
+            diagnostics.hint("encoding.globalKey", "features." + String.join(",", otherBlocks),
                     "stage #" + s.index() + " evaluates every row under one key (a single worker thread"
                             + (spec.engine.parallelWaves ? " — the critical path once the waves run in parallel" : "")
                             + "); a global / very coarse encoding can move its statistics to fit.mode forward"
@@ -434,6 +451,8 @@ public final class FeaturePlanCompiler {
         for (final Op op : def.ops) {
             refs.addAll(op.fields);
             if (op.against != null) refs.add(op.against);
+            // a rating reads its contest's keys from the past rows
+            if (def.scope == Scope.sequence && op.context != null && contexts.containsKey(op.context)) refs.addAll(contexts.get(op.context).keys());
             if (op.expr != null) refs.addAll(expressionReferences(op.expr).others);
             if (op.predicate != null) refs.addAll(expressionReferences(op.predicate).others);
             if (op.weightBy != null) {
@@ -1099,8 +1118,11 @@ public final class FeaturePlanCompiler {
             final String reducedKey = reducibleFilterField(window, computeAt);
             final References filterRefs = window.filter == null || reducedKey != null ? null : expressionReferences(window.filter);
             if (reducedKey != null) {
+                // a rating is pooled: its stage key is the reduced field alone, the entity is not part of it
+                final boolean anyRating = def.ops.stream().anyMatch(o -> "rating".equals(o.type));
                 diagnostics.info("sequence.filter.reduced", loc,
-                        "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")");
+                        "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")"
+                                + (anyRating ? "; a rating op of this block is partitioned by (" + reducedKey + ") alone — its pool is every entity sharing that value" : ""));
             }
             if (form != null) {
                 expandDynamics(def, entity, window, filterRefs, reducedKey, form, computeAt);
@@ -1315,6 +1337,7 @@ public final class FeaturePlanCompiler {
                             addSelfInput(c, field);
                             finishSequence(c, def, entity, window, filterRefs, reducedKey, op);
                         }
+                        case "rating" -> expandRating(def, entity, window, reducedKey, op, field, fields.size() == 1, computeAt);
                         default -> diagnostics.error("sequence.op", loc, "unsupported sequence op: " + op.type);
                     }
                 }
@@ -1322,6 +1345,128 @@ public final class FeaturePlanCompiler {
         }
         if (form != null && form.compress() != null) expandCompress(def, form, computeAt);
     }
+
+    /**
+     * The sequence {@code rating} op: the block's entity is the rated player, {@code field} the outcome of a contest
+     * and {@code context} the contest (the rows of one group at one event time). One running state per op × window,
+     * shared by its readout columns ({@code stateKey}); the columns are pooled — replayed under the global key, or
+     * under the field of a reduced window filter — because a contest moves every player it involves. Only the
+     * unbounded window exists: a contest cannot be taken out of the ratings again.
+     */
+    private void expandRating(final FeatureDef def, final EntityDef entity, final Window window, final String reducedKey,
+                              final Op op, final String field, final boolean singleField, final AvailableAt computeAt) {
+        final String loc = def.location();
+        if (window.maxAge != null || window.maxEvents != null || window.onCalendar() || (window.filter != null && reducedKey == null)) {
+            if (hintedBlocks.add("sequence.rating.window:" + def.name + ":" + window.token() + ":" + window.filter)) {
+                diagnostics.error("sequence.rating.window", loc, "rating reads every earlier contest of its pool (an update cannot be taken back): window " + window.token()
+                        + (window.filter == null ? "" : " with filter '" + window.filter + "'") + " is not supported — declare no maxAge / maxEvents, and only a filter"
+                        + " \"<field> = $self.<field>\" on a pre-event field (it splits the contests into independent pools); tau ages an old rating instead of a window");
+            }
+            return;
+        }
+        final ContextDef contest = op.context == null ? null : contexts.get(op.context);
+        if (contest == null) {
+            diagnostics.error("sequence.rating.context", loc, "rating requires 'context' referencing contexts[].name — the contest whose rows are rated against each other: " + op.context);
+            return;
+        }
+        final String methodName = op.method == null ? Rating.Method.plackettLuce.name() : op.method;
+        if (!Rating.METHODS.contains(methodName)) {
+            diagnostics.error("sequence.rating.method", loc, "unknown rating method: " + op.method + " (available: " + String.join(" | ", Rating.METHODS) + ")");
+            return;
+        }
+        final Rating.Method method = Rating.Method.valueOf(methodName);
+        final boolean elo = method == Rating.Method.elo;
+        if (op.order != null && !Rating.ORDERS.contains(op.order)) {
+            diagnostics.error("sequence.rating.order", loc, "rating order must be ascending (a smaller outcome is better: a rank) or descending (a larger one: a score): " + op.order);
+            return;
+        }
+        boolean valid = true;
+        final List<String> foreign = new ArrayList<>();
+        if (elo) {
+            if (op.sigma != null) foreign.add("sigma");
+            if (op.beta != null) foreign.add("beta");
+            if (op.tau != null) foreign.add("tau");
+        } else {
+            if (op.kFactor != null) foreign.add("kFactor");
+            if (op.scale != null) foreign.add("scale");
+        }
+        if (!foreign.isEmpty()) {
+            diagnostics.error("sequence.rating.parameter", loc, foreign + (elo ? " are parameters of bradleyTerry / plackettLuce: elo takes mu, kFactor, scale"
+                    : " are elo parameters: " + methodName + " takes mu, sigma, beta, tau"));
+            valid = false;
+        }
+        if (op.mu != null && !Double.isFinite(op.mu)
+                || op.sigma != null && !(op.sigma > 0 && Double.isFinite(op.sigma)) || op.beta != null && !(op.beta > 0 && Double.isFinite(op.beta))
+                || op.tau != null && !(op.tau >= 0 && Double.isFinite(op.tau))
+                || op.kFactor != null && !(op.kFactor > 0 && Double.isFinite(op.kFactor)) || op.scale != null && !(op.scale > 0 && Double.isFinite(op.scale))) {
+            diagnostics.error("sequence.rating.parameter", loc, "rating parameters must be finite, with sigma / beta / kFactor / scale > 0 and tau >= 0: mu=" + op.mu
+                    + " sigma=" + op.sigma + " beta=" + op.beta + " tau=" + op.tau + " kFactor=" + op.kFactor + " scale=" + op.scale);
+            valid = false;
+        }
+        final List<String> funcs = op.funcs.isEmpty() ? (elo ? List.of("mu") : List.of("mu", "sigma")) : op.funcs;
+        for (final String func : funcs) {
+            if (!Rating.FUNCS.contains(func) || (elo && "sigma".equals(func))) {
+                diagnostics.error("sequence.rating.func", loc, (Rating.FUNCS.contains(func) ? "elo keeps no uncertainty: sigma is a readout of bradleyTerry / plackettLuce"
+                        : "unknown rating func: " + func) + " (available: " + String.join(" | ", Rating.FUNCS) + ")");
+                valid = false;
+            }
+        }
+        if (!valid) return;
+
+        final double mu = op.mu != null ? op.mu : Rating.defaultMu(method);
+        final double sigma = op.sigma != null ? op.sigma : Rating.defaultSigma(mu);
+        if (!elo && !(sigma > 0)) {
+            diagnostics.error("sequence.rating.parameter", loc, "the default sigma is |mu| / 3: declare sigma when mu is 0");
+            return;
+        }
+        // the coordinates every readout column of this op shares: they define the one running state behind them
+        final Map<String, String> shared = new LinkedHashMap<>();
+        shared.put("method", methodName);
+        shared.put("order", op.order == null ? "ascending" : op.order);
+        shared.put("mu", Double.toString(mu));
+        if (elo) {
+            shared.put("kFactor", Double.toString(op.kFactor != null ? op.kFactor : Rating.DEFAULT_K_FACTOR));
+            shared.put("scale", Double.toString(op.scale != null ? op.scale : Rating.DEFAULT_SCALE));
+        } else {
+            shared.put("sigma", Double.toString(sigma));
+            shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
+            shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
+        }
+        shared.put("context", contest.name());
+        // what a past row brings to its contest: the outcome, the player and the contest it belongs to
+        shared.put("field", canonicalOf(field));
+        final List<String> playerKeys = new ArrayList<>(), contestKeys = new ArrayList<>();
+        for (final String key : entity.keys()) playerKeys.add(canonicalOf(key));
+        for (final String key : contest.keys()) contestKeys.add(canonicalOf(key));
+        shared.put("playerKeys", String.join(",", playerKeys));
+        shared.put("contestKeys", String.join(",", contestKeys));
+
+        // `as` names the field segment; without it the op is part of the name (the outcome field may feed other ops)
+        final String segment = op.as != null && singleField ? op.as : displayName(field) + "_rating";
+        final String stateKey = def.name + "_" + window.token() + "_" + segment;
+        // the readout columns of one op share the running state under `stateKey`; two ops that resolve to the same
+        // segment with different parameters would silently share one replay whenever their funcs do not collide
+        final String previous = ratingStates.putIfAbsent(stateKey, shared.toString());
+        if (previous != null && !previous.equals(shared.toString())) {
+            diagnostics.error("sequence.rating.as", loc, "two rating ops of block '" + def.name + "' resolve to the same column segment '"
+                    + segment + "' with different parameters (" + previous + " vs " + shared + "): they would share one running state — name them apart with as:");
+            return;
+        }
+        for (final String func : funcs) {
+            final OutputColumn c = newColumn(def.name, Scope.sequence, "rating", stateKey + "_" + func,
+                    "count".equals(func) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("func", func);
+            c.coordinates.putAll(shared);
+            c.coordinates.put("stateKey", stateKey);
+            addPastInput(c, field);
+            for (final String key : entity.keys()) addPastInput(c, key);
+            for (final String key : contest.keys()) addPastInput(c, key);
+            finishSequence(c, def, entity, window, null, reducedKey, op, List.of(), true);
+        }
+    }
+
+    /** The rating ops already expanded, by their {@code stateKey}: the coordinates behind one running state. */
+    private final Map<String, String> ratingStates = new HashMap<>();
 
     /**
      * Upper bound on the component columns one general-form block emits: {@code lti} windows × halflifes × channels ×
@@ -1846,12 +1991,26 @@ public final class FeaturePlanCompiler {
     /** {@code alignWith}: references whose availability the window takes without reading them (the time channel). */
     private void finishSequence(final OutputColumn c, final FeatureDef def, final EntityDef entity, final Window window,
                                 final References filterRefs, final String reducedKey, final Op op, final List<String> alignWith) {
+        finishSequence(c, def, entity, window, filterRefs, reducedKey, op, alignWith, false);
+    }
+
+    /**
+     * {@code pooled}: the column is replayed over a pool of entities rather than per entity (a {@code rating}): its
+     * stage key is the reduced filter field alone — none = the global key — and the entity's {@code minInterval}
+     * proves nothing about the other entities' events, so it never absorbs the window shift.
+     */
+    private void finishSequence(final OutputColumn c, final FeatureDef def, final EntityDef entity, final Window window,
+                                final References filterRefs, final String reducedKey, final Op op, final List<String> alignWith,
+                                final boolean pooled) {
         c.coordinates.put("entity", entity.name());
         c.coordinates.put("window", window.token());
         if (window.maxAge != null) c.coordinates.put("maxAge", window.maxAge.toString());
         calendarWindow(c, window, def.location());
         if (window.maxEvents != null) c.coordinates.put("maxEvents", window.maxEvents.toString());
-        if (reducedKey != null) {
+        if (pooled) {
+            c.coordinates.put("stageKeys", reducedKey == null ? "" : reducedKey);
+            if (reducedKey != null) addSelfInput(c, reducedKey);
+        } else if (reducedKey != null) {
             final List<String> stageKeys = new ArrayList<>(entity.keys());
             stageKeys.add(reducedKey);
             c.coordinates.put("stageKeys", String.join(",", stageKeys));
@@ -1867,7 +2026,7 @@ public final class FeaturePlanCompiler {
             for (final String o : filterRefs.others) addPastInput(c, o);
         }
         if (isFuture(def)) classifyFuture(c, window);
-        else classifyPast(c, entity.minInterval(), alignWith);
+        else classifyPast(c, pooled ? null : entity.minInterval(), alignWith);
         c.validFor = def.validFor;
         register(c);
     }

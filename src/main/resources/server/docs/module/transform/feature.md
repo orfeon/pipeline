@@ -283,6 +283,64 @@ without `distribution` is an error (`encoding.target.values`).
 - Diagnostics: `sequence.regression.against` (missing / non-numeric), `sequence.regression.func`,
   `sequence.regression.lag`, `sequence.fracdiff.d` (required, in (0, 2]), `sequence.fracdiff.k` (≥ 2).
 
+### Ratings from contests (sequence `rating`)
+
+```yaml
+contexts:
+  - {name: session, keys: [session_id]}
+features:
+  - name: skill
+    scope: sequence
+    entity: seller                     # the rated player
+    ops:
+      - {type: rating, field: final_price, context: session, order: descending}             # skill_all_final_price_rating_mu / _sigma
+      - {type: rating, field: final_price, context: session, order: descending, method: elo, as: elo, funcs: [mu, count, delta]}  # skill_all_elo_mu ...
+  - name: field                        # the rating against the others of the same session: an ordinary context block
+    scope: context
+    context: session
+    inputs: [skill_all_final_price_rating_mu]
+    ops: [zscore, gapToBest]
+```
+
+A **rating** is the entity's strength as its past *contests* tell it: every contest moves all its players at
+once, by how the result compares with what their ratings expected — so beating strong opponents counts for
+more than beating weak ones, which no per-entity aggregate of the outcome can express.
+
+- **`context`** names the contest (a `contexts[].name`): the rows of one group **sharing an event time** are
+  one contest; **`field`** is its numeric outcome and **`order`** says which end is better — `ascending`
+  (default: a rank or finishing position, smaller is better) or `descending` (a score, larger is better).
+  Equal outcomes are ties. A row without a contest key, an entity key or a finite outcome takes no part, and a
+  contest needs two distinct players. A player with several rows in one contest takes part once per row and
+  receives the sum of their changes (its own rows are not compared with each other in `elo` / `bradleyTerry`).
+- **`method`**: `plackettLuce` (default) and `bradleyTerry` are the closed-form Bayesian updates of Weng & Lin
+  (2011) over a Gaussian strength `(mu, sigma)` — the ranking likelihood, and all pairs of the contest;
+  `elo` is the pairwise logistic update with `kFactor` shared over the opponents (no uncertainty).
+  Parameters: `mu` (prior, default 25; elo 1500), `sigma` (default `mu / 3`), `beta` (performance noise,
+  default `sigma / 2`), `tau` (added to every participant's variance before a contest — strengths drift —
+  default `sigma / 100`); elo: `kFactor` (32), `scale` (400).
+- **`funcs`** (default `[mu, sigma]`; elo `[mu]`): `mu`, `sigma`, `count` (contests rated so far) and `delta`
+  (the rating's change in its last contest, null before the first). An entity never rated reads the prior
+  (`count` 0), a row without the entity key reads null. Columns are `{block}_{window}_{field}_rating_{func}`,
+  or `{block}_{window}_{as}_{func}` with `as` — needed when one field is rated by two methods.
+- **Strictly past, and only what is known.** The contests sharing the row's time are never visible, and the
+  window is shifted by the outcome's availability like any sequence column: a contest enters the ratings once
+  its outcome is available at the row's `computeAt`. The entity's `minInterval` does not absorb that shift —
+  the other players' contests fall inside it.
+- **One replay per pool.** An update reads the ratings the earlier contests left, so the contests must be
+  folded in time order by one replay: the columns run under the **global key** (hint
+  `sequence.rating.globalKey`; a single worker thread, memory = one rating per player). When the contests fall
+  into independent pools, split them with `windows: [{filter: "category = $self.category"}]` on a pre-event
+  field — it becomes the partition key and each pool is replayed on its own. Nothing else is a window here: an
+  update cannot be taken back, so `maxAge` / `maxEvents` / any other filter are rejected
+  (`sequence.rating.window`); `tau` is what ages an old rating. The result never depends on the row order: within
+  a contest the changes are computed from the pre-contest ratings, and the contests held at one event time are
+  applied in the order of their context key.
+- Diagnostics: `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
+  `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
+  method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`),
+  `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column
+  segment with different parameters — they would share one running state; name them apart with `as`).
+
 ### Static fits and artifacts (fit.mode static)
 
 ```yaml

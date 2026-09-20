@@ -109,6 +109,21 @@ public class FeatureSpec implements Serializable {
          * weights contribute nothing.
          */
         public String weightBy;
+        /**
+         * rating: the update rule ({@code elo | bradleyTerry | plackettLuce}), the contexts[].name whose groups are the
+         * contests, and whether a smaller outcome ({@code ascending}, the default: a rank) or a larger one
+         * ({@code descending}: a score) is the better.
+         */
+        public String method;
+        public String context;
+        public String order;
+        /** rating: the prior ({@code mu}, {@code sigma}), the performance noise {@code beta}, the per-contest drift {@code tau}; elo's {@code kFactor} / {@code scale}. */
+        public Double mu;
+        public Double sigma;
+        public Double beta;
+        public Double tau;
+        public Double kFactor;
+        public Double scale;
     }
 
     /**
@@ -1000,6 +1015,15 @@ public class FeatureSpec implements Serializable {
         op.unit = Json.strings(o, "unit");
         op.decayBy = Json.string(o, "decayBy");
         op.weightBy = Json.string(o, "weightBy");
+        op.method = Json.string(o, "method");
+        op.context = Json.string(o, "context");
+        op.order = Json.string(o, "order");
+        op.mu = doubleOf(o, "mu", diagnostics, loc);
+        op.sigma = doubleOf(o, "sigma", diagnostics, loc);
+        op.beta = doubleOf(o, "beta", diagnostics, loc);
+        op.tau = doubleOf(o, "tau", diagnostics, loc);
+        op.kFactor = doubleOf(o, "kFactor", diagnostics, loc);
+        op.scale = doubleOf(o, "scale", diagnostics, loc);
         op.as = Json.string(o, "as");
         op.values = Json.strings(o, "values");
         op.offset = Json.string(o, "offset");

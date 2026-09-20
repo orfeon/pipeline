@@ -128,7 +128,14 @@ reads what the compile layer wrote into each column's `coordinates`.
   `SeriesStats` (order-dependent readouts of a sequence window's values: zeroCross / peaks / acf / pacf /
   ar — tokens parsed once into the column plan; scan-only by construction, §9.6.1), `BlockSeries<S>` (one
   `Summary` state per time block, merged per readable range, one model per change point: what makes
-  `static` / `forward` / `window` one implementation, §9.6.2).
+  `static` / `forward` / `window` one implementation, §9.6.2), `Rating` (the sequence `rating` op: elo and the
+  Weng–Lin `bradleyTerry` / `plackettLuce` updates over a pool of players — a running state that is *not* a
+  `Summary`, because a contest reads the ratings the earlier ones left: no merge, no inverse. `fold(state, run)` takes
+  the rows of ONE event time and splits them into contests by the context keys; `SequenceEvaluator.advanceRating`
+  feeds it run by run from the fold pointer, `replay` is the scan reference. Its columns are *pooled*
+  (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no
+  `minInterval`), and the row order inside a timestamp never reaches the output: a contest is evaluated over
+  entries sorted by player, and the contests of one event time are applied in context-key order).
 
 ### Evaluators (`Serializable`, Beam-free, one instance per stage DoFn)
 

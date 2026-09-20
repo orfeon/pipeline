@@ -6,6 +6,7 @@ import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.feature.Rating;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -2775,5 +2776,81 @@ public class FeatureTransformTest {
             return null;
         });
         pipeline.run();
+    }
+
+    private static final String RATING_BLOCKS = """
+                - name: skill
+                  scope: sequence
+                  entity: seller
+                  ops:
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: pl, funcs: [mu, sigma, count]}
+                    - {type: rating, field: final_price, context: session, order: descending, method: elo, as: elo, funcs: [mu, count, delta]}
+                - name: field
+                  scope: context
+                  context: session
+                  inputs: [skill_all_elo_mu]
+                  ops: [gapToBest]
+            """.replaceAll("(?m)^", "    ");
+
+    /**
+     * The sequence {@code rating} op: sellers are rated by the final price within a session (the higher the better),
+     * all sellers in one replay under the global key. The outcome reaches the system 6 days 30 minutes after a session
+     * and a row is computed 8 minutes before its own, so session A (s1 150 beats s2 0) is unknown at B (2 days later)
+     * and known at C; C (s1 95 beats s2 72) is known at D. B and D are single-seller sessions: no contest. A context
+     * block reads the rating like any column (the seller's rating against the best of its session).
+     */
+    @Test
+    public void testSequenceRating() throws java.io.IOException {
+        final String config = FEATURE_CONFIG.replace("      output:\n", RATING_BLOCKS + "      output:\n");
+        Assertions.assertNotEquals(FEATURE_CONFIG, config);
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config)).get("features");
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_skill_all_elo_count").getFieldType().getType());
+        Assertions.assertEquals("windowShift", output.getSchema().getField("f_skill_all_pl_mu").getOptions().get("feature.status"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            // the second contest, from the ratings the first one left (the update rules themselves: RatingTest)
+            final Rating pl = Rating.of(
+                    Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of(), List.of(), "y");
+            final Rating.State state = new Rating.State();
+            pl.update(state, List.of(new Rating.Entry("s1", 150), new Rating.Entry("s2", 0)));
+            pl.update(state, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)));
+            final double plMuD = (Double) pl.read(state, "s1", "mu"), plSigmaD = (Double) pl.read(state, "s1", "sigma");
+            // elo at D: 1516 beat 1484 with the expected score 1 / (1 + 10^(-32 / 400))
+            final double eloDeltaD = 32d * (1d - 1d / (1d + Math.pow(10d, -32d / 400d)));
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                // pl mu, pl sigma, pl count, elo mu, elo count, elo delta, elo gap to the session's best
+                final Object[] expected = switch (id) {
+                    case "A/s1", "A/s2", "B/s1" -> new Object[]{25.0, 25.0 / 3, 0L, 1500.0, 0L, null, 0.0}; // nothing known yet
+                    case "C/s1" -> new Object[]{27.63523138347365, 8.065506316323548, 1L, 1516.0, 1L, 16.0, 0.0};
+                    case "C/s2" -> new Object[]{22.36476861652635, 8.065506316323548, 1L, 1484.0, 1L, -16.0, -32.0};
+                    case "D/s1" -> new Object[]{plMuD, plSigmaD, 2L, 1516.0 + eloDeltaD, 2L, eloDeltaD, 0.0};
+                    default -> throw new AssertionError("unexpected row " + id);
+                };
+                final String[] columns = {"f_skill_all_pl_mu", "f_skill_all_pl_sigma", "f_skill_all_pl_count",
+                        "f_skill_all_elo_mu", "f_skill_all_elo_count", "f_skill_all_elo_delta", "f_field_skill_all_elo_mu_gapToBest"};
+                for (int i = 0; i < columns.length; i++) {
+                    final Object actual = row.getPrimitiveValue(columns[i]);
+                    if (expected[i] == null) {
+                        Assertions.assertNull(actual, id + " " + columns[i]);
+                    } else if (expected[i] instanceof Double d) {
+                        Assertions.assertEquals(d, ((Number) actual).doubleValue(), 1e-9, id + " " + columns[i]);
+                    } else {
+                        Assertions.assertEquals(expected[i], ((Number) actual).longValue(), id + " " + columns[i]);
+                    }
+                }
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testSequenceRatingParallelMatchesLinear() throws java.io.IOException {
+        // the rating replay (global key) is one more keyed branch of wave 1; the context block reading it follows
+        assertParallelMatchesLinear(PARALLEL_CONFIG.replace("      output:\n", RATING_BLOCKS + "      output:\n"), 6,
+                List.of("Wave1_FanIn"), List.of());
     }
 }

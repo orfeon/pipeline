@@ -94,6 +94,7 @@ what that state can do classifies every sequence statistic — the sugar ops of 
 | reads *neighbouring* events (an ordered monoid with boundary values) | — | re-read over the window per row; the window must be bounded | acf / pacf / AR coefficients, zero crossings, peaks, lagged cross-correlation, `trend`, `fracdiff` |
 | depends on the *current row* (a self-join) | none possible | re-read over the window per row; the window must be bounded | `weightBy` kernels |
 | a linear / bilinear recurrence over the path (`lti`, `bilinear`) | the recurrence state | incremental; a group when the recurrence is invertible (Chen's identity for signatures) | `ewma`, HiPPO projections, log-signatures — the general form, §4.3 |
+| a *non-linear* recurrence over a pool of entities (each update reads the state the earlier ones left) | the pool's state | incremental, but neither mergeable nor invertible: one replay in time order, no window, no per-block fit | `rating` (elo, Bradley–Terry, Plackett–Luce) |
 
 The same classification carries over to fits (§4.4): a state that merges is a state that can be accumulated per
 time block and combined per window of blocks, which is what makes a walk-forward fit a parallel computation instead
@@ -705,6 +706,7 @@ may be left unbounded:
 | `aggregate` moments / shape, same-event `regression`, `ewma` and the `exponential` / `fourier` dynamics | incrementally (evicting under `maxAge`) | none beyond the state |
 | `legendre` dynamics | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
 | `aggregate` `min / max` | incrementally over an unbounded past, by re-reading under `maxAge` | none / the window |
+| `rating` (the entity rated from its contests: `context` = the contest, `field` = the outcome) | incrementally, one contest — the rows of a context group at one event time — at a time, over a **pool** of entities: the stage key is the global key, or the field of a reduced `$self` equality filter; no other window exists | one rating per player of the pool; the rows the window shift still holds back |
 | `lag`, `delta`, `trend`, `fracdiff` without a `filter` | by re-reading a fixed tail | k (k + 1) events |
 | any op under `maxEvents`, without a `filter` | by re-reading | `maxEvents` events |
 | series readouts, `first / last`, lagged `regression`, `weightBy`, `runLength`, predicates; any scan-path op with a `filter` (`f = $self.f` included) | by re-reading the window | **the key's whole history** — give the window a bound (validation hints `sequence.window.unbounded`) |
