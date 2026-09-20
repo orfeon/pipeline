@@ -34,6 +34,12 @@ public final class Signature implements Summary<Signature.State> {
         double[] last;
         /** The signature of the path so far, level-major (level 0 = the scalar 1). */
         double[] tensor;
+        /**
+         * {@code log(tensor)}, computed on the first read and dropped whenever the state changes: every Lyndon-word
+         * column of a window shares one state (the {@code stateKey}), so the logarithm is taken once per row instead
+         * of once per column. Derived, hence not serialised.
+         */
+        private transient double[] logarithm;
     }
 
     private final int channels;
@@ -45,6 +51,9 @@ public final class Signature implements Summary<Signature.State> {
     /** The clock of the time channel: {@code time} (days), {@code events} (the point's ordinal) or a calendar (ticks). */
     private final boolean byEvents;
     private final Clock calendar;
+    /** {@code powers[k]} = channels^k, the number of entries of level k. */
+    private final int[] powers;
+    /** {@code offsets[k]} = where level k starts in a tensor; {@code offsets[depth + 1]} is the tensor's length. */
     private final int[] offsets;
     private final int size;
     private final List<int[]> words;
@@ -57,12 +66,14 @@ public final class Signature implements Summary<Signature.State> {
         this.byEvents = byEvents;
         this.calendar = calendar;
         this.offsets = new int[depth + 2];
+        this.powers = new int[depth + 1];
         int length = 1;
         for (int k = 0; k <= depth; k++) {
-            offsets[k] = k == 0 ? 0 : offsets[k - 1] + length;
-            length = k == 0 ? channels : length * channels;
+            powers[k] = length;
+            offsets[k] = k == 0 ? 0 : offsets[k - 1] + powers[k - 1];
+            length *= channels;
         }
-        offsets[depth + 1] = offsets[depth] + (int) Math.pow(channels, depth);
+        offsets[depth + 1] = offsets[depth] + powers[depth];
         this.size = offsets[depth + 1];
         this.words = lyndonWords(channels, depth);
     }
@@ -127,12 +138,14 @@ public final class Signature implements Summary<Signature.State> {
         }
         s.last = point;
         s.points++;
+        s.logarithm = null;
     }
 
     /** {@code into ← into ⊕ other}, {@code other} holding the later events: the paths joined by the increment between them (Chen). */
     @Override
     public void merge(final State into, final State other) {
         if (other.points == 0) return;
+        into.logarithm = null;
         if (into.points == 0) {
             into.points = other.points;
             into.first = other.first.clone();
@@ -154,11 +167,15 @@ public final class Signature implements Summary<Signature.State> {
         return s.points;
     }
 
-    /** The coefficient of the readout's Lyndon word in {@code log S}; null without an increment (fewer than two points). */
+    /**
+     * The coefficient of the readout's Lyndon word in {@code log S}; null without an increment (fewer than two points).
+     * The logarithm is memoised on the state: the window's word columns share one state, so they share one {@code log}.
+     */
     @Override
     public Object read(final State s, final Readout readout) {
         if (s.points < 2) return null;
-        final double value = log(s.tensor)[index(words.get(readout.parameter().intValue()))];
+        if (s.logarithm == null) s.logarithm = log(s.tensor);
+        final double value = s.logarithm[index(words.get(readout.parameter().intValue()))];
         return Double.isFinite(value) ? value : null;
     }
 
@@ -210,7 +227,7 @@ public final class Signature implements Summary<Signature.State> {
         for (int k = 0; k <= depth; k++) {
             for (int i = 0; i <= k; i++) {
                 final int j = k - i;
-                final int la = (int) Math.pow(channels, i), lb = (int) Math.pow(channels, j);
+                final int la = powers[i], lb = powers[j];
                 for (int x = 0; x < la; x++) {
                     final double ax = a[offsets[i] + x];
                     if (ax == 0) continue;

@@ -1323,8 +1323,14 @@ public final class FeaturePlanCompiler {
         if (form != null && form.compress() != null) expandCompress(def, form, computeAt);
     }
 
-    /** Upper bound on the component columns one general-form block emits (windows × halflifes × channels × components). */
+    /**
+     * Upper bound on the component columns one general-form block emits: {@code lti} windows × halflifes × channels ×
+     * components, {@code bilinear} windows × the Lyndon words of the channels up to the depth.
+     */
     static final int MAX_DYNAMICS_COLUMNS = 64;
+
+    /** The parameters {@code compress: {svd: {...}}} forwards to a population svd block (the keys {@code type: svd} reads). */
+    private static final List<String> SVD_KEYS = List.of("rank", "center", "standardize", "outputs", "fit");
 
     /**
      * The validated general form of a sequence block: channels (a null reference = the constant time channel), the
@@ -1458,11 +1464,12 @@ public final class FeaturePlanCompiler {
                     + def.name + "__e{n}), which renumbers when an earlier expression is added or removed: name it with {expr: \"...\", as: name}");
         }
         final int perChannel = bilinear ? 0 : Dynamics.dimension(measure, order);
-        if (def.lift.timeAugment) {
-            if (!bilinear && perChannel == 1) {
+        // bilinear carries the time channel inside the one joint path (Signature), so it adds no constant channel here
+        if (def.lift.timeAugment && !bilinear) {
+            if (perChannel == 1) {
                 diagnostics.warning("sequence.lift.timeAugment", loc, "timeAugment adds no column at order 0: the constant channel's only component is 1");
             }
-            if (!bilinear) channels.add(new Channel(null, "time"));
+            channels.add(new Channel(null, "time"));
             // the time channel reads no field: it takes the most delayed channel's availability, so it describes the
             // events the value channels see (a shifted window) rather than the events the entity had
             final Set<AvailableAt> availabilities = new LinkedHashSet<>();
@@ -1470,7 +1477,7 @@ public final class FeaturePlanCompiler {
                 final Ref ref = channel.reference() == null ? null : resolve(channel.reference());
                 if (ref != null) availabilities.add(ref.availableAt() == null ? AvailableAt.atEventTime() : ref.availableAt());
             }
-            if (!bilinear && availabilities.size() > 1) {
+            if (availabilities.size() > 1) {
                 diagnostics.info("sequence.lift.align", loc, "the lift channels are available at different times " + availabilities
                         + ": the time channel follows the latest one (its window is shifted like that channel's)");
             }
@@ -1508,12 +1515,19 @@ public final class FeaturePlanCompiler {
         if (def.compress) {
             compress = parseJsonObject(def.compressJson);
             if (compress == null || !compress.has("svd") || !compress.get("svd").isJsonObject()) {
-                diagnostics.error("sequence.compress", loc, "compress must be {svd: {rank, center, standardize, fit}, keep: false}");
+                diagnostics.error("sequence.compress", loc, "compress must be {svd: {rank, center, standardize, outputs, fit}, keep: false}");
                 valid = false;
             } else {
                 for (final String key : compress.keySet()) {
                     if (!List.of("svd", "keep").contains(key)) {
                         diagnostics.error("sequence.compress", loc, "unknown compress key '" + key + "' (accepted: svd, keep)");
+                        valid = false;
+                    }
+                }
+                // a misspelled svd parameter would silently take its default (rank especially), as everywhere else
+                for (final String key : compress.getAsJsonObject("svd").keySet()) {
+                    if (!SVD_KEYS.contains(key)) {
+                        diagnostics.error("sequence.compress", loc, "unknown compress.svd key '" + key + "' (accepted: " + String.join(", ", SVD_KEYS) + ")");
                         valid = false;
                     }
                 }
@@ -1623,11 +1637,12 @@ public final class FeaturePlanCompiler {
             return;
         }
         expandSvd(compress, computeAt);
-        if (!SourceContract.Json.bool(form.compress(), "keep", false)) {
+        final boolean keep = SourceContract.Json.bool(form.compress(), "keep", false);
+        if (!keep) {
             for (final OutputColumn c : form.components()) c.intermediate = true;
         }
         diagnostics.info("sequence.compress", def.location(), "compress fits an svd of the " + compress.inputs.size() + " component columns as block " + compress.name
-                + (SourceContract.Json.bool(form.compress(), "keep", false) ? "; the components are emitted too (keep: true)" : "; the components are intermediate (keep: true emits them)"));
+                + (keep ? "; the components are emitted too (keep: true)" : "; the components are intermediate (keep: true emits them)"));
     }
 
     /** Validated weightBy references per (block, expression): an op is expanded once per window, reported once. */

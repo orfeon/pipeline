@@ -444,7 +444,14 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [condition_grade]}")), "sequence.lift.type"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: []}")), "sequence.lift"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, "lift: {fields: [start_price], exprs: [\"$self.quantity\"]}")), "sequence.self"));
-        Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, lift + "\n    compress: {svd: {rank: 2}}")), "sequence.compress"));
+        // compress is expanded, not rejected (the generated svd block is covered by testLogSignatureAndCompress):
+        // an info naming the block, and an error only on a malformed one
+        final FeaturePlan compressed = compile(SOURCES, spec.replace(lift, lift + "\n    compress: {svd: {rank: 2}}"));
+        Assertions.assertFalse(compressed.getDiagnostics().hasErrors(), compressed::describe);
+        Assertions.assertTrue(hasCode(compressed, "sequence.compress"));
+        final FeaturePlan misspelled = compile(SOURCES, spec.replace(lift, lift + "\n    compress: {svd: {rnak: 2}}"));
+        Assertions.assertTrue(misspelled.getDiagnostics().hasErrors(), misspelled::describe);
+        Assertions.assertTrue(hasCode(misspelled, "sequence.compress"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace(lift, lift + "\n    ops: [{type: lag, fields: [sold]}]")), "sequence.form"));
         Assertions.assertTrue(hasCode(compile(SOURCES, spec.replace("    summarize:\n      dynamics: " + exp + "\n", "")), "sequence.summarize"));
         // lift channels are block references: a typo is reported (not a silently empty block), a later block's column is waited for

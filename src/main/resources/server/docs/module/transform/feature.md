@@ -879,8 +879,8 @@ projection of the path onto a basis `b_j` under the measure `w`:
   one after it). One channel alone is only its increment (`sequence.dynamics.channels`), at most 26 channels.
 - **Compress (`compress: {svd: {...}}`).** The component columns of the block (every window) feed an svd block
   `{block}_svd` — `rank`, `center`, `standardize`, `outputs` and its own `fit` (static by default, `mode: forward` to
-  walk forward) as for `type: svd` — whose scores `{block}_svd_<k>` are emitted instead of the components; `keep: true`
-  emits the components too.
+  walk forward) as for `type: svd`, and no other key — whose scores `{block}_svd_<k>` are emitted instead of the
+  components; `keep: true` emits the components too.
 - **Diagnostics**: a block uses either `ops` or `lift` + `summarize` (`sequence.form`); `summarize` needs
   `dynamics` (`sequence.summarize`) with `family: lti | bilinear` (`sequence.dynamics.family`) — lti a `measure`
   (`sequence.dynamics.measure`), bilinear `type: logsignature` (`sequence.dynamics.type`) and a `depth`
