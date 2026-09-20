@@ -307,9 +307,10 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   history holds only the contests the window shift still keeps back. The columns are *pooled*: their stage key is
   not the entity but the reduced filter field alone (`stageKeys`, empty = the global key — hint
   `sequence.rating.globalKey` instead of `encoding.globalKey`, whose advice does not apply), and the entity's
-  `minInterval` never absorbs the shift (other players' contests fall inside it). Within a contest every change is
-  computed from the pre-contest ratings over the entries sorted by player, so the row order inside a timestamp —
-  which the sorter does not fix — cannot reach the output. The scan path (`Rating.replay` over the visible window)
+  `minInterval` never absorbs the shift (other players' contests fall inside it). The row order inside a timestamp —
+  which the sorter does not fix — cannot reach the output: within a contest every change is computed from the
+  pre-contest ratings over the entries sorted by player, and the contests of one event time are applied in
+  context-key order (two of them may share a player). The scan path (`Rating.replay` over the visible window)
   is the reference `RatingTest` compares the running state with, bit for bit, over trimmed and untrimmed histories.
 - **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
   into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored

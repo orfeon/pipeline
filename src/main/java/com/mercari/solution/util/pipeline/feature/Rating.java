@@ -2,11 +2,12 @@ package com.mercari.solution.util.pipeline.feature;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Sequential ratings from multi-player contests (the sequence {@code rating} op): every contest — the rows of one
@@ -24,6 +25,11 @@ import java.util.Map;
  * the update is order-independent: every change is computed from the pre-contest ratings over the entries sorted by
  * player, then applied. A player with several rows in one contest takes part once per row (its own rows are not
  * compared with each other in the pairwise methods) and receives the sum of their changes.
+ *
+ * <p>The row order the replay hands over is not fixed inside one event time (the sorter orders by event time alone),
+ * so the contests held at one event time are folded in the order of their context key, not the order their rows
+ * happen to arrive in: two contests of the same timestamp sharing a player would otherwise leave a different state
+ * per run.
  */
 public final class Rating implements Serializable {
 
@@ -83,9 +89,9 @@ public final class Rating implements Serializable {
         return method == Method.elo ? 1500d : 25d;
     }
 
-    /** The defaults that derive from the prior: {@code sigma = mu / 3}, {@code beta = sigma / 2}, {@code tau = sigma / 100}. */
+    /** The defaults that derive from the prior: {@code sigma = |mu| / 3}, {@code beta = sigma / 2}, {@code tau = sigma / 100}. */
     public static double defaultSigma(final double mu) {
-        return mu / 3d;
+        return Math.abs(mu) / 3d;
     }
 
     public static double defaultBeta(final double sigma) {
@@ -134,10 +140,11 @@ public final class Rating implements Serializable {
     /**
      * Folds the rows of ONE event time into the state: they are split into contests by the context keys (a row
      * without them, without a player or without a finite outcome takes no part), and every contest with at least two
-     * distinct players updates its players.
+     * distinct players updates its players. The contests are applied in context-key order so the arbitrary row order
+     * inside a timestamp cannot reach the state (two contests of one event time may share a player).
      */
     public void fold(final State state, final List<SequenceEvaluator.Past> run) {
-        final Map<String, List<Entry>> contests = new LinkedHashMap<>();
+        final Map<String, List<Entry>> contests = new TreeMap<>();
         for (final SequenceEvaluator.Past p : run) {
             final String contest = FeatureValues.key(p.values(), contestKeys);
             final String player = player(p.values());
@@ -166,7 +173,8 @@ public final class Rating implements Serializable {
         final List<Entry> entries = new ArrayList<>(contest);
         entries.sort(Comparator.comparing(Entry::player).thenComparingDouble(Entry::outcome));
         final int n = entries.size();
-        if (entries.stream().map(Entry::player).distinct().count() < 2) return;
+        // a contest needs two distinct players; the entries are sorted by player, so the ends decide it
+        if (n < 2 || entries.get(0).player().equals(entries.get(n - 1).player())) return;
 
         // pre-contest ratings per entry (the variance already carries the drift)
         final double[] m = new double[n], v = new double[n];
@@ -177,7 +185,7 @@ public final class Rating implements Serializable {
             v[i] = s * s + tau * tau;
         }
         final double[] dMu = new double[n], shrink = new double[n];
-        java.util.Arrays.fill(shrink, 1d);
+        Arrays.fill(shrink, 1d);
         switch (method) {
             case elo -> elo(entries, m, dMu);
             case bradleyTerry -> bradleyTerry(entries, m, v, dMu, shrink);

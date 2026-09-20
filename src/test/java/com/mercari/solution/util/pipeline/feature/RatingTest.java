@@ -181,6 +181,49 @@ public class RatingTest {
         }
     }
 
+    private static SequenceEvaluator.Past past(final String contest, final String player, final double outcome) {
+        final Map<String, Object> values = new HashMap<>();
+        values.put("c", contest);
+        values.put("p", player);
+        values.put("y", outcome);
+        return new SequenceEvaluator.Past(1_000L, values);
+    }
+
+    /**
+     * Several contests may share one event time, and the replay does not fix the row order inside a timestamp: they
+     * are folded in context-key order, so a player taking part in two of them ends at the same rating every run.
+     */
+    @Test
+    public void testContestsOfOneTimeAreFoldedInKeyOrder() {
+        final Rating rating = rating(Rating.Method.plackettLuce, true, null);
+        // the two contests do not commute: a meets b in one and c in the other, from whatever rating the first left
+        final Rating.State first = new Rating.State(), second = new Rating.State();
+        rating.update(first, List.of(entry("a", 1), entry("b", 2)));
+        rating.update(first, List.of(entry("a", 1), entry("c", 2)));
+        rating.update(second, List.of(entry("a", 1), entry("c", 2)));
+        rating.update(second, List.of(entry("a", 1), entry("b", 2)));
+        Assertions.assertNotEquals(rating.read(first, "b", "mu"), rating.read(second, "b", "mu"));
+
+        final List<SequenceEvaluator.Past> run = List.of(
+                past("c1", "a", 1), past("c1", "b", 2), past("c2", "a", 1), past("c2", "c", 2));
+        final Rating.State reference = new Rating.State();
+        rating.fold(reference, run);
+        final Random random = new Random(29);
+        for (int i = 0; i < 20; i++) {
+            final List<SequenceEvaluator.Past> shuffled = new ArrayList<>(run);
+            Collections.shuffle(shuffled, random);
+            final Rating.State other = new Rating.State();
+            rating.fold(other, shuffled);
+            for (final String player : List.of("a", "b", "c")) {
+                final String key = rating.player(Map.of("p", player));
+                Assertions.assertEquals(rating.read(reference, key, "mu"), rating.read(other, key, "mu"), player);
+                Assertions.assertEquals(rating.read(reference, key, "sigma"), rating.read(other, key, "sigma"), player);
+            }
+        }
+        // c1 sorts before c2: the key order, not the row order
+        Assertions.assertEquals(rating.read(first, "b", "mu"), rating.read(reference, rating.player(Map.of("p", "b")), "mu"));
+    }
+
     @Test
     public void testCompile() {
         final FeaturePlan plan = compile(SPEC);
@@ -243,6 +286,9 @@ public class RatingTest {
         cases.put("      - {type: rating, field: final_price, context: session, sigma: -1}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: final_price, context: session, mu: 0}", "sequence.rating.parameter");
         cases.put("      - {type: rating, field: category, context: session}", "sequence.op.type");
+        // two ops of one block on the same segment with different parameters: they would share one running state
+        cases.put("      - {type: rating, field: final_price, context: session, funcs: [mu]}\n"
+                + "      - {type: rating, field: final_price, context: session, method: elo, funcs: [count]}", "sequence.rating.as");
         for (final Map.Entry<String, String> e : cases.entrySet()) {
             final FeaturePlan plan = compile(SPEC.replace(op, e.getKey()));
             Assertions.assertTrue(hasCode(plan, e.getValue()), () -> e.getKey() + "\n" + plan.describe());

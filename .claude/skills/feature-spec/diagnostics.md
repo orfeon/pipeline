@@ -184,6 +184,7 @@ not expand because another block failed).
 | `sequence.fracdiff.d` / `sequence.fracdiff.k` | error | `fracdiff` needs `d` in (0, 2]; `k` ≥ 2 |
 | `sequence.rating.context` / `.method` / `.order` / `.func` / `.parameter` | error | `rating` needs `context` (a `contexts[].name`); method is elo / bradleyTerry / plackettLuce; order ascending / descending; funcs mu / sigma / count / delta (`sigma` not under elo); `sigma` / `beta` / `tau` belong to the Bayesian methods, `kFactor` / `scale` to elo; `sigma` / `beta` / `kFactor` / `scale` > 0, `tau` ≥ 0 (declare `sigma` when `mu` is 0) |
 | `sequence.rating.window` | error | a rating reads every earlier contest of its pool: remove `maxAge` / `maxEvents` / the filter — only `filter: "f = $self.f"` on a pre-event field is accepted (independent pools); `tau` is what ages an old rating |
+| `sequence.rating.as` | error | two `rating` ops of one block resolve to the same column segment with different parameters (they would share one running state): give them different `as:` names |
 | `sequence.rating.globalKey` | hint | the rating stage replays every row under one key (one worker thread) — expected; split independent pools with a pre-event `$self` equality filter when the data has them |
 | `sequence.direction` / `features.direction` | error | `direction` is `past` (default) or `future`, on sequence blocks only |
 | `sequence.direction.maxAge` | error | a `direction: future` window needs `maxAge` (the label horizon) |

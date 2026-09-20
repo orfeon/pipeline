@@ -6,6 +6,7 @@ import com.mercari.solution.module.IllegalModuleException;
 import com.mercari.solution.module.MCollection;
 import com.mercari.solution.module.MElement;
 import com.mercari.solution.module.Schema;
+import com.mercari.solution.util.pipeline.feature.Rating;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -2807,11 +2808,11 @@ public class FeatureTransformTest {
         Assertions.assertEquals("windowShift", output.getSchema().getField("f_skill_all_pl_mu").getOptions().get("feature.status"));
         PAssert.that(output.getCollection()).satisfies(rows -> {
             // the second contest, from the ratings the first one left (the update rules themselves: RatingTest)
-            final com.mercari.solution.util.pipeline.feature.Rating pl = com.mercari.solution.util.pipeline.feature.Rating.of(
-                    com.mercari.solution.util.pipeline.feature.Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of(), List.of(), "y");
-            final com.mercari.solution.util.pipeline.feature.Rating.State state = new com.mercari.solution.util.pipeline.feature.Rating.State();
-            pl.update(state, List.of(new com.mercari.solution.util.pipeline.feature.Rating.Entry("s1", 150), new com.mercari.solution.util.pipeline.feature.Rating.Entry("s2", 0)));
-            pl.update(state, List.of(new com.mercari.solution.util.pipeline.feature.Rating.Entry("s1", 95), new com.mercari.solution.util.pipeline.feature.Rating.Entry("s2", 72)));
+            final Rating pl = Rating.of(
+                    Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of(), List.of(), "y");
+            final Rating.State state = new Rating.State();
+            pl.update(state, List.of(new Rating.Entry("s1", 150), new Rating.Entry("s2", 0)));
+            pl.update(state, List.of(new Rating.Entry("s1", 95), new Rating.Entry("s2", 72)));
             final double plMuD = (Double) pl.read(state, "s1", "mu"), plSigmaD = (Double) pl.read(state, "s1", "sigma");
             // elo at D: 1516 beat 1484 with the expected score 1 / (1 + 10^(-32 / 400))
             final double eloDeltaD = 32d * (1d - 1d / (1d + Math.pow(10d, -32d / 400d)));

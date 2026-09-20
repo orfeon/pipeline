@@ -332,12 +332,14 @@ more than beating weak ones, which no per-entity aggregate of the outcome can ex
   into independent pools, split them with `windows: [{filter: "category = $self.category"}]` on a pre-event
   field — it becomes the partition key and each pool is replayed on its own. Nothing else is a window here: an
   update cannot be taken back, so `maxAge` / `maxEvents` / any other filter are rejected
-  (`sequence.rating.window`); `tau` is what ages an old rating. Within a contest the update does not depend on
-  the row order.
+  (`sequence.rating.window`); `tau` is what ages an old rating. The result never depends on the row order: within
+  a contest the changes are computed from the pre-contest ratings, and the contests held at one event time are
+  applied in the order of their context key.
 - Diagnostics: `sequence.rating.context`, `sequence.rating.method`, `sequence.rating.order`,
   `sequence.rating.func` (unknown, or `sigma` under elo), `sequence.rating.parameter` (a parameter of the other
   method family, a non-positive `sigma` / `beta` / `kFactor` / `scale`, a negative `tau`),
-  `sequence.rating.window`.
+  `sequence.rating.window`, `sequence.rating.as` (two rating ops of one block resolve to the same column
+  segment with different parameters — they would share one running state; name them apart with `as`).
 
 ### Static fits and artifacts (fit.mode static)
 

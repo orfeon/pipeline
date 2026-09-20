@@ -1118,8 +1118,11 @@ public final class FeaturePlanCompiler {
             final String reducedKey = reducibleFilterField(window, computeAt);
             final References filterRefs = window.filter == null || reducedKey != null ? null : expressionReferences(window.filter);
             if (reducedKey != null) {
+                // a rating is pooled: its stage key is the reduced field alone, the entity is not part of it
+                final boolean anyRating = def.ops.stream().anyMatch(o -> "rating".equals(o.type));
                 diagnostics.info("sequence.filter.reduced", loc,
-                        "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")");
+                        "window.filter '" + window.filter + "' is evaluated as an additional partition key (" + String.join(",", entity.keys()) + "," + reducedKey + ")"
+                                + (anyRating ? "; a rating op of this block is partitioned by (" + reducedKey + ") alone — its pool is every entity sharing that value" : ""));
             }
             if (form != null) {
                 expandDynamics(def, entity, window, filterRefs, reducedKey, form, computeAt);
@@ -1411,48 +1414,59 @@ public final class FeaturePlanCompiler {
         if (!valid) return;
 
         final double mu = op.mu != null ? op.mu : Rating.defaultMu(method);
-        final double sigma = op.sigma != null ? op.sigma : Rating.defaultSigma(Math.abs(mu));
+        final double sigma = op.sigma != null ? op.sigma : Rating.defaultSigma(mu);
         if (!elo && !(sigma > 0)) {
             diagnostics.error("sequence.rating.parameter", loc, "the default sigma is |mu| / 3: declare sigma when mu is 0");
             return;
         }
+        // the coordinates every readout column of this op shares: they define the one running state behind them
+        final Map<String, String> shared = new LinkedHashMap<>();
+        shared.put("method", methodName);
+        shared.put("order", op.order == null ? "ascending" : op.order);
+        shared.put("mu", Double.toString(mu));
+        if (elo) {
+            shared.put("kFactor", Double.toString(op.kFactor != null ? op.kFactor : Rating.DEFAULT_K_FACTOR));
+            shared.put("scale", Double.toString(op.scale != null ? op.scale : Rating.DEFAULT_SCALE));
+        } else {
+            shared.put("sigma", Double.toString(sigma));
+            shared.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
+            shared.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
+        }
+        shared.put("context", contest.name());
+        // what a past row brings to its contest: the outcome, the player and the contest it belongs to
+        shared.put("field", canonicalOf(field));
+        final List<String> playerKeys = new ArrayList<>(), contestKeys = new ArrayList<>();
+        for (final String key : entity.keys()) playerKeys.add(canonicalOf(key));
+        for (final String key : contest.keys()) contestKeys.add(canonicalOf(key));
+        shared.put("playerKeys", String.join(",", playerKeys));
+        shared.put("contestKeys", String.join(",", contestKeys));
+
         // `as` names the field segment; without it the op is part of the name (the outcome field may feed other ops)
         final String segment = op.as != null && singleField ? op.as : displayName(field) + "_rating";
         final String stateKey = def.name + "_" + window.token() + "_" + segment;
+        // the readout columns of one op share the running state under `stateKey`; two ops that resolve to the same
+        // segment with different parameters would silently share one replay whenever their funcs do not collide
+        final String previous = ratingStates.putIfAbsent(stateKey, shared.toString());
+        if (previous != null && !previous.equals(shared.toString())) {
+            diagnostics.error("sequence.rating.as", loc, "two rating ops of block '" + def.name + "' resolve to the same column segment '"
+                    + segment + "' with different parameters (" + previous + " vs " + shared + "): they would share one running state — name them apart with as:");
+            return;
+        }
         for (final String func : funcs) {
             final OutputColumn c = newColumn(def.name, Scope.sequence, "rating", stateKey + "_" + func,
                     "count".equals(func) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
             c.coordinates.put("func", func);
-            c.coordinates.put("method", methodName);
-            c.coordinates.put("order", op.order == null ? "ascending" : op.order);
-            c.coordinates.put("mu", Double.toString(mu));
-            if (elo) {
-                c.coordinates.put("kFactor", Double.toString(op.kFactor != null ? op.kFactor : Rating.DEFAULT_K_FACTOR));
-                c.coordinates.put("scale", Double.toString(op.scale != null ? op.scale : Rating.DEFAULT_SCALE));
-            } else {
-                c.coordinates.put("sigma", Double.toString(sigma));
-                c.coordinates.put("beta", Double.toString(op.beta != null ? op.beta : Rating.defaultBeta(sigma)));
-                c.coordinates.put("tau", Double.toString(op.tau != null ? op.tau : Rating.defaultTau(sigma)));
-            }
-            c.coordinates.put("context", contest.name());
+            c.coordinates.putAll(shared);
             c.coordinates.put("stateKey", stateKey);
-            // what a past row brings to its contest: the outcome, the player and the contest it belongs to
-            c.coordinates.put("field", canonicalOf(field));
             addPastInput(c, field);
-            final List<String> playerKeys = new ArrayList<>(), contestKeys = new ArrayList<>();
-            for (final String key : entity.keys()) {
-                playerKeys.add(canonicalOf(key));
-                addPastInput(c, key);
-            }
-            for (final String key : contest.keys()) {
-                contestKeys.add(canonicalOf(key));
-                addPastInput(c, key);
-            }
-            c.coordinates.put("playerKeys", String.join(",", playerKeys));
-            c.coordinates.put("contestKeys", String.join(",", contestKeys));
+            for (final String key : entity.keys()) addPastInput(c, key);
+            for (final String key : contest.keys()) addPastInput(c, key);
             finishSequence(c, def, entity, window, null, reducedKey, op, List.of(), true);
         }
     }
+
+    /** The rating ops already expanded, by their {@code stateKey}: the coordinates behind one running state. */
+    private final Map<String, String> ratingStates = new HashMap<>();
 
     /**
      * Upper bound on the component columns one general-form block emits: {@code lti} windows × halflifes × channels ×

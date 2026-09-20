@@ -134,8 +134,8 @@ reads what the compile layer wrote into each column's `coordinates`.
   the rows of ONE event time and splits them into contests by the context keys; `SequenceEvaluator.advanceRating`
   feeds it run by run from the fold pointer, `replay` is the scan reference. Its columns are *pooled*
   (`finishSequence(..., pooled = true)`: `stageKeys` = the reduced filter field alone, empty = global key; no
-  `minInterval`), and a contest is evaluated over entries sorted by player so the row order inside a timestamp
-  never reaches the output).
+  `minInterval`), and the row order inside a timestamp never reaches the output: a contest is evaluated over
+  entries sorted by player, and the contests of one event time are applied in context-key order).
 
 ### Evaluators (`Serializable`, Beam-free, one instance per stage DoFn)
 
