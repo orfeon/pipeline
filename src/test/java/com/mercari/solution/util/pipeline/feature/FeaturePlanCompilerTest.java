@@ -1287,6 +1287,53 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(withMains.replace("shrinkage: {scale: logit}", "shrinkage: {scale: logit, weights: heldOut}"))), "encoding.shrinkage.weights"));
     }
 
+    /**
+     * {@code structure: sequence}: the keys are a path declared most recent first, and the lattice is the chain of its
+     * suffixes — the same levels an explicit {@code hierarchy} of the shortened key lists declares.
+     */
+    @Test
+    public void testSequenceStructureDerivesTheSuffixChain() {
+        final String path = """
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [condition_grade, category, seller_id]
+                        structure: sequence
+                    targets:
+                      - {expr: "sold >= 1", stats: [mean]}
+                    shrinkage: {priorWeight: 2}
+            """;
+        final FeaturePlan derived = compile(SOURCES, withEncoding(path));
+        Assertions.assertFalse(derived.getDiagnostics().hasErrors(), derived::describe);
+        Assertions.assertTrue(hasCode(derived, "encoding.keySet.sequence"), derived::describe);
+        final FeaturePlan declared = compile(SOURCES, withEncoding(path.replace("structure: sequence", "hierarchy: [[condition_grade, category], [condition_grade], []]")));
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        final OutputColumn a = column(derived, "enc__condition_grade_category_seller_id__e1__mean"), b = column(declared, "enc__condition_grade_category_seller_id__e1__mean");
+        Assertions.assertEquals(b.getCoordinates().get("levels"), a.getCoordinates().get("levels"));
+        // one keyed stage per level of the chain, the global one included
+        for (final List<String> keys : List.of(List.of("condition_grade", "category", "seller_id"), List.of("condition_grade", "category"), List.of("condition_grade"), List.<String>of())) {
+            Assertions.assertTrue(indexOfStage(derived.getStages(), keys) >= 0, () -> keys + " in\n" + derived.describe());
+        }
+        // a path has at least two steps (an error, not the info of the same code); an unknown structure names the accepted ones
+        final FeaturePlan oneStep = compile(SOURCES, withEncoding(path.replace("[condition_grade, category, seller_id]", "[condition_grade]")));
+        Assertions.assertTrue(hasCode(oneStep, "encoding.keySet.sequence"), oneStep::describe);
+        Assertions.assertTrue(oneStep.getDiagnostics().hasErrors(), oneStep::describe);
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: tree"))), "encoding.keySet.structure"));
+        // the derivation is not silenced by a hierarchy key that declares nothing (a bare `hierarchy:` is JSON null)
+        for (final String empty : List.of("hierarchy:", "hierarchy: []")) {
+            final FeaturePlan plan = compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: sequence\n" + " ".repeat(12) + empty)));
+            Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+            Assertions.assertEquals(a.getCoordinates().get("levels"),
+                    column(plan, "enc__condition_grade_category_seller_id__e1__mean").getCoordinates().get("levels"), plan::describe);
+        }
+        // without shrinkage the chain is never composed: the same code warns instead of informing
+        final FeaturePlan unshrunk = compile(SOURCES, withEncoding(path.replace("\n" + " ".repeat(8) + "shrinkage: {priorWeight: 2}", "")));
+        Assertions.assertFalse(unshrunk.getDiagnostics().hasErrors(), unshrunk::describe);
+        Assertions.assertTrue(unshrunk.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("encoding.keySet.sequence") && m.level() == Diagnostics.Level.warning), unshrunk::describe);
+    }
+
     @Test
     public void testJointEstimatorCompilesToFitStageColumns() {
         final String joint = """

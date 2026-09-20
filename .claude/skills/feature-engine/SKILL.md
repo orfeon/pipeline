@@ -1,6 +1,6 @@
 ---
 name: feature-engine
-description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, quantileTransform, svd, and the backlog spectralEmbedding / transitionStats / structure sequence / nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
+description: Developing and maintaining the feature transform (util/pipeline/feature + module/transform/FeatureTransform) — the declarative feature-engineering DSL with availability-time leak checking, its pure compile layer (FeaturePlanCompiler / OperatorCatalog / FeaturePlan) and its Beam engine (FeatureStages — keyed replay, waves, static fits, KeyedSpillSorter). Use when adding or changing a row / context / sequence op, an encoding stat, a population type (encoding, factorization, discretize, quantileTransform, svd, key-set structures flat / hierarchy / cross / sequence, and the backlog spectralEmbedding / transitionStats / nested encoding), the shrinkage estimators (backoff / sequential / joint) and families, touching the stage scheduler, waves, the fan-out merge, FitApplyDoFn / artifacts, spill / history trimming, or the plan report (describe / toJson / audit); when a diagnostic code (encoding.globalKey, sequence.window.unbounded, population.unsupported, encoding.stat.static, input.reserved, availability.violation, reference.unresolved ...) or an engine message ("keyed spill sorter", "Fan-out merge", "RowId_Pin", "Wave1_Merge", "fit.mode static ... requires an existing artifact", "feature stage scheduling") needs explaining; or when measuring a feature-engine change on Dataflow / prism.
 ---
 
 # Feature transform engine
@@ -437,8 +437,10 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   row-local replay has no cell table), a moment-estimated λ for a shrunk `distribution` — extend `Shrinkage` +
   `expandEncoding`. (An `offset` on a logit / log scale is implemented: hidden `__sumoff` per level,
   `Shrinkage.Level.offColumn`, `KeyStats.sumOff`, info `encoding.offset.additive`.)
-- `structure: sequence` key sets, nested encoding targets (`targets[].field.ref`) —
-  `encoding.keySet.structure` / `encoding.nested`; ordering of fits is the open question.
+- nested encoding targets (`targets[].field.ref`) —
+  `encoding.nested`; ordering of fits is the open question. (`structure: sequence` is implemented: the keys are a
+  path declared most recent first and `expandEncoding` derives the suffix chain `(k1..kn) → (k1..kn−1) → … → (k1)` as
+  lattice levels — the same thing an explicit chain `hierarchy` declares, so the engine has no code of its own for it.)
 - `quantile` / `distribution` in static / fold (`encoding.stat.static`): a static fit keeps only
   (n, Σy, Σy²) per key; would need a per-key sketch artifact.
 - discretize `tree` / `optimal` (`discretize.method`): supervised, consumes a target — the spec ties

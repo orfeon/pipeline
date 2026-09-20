@@ -2862,8 +2862,16 @@ public final class FeaturePlanCompiler {
             levels.add(ks.keys);
             int additiveAt = -1;
             final String structure = ks.structure == null ? "flat" : ks.structure;
-            final JsonElement hierarchy = ks.hierarchyJson == null ? null : JsonParser.parseString(ks.hierarchyJson);
-            if (hierarchy != null && hierarchy.isJsonArray()) {
+            // "an explicit lattice was declared" = a non-empty hierarchy array. A null / empty / malformed one is
+            // NOT a declaration: it must not silence the derivation a `structure` asks for (a bare `hierarchy:` in
+            // YAML parses to JSON null, which is a non-null JsonElement)
+            final JsonElement declaredHierarchy = ks.hierarchyJson == null ? null : JsonParser.parseString(ks.hierarchyJson);
+            if (declaredHierarchy != null && !declaredHierarchy.isJsonNull() && !declaredHierarchy.isJsonArray()) {
+                diagnostics.error("encoding.hierarchy.entry", loc, "hierarchy must be a list of key lists, 'additive' or []: " + ks.hierarchyJson);
+            }
+            final JsonElement hierarchy = declaredHierarchy != null && declaredHierarchy.isJsonArray()
+                    && !declaredHierarchy.getAsJsonArray().isEmpty() ? declaredHierarchy : null;
+            if (hierarchy != null) {
                 for (final JsonElement entry : hierarchy.getAsJsonArray()) {
                     if (entry.isJsonPrimitive() && Shrinkage.ADDITIVE.equals(entry.getAsString())) {
                         if (additiveAt >= 0) diagnostics.error("encoding.hierarchy.additive", loc, "hierarchy may contain 'additive' once");
@@ -2895,7 +2903,28 @@ public final class FeaturePlanCompiler {
                         levels.add(List.of(Shrinkage.ADDITIVE));
                     }
                 }
-                default -> diagnostics.error("encoding.keySet.structure", loc, "structure must be flat | hierarchy | cross (sequence is v1): " + structure);
+                case "sequence" -> {
+                    // the keys are a path declared most recent first: the lattice backs off by forgetting the oldest
+                    // step, a chain of nested key lists like an explicit hierarchy (leave-node-out holds: the rows
+                    // of a path are rows of each of its suffixes)
+                    if (ks.keys.size() < 2) {
+                        diagnostics.error("encoding.keySet.sequence", loc, "structure: sequence requires at least two keys (a path, most recent first): " + ks.keys);
+                    } else if (hierarchy == null) {
+                        for (int n = ks.keys.size() - 1; n >= 1; n--) levels.add(List.copyOf(ks.keys.subList(0, n)));
+                        final String chain = String.join(" -> ", levels.stream().map(Object::toString).toList()) + " -> global";
+                        if (shrinkage.enabled) {
+                            diagnostics.info("encoding.keySet.sequence", loc, "structure: sequence on " + ks.keys + " (most recent first) shrinks along "
+                                    + chain + ": a row whose older keys are null or unseen reads its longest known suffix");
+                        } else {
+                            // the lattice is only composed for a shrunk statistic: without shrinkage the block emits the
+                            // raw full-path statistic and the back-off the structure asks for never happens
+                            diagnostics.warning("encoding.keySet.sequence", loc, "structure: sequence on " + ks.keys + " derives " + chain
+                                    + " but the block declares no shrinkage: the emitted statistic is the raw full-path value and a row whose path"
+                                    + " is unseen reads null; declare shrinkage (e.g. shrinkage: {priorWeight: 20}) to back off along the suffixes");
+                        }
+                    }
+                }
+                default -> diagnostics.error("encoding.keySet.structure", loc, "structure must be flat | hierarchy | cross | sequence: " + structure);
             }
             if (additiveAt >= 0) {
                 for (final String key : ks.keys) {

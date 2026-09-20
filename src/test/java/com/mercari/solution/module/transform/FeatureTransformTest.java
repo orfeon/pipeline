@@ -364,6 +364,63 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    private static final String PATH_BLOCKS = """
+                - name: grade
+                  scope: sequence
+                  entity: seller
+                  ops:
+                    - {type: lag, field: condition_grade, k: 2}
+                - name: path
+                  scope: population
+                  type: encoding
+                  keySets:
+                    - keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2]
+                      structure: sequence
+                  targets:
+                    - {field: sold, stats: [mean]}
+                  shrinkage: {priorWeight: 1}
+            """.replaceAll("(?m)^", "    ");
+
+    /**
+     * {@code structure: sequence}: the sale rate given the last two condition grades of the seller (most recent first),
+     * backing off to the last grade alone and then to the global rate. The grades of s1 run good, good, fair, good;
+     * those of s2 fair, good. No row has seen its own two-step path before, so every value is its longest known suffix —
+     * and the derived lattice equals the explicit hierarchy of the shortened key list, row for row.
+     */
+    @Test
+    public void testSequenceStructure() throws java.io.IOException {
+        final String derived = FEATURE_CONFIG.replace("      output:\n", PATH_BLOCKS + "      output:\n");
+        final String declared = derived.replace("structure: sequence", "hierarchy: [[grade_all_condition_grade_lag1], []]")
+                .replace("name: features", "name: declared").replace("transforms:\n", "");
+        Assertions.assertNotEquals(derived, declared);
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + derived + declared));
+        final String column = "f_path__grade_all_condition_grade_lag1_grade_all_condition_grade_lag2__sold__mean";
+        Assertions.assertNotNull(outputs.get("features").getSchema().getField(column), () -> outputs.get("features").getSchema().getFields().toString());
+        final PCollection<KV<String, String>> a = outputs.get("features").getCollection().apply("TagDerived", ParDo.of(new TagDoFn("derived")));
+        final PCollection<KV<String, String>> b = outputs.get("declared").getCollection().apply("TagDeclared", ParDo.of(new TagDoFn("declared")));
+        PAssert.that(PCollectionList.of(a).and(b).apply(Flatten.pCollections())).satisfies(kvs -> {
+            final Set<String> first = new HashSet<>(), second = new HashSet<>();
+            for (final KV<String, String> kv : kvs) (kv.getKey().equals("derived") ? first : second).add(kv.getValue());
+            Assertions.assertEquals(6, first.size());
+            Assertions.assertEquals(second, first);
+            return null;
+        });
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            // Jan 3: no outcome has reached the system yet
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue(column));
+            // Jan 20, s1 (good, good): the path is new; after "good" came B/s1 (not sold): 1/3 + 1/2 · (0 − 1/3) = 1/6
+            Assertions.assertEquals(1.0 / 6.0, byKey.get("C/s1").getAsDouble(column), 1e-9);
+            // Jan 20, s2 (fair, –): no second step and nothing seen after "fair" yet: the global rate 1/3
+            Assertions.assertEquals(1.0 / 3.0, byKey.get("C/s2").getAsDouble(column), 1e-9);
+            // Feb 1, s1 (fair, good): new path; after "fair" came C/s2 (sold): 3/5 + 1/2 · (1 − 3/5) = 0.8
+            Assertions.assertEquals(0.8, byKey.get("D/s1").getAsDouble(column), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
     @Test
     public void testVarianceComponents() throws java.io.IOException {
         // seller means [3/4, 1/2] are closer than the within-seller noise: τ² truncates to 0 → λ = ∞ → full shrinkage,

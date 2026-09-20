@@ -691,7 +691,7 @@ roughly linear in the input).
 
 **Deferred (parsed, rejected with a diagnostic)**: `weights: heldOut`,
 `estimator: joint` under `fit.mode: expanding` (row-local replay cannot hold the cell table), a variance-components
-λ for a shrunk `distribution`; `structure: sequence`; nested encoding targets;
+λ for a shrunk `distribution`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
 consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
 types: they need the per-entity value sequence, i.e. a keyed pass before the fit); the general sequence
