@@ -3,8 +3,6 @@ package com.mercari.solution.util.pipeline.feature;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,7 +23,7 @@ import java.util.Map;
  * fit and maps to null scores. A fit with fewer than two vectors has no components and maps every vector to null
  * (the artifact is still written).
  */
-public final class Svd implements Serializable {
+public final class Svd implements Serializable, FitArtifact.Model {
 
     private static final Logger LOG = LoggerFactory.getLogger(Svd.class);
 
@@ -59,8 +57,14 @@ public final class Svd implements Serializable {
     }
 
     /** Whether the fit had no components (fewer than two vectors): every vector maps to null scores. */
+    @Override
     public boolean isEmpty() {
         return components.length == 0;
+    }
+
+    @Override
+    public String describe() {
+        return "dimension " + dimension + ", rank " + rank() + ", n=" + n;
     }
 
     /**
@@ -229,10 +233,8 @@ public final class Svd implements Serializable {
         for (int r = 0; r < k; r++) {
             components[r] = eigen[r + 1].clone();
             variances[r] = Math.max(0, eigen[0][r]);
-            // deterministic orientation: the largest-magnitude loading is positive
-            int arg = 0;
-            for (int i = 1; i < d; i++) if (Math.abs(components[r][i]) > Math.abs(components[r][arg])) arg = i;
-            if (components[r][arg] < 0) for (int i = 0; i < d; i++) components[r][i] = -components[r][i];
+            final double sign = sign(components[r]);
+            if (sign < 0) for (int i = 0; i < d; i++) components[r][i] = -components[r][i];
         }
         return new Svd(d, mean, scale, components, variances, trace, m.n);
     }
@@ -244,10 +246,28 @@ public final class Svd implements Serializable {
     }
 
     /**
-     * Cyclic Jacobi eigendecomposition of a symmetric matrix: returns {@code [eigenvalues, v_0, v_1, ...]} with the
-     * eigenvalues sorted in decreasing order and {@code v_r} the corresponding unit eigenvector (a row).
+     * The sign that orients an eigenvector deterministically: {@code +1} when its largest-magnitude loading is already
+     * positive, {@code -1} otherwise (the first loading on a tie). Multiplying by it makes a re-fit on the same data
+     * reproduce the columns — {@link #fit} negates the vector, {@link Spectral#fit} folds the sign into its scale.
      */
+    static double sign(final double[] vector) {
+        int arg = 0;
+        for (int i = 1; i < vector.length; i++) if (Math.abs(vector[i]) > Math.abs(vector[arg])) arg = i;
+        return vector[arg] < 0 ? -1 : 1;
+    }
+
+    /** {@link #jacobi(double[][], boolean)} ordered by eigenvalue (the covariance case: every one is non-negative). */
     static double[][] jacobi(final double[][] input) {
+        return jacobi(input, false);
+    }
+
+    /**
+     * Cyclic Jacobi eigendecomposition of a symmetric matrix: returns {@code [eigenvalues, v_0, v_1, ...]} with
+     * {@code v_r} the unit eigenvector (a row) of the {@code r}th eigenvalue, sorted in decreasing order — or by
+     * decreasing magnitude when {@code byMagnitude}, which is the order of the singular values of a matrix that is
+     * not definite (the PPMI matrix of {@link Spectral}).
+     */
+    static double[][] jacobi(final double[][] input, final boolean byMagnitude) {
         final int d = input.length;
         final double[][] a = new double[d][];
         for (int i = 0; i < d; i++) a[i] = input[i].clone();
@@ -287,7 +307,7 @@ public final class Svd implements Serializable {
         }
         final Integer[] order = new Integer[d];
         for (int i = 0; i < d; i++) order[i] = i;
-        Arrays.sort(order, (x, y) -> Double.compare(a[y][y], a[x][x]));
+        Arrays.sort(order, (x, y) -> Double.compare(byMagnitude ? Math.abs(a[y][y]) : a[y][y], byMagnitude ? Math.abs(a[x][x]) : a[x][x]));
         final double[][] out = new double[d + 1][];
         out[0] = new double[d];
         for (int r = 0; r < d; r++) {
@@ -336,13 +356,8 @@ public final class Svd implements Serializable {
     // artifact
     // ------------------------------------------------------------------------------------------
 
-    public static String artifactPath(final String artifactUri, final String planHash, final String block) {
-        return FitArtifact.directory(artifactUri, planHash) + "/" + block + ".svd.json";
-    }
-
-    public static boolean exists(final String artifactUri, final String planHash, final String block) {
-        return ResourceUtil.exists(artifactPath(artifactUri, planHash, block));
-    }
+    public static final FitArtifact.Json<Svd> ARTIFACT = new FitArtifact.Json<>("svd", "svd", Svd::fromJson,
+            "the score columns", "on an input with at least two complete vectors");
 
     private static JsonArray array(final double[] values) {
         final JsonArray a = new JsonArray();
@@ -356,6 +371,7 @@ public final class Svd implements Serializable {
         return v;
     }
 
+    @Override
     public JsonObject toJson() {
         final JsonObject json = new JsonObject();
         json.addProperty("dimension", dimension);
@@ -379,25 +395,6 @@ public final class Svd implements Serializable {
         for (int r = 0; r < components.length; r++) components[r] = doubles(rows.get(r).getAsJsonArray());
         return new Svd(json.get("dimension").getAsInt(), doubles(json.getAsJsonArray("mean")), doubles(json.getAsJsonArray("scale")),
                 components, doubles(json.getAsJsonArray("variances")), json.get("totalVariance").getAsDouble(), n.getAsLong());
-    }
-
-    public static void write(final String artifactUri, final String planHash, final String block, final Svd svd) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final JsonObject json = FitArtifact.manifest(planHash, block);
-        for (final Map.Entry<String, JsonElement> e : svd.toJson().entrySet()) json.add(e.getKey(), e.getValue());
-        ResourceUtil.writeString(path, json.toString());
-        LOG.info("wrote svd artifact {} (dimension {}, rank {}, n={})", path, svd.dimension, svd.rank(), svd.n);
-    }
-
-    public static Svd read(final String artifactUri, final String planHash, final String block) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final Svd svd = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        if (svd.isEmpty()) {
-            LOG.warn("loaded svd artifact {} with no components (n={}): the score columns of block '{}' read null for every row; re-fit it on an input with at least two complete vectors (fit.artifact.refit: true)", path, svd.n, block);
-        } else {
-            LOG.info("loaded svd artifact {} (dimension {}, rank {}, n={})", path, svd.dimension, svd.rank(), svd.n);
-        }
-        return svd;
     }
 
 }

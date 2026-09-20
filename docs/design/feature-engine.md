@@ -1148,6 +1148,24 @@ recorded in §9.2). A block that fits an empty input too (quantileTransform: n =
 empty marker part so its group exists. fm, discretize and the joint estimator keep their own chains: fm and joint
 have no summary state, discretize gathers the same values as the quantile transform and can join its family.
 
+**One fit geometry, four types: `ForwardFitBlock`.** svd, quantileTransform, smooth and spectralEmbedding differ only
+in what a row contributes, how a state becomes a model and which columns it fills; the geometry around that is the
+same for all of them, so it is declared once. A `ForwardFitBlock<T, S, M>` (a `SummaryFitBlock` whose model is
+`ForwardModel<M>` = total + byBlock + observed) asks for `artifact()`, `forward()`, `predictOffsetMillis()` and
+`fit(state, loud)` and supplies the rest: `artifactPath` / `artifactExists` / `readArtifact` from its
+`FitArtifact.Json`, the `solve` that fits the whole input (a static fit is one block, fitted as it stands — a fit
+reads the state and keeps nothing) plus one model per change point and writes the artifact once, the `modelFor`
+lookup a row does (`toEpochMillis` → `usableBlock` → `BlockSeries.lookup`) and the `timeBlock(row)` a contribution
+is keyed by. `loud` is the whole-input fit, which reports what it fitted; a per-change-point fit is quiet because an
+empty or short window at a leave point is normal. Two hooks cover the exceptions: `adopt(model)` (quantileTransform
+takes the config's clip, not the artifact's) and `prepare` / `extractionViews` (below).
+
+**One JSON artifact, four types: `FitArtifact.Json`.** The same four persist their model as
+`<planHash>/<block>.<extension>.json` — the manifest header plus the model's own members. `FitArtifact.Json<T>`
+holds the path, the existence check, the write and the read with its "nothing was fitted" warning; a model class
+implements `FitArtifact.Model` (`isEmpty` / `describe` / `toJson`) and declares one constant naming the extension,
+how JSON becomes a model, which columns read null when it is empty and what to re-fit on (`Svd.ARTIFACT`).
+
 **A state that must be bounded before it accumulates.** Every other summary state is bounded by its declaration (a
 d×d matrix, 8 bytes per row); the co-occurrence counts of `spectralEmbedding` are quadratic in the *values* they
 hold, so a high-cardinality field dies in the accumulator long before `maxValues` is consulted in the solve. A block

@@ -3,8 +3,6 @@ package com.mercari.solution.util.pipeline.feature;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.mercari.solution.util.domain.file.ResourceUtil;
 import com.mercari.solution.util.domain.math.NormalDistribution;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +28,7 @@ import java.util.Map;
  * ties do not depend on the search direction. Missing (null / NaN) maps to null. A fit that saw no value (n = 0)
  * maps everything to null and is still written as an artifact.
  */
-public final class QuantileTransform implements Serializable {
+public final class QuantileTransform implements Serializable, FitArtifact.Model {
 
     private static final Logger LOG = LoggerFactory.getLogger(QuantileTransform.class);
 
@@ -156,8 +154,14 @@ public final class QuantileTransform implements Serializable {
     }
 
     /** Whether the fit saw no value: every value maps to null (a serving config loading such an artifact reads null everywhere). */
+    @Override
     public boolean isEmpty() {
         return n == 0;
+    }
+
+    @Override
+    public String describe() {
+        return knots.length + " knots, n=" + n;
     }
 
     /**
@@ -211,14 +215,10 @@ public final class QuantileTransform implements Serializable {
     // artifact
     // ------------------------------------------------------------------------------------------
 
-    public static String artifactPath(final String artifactUri, final String planHash, final String block) {
-        return FitArtifact.directory(artifactUri, planHash) + "/" + block + ".quantiles.json";
-    }
+    public static final FitArtifact.Json<QuantileTransform> ARTIFACT = new FitArtifact.Json<>("quantile transform", "quantiles",
+            QuantileTransform::fromJson, "the column", "on an input that has values");
 
-    public static boolean exists(final String artifactUri, final String planHash, final String block) {
-        return ResourceUtil.exists(artifactPath(artifactUri, planHash, block));
-    }
-
+    @Override
     public JsonObject toJson() {
         final JsonObject json = new JsonObject();
         final JsonArray array = new JsonArray();
@@ -241,25 +241,6 @@ public final class QuantileTransform implements Serializable {
         final JsonElement clip = json.get("clip");
         return new QuantileTransform(knots, n.getAsLong(), distribution == null ? UNIFORM : distribution.getAsString(),
                 clip == null || !clip.isJsonPrimitive() ? DEFAULT_CLIP : clip.getAsDouble());
-    }
-
-    public static void write(final String artifactUri, final String planHash, final String block, final QuantileTransform q) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final JsonObject json = FitArtifact.manifest(planHash, block);
-        for (final Map.Entry<String, JsonElement> e : q.toJson().entrySet()) json.add(e.getKey(), e.getValue());
-        ResourceUtil.writeString(path, json.toString());
-        LOG.info("wrote quantile transform artifact {} ({} knots, n={})", path, q.knots.length, q.n);
-    }
-
-    public static QuantileTransform read(final String artifactUri, final String planHash, final String block) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final QuantileTransform q = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        if (q.isEmpty()) {
-            LOG.warn("loaded quantile transform artifact {} fitted on no value (n=0): column '{}' reads null for every row; re-fit it on an input that has values (fit.artifact.refit: true)", path, block);
-        } else {
-            LOG.info("loaded quantile transform artifact {} ({} knots, n={})", path, q.knots.length, q.n);
-        }
-        return q;
     }
 
 }

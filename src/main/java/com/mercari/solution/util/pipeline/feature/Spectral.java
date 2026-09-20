@@ -3,14 +3,11 @@ package com.mercari.solution.util.pipeline.feature;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +32,7 @@ import java.util.TreeMap;
  * holds; {@link #fit} applies the same cap to whatever state it is given, which is what a direct caller (a test, a
  * re-fit from a state) relies on.
  */
-public final class Spectral implements Serializable {
+public final class Spectral implements Serializable, FitArtifact.Model {
 
     private static final Logger LOG = LoggerFactory.getLogger(Spectral.class);
 
@@ -162,8 +159,14 @@ public final class Spectral implements Serializable {
         return eigenvalues.length;
     }
 
+    @Override
     public boolean isEmpty() {
         return eigenvalues.length == 0;
+    }
+
+    @Override
+    public String describe() {
+        return vocabulary.length + " values, rank " + rank() + ", " + pairs + " pairs";
     }
 
     /**
@@ -276,24 +279,15 @@ public final class Spectral implements Serializable {
                 if (c[i][j] > 0) ppmi[i][j] = Math.max(0, Math.log(c[i][j] * total / (rowSum[i] * rowSum[j])));
             }
         }
-        final double[][] eigen = Svd.jacobi(ppmi);
         // the symmetric factorisation keeps the components of largest |eigenvalue| (the singular values of the matrix)
-        final Integer[] order = new Integer[v];
-        for (int i = 0; i < v; i++) order[i] = i;
-        Arrays.sort(order, (x, y) -> {
-            final int byMagnitude = Double.compare(Math.abs(eigen[0][y]), Math.abs(eigen[0][x]));
-            return byMagnitude != 0 ? byMagnitude : Integer.compare(x, y);
-        });
+        final double[][] eigen = Svd.jacobi(ppmi, true);
         final int k = Math.min(rank, v);
         final double[][] embedding = new double[v][k];
         final double[] eigenvalues = new double[k];
         for (int r = 0; r < k; r++) {
-            final double[] vector = eigen[order[r] + 1];
-            eigenvalues[r] = eigen[0][order[r]];
-            // deterministic orientation: the largest-magnitude loading is positive (the first one on a tie)
-            int arg = 0;
-            for (int i = 1; i < v; i++) if (Math.abs(vector[i]) > Math.abs(vector[arg]) + 1e-12) arg = i;
-            final double scale = (vector[arg] < 0 ? -1 : 1) * Math.sqrt(Math.abs(eigenvalues[r]));
+            final double[] vector = eigen[r + 1];
+            eigenvalues[r] = eigen[0][r];
+            final double scale = Svd.sign(vector) * Math.sqrt(Math.abs(eigenvalues[r]));
             for (int i = 0; i < v; i++) embedding[i][r] = scale * vector[i];
         }
         return new Spectral(vocabulary, embedding, eigenvalues, state.pairs, dropped);
@@ -303,14 +297,10 @@ public final class Spectral implements Serializable {
     // artifact
     // ------------------------------------------------------------------------------------------
 
-    public static String artifactPath(final String artifactUri, final String planHash, final String block) {
-        return FitArtifact.directory(artifactUri, planHash) + "/" + block + ".spectral.json";
-    }
+    public static final FitArtifact.Json<Spectral> ARTIFACT = new FitArtifact.Json<>("spectralEmbedding", "spectral",
+            Spectral::fromJson, "the columns", "on an input with at least two co-occurring values");
 
-    public static boolean exists(final String artifactUri, final String planHash, final String block) {
-        return ResourceUtil.exists(artifactPath(artifactUri, planHash, block));
-    }
-
+    @Override
     public JsonObject toJson() {
         final JsonObject json = new JsonObject();
         json.addProperty("pairs", pairs);
@@ -358,25 +348,6 @@ public final class Spectral implements Serializable {
         final JsonElement element = json.get(name);
         if (element == null || !element.isJsonArray()) throw new IllegalStateException("spectralEmbedding artifact lacks the array '" + name + "': " + json);
         return element.getAsJsonArray();
-    }
-
-    public static void write(final String artifactUri, final String planHash, final String block, final Spectral spectral) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final JsonObject json = FitArtifact.manifest(planHash, block);
-        for (final Map.Entry<String, JsonElement> e : spectral.toJson().entrySet()) json.add(e.getKey(), e.getValue());
-        ResourceUtil.writeString(path, json.toString());
-        LOG.info("wrote spectralEmbedding artifact {} ({} values, rank {}, {} pairs)", path, spectral.vocabulary.length, spectral.rank(), spectral.pairs);
-    }
-
-    public static Spectral read(final String artifactUri, final String planHash, final String block) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final Spectral spectral = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        if (spectral.isEmpty()) {
-            LOG.warn("loaded spectralEmbedding artifact {} without an embedding ({} pairs): the columns of block '{}' read null for every row; re-fit it on an input with at least two co-occurring values (fit.artifact.refit: true)", path, spectral.pairs, block);
-        } else {
-            LOG.info("loaded spectralEmbedding artifact {} ({} values, rank {}, {} pairs)", path, spectral.vocabulary.length, spectral.rank(), spectral.pairs);
-        }
-        return spectral;
     }
 
 }

@@ -3,8 +3,6 @@ package com.mercari.solution.util.pipeline.feature;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.mercari.solution.util.domain.file.ResourceUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -33,7 +31,7 @@ import java.util.Map;
  * constants, so the mean is added back to every coefficient — exact, and a target with a large level costs no
  * digits), and the moments are read through their centred form, which does not depend on the accumulator's anchor.
  */
-public final class Smooth implements Serializable {
+public final class Smooth implements Serializable, FitArtifact.Model {
 
     private static final Logger LOG = LoggerFactory.getLogger(Smooth.class);
 
@@ -115,8 +113,14 @@ public final class Smooth implements Serializable {
         this.n = n;
     }
 
+    @Override
     public boolean isEmpty() {
         return coefficients.length == 0;
+    }
+
+    @Override
+    public String describe() {
+        return basis.size() + " basis functions, lambda = " + lambda + ", edf = " + edf + ", n=" + n;
     }
 
     /** The curve at a key (clamped into the range), or null for a missing key or an empty fit. */
@@ -354,14 +358,10 @@ public final class Smooth implements Serializable {
     // artifact
     // ------------------------------------------------------------------------------------------
 
-    public static String artifactPath(final String artifactUri, final String planHash, final String block) {
-        return FitArtifact.directory(artifactUri, planHash) + "/" + block + ".smooth.json";
-    }
+    public static final FitArtifact.Json<Smooth> ARTIFACT = new FitArtifact.Json<>("smooth", "smooth", Smooth::fromJson,
+            "the columns", "on an input with keys and targets");
 
-    public static boolean exists(final String artifactUri, final String planHash, final String block) {
-        return ResourceUtil.exists(artifactPath(artifactUri, planHash, block));
-    }
-
+    @Override
     public JsonObject toJson() {
         final JsonObject json = new JsonObject();
         json.addProperty("method", SPLINE);
@@ -392,25 +392,6 @@ public final class Smooth implements Serializable {
         return new Smooth(basis, json.get("penaltyOrder").getAsInt(), Double.parseDouble(json.get("lambda").getAsString()),
                 json.get("estimated").getAsBoolean(), coefficients, json.get("edf").getAsDouble(),
                 Double.parseDouble(json.get("sigma2").getAsString()), n.getAsLong());
-    }
-
-    public static void write(final String artifactUri, final String planHash, final String block, final Smooth smooth) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final JsonObject json = FitArtifact.manifest(planHash, block);
-        for (final Map.Entry<String, JsonElement> e : smooth.toJson().entrySet()) json.add(e.getKey(), e.getValue());
-        ResourceUtil.writeString(path, json.toString());
-        LOG.info("wrote smooth artifact {} ({} basis functions, λ = {}, edf = {}, n={})", path, smooth.basis.size(), smooth.lambda, smooth.edf, smooth.n);
-    }
-
-    public static Smooth read(final String artifactUri, final String planHash, final String block) {
-        final String path = artifactPath(artifactUri, planHash, block);
-        final Smooth smooth = fromJson(JsonParser.parseString(ResourceUtil.readString(path)).getAsJsonObject());
-        if (smooth.isEmpty()) {
-            LOG.warn("loaded smooth artifact {} without a curve (n={}): the columns of block '{}' read null for every row; re-fit it on an input with keys and targets (fit.artifact.refit: true)", path, smooth.n, block);
-        } else {
-            LOG.info("loaded smooth artifact {} ({} basis functions, λ = {}, edf = {}, n={})", path, smooth.basis.size(), smooth.lambda, smooth.edf, smooth.n);
-        }
-        return smooth;
     }
 
 }

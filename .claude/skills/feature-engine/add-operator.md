@@ -115,7 +115,7 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
      block declares no mode of its own), `blocks` / `minBlocks` / `minHistory` / `window` are
      read into the spec, and the columns get the forward coordinates via `forwardCoordinates(c, null,
      inputs, def, fitSpec)` plus `predictOffsetMillis` — the engine side is a `BlockSeries<S>` fitted per
-     change point (`SvdSpec` as a `SummaryFitBlock` — `contribution` / `solve` — is the template);
+     change point (`SvdSpec` as a `ForwardFitBlock` — `contribution` / `fit` — is the template);
    - `diagnostics.info("fit.mode.static", loc, ...)` including `artifactPhrase(fitSpec)` and the
      outcome-like caveat when the input is an outcome;
    - `newColumn(...)`, `c.fitted = true`, coordinates `fit=static`, the parameters, `field`,
@@ -132,7 +132,13 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    (svd's moments, quantileTransform's values) implement `SummaryFitBlock<T, S, M>` instead of `fit`:
    `family()` / `familyName()` / `stateClass()` / `contributionCoder()`, `contribution(row)` → (time
    block — 0 under static —, value) or null, `solve(parts, planHash)` (merge the per-time-block states
-   through a `BlockSeries`, fit, write the artifact) and `fitsEmptyInput()`. The stage then fits every
+   through a `BlockSeries`, fit, write the artifact) and `fitsEmptyInput()`. **When the model is solved from
+   the state and persisted as JSON** (svd / quantileTransform / smooth / spectralEmbedding), implement
+   `ForwardFitBlock<T, S, M>` rather than spelling that out: declare `artifact()` (a `FitArtifact.Json`
+   constant on the model class, which implements `FitArtifact.Model` = `isEmpty` / `describe` / `toJson`),
+   `forward()`, `predictOffsetMillis()` and `fit(state, loud)` — and the artifact path / existence / read, the
+   whole-input-plus-change-point `solve`, the `modelFor(model, values)` lookup and `timeBlock(row)` come with
+   it (`adopt(model)` is the hook for a parameter the artifact must not fix, e.g. the quantile clip). The stage then fits every
    such block together — one extraction pass and one `Combine.perKey` per family, one side input for
    all models (`fitSummaryBlocks`) — so a dozen blocks do not become a dozen chains. **When the state is
    only bounded once something of the input is known** (spectralEmbedding: the pair counts are quadratic in

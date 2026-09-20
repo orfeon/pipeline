@@ -948,6 +948,97 @@ public final class FeatureStages {
         }
     }
 
+    /**
+     * The model of a block fitted over time blocks: the whole-input fit ({@code total}, what the artifact holds) and,
+     * under {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed
+     * blocks (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
+     */
+    record ForwardModel<M extends Serializable>(M total, TreeMap<Long, M> byBlock, TreeSet<Long> observed) implements Serializable {}
+
+    /**
+     * A {@link SummaryFitBlock} whose model is solved from the state and persisted as its own JSON artifact — every
+     * population type outside the encoding lattice (svd, quantileTransform, smooth, spectralEmbedding). They differ
+     * only in what a row contributes, how a state becomes a model and which columns it fills; the fit geometry is the
+     * same for all of them and lives here: the whole-input fit plus one per change point under {@code forward}, the
+     * artifact written once, and the lookup a row does ({@link #modelFor}).
+     *
+     * @param <T> a row's contribution
+     * @param <S> the summary state
+     * @param <M> the solved model
+     */
+    interface ForwardFitBlock<T, S extends Serializable, M extends Serializable & FitArtifact.Model> extends SummaryFitBlock<T, S, ForwardModel<M>> {
+        /** How this model class is named, stored and reported ({@link FitArtifact.Json}). */
+        FitArtifact.Json<M> artifact();
+        /** The forward geometry, or null for a static fit. */
+        Forward forward();
+        long predictOffsetMillis();
+
+        /**
+         * The model of one state. {@code loud} is the whole-input fit — the one that reports what it fitted; a
+         * per-change-point fit is quiet, because an empty or short window at a leave point is normal.
+         */
+        M fit(S state, boolean loud);
+
+        /** The loaded model as this block will apply it (quantileTransform takes the config's clip, not the artifact's). */
+        default M adopt(final M model) {
+            return model;
+        }
+
+        @Override
+        default String artifactPath(final String planHash) {
+            return artifact().path(artifactUri(), planHash, block());
+        }
+
+        /** A forward fit is always re-fitted: the artifact holds the whole-input model only, for a static serving run. */
+        @Override
+        default boolean artifactExists(final String planHash) {
+            return forward() == null && artifact().exists(artifactUri(), planHash, block());
+        }
+
+        @Override
+        default ForwardModel<M> readArtifact(final String planHash) {
+            return new ForwardModel<>(adopt(artifact().read(artifactUri(), planHash, block())), null, null);
+        }
+
+        /**
+         * Solves the per-time-block states on one worker: the whole-input model (a static fit is a single block, whose
+         * state is fitted as it stands — a fit reads the state and keeps nothing) and, under forward, one model per
+         * change point. The artifact is written once even under forward, which re-fits every run.
+         */
+        @Override
+        default ForwardModel<M> solve(final Map<Long, S> parts, final String planHash) {
+            final BlockSeries<S> series = new BlockSeries<>(family(), parts);
+            final S all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
+            final M total = fit(all == null ? family().create() : all, true);
+            TreeMap<Long, M> byBlock = null;
+            if (forward() != null) {
+                byBlock = series.models(forward().windowBlocks(), state -> fit(state, false));
+                LOG.info("{} {}: forward fit over {} block(s), {} change point(s)", artifact().name(), block(), parts.size(), byBlock.size());
+            }
+            if (artifactUri() != null && (refit() || !artifact().exists(artifactUri(), planHash, block()))) {
+                artifact().write(artifactUri(), planHash, block(), total);
+            }
+            return new ForwardModel<>(total, byBlock, forward() == null ? null : series.observed());
+        }
+
+        /** The model a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
+        default M modelFor(final ForwardModel<M> model, final Map<String, Object> values) {
+            if (model == null) return null;
+            if (forward() == null) return model.total();
+            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward().blockField()), forward().blockFieldType());
+            if (eventMillis == null) return null;
+            final long usable = forward().blocks().usableBlock(eventMillis, predictOffsetMillis(), forward().lagMillis());
+            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward().minBlocks());
+        }
+
+        /** The row's time block: 0 under a static fit, the block of its event time under forward (null = no contribution). */
+        default Long timeBlock(final Map<String, Object> row) {
+            if (forward() == null) return 0L;
+            final Long millis = FeatureValues.toEpochMillis(row.get(forward().blockField()), forward().blockFieldType());
+            return millis == null ? null : forward().blocks().indexOf(millis);
+        }
+    }
+
     /** The time-block key of the marker that keeps a block's group alive on an input without contributions. */
     private static final long EMPTY_MARKER = Long.MIN_VALUE;
 
@@ -1307,36 +1398,23 @@ public final class FeatureStages {
     // --- quantileTransform ---------------------------------------------------------------------------
 
     /**
-     * The fitted quantile transform of a block: the whole-input knots ({@code total}, what the artifact holds) and,
-     * under {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed
-     * blocks (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
-     */
-    record QuantileModel(QuantileTransform total, TreeMap<Long, QuantileTransform> byBlock, TreeSet<Long> observed) implements Serializable {}
-
-    /**
      * One quantileTransform block of a fit stage, rebuilt from its column's coordinates. The fit state is the values
      * themselves ({@link QuantileTransform#VALUES}, exact), gathered per time block — one block for a static fit.
      */
     record QuantileTransformSpec(String block, String column, String field, int bins, String distribution, double clip,
-                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis) implements SummaryFitBlock<Double, QuantileTransform.Values, QuantileModel> {
+                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis) implements ForwardFitBlock<Double, QuantileTransform.Values, QuantileTransform> {
         @Override
-        public String artifactPath(final String planHash) {
-            return QuantileTransform.artifactPath(artifactUri, planHash, block);
+        public FitArtifact.Json<QuantileTransform> artifact() {
+            return QuantileTransform.ARTIFACT;
         }
 
-        /** A forward fit is always re-fitted (the artifact holds the whole-input knots only, for a static serving run). */
+        /** The clamp is an apply-time parameter: a loaded artifact takes the clip of the config that applies it. */
         @Override
-        public boolean artifactExists(final String planHash) {
-            return forward == null && QuantileTransform.exists(artifactUri, planHash, block);
-        }
-
-        @Override
-        public QuantileModel readArtifact(final String planHash) {
-            final QuantileTransform q = QuantileTransform.read(artifactUri, planHash, block);
+        public QuantileTransform adopt(final QuantileTransform q) {
             if (q.clip != clip) {
                 LOG.info("quantileTransform {}: the artifact was written with clip {}; applying the config's clip {}", block, q.clip, clip);
             }
-            return new QuantileModel(q.withClip(clip), null, null);
+            return q.withClip(clip);
         }
 
         @Override
@@ -1364,18 +1442,13 @@ public final class FeatureStages {
             return DoubleCoder.of();
         }
 
-        /** The row's non-null value: time block 0 for a static fit, the row's time block under forward. */
+        /** The row's non-null value. */
         @Override
         public KV<Long, Double> contribution(final Map<String, Object> row) {
             final Double v = FeatureValues.toDouble(row.get(field));
             if (v == null || v.isNaN()) return null;
-            long timeBlock = 0L;
-            if (forward != null) {
-                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
-                if (millis == null) return null;
-                timeBlock = forward.blocks().indexOf(millis);
-            }
-            return KV.of(timeBlock, v);
+            final Long timeBlock = timeBlock(row);
+            return timeBlock == null ? null : KV.of(timeBlock, v);
         }
 
         /** An input without a single value still fits (n = 0: every value reads null) and writes its artifact. */
@@ -1384,43 +1457,16 @@ public final class FeatureStages {
             return true;
         }
 
-        /**
-         * The values of every time block meet here (8 bytes per row, as the static fit always did): the whole-input
-         * knots, and under forward one fit per change point over the blocks readable there.
-         */
+        /** The values of every time block meet here (8 bytes per row, as the static fit always did). */
         @Override
-        public QuantileModel solve(final Map<Long, QuantileTransform.Values> parts, final String planHash) {
-            final BlockSeries<QuantileTransform.Values> series = new BlockSeries<>(QuantileTransform.VALUES, parts);
-            // a static fit has one block: fit on it directly instead of a merged copy (fit copies before sorting)
-            final QuantileTransform.Values all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
-            final QuantileTransform.Values values = all == null ? QuantileTransform.VALUES.create() : all;
-            LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", block, bins, values.size());
-            final QuantileTransform total = QuantileTransform.fit(values, bins, distribution, clip, true);
-            TreeMap<Long, QuantileTransform> byBlock = null;
-            if (forward != null) {
-                byBlock = series.models(forward.windowBlocks(), v -> QuantileTransform.fit(v, bins, distribution, clip, false));
-                LOG.info("quantileTransform {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
-            }
-            // a forward fit re-fits every run but writes the whole-input knots once (refit: true overwrites)
-            if (artifactUri != null && (forward == null || refit || !QuantileTransform.exists(artifactUri, planHash, block))) {
-                QuantileTransform.write(artifactUri, planHash, block, total);
-            }
-            return new QuantileModel(total, byBlock, forward == null ? null : series.observed());
-        }
-
-        /** The knots a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
-        QuantileTransform transformFor(final QuantileModel model, final Map<String, Object> values) {
-            if (model == null) return null;
-            if (forward == null) return model.total();
-            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
-            if (eventMillis == null) return null;
-            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
-            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
+        public QuantileTransform fit(final QuantileTransform.Values values, final boolean loud) {
+            if (loud) LOG.info("quantileTransform {}: fitting {} quantile intervals on {} values", block, bins, values.size());
+            return QuantileTransform.fit(values, bins, distribution, clip, loud);
         }
 
         @Override
-        public void apply(final QuantileModel model, final Map<String, Object> values) {
-            final QuantileTransform q = transformFor(model, values);
+        public void apply(final ForwardModel<QuantileTransform> model, final Map<String, Object> values) {
+            final QuantileTransform q = modelFor(model, values);
             values.put(column, q == null ? null : q.transform(FeatureValues.toDouble(values.get(field))));
         }
     }
@@ -1444,42 +1490,29 @@ public final class FeatureStages {
     // --- svd ------------------------------------------------------------------------------------------
 
     /**
-     * The fitted svd of a block: the whole-input components ({@code total}, what the artifact holds) and, under
-     * {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed blocks
-     * (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
-     */
-    record SvdModel(Svd total, TreeMap<Long, Svd> byBlock, TreeSet<Long> observed) implements Serializable {}
-
-    /**
      * One svd block of a fit stage (all its score columns), rebuilt from the columns' coordinates: the vector is
      * the listed numeric {@code fields} or one array-typed {@code arrayField}.
      */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
                    String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                   Forward forward, long predictOffsetMillis) implements SummaryFitBlock<double[], Svd.Moments, SvdModel> {
+                   Forward forward, long predictOffsetMillis) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
         @Override
-        public String artifactPath(final String planHash) {
-            return Svd.artifactPath(artifactUri, planHash, block);
+        public FitArtifact.Json<Svd> artifact() {
+            return Svd.ARTIFACT;
         }
 
-        /** A forward fit is always re-fitted (the artifact holds the whole-input components only, for a static serving run). */
+        /**
+         * Solves the sufficient statistics (n, Σx, Σxxᵀ) — no vector leaves the workers. A per-change-point fit is
+         * quiet: an empty / short window at a leave point is normal under forward.
+         */
         @Override
-        public boolean artifactExists(final String planHash) {
-            return forward == null && Svd.exists(artifactUri, planHash, block);
-        }
-
-        @Override
-        public SvdModel readArtifact(final String planHash) {
-            return new SvdModel(Svd.read(artifactUri, planHash, block), null, null);
-        }
-
-        Svd fit(final Svd.Moments moments) {
-            return Svd.fit(moments, rank, center, standardize, true);
-        }
-
-        /** A per-change-point fit: an empty / short window is normal under forward, so it is not reported. */
-        Svd fitQuietly(final Svd.Moments moments) {
-            return Svd.fit(moments, rank, center, standardize, false);
+        public Svd fit(final Svd.Moments m, final boolean loud) {
+            final Svd fitted = Svd.fit(m, rank, center, standardize, loud);
+            if (loud) {
+                LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
+                        block, fitted.rank(), rank, m.n, m.dimension, m.skipped, m.mismatched);
+            }
+            return fitted;
         }
 
         @Override
@@ -1519,58 +1552,19 @@ public final class FeatureStages {
             return SerializableCoder.of(double[].class);
         }
 
-        /** The row's vector: time block 0 for a static fit, the row's time block under forward. */
+        /** The row's vector. */
         @Override
         public KV<Long, double[]> contribution(final Map<String, Object> row) {
             final double[] x = vector(row);
             if (x == null) return null;
-            long timeBlock = 0L;
-            if (forward != null) {
-                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
-                if (millis == null) return null;
-                timeBlock = forward.blocks().indexOf(millis);
-            }
-            return KV.of(timeBlock, x);
+            final Long timeBlock = timeBlock(row);
+            return timeBlock == null ? null : KV.of(timeBlock, x);
         }
 
         /** An input without a single vector has no components: no model (every score reads null) and no artifact. */
         @Override
         public boolean fitsEmptyInput() {
             return false;
-        }
-
-        /**
-         * Solves the sufficient statistics (n, Σx, Σxxᵀ) of the time blocks — no vector leaves the workers — on one
-         * worker: the whole-input components (a static fit is a single block), plus one fit per change point under forward.
-         */
-        @Override
-        public SvdModel solve(final Map<Long, Svd.Moments> parts, final String planHash) {
-            final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
-            final Svd.Moments all = series.total();
-            final Svd.Moments m = all == null ? new Svd.Moments() : all;
-            final Svd total = fit(m);
-            LOG.info("svd {}: fitted {} of {} requested component(s) from {} vectors of dimension {} ({} missing skipped, {} of another length)",
-                    block, total.rank(), rank, m.n, m.dimension, m.skipped, m.mismatched);
-            TreeMap<Long, Svd> byBlock = null;
-            if (forward != null) {
-                byBlock = series.models(forward.windowBlocks(), this::fitQuietly);
-                LOG.info("svd {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
-            }
-            // a forward fit re-fits every run but writes the whole-input components once (refit: true overwrites)
-            if (artifactUri != null && (refit || !Svd.exists(artifactUri, planHash, block))) {
-                Svd.write(artifactUri, planHash, block, total);
-            }
-            return new SvdModel(total, byBlock, forward == null ? null : series.observed());
-        }
-
-        /** The components a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
-        Svd svdFor(final SvdModel model, final Map<String, Object> values) {
-            if (model == null) return null;
-            if (forward == null) return model.total();
-            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
-            if (eventMillis == null) return null;
-            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
-            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
         }
 
         /** The {@code components} code of the residual-norm column. */
@@ -1588,8 +1582,8 @@ public final class FeatureStages {
 
         /** {@code columns.get(i)} carries output {@code components[i]} (see {@link #output}; resolved once in {@link #svdSpecs}, never parsed per row). */
         @Override
-        public void apply(final SvdModel model, final Map<String, Object> values) {
-            final Svd svd = svdFor(model, values);
+        public void apply(final ForwardModel<Svd> model, final Map<String, Object> values) {
+            final Svd svd = modelFor(model, values);
             final double[] x = svd == null ? null : vector(values);
             final double[] scores = svd == null ? null : svd.transform(x);
             double[] residual = null;
@@ -1670,34 +1664,16 @@ public final class FeatureStages {
     // --- smooth ---------------------------------------------------------------------------------------
 
     /**
-     * The fitted curve of a smooth block: the whole-input fit ({@code total}, what the artifact holds) and, under
-     * {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed blocks
-     * (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
-     */
-    record SmoothModel(Smooth total, TreeMap<Long, Smooth> byBlock, TreeSet<Long> observed) implements Serializable {}
-
-    /**
      * One smooth block of a fit stage (its curve and residual columns), rebuilt from the columns' coordinates. A row
      * contributes {@code [B(x), y]} to the vector moments — the family of the svd blocks, so the stage's one
      * {@code _FitMoments_Combine} serves both — and the penalised system is solved from them on one worker.
      */
     record SmoothSpec(String block, String field, String target, Smooth.Basis basis, int penaltyOrder, Double lambda,
                       String artifactUri, boolean refit, List<OutputColumn> columns, boolean[] residual,
-                      Forward forward, long predictOffsetMillis) implements SummaryFitBlock<double[], Svd.Moments, SmoothModel> {
+                      Forward forward, long predictOffsetMillis) implements ForwardFitBlock<double[], Svd.Moments, Smooth> {
         @Override
-        public String artifactPath(final String planHash) {
-            return Smooth.artifactPath(artifactUri, planHash, block);
-        }
-
-        /** A forward fit is always re-fitted (the artifact holds the whole-input curve only, for a static serving run). */
-        @Override
-        public boolean artifactExists(final String planHash) {
-            return forward == null && Smooth.exists(artifactUri, planHash, block);
-        }
-
-        @Override
-        public SmoothModel readArtifact(final String planHash) {
-            return new SmoothModel(Smooth.read(artifactUri, planHash, block), null, null);
+        public FitArtifact.Json<Smooth> artifact() {
+            return Smooth.ARTIFACT;
         }
 
         @Override
@@ -1725,18 +1701,13 @@ public final class FeatureStages {
             return SerializableCoder.of(double[].class);
         }
 
-        /** The row's basis values and target: time block 0 for a static fit, the row's time block under forward. */
+        /** The row's basis values and target. */
         @Override
         public KV<Long, double[]> contribution(final Map<String, Object> row) {
             final double[] z = Smooth.contribution(basis, FeatureValues.toDouble(row.get(field)), FeatureValues.toDouble(row.get(target)));
             if (z == null) return null;
-            long timeBlock = 0L;
-            if (forward != null) {
-                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
-                if (millis == null) return null;
-                timeBlock = forward.blocks().indexOf(millis);
-            }
-            return KV.of(timeBlock, z);
+            final Long timeBlock = timeBlock(row);
+            return timeBlock == null ? null : KV.of(timeBlock, z);
         }
 
         /** An input without a single (key, target) pair has no curve: no model (every column reads null) and no artifact. */
@@ -1745,40 +1716,21 @@ public final class FeatureStages {
             return false;
         }
 
-        /** Solves the penalised system from the moments of the time blocks: the whole-input curve, plus one per change point under forward. */
+        /** Solves the penalised system from the moments of a time block's rows. */
         @Override
-        public SmoothModel solve(final Map<Long, Svd.Moments> parts, final String planHash) {
-            final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
-            final Svd.Moments all = series.total();
-            final Smooth total = Smooth.fit(all == null ? new Svd.Moments() : all, basis, penaltyOrder, lambda, true);
-            LOG.info("smooth {}: fitted {} coefficients on {} rows (λ = {}{}, edf = {})", block, total.coefficients.length, total.n,
-                    total.lambda, total.estimated ? " by REML" : "", total.edf);
-            TreeMap<Long, Smooth> byBlock = null;
-            if (forward != null) {
-                byBlock = series.models(forward.windowBlocks(), m -> Smooth.fit(m, basis, penaltyOrder, lambda, false));
-                LOG.info("smooth {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
+        public Smooth fit(final Svd.Moments m, final boolean loud) {
+            final Smooth fitted = Smooth.fit(m, basis, penaltyOrder, lambda, loud);
+            if (loud) {
+                LOG.info("smooth {}: fitted {} coefficients on {} rows (λ = {}{}, edf = {})", block, fitted.coefficients.length, fitted.n,
+                        fitted.lambda, fitted.estimated ? " by REML" : "", fitted.edf);
             }
-            // a forward fit re-fits every run but writes the whole-input curve once (refit: true overwrites)
-            if (artifactUri != null && (refit || !Smooth.exists(artifactUri, planHash, block))) {
-                Smooth.write(artifactUri, planHash, block, total);
-            }
-            return new SmoothModel(total, byBlock, forward == null ? null : series.observed());
-        }
-
-        /** The curve a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
-        Smooth smoothFor(final SmoothModel model, final Map<String, Object> values) {
-            if (model == null) return null;
-            if (forward == null) return model.total();
-            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
-            if (eventMillis == null) return null;
-            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
-            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
+            return fitted;
         }
 
         /** {@code columns.get(i)} is the residual when {@code residual[i]}, else the curve (resolved once in {@link #smoothSpecs}). */
         @Override
-        public void apply(final SmoothModel model, final Map<String, Object> values) {
-            final Smooth smooth = smoothFor(model, values);
+        public void apply(final ForwardModel<Smooth> model, final Map<String, Object> values) {
+            final Smooth smooth = modelFor(model, values);
             final Double curve = smooth == null ? null : smooth.curve(FeatureValues.toDouble(values.get(field)));
             for (int i = 0; i < residual.length; i++) {
                 Double value = curve;
@@ -1814,13 +1766,6 @@ public final class FeatureStages {
     // --- spectralEmbedding ----------------------------------------------------------------------------
 
     /**
-     * The fitted embedding of a spectralEmbedding block: the whole-input fit ({@code total}, what the artifact holds)
-     * and, under {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the
-     * observed blocks (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
-     */
-    record SpectralModel(Spectral total, TreeMap<Long, Spectral> byBlock, TreeSet<Long> observed) implements Serializable {}
-
-    /**
      * One spectralEmbedding block of a fit stage (all its coordinate columns), rebuilt from the columns' coordinates:
      * a row contributes its value of {@code field} with the values of the lag {@code path} columns — the entity's
      * previous steps, computed by an earlier keyed stage — and reads the coordinates of its {@code applied} value.
@@ -1832,21 +1777,10 @@ public final class FeatureStages {
     record SpectralSpec(String block, String field, List<String> path, String applied, int rank, int maxValues,
                         String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
                         Forward forward, long predictOffsetMillis,
-                        PCollectionView<Map<String, Long>> vocabulary) implements SummaryFitBlock<String[], Spectral.PairCounts, SpectralModel> {
+                        PCollectionView<Map<String, Long>> vocabulary) implements ForwardFitBlock<String[], Spectral.PairCounts, Spectral> {
         @Override
-        public String artifactPath(final String planHash) {
-            return Spectral.artifactPath(artifactUri, planHash, block);
-        }
-
-        /** A forward fit is always re-fitted (the artifact holds the whole-input embedding only, for a static serving run). */
-        @Override
-        public boolean artifactExists(final String planHash) {
-            return forward == null && Spectral.exists(artifactUri, planHash, block);
-        }
-
-        @Override
-        public SpectralModel readArtifact(final String planHash) {
-            return new SpectralModel(Spectral.read(artifactUri, planHash, block), null, null);
+        public FitArtifact.Json<Spectral> artifact() {
+            return Spectral.ARTIFACT;
         }
 
         @Override
@@ -1893,13 +1827,8 @@ public final class FeatureStages {
                 if (previous != null) values.add(previous);
             }
             if (values.size() == 1) return null;
-            long timeBlock = 0L;
-            if (forward != null) {
-                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
-                if (millis == null) return null;
-                timeBlock = forward.blocks().indexOf(millis);
-            }
-            return KV.of(timeBlock, values.toArray(new String[0]));
+            final Long timeBlock = timeBlock(row);
+            return timeBlock == null ? null : KV.of(timeBlock, values.toArray(new String[0]));
         }
 
         /** The block with its vocabulary side input: one extra pass over the fit input per spectralEmbedding block. */
@@ -1938,34 +1867,15 @@ public final class FeatureStages {
             return false;
         }
 
-        /** Factorises the pair counts of the time blocks on one worker: the whole-input embedding, plus one per change point under forward. */
+        /** Factorises the pair counts of a time block's rows on one worker. */
         @Override
-        public SpectralModel solve(final Map<Long, Spectral.PairCounts> parts, final String planHash) {
-            final BlockSeries<Spectral.PairCounts> series = new BlockSeries<>(Spectral.SUMMARY, parts);
-            final Spectral.PairCounts all = series.total();
-            final Spectral total = Spectral.fit(all == null ? new Spectral.PairCounts() : all, rank, maxValues, true);
-            LOG.info("spectralEmbedding {}: {} value(s) embedded in {} of {} requested coordinate(s) from {} pairs ({} counted value(s) left out: no co-occurrence row)",
-                    block, total.vocabulary.length, total.rank(), rank, total.pairs, total.dropped);
-            TreeMap<Long, Spectral> byBlock = null;
-            if (forward != null) {
-                byBlock = series.models(forward.windowBlocks(), s -> Spectral.fit(s, rank, maxValues, false));
-                LOG.info("spectralEmbedding {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
+        public Spectral fit(final Spectral.PairCounts counts, final boolean loud) {
+            final Spectral fitted = Spectral.fit(counts, rank, maxValues, loud);
+            if (loud) {
+                LOG.info("spectralEmbedding {}: {} value(s) embedded in {} of {} requested coordinate(s) from {} pairs ({} counted value(s) left out: no co-occurrence row)",
+                        block, fitted.vocabulary.length, fitted.rank(), rank, fitted.pairs, fitted.dropped);
             }
-            // a forward fit re-fits every run but writes the whole-input embedding once (refit: true overwrites)
-            if (artifactUri != null && (refit || !Spectral.exists(artifactUri, planHash, block))) {
-                Spectral.write(artifactUri, planHash, block, total);
-            }
-            return new SpectralModel(total, byBlock, forward == null ? null : series.observed());
-        }
-
-        /** The embedding a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
-        Spectral spectralFor(final SpectralModel model, final Map<String, Object> values) {
-            if (model == null) return null;
-            if (forward == null) return model.total();
-            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
-            if (eventMillis == null) return null;
-            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
-            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
+            return fitted;
         }
 
         /**
@@ -1974,8 +1884,8 @@ public final class FeatureStages {
          * (one instance serves every thread of a worker) and no vector is copied per row.
          */
         @Override
-        public void apply(final SpectralModel model, final Map<String, Object> values) {
-            final Spectral spectral = spectralFor(model, values);
+        public void apply(final ForwardModel<Spectral> model, final Map<String, Object> values) {
+            final Spectral spectral = modelFor(model, values);
             final Integer row = spectral == null ? null : spectral.indexOf(valueOf(values.get(applied)));
             for (int i = 0; i < components.length; i++) {
                 values.put(columns.get(i).getCanonicalName(), row == null ? null : spectral.coordinate(row, components[i]));
