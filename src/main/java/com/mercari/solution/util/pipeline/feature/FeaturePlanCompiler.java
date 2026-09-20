@@ -463,6 +463,8 @@ public final class FeaturePlanCompiler {
         refs.addAll(def.inputs);
         if (def.baseline != null) refs.add(def.baseline);
         if (def.offset != null) refs.add(def.offset);
+        // the sequence of values a spectralEmbedding / transitionStats block walks
+        if (def.sequenceField != null) refs.add(def.sequenceField);
         // the target of a smooth curve is read by its fit (a discretize target is declared but unused)
         if (def.target != null && "smooth".equals(def.type)) refs.add(def.target);
         for (final Op op : def.ops) {
@@ -2285,7 +2287,216 @@ public final class FeaturePlanCompiler {
             expandSmooth(def, computeAt);
             return;
         }
+        if ("transitionStats".equals(def.type)) {
+            expandTransitionStats(def, computeAt);
+            return;
+        }
+        if ("spectralEmbedding".equals(def.type)) {
+            expandSpectralEmbedding(def, computeAt);
+            return;
+        }
         expandEncoding(def, computeAt);
+    }
+
+    /**
+     * The previous values of a block's {@code sequenceOf: {entity, field}} — a {@code lag} over the entity, expanded
+     * under the block's own name as intermediate columns {@code <name>_all_prev_lag<i>}, most recent first — or null
+     * after reporting. The two sequence-of-values population types are built on these columns: what an entity's
+     * value was one, two ... steps ago is an ordinary keyed column, so neither type needs a keyed pass of its own.
+     */
+    private List<String> sequencePath(final FeatureDef def, final int steps, final AvailableAt computeAt) {
+        final String loc = def.location();
+        if (!def.sequenceUnknown.isEmpty()) {
+            diagnostics.error(def.type + ".parameters", loc, "not understood: " + def.sequenceUnknown
+                    + " (sequenceOf: {entity, field}; cooccur: {window, weighting}; emit: [distribution | {toValueProb: <value>}]; blend: {perEntity, priorWeight})");
+            return null;
+        }
+        if (def.sequenceEntity == null || def.sequenceField == null || !entities.containsKey(def.sequenceEntity)) {
+            diagnostics.error(def.type + ".sequenceOf", loc, def.type + " requires sequenceOf: {entity: <entities[].name>, field: <categorical field>}"
+                    + (def.sequenceEntity != null && !entities.containsKey(def.sequenceEntity) ? ": unknown entity " + def.sequenceEntity : ""));
+            return null;
+        }
+        final Ref ref = resolve(def.sequenceField);
+        if (ref == null) {
+            diagnostics.error("reference.unknown", loc, "unknown field: " + def.sequenceField);
+            return null;
+        }
+        if (!OperatorCatalog.isCategorical(ref.type())) {
+            diagnostics.error(def.type + ".sequenceOf", loc, "sequenceOf.field '" + def.sequenceField + "' must be categorical (discretize a numeric field first)");
+            return null;
+        }
+        final FeatureDef path = new FeatureDef();
+        path.name = def.name;
+        path.scope = Scope.sequence;
+        path.entity = def.sequenceEntity;
+        path.validFor = def.validFor;
+        final Op lag = new Op();
+        lag.type = "lag";
+        lag.fields = List.of(def.sequenceField);
+        lag.k = steps;
+        lag.as = "prev";
+        path.ops.add(lag);
+        expandSequence(path, computeAt);
+        final List<String> columns = new ArrayList<>();
+        for (int i = 1; i <= steps; i++) {
+            final OutputColumn c = columnsByCanonical.get(def.name + "_" + new Window().token() + "_prev_lag" + i);
+            if (c == null) return null; // the lag failed to expand and said why
+            c.intermediate = true;
+            columns.add(c.canonicalName);
+        }
+        return columns;
+    }
+
+    /**
+     * §4.4 transitionStats: the distribution of an entity's NEXT value given its previous one(s) — a desugaring, not an
+     * estimator of its own. The state is the lag path of {@link #sequencePath}; the statistic is an encoding's
+     * {@code distribution} of the field keyed on that state, expanding (strictly past) and shrunk along the chain
+     * {@code (entity, state) → (state) → shorter states → global} with the {@code blend} pseudo-count — the
+     * Dirichlet-Multinomial case of §5.5, which is what the spec's {@code blend} always was. Columns:
+     * {@code <name>_to_<value>} per {@code toValueProb}, and the map {@code <name>_to} for {@code distribution}.
+     */
+    private void expandTransitionStats(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final int order = def.order == null ? 1 : def.order;
+        if (order < 1 || order > 4) {
+            diagnostics.error("transitionStats.order", loc, "order must be within 1..4 (the number of previous values that make the state): " + order);
+            return;
+        }
+        if (def.emitValues.isEmpty() && !def.emitDistribution && def.sequenceUnknown.isEmpty()) {
+            diagnostics.error("transitionStats.emit", loc, "transitionStats requires emit: [distribution | {toValueProb: <value>}, ...]");
+            return;
+        }
+        final boolean perEntity = def.blendPerEntity != null && def.blendPerEntity;
+        final double priorWeight = def.blendPriorWeight == null ? 20 : def.blendPriorWeight;
+        if (!(priorWeight > 0) || Double.isInfinite(priorWeight)) {
+            diagnostics.error("transitionStats.blend", loc, "blend.priorWeight must be a positive number: " + def.blendPriorWeight);
+            return;
+        }
+        final List<String> path = sequencePath(def, order, computeAt);
+        if (path == null) return;
+
+        // the chain of coarser states under the leaf: the pooled state, then its shorter suffixes, then the marginal
+        final List<String> leaf = new ArrayList<>();
+        if (perEntity) leaf.addAll(entities.get(def.sequenceEntity).keys());
+        leaf.addAll(path);
+        final com.google.gson.JsonArray hierarchy = new com.google.gson.JsonArray();
+        for (int length = perEntity ? order : order - 1; length >= 0; length--) {
+            final com.google.gson.JsonArray level = new com.google.gson.JsonArray();
+            for (final String step : path.subList(0, length)) level.add(step);
+            hierarchy.add(level);
+        }
+        final FeatureDef encoding = new FeatureDef();
+        encoding.name = def.name;
+        encoding.scope = Scope.population;
+        encoding.type = "encoding";
+        encoding.validFor = def.validFor;
+        encoding.naming = "{block}_{target}";
+        final KeySet keySet = new KeySet();
+        keySet.keys = leaf;
+        keySet.hierarchyJson = hierarchy.toString();
+        encoding.keySets.add(keySet);
+        final Target target = new Target();
+        target.field = def.sequenceField;
+        target.as = "to";
+        target.stats = List.of("distribution");
+        target.values = def.emitValues;
+        encoding.targets.add(target);
+        final JsonObject shrinkage = new JsonObject();
+        shrinkage.addProperty("priorWeight", priorWeight);
+        encoding.shrinkageJson = shrinkage.toString();
+        // a value distribution lives in the expanding replay only, whatever the top-level fit
+        final JsonObject fit = new JsonObject();
+        fit.addProperty("mode", FitMode.expanding.token());
+        encoding.fitJson = fit.toString();
+        expandEncoding(encoding, computeAt);
+        // emit: [distribution, {toValueProb: …}] keeps the map next to its per-value columns
+        final OutputColumn map = columnsByCanonical.get(def.name + "_to");
+        if (map != null && def.emitDistribution) map.intermediate = false;
+        diagnostics.info("transitionStats.expansion", loc, "transitionStats is the expanding distribution of " + def.sequenceField + " keyed on "
+                + leaf + " (the previous " + (order == 1 ? "value" : order + " values") + " of entity " + def.sequenceEntity + (perEntity ? ", per entity" : ", pooled over entities")
+                + "), shrunk along " + hierarchy + " with pseudo-count " + priorWeight + " (Dirichlet-Multinomial); an event without a previous value reads the coarser levels");
+    }
+
+    /**
+     * §4.4 spectralEmbedding: coordinates of a categorical state from the company it keeps — the pairs (value, a value
+     * at most {@code cooccur.window} steps earlier in the entity's sequence) are counted, turned into a PPMI matrix
+     * and factorised ({@link Spectral}). The pairs come from the lag path of {@link #sequencePath}, so the fit is a
+     * summary block like svd (static, or per time block under forward); the row's own value — or, with
+     * {@code of: previous}, its previous one — is looked up. {@code rank} FLOAT64 columns {@code <name>_<k>}.
+     */
+    private void expandSpectralEmbedding(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final int window = def.cooccurWindow == null ? Spectral.DEFAULT_WINDOW : def.cooccurWindow;
+        final int rank = def.rank == null ? Spectral.DEFAULT_RANK : def.rank;
+        final int maxValues = def.maxValues == null ? Spectral.DEFAULT_MAX_VALUES : def.maxValues;
+        final String of = def.embedOf == null ? "current" : def.embedOf;
+        boolean valid = true;
+        if (window < 1 || window > 8) {
+            diagnostics.error("spectralEmbedding.cooccur", loc, "cooccur.window must be within 1..8 steps: " + window);
+            valid = false;
+        }
+        if (def.cooccurWeighting != null && !Spectral.PPMI.equals(def.cooccurWeighting)) {
+            diagnostics.error("spectralEmbedding.cooccur", loc, "cooccur.weighting must be ppmi: " + def.cooccurWeighting);
+            valid = false;
+        }
+        if (rank < 1) {
+            diagnostics.error("spectralEmbedding.rank", loc, "rank must be >= 1");
+            valid = false;
+        }
+        if (maxValues < 2 || maxValues > Spectral.MAX_VALUES) {
+            diagnostics.error("spectralEmbedding.maxValues", loc, "maxValues must be within 2.." + Spectral.MAX_VALUES + " (the eigenproblem is dense in the distinct values): " + maxValues);
+            valid = false;
+        }
+        if (!List.of("current", "previous").contains(of)) {
+            diagnostics.error("spectralEmbedding.of", loc, "of must be current | previous: " + of);
+            valid = false;
+        }
+        if (def.maxFeatures != null && rank > def.maxFeatures) {
+            diagnostics.error("spectralEmbedding.maxFeatures", loc, "rank " + rank + " exceeds maxFeatures " + def.maxFeatures);
+            valid = false;
+        }
+        if (!valid) return;
+        final List<String> path = sequencePath(def, window, computeAt);
+        if (path == null) return;
+        final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "spectralEmbedding", "the embedding is fitted", "eigendecomposition of the whole input's co-occurrence counts", true);
+        final boolean forward = fitSpec.mode == FitMode.forward;
+        final String applied = "previous".equals(of) ? path.get(0) : def.sequenceField;
+        final String what = "spectralEmbedding counts the pairs of " + def.sequenceField + " within " + window + " step(s) of entity " + def.sequenceEntity
+                + " and factorises their PPMI matrix into " + rank + " coordinate(s) (at most " + maxValues + " values)";
+        if (forward) {
+            final ForwardBlocks blocks = fitSpec.forwardBlocks();
+            diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + "), re-solved for every row over the complete blocks"
+                    + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose values are known at predictAt (the row's own block excluded)"
+                    + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input embedding is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+        } else {
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
+                    + "; no target is read, but the neighbourhoods include the test period (fit.mode forward walks them)");
+        }
+        final List<String> references = new ArrayList<>(path);
+        references.add(def.sequenceField);
+        for (int k = 0; k < rank; k++) {
+            final OutputColumn c = newColumn(def.name, Scope.population, "spectralEmbedding", def.name + "_" + k, Schema.FieldType.FLOAT64, computeAt);
+            c.fitted = true;
+            c.coordinates.put("fit", forward ? "forward" : "static");
+            if (forward) {
+                forwardCoordinates(c, null, references, def, fitSpec);
+                c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+            }
+            c.coordinates.put("field", canonicalOf(def.sequenceField));
+            c.coordinates.put("path", String.join(",", path));
+            c.coordinates.put("applied", canonicalOf(applied));
+            c.coordinates.put("rank", Integer.toString(rank));
+            c.coordinates.put("component", Integer.toString(k));
+            c.coordinates.put("maxValues", Integer.toString(maxValues));
+            if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
+            if (fitSpec.refit) c.coordinates.put("refit", "true");
+            // only the embedded value is read from the row itself; the pairs are read through the fit
+            addSelfInput(c, applied);
+            for (final String reference : references) addPastInput(c, reference);
+            finishStaticFitted(c, def);
+            register(c);
+        }
     }
 
     /**

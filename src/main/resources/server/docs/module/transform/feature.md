@@ -39,7 +39,9 @@ Supports:
   **quantileTransform**: a value's position in the fitted distribution (rank normalisation, optionally as a
   normal score). **svd**: PCA / truncated-SVD scores of a numeric vector (several fields or an array).
   **smooth**: the curve of a target over a numeric key (penalised B-splines, strength by REML) and the
-  target's residual from it.
+  target's residual from it. **transitionStats** / **spectralEmbedding**: over the values an entity takes one
+  after another — the shrunk distribution of the next value given the previous one(s), and coordinates of a
+  categorical state from its co-occurrences (PPMI + spectral factorisation).
 - **Leakage checking** — every column carries a derived availability time and lineage (source, kind,
   evidence). Columns available after `predictAt` are rejected unless they are only consumed as
   intermediates; history windows over late-arriving fields are shifted automatically.
@@ -398,7 +400,7 @@ block from the keys' statistics up to that block, and recorded per block in the 
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
 (UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
-A `type: svd`, `type: quantileTransform` or `type: smooth` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
+A `type: svd`, `type: quantileTransform`, `type: smooth` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
 *Quantile transform* and *Smooth curve*); the other population types (factorization / discretize) are always static and are
 unaffected.
 
@@ -672,6 +674,63 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
 - Several keys are several blocks; chain them through the residual (`target: <previous>_resid`) for an additive
   fit by hand. `method: isotonic` / `rff`, several inputs in one block (additive / tensor smooths) and
   category-varying curves are not implemented (`smooth.method`).
+
+### Sequences of values (population, types: transitionStats, spectralEmbedding)
+
+Two population types read the **values an entity takes one after another** — a seller's grades, a machine's states,
+a customer's plan changes: `sequenceOf: {entity, field}` names the entity (`entities[].name`) and a categorical field
+(discretize a numeric one first). Both are built on the entity's previous values, an ordinary `lag` that the block
+expands under its own name as intermediate columns (`<name>_all_prev_lag<i>`, most recent first), so they need no
+keyed pass of their own and schedule like the blocks they stand for.
+
+```yaml
+  - name: grade_next
+    scope: population
+    type: transitionStats
+    sequenceOf: {entity: seller, field: condition_grade}
+    order: 1                                   # previous values that make the state (1..4, default 1)
+    emit: [{toValueProb: good}, distribution]  # grade_next_to_good (FLOAT64) and the map grade_next_to
+    blend: {perEntity: true, priorWeight: 20}  # optional: the entity's own transitions, shrunk toward everyone's
+```
+
+**transitionStats** is "what comes next, given where the entity is": the distribution of the field's value
+conditional on the previous `order` value(s). It is a desugaring, not an estimator of its own
+(`transitionStats.expansion` info spells it out): an **expanding** `encoding` with `stats: [distribution]` keyed on the
+state and shrunk along the chain `(entity, state) → (state) → shorter states → marginal` — the Dirichlet-Multinomial
+case of *Shrinkage*, `p(level) = (counts + λ · p(parent)) / (n + λ)` with `λ = blend.priorWeight` (default 20) — so it
+is strictly past, leak-checked and windowless like any expanding encoding, and a row reads exactly what the explicit
+`lag` + `encoding` blocks would read. Without `blend` (or with `perEntity: false`) the transitions are pooled over
+entities: `(state) → … → marginal`. `{toValueProb: v}` emits the probability of one next value (0 when it has no
+mass, null when nothing is known yet); `distribution` emits the whole map. An entity's first event has no previous
+value, so its state levels are empty and it reads the marginal; a state never seen before reads its parent. It is
+always expanding, whatever the top-level `fit.mode` (a value distribution has no static form). When the field is an
+outcome the usual window shift applies to the lag and to the counted transitions alike.
+
+```yaml
+  - name: grade_embed
+    scope: population
+    type: spectralEmbedding
+    sequenceOf: {entity: seller, field: condition_grade}
+    cooccur: {window: 2, weighting: ppmi}      # steps back that count as co-occurring (1..8, default 2); ppmi only
+    rank: 8                                    # coordinates grade_embed_0 .. grade_embed_7 (default 8)
+    of: current                                # embed the row's own value (default) | previous: the value it comes from
+    maxValues: 256                             # vocabulary cap, by co-occurrence mass (2..1024, default 256)
+    fit: {artifact: {uri: "gs://bucket/features"}}   # static (default), forward, or inherited from a top-level forward fit
+```
+
+**spectralEmbedding** gives a categorical state numeric coordinates from the company it keeps: every (value, a value
+at most `window` steps earlier in the same entity's sequence) is one co-occurrence, the counts become a positive
+pointwise mutual information matrix `max(0, ln(C_ab · T / (r_a · r_b)))`, and its eigenvectors of largest
+|eigenvalue|, scaled by `sqrt(|eigenvalue|)`, are the coordinates (the symmetric factorisation; oriented so the
+largest loading is positive — a re-fit reproduces the columns). Values that follow and precede the same values land
+close together, which lets a model generalise across a high-cardinality state without a target: no label is read, so
+the columns are as available as the embedded value. `of: previous` embeds the state the entity comes from — the form
+to use when the field itself is an outcome (the row's own value would be an `availability.violation`). A value that
+is missing, unseen in the fit or beyond `maxValues` reads null, as do the surplus columns when there are fewer
+values than `rank`. The fit state is the pair counts — a sum of row contributions, so one Combine (per time block
+under `fit.mode: forward`, where a row reads the complete blocks before it and the usual `window` / `minBlocks` apply)
+— and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. Artifact
+`<planHash>/<block>.spectral.json` (values with their coordinates, eigenvalues, pair count).
 
 ### Shrinkage and key lattices (population)
 
@@ -1386,9 +1445,8 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   run in streaming within the configured window, as a linear chain (the parallel-wave merge is a batch
   GroupByKey).
 - Nested encoding targets, the `quantile` / `distribution` stats in
-  `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
-  `factorization` / `discretize` / `quantileTransform` / `svd` / `smooth` (`spectralEmbedding`, `transitionStats`) are parsed
-  but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
+  `fit.mode: static` / `fold` (expanding only) are parsed but rejected. transitionStats is always expanding;
+  spectralEmbedding: `fold`, and `cooccur.weighting` other than `ppmi`. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
   and non-static fits. Discretize: non-static fits (`fit.cadence / window /
   warmStart` are accepted and ignored); quantileTransform, svd and smooth: `fold` (`static` and `forward` are implemented, `fit.cadence /
   warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). Smooth: `method: isotonic` / `rff`,

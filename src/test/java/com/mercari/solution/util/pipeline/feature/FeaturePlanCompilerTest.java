@@ -672,8 +672,11 @@ public class FeaturePlanCompilerTest {
 
     @Test
     public void testUnsupportedPopulationTypeAndFitMode() {
-        final String spectral = SPEC.replace("type: encoding", "type: spectralEmbedding");
-        Assertions.assertTrue(hasCode(compile(SOURCES, spectral), "population.unsupported"));
+        // every registered population type is implemented: an unknown one is a type error, and an encoding's
+        // parameters do not make a sequence-of-values block
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("type: encoding", "type: kernelEmbedding")), "population.type"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, SPEC.replace("type: encoding", "type: spectralEmbedding")), "spectralEmbedding.sequenceOf"));
+        Assertions.assertTrue(OperatorCatalog.IMPLEMENTED_POPULATION_TYPES.containsAll(List.of("spectralEmbedding", "transitionStats")));
         final String folds = SPEC.replace("output:\n  prefix: f_", "fit: {mode: fold, folds: 1}\noutput:\n  prefix: f_");
         Assertions.assertTrue(hasCode(compile(SOURCES, folds), "fit.folds"));
     }
@@ -2069,6 +2072,130 @@ public class FeaturePlanCompilerTest {
         // a normal-score input has no bounded range to default to
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(blocks.replace("input: start_price\n", "input: start_price\n        distribution: normal\n"))), "smooth.range"));
         Assertions.assertTrue(compile(SOURCES, withEncoding(blocks.replace("input: start_price\n", "input: start_price\n        distribution: normal\n"))).getDiagnostics().hasErrors());
+    }
+
+    private static final String TRANSITION_BLOCK = """
+                  - name: grade_next
+                    scope: population
+                    type: transitionStats
+                    sequenceOf: {entity: seller, field: condition_grade}
+                    emit: [{toValueProb: good}, {toValueProb: fair}]
+                    blend: {perEntity: true, priorWeight: 5}
+            """;
+
+    /**
+     * transitionStats is a desugaring: the previous value is a lag column of the entity, the statistic the expanding,
+     * shrunk {@code distribution} of the field keyed on (entity, previous value) → (previous value) → global.
+     */
+    @Test
+    public void testTransitionStatsExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(TRANSITION_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "transitionStats.expansion"), plan::describe);
+        // the state: the entity's previous value, an intermediate lag column of the block
+        final OutputColumn previous = column(plan, "grade_next_all_prev_lag1");
+        Assertions.assertEquals("lag", previous.getOperator());
+        Assertions.assertEquals("condition_grade", previous.getCoordinates().get("field"));
+        Assertions.assertTrue(previous.isIntermediate());
+        // one probability column per emitted value, read from the (intermediate) shrunk distribution map
+        for (final String value : List.of("good", "fair")) {
+            final OutputColumn c = column(plan, "grade_next_to_" + value);
+            Assertions.assertEquals("mapValue", c.getOperator());
+            Assertions.assertEquals(value, c.getCoordinates().get("value"));
+            Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), c.getFieldType().getType());
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+            Assertions.assertFalse(c.isIntermediate());
+        }
+        final OutputColumn map = column(plan, "grade_next_to");
+        Assertions.assertTrue(map.isIntermediate());
+        Assertions.assertEquals("dirichletMultinomial", map.getCoordinates().get("family"));
+        final List<Shrinkage.Level> levels = Shrinkage.parseLevels(map.getCoordinates().get("levels"));
+        Assertions.assertEquals(3, levels.size(), map.getCoordinates()::toString);
+        // the lag column is computed by the seller stage, the distribution keyed on it one keyed stage later
+        final FeaturePlan.Stage lagStage = plan.getStages().stream().filter(s -> s.columnNames().contains("grade_next_all_prev_lag1")).findFirst().orElseThrow();
+        final FeaturePlan.Stage leafStage = plan.getStages().stream().filter(s -> s.keys().equals(List.of("seller_id", "grade_next_all_prev_lag1"))).findFirst().orElseThrow();
+        Assertions.assertTrue(lagStage.index() < leafStage.index(), plan::describe);
+
+        // emit: distribution keeps the map; pooled (no blend) drops the entity level; order 2 adds the suffix level
+        final FeaturePlan distribution = compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("emit: [{toValueProb: good}, {toValueProb: fair}]", "emit: [distribution, {toValueProb: good}]")));
+        Assertions.assertFalse(distribution.getDiagnostics().hasErrors(), distribution::describe);
+        Assertions.assertFalse(column(distribution, "grade_next_to").isIntermediate());
+        Assertions.assertNotNull(distribution.getColumn("grade_next_to_good"));
+        final FeaturePlan pooled = compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        blend: {perEntity: true, priorWeight: 5}\n", "")));
+        Assertions.assertFalse(pooled.getDiagnostics().hasErrors(), pooled::describe);
+        Assertions.assertEquals(2, Shrinkage.parseLevels(column(pooled, "grade_next_to").getCoordinates().get("levels")).size());
+        final FeaturePlan second = compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        emit:", "        order: 2\n        emit:")));
+        Assertions.assertFalse(second.getDiagnostics().hasErrors(), second::describe);
+        Assertions.assertNotNull(second.getColumn("grade_next_all_prev_lag2"));
+        Assertions.assertEquals(4, Shrinkage.parseLevels(column(second, "grade_next_to").getCoordinates().get("levels")).size());
+        Assertions.assertNotEquals(plan.getHash(), second.getHash());
+        // a top-level lookup fit does not reach it: a value distribution lives in the expanding replay
+        final FeaturePlan underStatic = compile(SOURCES, withEncoding(TRANSITION_BLOCK).replace("output:\n", "fit: {mode: static}\noutput:\n"));
+        Assertions.assertFalse(hasCode(underStatic, "encoding.stat.static"), underStatic::describe);
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        emit: [{toValueProb: good}, {toValueProb: fair}]\n", ""))), "transitionStats.emit"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("{toValueProb: fair}", "{fromValueProb: fair}"))), "transitionStats.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("priorWeight: 5", "priorWeight: 0"))), "transitionStats.blend"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        emit:", "        order: 9\n        emit:"))), "transitionStats.order"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("entity: seller", "entity: buyer"))), "transitionStats.sequenceOf"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("field: condition_grade", "field: start_price"))), "transitionStats.sequenceOf"));
+    }
+
+    private static final String SPECTRAL_BLOCK = """
+                  - name: grade_embed
+                    scope: population
+                    type: spectralEmbedding
+                    sequenceOf: {entity: seller, field: condition_grade}
+                    cooccur: {window: 2, weighting: ppmi}
+                    rank: 3
+                    fit: {artifact: "gs://bucket/features"}
+            """;
+
+    /**
+     * spectralEmbedding: the pairs come from the lag path (a keyed stage), the factorisation is a fit stage after it,
+     * and the row's own value — or its previous one — is looked up.
+     */
+    @Test
+    public void testSpectralEmbeddingExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(SPECTRAL_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.static"), plan::describe);
+        for (int k = 0; k < 3; k++) {
+            final OutputColumn c = column(plan, "grade_embed_" + k);
+            Assertions.assertEquals("spectralEmbedding", c.getOperator());
+            Assertions.assertEquals("static", c.getCoordinates().get("fit"));
+            Assertions.assertEquals("condition_grade", c.getCoordinates().get("field"));
+            Assertions.assertEquals("condition_grade", c.getCoordinates().get("applied"));
+            Assertions.assertEquals("grade_embed_all_prev_lag1,grade_embed_all_prev_lag2", c.getCoordinates().get("path"));
+            Assertions.assertEquals(Integer.toString(k), c.getCoordinates().get("component"));
+            Assertions.assertEquals("256", c.getCoordinates().get("maxValues"));
+            Assertions.assertEquals(OutputColumn.Status.staticSafe, c.getStatus());
+        }
+        Assertions.assertNull(plan.getColumn("grade_embed_3"));
+        Assertions.assertTrue(column(plan, "grade_embed_all_prev_lag2").isIntermediate());
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.columnNames().containsAll(List.of("grade_embed_0", "grade_embed_2")), plan::describe);
+        final FeaturePlan.Stage lagStage = plan.getStages().stream().filter(s -> s.columnNames().contains("grade_embed_all_prev_lag1")).findFirst().orElseThrow();
+        Assertions.assertTrue(lagStage.index() < fit.index(), plan::describe);
+        Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("grade_embed").endsWith("grade_embed.spectral.json"));
+
+        // of: previous embeds the state the entity comes from; forward walks the neighbourhoods
+        final FeaturePlan previous = compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("        rank: 3\n", "        rank: 3\n        of: previous\n")));
+        Assertions.assertFalse(previous.getDiagnostics().hasErrors(), previous::describe);
+        Assertions.assertEquals("grade_embed_all_prev_lag1", column(previous, "grade_embed_0").getCoordinates().get("applied"));
+        Assertions.assertNotEquals(plan.getHash(), previous.getHash());
+        final FeaturePlan forward = compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("fit: {artifact", "fit: {mode: forward, blocks: {size: P7D}, artifact")));
+        Assertions.assertFalse(forward.getDiagnostics().hasErrors(), forward::describe);
+        Assertions.assertEquals("forward", column(forward, "grade_embed_0").getCoordinates().get("fit"));
+        Assertions.assertEquals("0", column(forward, "grade_embed_0").getCoordinates().get("forwardLagMillis"));
+
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("window: 2", "window: 0"))), "spectralEmbedding.cooccur"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("weighting: ppmi", "weighting: tfidf"))), "spectralEmbedding.cooccur"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("window: 2,", "window: 2, decay: 1,"))), "spectralEmbedding.parameters"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 0"))), "spectralEmbedding.rank"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        maxValues: 5000"))), "spectralEmbedding.maxValues"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: next"))), "spectralEmbedding.of"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("fit: {artifact", "fit: {mode: fold, artifact"))), "spectralEmbedding.fit.mode"));
     }
 
     private static final String QUANTILE_BLOCK = """

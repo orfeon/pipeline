@@ -693,8 +693,7 @@ roughly linear in the input).
 `estimator: joint` under `fit.mode: expanding` (row-local replay cannot hold the cell table), a variance-components
 λ for a shrunk `distribution`; nested encoding targets;
 `quantile` / `distribution` under static / fold; discretize `tree` / `optimal` (the two-stage target
-consumption is not modelled); `spectralEmbedding` / `transitionStats` (the sequence-of-values population
-types: they need the per-entity value sequence, i.e. a keyed pass before the fit); the general sequence
+consumption is not modelled); the general sequence
 form's `probabilistic` dynamics (`sequence.dynamics.family`); factorization `variant: bayesian` and `fit.cadence / warmStart`; sketch-backed (approximate,
 bounded-size) per-key quantile / distribution stats in static / fold — quantileTransform, static and forward,
 keeps the exact values (decision 11); the run-time availability
@@ -1161,6 +1160,21 @@ knots must exist before the one pass over the rows, so the range is declared (qu
 (PAVA is not a sum of contributions — it would gather per-key (x, n, Σy) like the quantile transform's values), `rff`,
 several smooth terms in one block (one λ per term makes REML a multi-dimensional search) and category-varying curves
 (spec §5.6, the tensor with a key lattice — `joint` territory).
+
+**The sequence-of-values types need no engine of their own.** `transitionStats` and `spectralEmbedding` were deferred
+as "needing the per-entity value sequence before the fit". That sequence is a `lag`: `FeaturePlanCompiler.sequencePath`
+expands a synthetic sequence block under the population block's name (as `expandCompress` builds a synthetic svd
+block), and the scheduler places it like any keyed column — one stage ahead of whatever reads it as a key or a fit
+input. `transitionStats` is then *only* a compile-time desugaring into an expanding distribution encoding over the
+chain `(entity, path) → (path) → suffixes → global` (Dirichlet-Multinomial, `blend.priorWeight` = λ; naming template
+`{block}_{target}` with the target named `to`): there is no `transitionStats` operator at run time, and the e2e test
+pins "sugar == the explicit lag + encoding blocks" value for value. `spectralEmbedding` adds one model (`Spectral`)
+and one summary family of its own (`Spectral.SUMMARY`, family name `PairCounts`: nested sorted maps of unordered pair
+counts, a monoid — sorted so the sums and the vocabulary order never depend on the arrival order), contributed as
+`String[]{value, lag values…}` by `SpectralSpec`; the PPMI matrix and the Jacobi eigendecomposition (`Svd.jacobi`)
+run in `solve`, per change point under forward. The eigenproblem is dense in the distinct values, hence `maxValues`
+(default 256, at most 1024) by co-occurrence mass. With these two, every population type the catalog registers is
+implemented; `population.unsupported` remains for types registered ahead of their implementation.
 
 #### 9.6.4 Vector operators and their three supplies
 

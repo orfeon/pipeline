@@ -332,6 +332,7 @@ public final class FeatureStages {
         blocks.addAll(quantileTransformSpecs(columns));
         blocks.addAll(svdSpecs(columns));
         blocks.addAll(smoothSpecs(columns));
+        blocks.addAll(spectralSpecs(columns));
         blocks.addAll(jointSpecs(columns));
         return blocks;
     }
@@ -1762,6 +1763,158 @@ public final class FeatureStages {
             specs.add(new SmoothSpec(e.getKey(), k.get("field"), k.get("target"), basis, Integer.parseInt(k.get("penaltyOrder")),
                     Smooth.REML.equals(k.get("lambda")) ? null : Double.valueOf(k.get("lambda")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), residual,
+                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+        }
+        return specs;
+    }
+
+    // --- spectralEmbedding ----------------------------------------------------------------------------
+
+    /**
+     * The fitted embedding of a spectralEmbedding block: the whole-input fit ({@code total}, what the artifact holds)
+     * and, under {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the
+     * observed blocks (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
+     */
+    record SpectralModel(Spectral total, TreeMap<Long, Spectral> byBlock, TreeSet<Long> observed) implements Serializable {}
+
+    /**
+     * One spectralEmbedding block of a fit stage (all its coordinate columns), rebuilt from the columns' coordinates:
+     * a row contributes its value of {@code field} with the values of the lag {@code path} columns — the entity's
+     * previous steps, computed by an earlier keyed stage — and reads the coordinates of its {@code applied} value.
+     */
+    record SpectralSpec(String block, String field, List<String> path, String applied, int rank, int maxValues,
+                        String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
+                        Forward forward, long predictOffsetMillis) implements SummaryFitBlock<String[], Spectral.PairCounts, SpectralModel> {
+        @Override
+        public String artifactPath(final String planHash) {
+            return Spectral.artifactPath(artifactUri, planHash, block);
+        }
+
+        /** A forward fit is always re-fitted (the artifact holds the whole-input embedding only, for a static serving run). */
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return forward == null && Spectral.exists(artifactUri, planHash, block);
+        }
+
+        @Override
+        public SpectralModel readArtifact(final String planHash) {
+            return new SpectralModel(Spectral.read(artifactUri, planHash, block), null, null);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            final List<String> inputs = new ArrayList<>(path);
+            inputs.add(field);
+            return inputs;
+        }
+
+        @Override
+        public Summary<Spectral.PairCounts> family() {
+            return Spectral.SUMMARY;
+        }
+
+        @Override
+        public String familyName() {
+            return "PairCounts";
+        }
+
+        @Override
+        public Class<Spectral.PairCounts> stateClass() {
+            return Spectral.PairCounts.class;
+        }
+
+        @Override
+        public Coder<String[]> contributionCoder() {
+            return SerializableCoder.of(String[].class);
+        }
+
+        /** The string form a value is counted and looked up under (an integral number without its fraction, like {@code values:}). */
+        static String valueOf(final Object value) {
+            return value == null ? null : ContextEvaluator.valueKey(value);
+        }
+
+        /** The row's value followed by the previous values in the window; null when the row has no value or no previous one. */
+        @Override
+        public KV<Long, String[]> contribution(final Map<String, Object> row) {
+            final String value = valueOf(row.get(field));
+            if (value == null) return null;
+            final List<String> values = new ArrayList<>(path.size() + 1);
+            values.add(value);
+            for (final String step : path) {
+                final String previous = valueOf(row.get(step));
+                if (previous != null) values.add(previous);
+            }
+            if (values.size() == 1) return null;
+            long timeBlock = 0L;
+            if (forward != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
+                if (millis == null) return null;
+                timeBlock = forward.blocks().indexOf(millis);
+            }
+            return KV.of(timeBlock, values.toArray(new String[0]));
+        }
+
+        /** An input without a single pair has no embedding: no model (every column reads null) and no artifact. */
+        @Override
+        public boolean fitsEmptyInput() {
+            return false;
+        }
+
+        /** Factorises the pair counts of the time blocks on one worker: the whole-input embedding, plus one per change point under forward. */
+        @Override
+        public SpectralModel solve(final Map<Long, Spectral.PairCounts> parts, final String planHash) {
+            final BlockSeries<Spectral.PairCounts> series = new BlockSeries<>(Spectral.SUMMARY, parts);
+            final Spectral.PairCounts all = series.total();
+            final Spectral total = Spectral.fit(all == null ? new Spectral.PairCounts() : all, rank, maxValues, true);
+            LOG.info("spectralEmbedding {}: {} value(s) embedded in {} of {} requested coordinate(s) from {} pairs ({} value(s) beyond maxValues)",
+                    block, total.vocabulary.length, total.rank(), rank, total.pairs, total.dropped);
+            TreeMap<Long, Spectral> byBlock = null;
+            if (forward != null) {
+                byBlock = series.models(forward.windowBlocks(), s -> Spectral.fit(s, rank, maxValues, false));
+                LOG.info("spectralEmbedding {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
+            }
+            // a forward fit re-fits every run but writes the whole-input embedding once (refit: true overwrites)
+            if (artifactUri != null && (refit || !Spectral.exists(artifactUri, planHash, block))) {
+                Spectral.write(artifactUri, planHash, block, total);
+            }
+            return new SpectralModel(total, byBlock, forward == null ? null : series.observed());
+        }
+
+        /** The embedding a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
+        Spectral spectralFor(final SpectralModel model, final Map<String, Object> values) {
+            if (model == null) return null;
+            if (forward == null) return model.total();
+            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
+            if (eventMillis == null) return null;
+            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
+            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
+        }
+
+        /** {@code columns.get(i)} carries coordinate {@code components[i]} (resolved once in {@link #spectralSpecs}). */
+        @Override
+        public void apply(final SpectralModel model, final Map<String, Object> values) {
+            final Spectral spectral = spectralFor(model, values);
+            final double[] coordinates = spectral == null ? null : spectral.embed(valueOf(values.get(applied)));
+            for (int i = 0; i < components.length; i++) {
+                final int k = components[i];
+                values.put(columns.get(i).getCanonicalName(), coordinates == null || k >= coordinates.length ? null : (Object) coordinates[k]);
+            }
+        }
+    }
+
+    static List<SpectralSpec> spectralSpecs(final List<OutputColumn> stageColumns) {
+        final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
+        for (final OutputColumn c : stageColumns) {
+            if ("spectralEmbedding".equals(c.getOperator())) columns.computeIfAbsent(c.getBlock(), b -> new ArrayList<>()).add(c);
+        }
+        final List<SpectralSpec> specs = new ArrayList<>();
+        for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
+            final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final int[] components = new int[e.getValue().size()];
+            for (int i = 0; i < components.length; i++) components[i] = Integer.parseInt(e.getValue().get(i).getCoordinates().get("component"));
+            specs.add(new SpectralSpec(e.getKey(), k.get("field"), List.of(k.get("path").split(",")), k.get("applied"),
+                    Integer.parseInt(k.get("rank")), Integer.parseInt(k.get("maxValues")),
+                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
                     Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;

@@ -2445,6 +2445,135 @@ public class FeatureTransformTest {
     }
 
     /**
+     * transitionStats is a desugaring, so it must read exactly what the blocks it stands for read: a lag of the
+     * entity plus an expanding, shrunk distribution keyed on it. Sellers' grades in time order — s1: good, good, fair,
+     * good; s2: fair, good — give the pooled transitions good→good (B), good→fair (C/s1), fair→good (C/s2, D).
+     * D (previous = fair) has seen one fair→good; its parent is every earlier row but that one (good 2, fair 2), so
+     * P(good) = (1 + 2 · 0.5) / (1 + 2). B (previous = good) has seen no transition yet and reads the marginal.
+     */
+    @Test
+    public void testTransitionStats() throws java.io.IOException {
+        final String blocks = """
+                    - name: grade_next
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      emit: [{toValueProb: good}]
+                      blend: {perEntity: false, priorWeight: 2}
+                    - name: grade_own
+                      scope: population
+                      type: transitionStats
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      emit: [{toValueProb: good}]
+                      blend: {priorWeight: 2}
+                    - name: prev
+                      scope: sequence
+                      entity: seller
+                      ops: [{type: lag, fields: [condition_grade], k: 1}]
+                    - name: manual
+                      scope: population
+                      type: encoding
+                      naming: "{block}_{target}"
+                      keySets:
+                        - keys: [prev_all_condition_grade_lag1]
+                          hierarchy: [[]]
+                      targets:
+                        - {field: condition_grade, stats: [distribution], values: [good], as: to}
+                      shrinkage: {priorWeight: 2}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final Schema schema = outputs.get("features").getSchema();
+        Assertions.assertNotNull(schema.getField("f_grade_next_to_good"), schema::toString);
+        Assertions.assertNotNull(schema.getField("f_manual_to_good"), schema::toString);
+        Assertions.assertNull(schema.getField("f_grade_next_all_prev_lag1"), "the state is an intermediate");
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            for (final MElement row : byKey.values()) {
+                Assertions.assertEquals(row.getPrimitiveValue("f_manual_to_good"), row.getPrimitiveValue("f_grade_next_to_good"), row::toString);
+            }
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue("f_grade_next_to_good"));
+            Assertions.assertEquals(0.5, byKey.get("B/s1").getAsDouble("f_grade_next_to_good"), 1e-9);
+            Assertions.assertEquals(2.0 / 3, byKey.get("D/s1").getAsDouble("f_grade_next_to_good"), 1e-9);
+            // per entity: D's own (s1, fair) cell is empty, so it reads the pooled fair level — which now shrinks toward
+            // the whole marginal (good 3 of 5), since leave-node-out subtracts the LEAF's rows and the leaf has none:
+            // (1 + 2 · 0.6) / (1 + 2). s2's first transition (C/s2, previous = fair) finds the pooled cell empty too —
+            // C/s1 shares its timestamp — and reads the marginal of the three rows before it (good, fair, good)
+            Assertions.assertEquals(11.0 / 15, byKey.get("D/s1").getAsDouble("f_grade_own_to_good"), 1e-9);
+            Assertions.assertEquals(2.0 / 3, byKey.get("C/s2").getAsDouble("f_grade_next_to_good"), 1e-9);
+            Assertions.assertEquals(2.0 / 3, byKey.get("C/s2").getAsDouble("f_grade_own_to_good"), 1e-9);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    /**
+     * spectralEmbedding with a window of one step. The pairs are (good, good) once and (good, fair) three times, so
+     * C = [[2, 3], [3, 0]] over (good, fair), the only positive PMI is ln(3 · 8 / 15) = ln 1.6 off the diagonal, and
+     * the eigenvalues are ± ln 1.6: every coordinate has the magnitude sqrt(ln 1.6 / 2), both positive for the value
+     * with the larger mass (good), of opposite signs for fair. Under forward D reads B's and C's blocks only
+     * ((good, good) once, (good, fair) twice → ln 1.5), and C's rows read a block with a single value: nothing.
+     */
+    @Test
+    public void testSpectralEmbedding() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: grade_embed
+                      scope: population
+                      type: spectralEmbedding
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      cooccur: {window: 1}
+                      rank: 2
+                      fit: {artifact: "%s"}
+                    - name: grade_walk
+                      scope: population
+                      type: spectralEmbedding
+                      sequenceOf: {entity: seller, field: condition_grade}
+                      cooccur: {window: 1}
+                      rank: 2
+                      fit: {mode: forward, blocks: {size: P7D}}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        Assertions.assertNull(outputs.get("features").getSchema().getField("f_grade_embed_2"));
+        final double m = Math.sqrt(Math.log(1.6) / 2), walk = Math.sqrt(Math.log(1.5) / 2);
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            int good = 0;
+            for (final MElement row : rows) {
+                final double e0 = row.getAsDouble("f_grade_embed_0"), e1 = row.getAsDouble("f_grade_embed_1");
+                if ("good".equals(row.getAsString("condition_grade"))) {
+                    good++;
+                    Assertions.assertEquals(m, e0, 1e-9, row::toString);
+                    Assertions.assertEquals(m, e1, 1e-9, row::toString);
+                } else {
+                    Assertions.assertEquals(m, Math.abs(e0), 1e-9, row::toString);
+                    Assertions.assertEquals(0, e0 + e1, 1e-9, row::toString);
+                }
+                final String key = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                if ("D/s1".equals(key)) {
+                    Assertions.assertEquals(walk, row.getAsDouble("f_grade_walk_0"), 1e-9);
+                    Assertions.assertEquals(walk, row.getAsDouble("f_grade_walk_1"), 1e-9);
+                } else {
+                    Assertions.assertNull(row.getPrimitiveValue("f_grade_walk_0"), row::toString);
+                }
+            }
+            Assertions.assertEquals(4, good);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs);
+        final java.io.File artifact = new java.io.File(dirs[0], "grade_embed.spectral.json");
+        Assertions.assertTrue(artifact.exists());
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject();
+        Assertions.assertEquals(4, json.get("pairs").getAsLong());
+        Assertions.assertEquals("good", json.getAsJsonArray("values").get(0).getAsJsonObject().get("value").getAsString());
+        Assertions.assertEquals(2, json.getAsJsonArray("values").size());
+    }
+
+    /**
      * {@code fit.window} on an encoding's forward fit bounds the blocks a keySet without {@code maxAge} reads: with two
      * weekly blocks C (Jan 20) reads blocks 2870–2871 for its row count (B only) and 2869–2870 for the lagged outcome
      * (A, B); D (Feb 1) reads 2872–2873 (C) and 2871–2872 (C).

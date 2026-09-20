@@ -96,7 +96,7 @@ Sequence ops read **past rows only** (`$self` is rejected in ops; window filters
 
 ## Recipe E — population type with a static fit (worked example: `discretize`)
 
-The pattern `quantileTransform` and `svd` follow, and the one for `spectralEmbedding` / `transitionStats`: fitted once
+The pattern `quantileTransform`, `svd`, `smooth` and `spectralEmbedding` follow: fitted once
 over the whole input (or loaded from an artifact), applied per row by lookup.
 
 1. **Model class** (pure Java, `Serializable`, like `Discretization`): `fit...(...)`, `apply` /
@@ -143,6 +143,10 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    `[basis(x), y]`, so it contributes that vector to `Svd.SUMMARY` under the family name `Moments` and shares the
    svd blocks' Combine — no new state, coder or merge law to test. A target-consuming block lists the target in
    `fitInputs()` and passes it to `forwardCoordinates` (its availability is the forward lag).
+   **When the type is a composition of blocks that exist**, write no engine code at all: build the synthetic
+   `FeatureDef`s and call their expanders (`expandCompress` → `expandSvd`; `sequencePath` → `expandSequence` for the
+   lag path; `expandTransitionStats` → `expandEncoding` with a `naming` template that gives the columns the type's
+   own names). Pin the equivalence in an e2e test — the sugar and the explicit blocks side by side, value for value.
 6. Docs: a `### <Type> (population, type: <type>)` section in `feature.md` (example, fit semantics,
    artifact file, out-of-range behaviour), and remove the type from the *Limitations* list.
 7. Tests: `FeaturePlanCompilerTest.test<Type>Expansion` (coordinates, `fit` stage before the keyed

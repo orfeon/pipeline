@@ -206,7 +206,7 @@ not expand because another block failed).
 
 | code | level | meaning / fix |
 |---|---|---|
-| `population.type` / `population.unsupported` | error | `type` required; `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd`, `smooth` are implemented (`spectralEmbedding` / `transitionStats` are not) |
+| `population.type` / `population.unsupported` | error | `type` required; every registered type is implemented: `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd`, `smooth`, `transitionStats`, `spectralEmbedding` |
 | `encoding.keySets` / `encoding.targets` / `encoding.keySet.keys` | error | required parts |
 | `encoding.keySet.structure` | error | `flat \| hierarchy \| cross \| sequence` |
 | `encoding.keySet.sequence` | error / warning / info | `structure: sequence` needs at least two keys (a path, most recent first); the info lists the derived suffix chain, the warning says the block declares no `shrinkage` so the chain is never composed (raw full-path statistic) |
@@ -260,6 +260,12 @@ not expand because another block failed).
 | `smooth.range` | error / info | error: `range: [lo, hi]` with lo < hi is required — the knots are placed before the rows are read (keys beyond the range are clamped); info: the range defaulted to `[0, 1]` because the input is a uniform `quantileTransform` column (knots at the input's quantiles) |
 | `smooth.segments` / `.degree` / `.penalty` / `.outputs` | error | segments ≥ 1 and `segments + degree` ≤ 64; degree 0..5; `penalty.order` 1 \| 2 \| 3 with more basis functions than the order, `penalty.lambda` `reml` or a positive number, no other penalty keys; outputs `curve \| residual` |
 | `smooth.fit.mode` / `smooth.fit.mode.static` | error / info | `static` \| `forward` only; the info says the block declared `static` under a top-level forward fit |
+| `transitionStats.sequenceOf` / `spectralEmbedding.sequenceOf` | error | `sequenceOf: {entity: <entities[].name>, field: <categorical field>}` is required; a numeric field must be discretized first |
+| `transitionStats.parameters` / `spectralEmbedding.parameters` | error | an unknown key or entry in `sequenceOf` / `cooccur` / `emit` / `blend` (e.g. `emit: [{fromValueProb: x}]`) — the message lists the accepted forms |
+| `transitionStats.emit` / `.order` / `.blend` | error | `emit: [distribution \| {toValueProb: <value>}]` is required; `order` 1..4; `blend.priorWeight` a positive number |
+| `transitionStats.expansion` | info | the desugaring: the lag path, the key chain and the pseudo-count the block became (it is always an expanding distribution encoding) |
+| `spectralEmbedding.cooccur` / `.rank` / `.maxValues` / `.of` / `.maxFeatures` | error | `cooccur.window` 1..8, `weighting: ppmi` only; rank ≥ 1 (and ≤ `maxFeatures`); `maxValues` 2..1024; `of: current \| previous` |
+| `spectralEmbedding.fit.mode` | error | `static` \| `forward` only |
 | `svd.rank` | info | array input: the rank cannot be checked against the array length at compile time — a shorter array caps the components at its length (run-time warning), the surplus score columns read null |
 
 ## Engine errors at assembly (after a clean compile)
