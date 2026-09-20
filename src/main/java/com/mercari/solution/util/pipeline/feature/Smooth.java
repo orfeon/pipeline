@@ -168,8 +168,13 @@ public final class Smooth implements Serializable, FitArtifact.Model {
     public static Smooth fit(final Svd.Moments moments, final Basis basis, final int penaltyOrder, final Double lambda, final boolean warn) {
         final int m = basis.size();
         // fewer rows than the penalty's null space (a polynomial of degree penaltyOrder − 1) has parameters: nothing to estimate
-        if (moments.n <= penaltyOrder || moments.dimension != m + 1) {
-            if (warn) LOG.warn("smooth: {} row(s) with a key and a target to fit; no curve, every key maps to null", moments.n);
+        if (moments.n <= penaltyOrder) {
+            if (warn) LOG.warn("smooth: {} row(s) with a key and a target to fit (penalty.order {} needs more); no curve, every key maps to null", moments.n, penaltyOrder);
+            return empty(basis, penaltyOrder, moments.n);
+        }
+        if (moments.dimension != m + 1) {
+            if (warn) LOG.warn("smooth: the fitted moments carry {} number(s) per row but the basis of {} function(s) plus the target needs {}; no curve",
+                    moments.dimension, m, m + 1);
             return empty(basis, penaltyOrder, moments.n);
         }
         final double n = moments.n;
@@ -197,6 +202,13 @@ public final class Smooth implements Serializable, FitArtifact.Model {
             chosen = lambda;
         } else {
             final double center = Math.log10(traceA / traceP);
+            // a non-finite centre (an empty design, or a penalty with nothing to penalise: basis size ≤ the order)
+            // would make the grid below step from ±∞ by a finite amount and never terminate
+            if (!Double.isFinite(center)) {
+                if (warn) LOG.warn("smooth: no strength scale to search (tr(XᵀX) = {}, tr(P) = {}, {} basis function(s) at penalty order {}); no curve",
+                        traceA, traceP, m, penaltyOrder);
+                return empty(basis, penaltyOrder, moments.n);
+            }
             double best = Double.NaN, bestValue = Double.POSITIVE_INFINITY;
             for (double e = center - SEARCH_DECADES; e <= center + SEARCH_DECADES + 1e-9; e += SEARCH_STEP) {
                 final double value = solver.reml(Math.pow(10, e));
@@ -211,12 +223,14 @@ public final class Smooth implements Serializable, FitArtifact.Model {
             }
             chosen = Math.pow(10, refine(solver, best - SEARCH_STEP, best + SEARCH_STEP));
         }
-        final double[] beta = solver.solve(chosen);
-        if (beta == null) {
+        // one factorisation of (A + λP) serves the coefficients and the effective degrees of freedom
+        final double[][] factor = solver.factor(chosen);
+        if (factor == null) {
             if (warn) LOG.warn("smooth: the penalised system is singular at λ = {} (n = {}); no curve", chosen, moments.n);
             return empty(basis, penaltyOrder, moments.n);
         }
-        final double edf = solver.edf(chosen);
+        final double[] beta = solver.solve(factor);
+        final double edf = solver.edf(factor);
         final double rss = solver.rss(beta);
         final double sigma2 = n - edf > 0 ? rss / (n - edf) : Double.NaN;
         for (int i = 0; i < m; i++) beta[i] += mean[m];
@@ -309,15 +323,13 @@ public final class Smooth implements Serializable, FitArtifact.Model {
             return x;
         }
 
-        double[] solve(final double lambda) {
-            final double[][] l = factor(lambda);
-            return l == null ? null : solve(l, r);
+        /** The coefficients of the system whose lower Cholesky factor is {@code l}. */
+        double[] solve(final double[][] l) {
+            return solve(l, r);
         }
 
-        /** {@code tr((A + λP)⁻¹A)}. */
-        double edf(final double lambda) {
-            final double[][] l = factor(lambda);
-            if (l == null) return Double.NaN;
+        /** {@code tr((A + λP)⁻¹A)} from the factor of {@code A + λP}. */
+        double edf(final double[][] l) {
             double trace = 0;
             final double[] column = new double[m];
             for (int j = 0; j < m; j++) {
@@ -372,10 +384,11 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         json.addProperty("penaltyOrder", penaltyOrder);
         json.addProperty("n", n);
         json.addProperty("estimated", estimated);
-        // a non-finite number is not JSON: an empty fit has no strength, and a saturated one no variance
-        json.addProperty("lambda", Double.toString(lambda));
-        json.addProperty("edf", edf);
-        json.addProperty("sigma2", Double.toString(sigma2));
+        // JSON has no ±Infinity / NaN: an empty fit has no strength, and a saturated one no variance, so those go
+        // through the shared writer that keeps a finite value a number and falls back to its string form otherwise
+        json.add("lambda", FitArtifact.lambdaJson(lambda));
+        json.add("edf", FitArtifact.lambdaJson(edf));
+        json.add("sigma2", FitArtifact.lambdaJson(sigma2));
         final JsonArray array = new JsonArray();
         for (final double c : coefficients) array.add(c);
         json.add("coefficients", array);
@@ -389,9 +402,10 @@ public final class Smooth implements Serializable, FitArtifact.Model {
         final double[] coefficients = new double[array.size()];
         for (int i = 0; i < coefficients.length; i++) coefficients[i] = array.get(i).getAsDouble();
         final Basis basis = new Basis(json.get("lo").getAsDouble(), json.get("hi").getAsDouble(), json.get("segments").getAsInt(), json.get("degree").getAsInt());
-        return new Smooth(basis, json.get("penaltyOrder").getAsInt(), Double.parseDouble(json.get("lambda").getAsString()),
+        // getAsDouble accepts both forms lambdaJson writes (a number, or its string form when non-finite)
+        return new Smooth(basis, json.get("penaltyOrder").getAsInt(), json.get("lambda").getAsDouble(),
                 json.get("estimated").getAsBoolean(), coefficients, json.get("edf").getAsDouble(),
-                Double.parseDouble(json.get("sigma2").getAsString()), n.getAsLong());
+                json.get("sigma2").getAsDouble(), n.getAsLong());
     }
 
 }
