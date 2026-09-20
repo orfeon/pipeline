@@ -7,16 +7,16 @@ feature plan 2b57bfceb0e0d469
 predictAt=event_time - PT10M time.field=session_time columns=127/183 stages=21 shuffles=20 waves=3 (dag shuffles~5)
 -- stages (linear chain; deps = stages whose keyed/fit columns this one needs, wave = depth in that DAG)
   #0 context key=[session_id] blocks=[relative, composition] columns=12 deps=[] wave=1
-  #1 population key=[seller_id] blocks=[recent, enc] columns=34 deps=[] wave=1
+  #1 population key=[account_id] blocks=[recent, enc] columns=34 deps=[] wave=1
   #9 population blocks=[enc] columns=6 deps=[] wave=1                 ← no key: the global level
   #11 fit blocks=[encFold] columns=7 deps=[] wave=1
   #19 context key=[session_id] blocks=[...] columns=84 deps=[1, 2, ...] wave=2
   #20 groupBy key=[session_id] blocks=[output] columns=0 deps=[...] wave=3
 -- columns
-  f_recent_n5_start_price_mean : float64 [sequence/aggregate] availableAt=event_time - PT10M status=staticSafe derivedFrom=[attribute] <- [start_price, seller_id]
-  _sold_flag : float64 [row/expr] availableAt=event_time + PT144H30M status=violation derivedFrom=[outcome] (intermediate) <- [sold]
+  f_recent_n5_amount_mean : float64 [sequence/aggregate] availableAt=event_time - PT10M status=staticSafe derivedFrom=[attribute] <- [amount, account_id]
+  _converted_flag : float64 [row/expr] availableAt=event_time + PT144H30M status=violation derivedFrom=[outcome] (intermediate) <- [converted]
 -- audit (hot keys; {input} = the transform input relation)
-  seller_id [stages 1, 4]: SELECT seller_id, COUNT(1) AS row_count FROM {input} WHERE seller_id IS NOT NULL GROUP BY seller_id ORDER BY row_count DESC LIMIT 20
+  account_id [stages 1, 4]: SELECT account_id, COUNT(1) AS row_count FROM {input} WHERE account_id IS NOT NULL GROUP BY account_id ORDER BY row_count DESC LIMIT 20
   <global> [stage 9]: SELECT COUNT(1) AS row_count FROM {input}
 -- diagnostics
   hint[encoding.globalKey] features.enc: stage #9 evaluates every row under one key ...
