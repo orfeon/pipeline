@@ -284,6 +284,22 @@ explain, one float64 `<name>_resid_<input>` per input **in input units** (`x −
 needs named `inputs`, not an array — `svd.outputs`); `residualNorm` = `<name>_residnorm`, its Euclidean length
 (arrays too). Null wherever the scores are null; 0 when `rank` equals the vector length.
 
+### `type: smooth` (static, or forward per time block)
+
+`input` (numeric key), `target` (numeric / boolean field or column), `range: [lo, hi]` (required — the knots are
+placed before the rows are read; keys beyond it are clamped, the curve is constant there; may be omitted when the
+input is a uniform `quantileTransform` column: `[0, 1]`, i.e. knots at the quantiles), `segments` (default 10),
+`degree` (0..5, default 3), `penalty: {order: 1 | 2 | 3, lambda: reml | <positive number>}` (default order 2 —
+the curve shrinks towards a line — and REML), `outputs: [curve, residual]` (default `[curve]`), `fit` as for svd
+(`static | forward`, inherited from a top-level forward fit). Output float64 `<name>` = the fitted conditional mean
+of the target at the row's key (a feature: only the key is read from the row itself), and `<name>_resid` = target −
+curve (reads the row's own target: an intermediate when another block consumes it, a label under
+`output.roles.label`, otherwise `availability.violation`). A penalised B-spline regression solved from sufficient
+statistics (it shares the svd blocks' Combine; no row leaves the workers); `segments + degree` ≤ 64. Under
+`forward` the readable blocks are delayed by the target's settlement + ingestion lag and λ is re-chosen per window.
+Missing key → null; a fit with ≤ `penalty.order` rows → null everywhere. Artifact `<block>.smooth.json` (λ, edf,
+σ², coefficients).
+
 ## Availability expressions
 
 | expression | meaning |

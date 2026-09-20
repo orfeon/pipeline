@@ -138,7 +138,11 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    (`blocks.addAll(<type>Specs(columns))`), which feeds both `applyFit` and the manifest's
    `artifactPaths` — `FitApplyDoFn` needs no change. Copy before
    sorting (DirectRunner immutability). The whole training set lands on one worker: state the
-   memory cost in the docs (discretize: 8 bytes per row).
+   memory cost in the docs (discretize: 8 bytes per row). Before writing a family, check whether the fit is a
+   function of one that exists: `SmoothSpec` needs (XᵀX, Xᵀy, yᵀy), which are the second moments of the vector
+   `[basis(x), y]`, so it contributes that vector to `Svd.SUMMARY` under the family name `Moments` and shares the
+   svd blocks' Combine — no new state, coder or merge law to test. A target-consuming block lists the target in
+   `fitInputs()` and passes it to `forwardCoordinates` (its availability is the forward lag).
 6. Docs: a `### <Type> (population, type: <type>)` section in `feature.md` (example, fit semantics,
    artifact file, out-of-range behaviour), and remove the type from the *Limitations* list.
 7. Tests: `FeaturePlanCompilerTest.test<Type>Expansion` (coordinates, `fit` stage before the keyed

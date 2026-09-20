@@ -463,6 +463,8 @@ public final class FeaturePlanCompiler {
         refs.addAll(def.inputs);
         if (def.baseline != null) refs.add(def.baseline);
         if (def.offset != null) refs.add(def.offset);
+        // the target of a smooth curve is read by its fit (a discretize target is declared but unused)
+        if (def.target != null && "smooth".equals(def.type)) refs.add(def.target);
         for (final Op op : def.ops) {
             refs.addAll(op.fields);
             if (op.against != null) refs.add(op.against);
@@ -2279,7 +2281,153 @@ public final class FeaturePlanCompiler {
             expandSvd(def, computeAt);
             return;
         }
+        if ("smooth".equals(def.type)) {
+            expandSmooth(def, computeAt);
+            return;
+        }
         expandEncoding(def, computeAt);
+    }
+
+    /**
+     * §5.6 smooth: the curve of a target over a numeric key (the linear-basis class) — a penalised B-spline
+     * regression solved from the moments of {@code [B(x), y]}, so it is fitted like an svd block (static, or per
+     * time block under forward) and applied by evaluating the curve at the row's key. Columns: the curve
+     * {@code <name>} and, on request, the residual {@code <name>_resid} = target − curve, which reads the row's
+     * own target and is therefore as available as the target is (a target for other blocks, not a feature).
+     */
+    private void expandSmooth(final FeatureDef def, final AvailableAt computeAt) {
+        final String loc = def.location();
+        final String input = singleInput(def);
+        if (input == null) return;
+        final Ref ref = resolve(input);
+        if (ref == null) {
+            diagnostics.error("reference.unknown", loc, "unknown field: " + input);
+            return;
+        }
+        if (!OperatorCatalog.isNumeric(ref.type())) diagnostics.error("smooth.input", loc, "smooth input '" + input + "' must be numeric");
+        if (def.target == null) {
+            diagnostics.error("smooth.target", loc, "smooth requires 'target' (the numeric or boolean field / column whose curve over the input is fitted)");
+            return;
+        }
+        final Ref targetRef = resolve(def.target);
+        if (targetRef == null) {
+            diagnostics.error("reference.unknown", loc, "unknown target: " + def.target);
+            return;
+        }
+        if (!OperatorCatalog.isNumeric(targetRef.type()) && (targetRef.type() == null || targetRef.type().getType() != Schema.Type.bool)) {
+            diagnostics.error("smooth.target", loc, "smooth target '" + def.target + "' must be numeric or boolean");
+        }
+        final String method = def.method == null ? Smooth.SPLINE : def.method;
+        switch (method) {
+            case Smooth.SPLINE -> { }
+            case "isotonic", "rff" -> diagnostics.error("smooth.method", loc, "method " + method + " is not implemented yet (spline is available)");
+            default -> diagnostics.error("smooth.method", loc, "method must be spline | isotonic | rff: " + method);
+        }
+        final int segments = def.segments == null ? Smooth.DEFAULT_SEGMENTS : def.segments;
+        final int degree = def.degree == null ? Smooth.DEFAULT_DEGREE : def.degree;
+        final int order = def.penaltyOrder == null ? Smooth.DEFAULT_PENALTY_ORDER : def.penaltyOrder;
+        boolean valid = true;
+        if (segments < 1) {
+            diagnostics.error("smooth.segments", loc, "segments must be >= 1");
+            valid = false;
+        }
+        if (degree < 0 || degree > 5) {
+            diagnostics.error("smooth.degree", loc, "degree must be within 0..5 (3 = cubic B-splines): " + degree);
+            valid = false;
+        }
+        if (order < 1 || order > 3) {
+            diagnostics.error("smooth.penalty", loc, "penalty.order must be 1 | 2 | 3 (the curve shrinks towards a constant | a line | a parabola): " + order);
+            valid = false;
+        }
+        if (!def.penaltyUnknown.isEmpty()) {
+            diagnostics.error("smooth.penalty", loc, "unknown penalty key(s) " + def.penaltyUnknown + " (accepted: order, lambda)");
+        }
+        if (valid && segments + degree > Smooth.MAX_BASIS) {
+            diagnostics.error("smooth.segments", loc, "segments + degree = " + (segments + degree) + " basis functions exceed " + Smooth.MAX_BASIS
+                    + " (the fit state is (basis + 1)² numbers per time block; the penalty, not the knot count, sets the smoothness)");
+            valid = false;
+        }
+        if (valid && segments + degree <= order) {
+            diagnostics.error("smooth.penalty", loc, "penalty.order " + order + " needs more than " + order + " basis functions (segments + degree = " + (segments + degree) + ")");
+            valid = false;
+        }
+        // λ: chosen by REML unless declared
+        String lambda = Smooth.REML;
+        if (def.penaltyLambda != null && !Smooth.REML.equals(def.penaltyLambda)) {
+            try {
+                final double declared = Double.parseDouble(def.penaltyLambda.trim());
+                if (!(declared > 0) || Double.isInfinite(declared)) throw new NumberFormatException();
+                lambda = Double.toString(declared);
+            } catch (final NumberFormatException e) {
+                diagnostics.error("smooth.penalty", loc, "penalty.lambda must be reml or a positive number: " + def.penaltyLambda);
+                valid = false;
+            }
+        }
+        // the knots are laid over a declared range: they must be known before the single pass over the rows
+        double lo = 0, hi = 1;
+        if (def.range.isEmpty() && ref.column() != null && "quantileTransform".equals(ref.column().operator)
+                && QuantileTransform.UNIFORM.equals(ref.column().coordinates.getOrDefault("distribution", QuantileTransform.UNIFORM))) {
+            diagnostics.info("smooth.range", loc, "range defaults to [0, 1], the range of the uniform quantileTransform column '" + input + "' (knots at the input's quantiles)");
+        } else if (def.range.size() != 2 || !(def.range.get(0) < def.range.get(1)) || def.range.get(0).isInfinite() || def.range.get(1).isInfinite()) {
+            diagnostics.error("smooth.range", loc, "smooth requires range: [lo, hi] with lo < hi — the knots are placed before the rows are read, and keys beyond the range are clamped to it"
+                    + " (for knots at the data's quantiles, feed a uniform quantileTransform column: its range is [0, 1])" + (def.range.isEmpty() ? "" : ": " + def.range));
+            valid = false;
+        } else {
+            lo = def.range.get(0);
+            hi = def.range.get(1);
+        }
+        final List<String> outputs = def.outputs.isEmpty() ? List.of("curve") : def.outputs;
+        for (final String output : outputs) {
+            if (!List.of("curve", "residual").contains(output)) {
+                diagnostics.error("smooth.outputs", loc, "unknown smooth output: " + output + " (curve | residual)");
+                valid = false;
+            }
+        }
+        final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "smooth", "the curve is fitted", "penalised regression solved from the moments of the whole input", true);
+        if (!valid) return;
+        final boolean forward = fitSpec.mode == FitMode.forward;
+        final String what = "smooth fits " + (segments + degree) + " B-spline coefficients of degree " + degree + " over [" + lo + ", " + hi + "] (difference penalty of order " + order
+                + ", strength " + (Smooth.REML.equals(lambda) ? "chosen by REML" : lambda) + ") from the moments of (basis, target)";
+        if (forward) {
+            final ForwardBlocks blocks = fitSpec.forwardBlocks();
+            diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves them over the complete blocks"
+                    + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose targets are known at predictAt (the row's own block excluded)"
+                    + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + (fitSpec.artifactUri == null ? "" : "; the whole-input curve is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
+        } else {
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
+                    + "; every training row's own target shapes the curve it reads (static-fit caveat): fit.mode forward reads the earlier time blocks only");
+        }
+
+        for (final String output : new LinkedHashSet<>(outputs)) {
+            final boolean residual = "residual".equals(output);
+            final OutputColumn c = newColumn(def.name, Scope.population, "smooth", residual ? def.name + "_resid" : def.name, Schema.FieldType.FLOAT64, computeAt);
+            c.fitted = true;
+            c.coordinates.put("fit", forward ? "forward" : "static");
+            if (forward) {
+                forwardCoordinates(c, null, List.of(input, def.target), def, fitSpec);
+                c.coordinates.put("predictOffsetMillis", Long.toString(spec.predictAt.getOffset().toMillis()));
+            }
+            c.coordinates.put("method", method);
+            c.coordinates.put("field", canonicalOf(input));
+            c.coordinates.put("target", canonicalOf(def.target));
+            c.coordinates.put("output", output);
+            c.coordinates.put("segments", Integer.toString(segments));
+            c.coordinates.put("degree", Integer.toString(degree));
+            c.coordinates.put("lo", Double.toString(lo));
+            c.coordinates.put("hi", Double.toString(hi));
+            c.coordinates.put("penaltyOrder", Integer.toString(order));
+            c.coordinates.put("lambda", lambda);
+            if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
+            if (fitSpec.refit) c.coordinates.put("refit", "true");
+            addSelfInput(c, input);
+            addPastInput(c, input);
+            // the curve reads the targets of other rows (through the fit); the residual also reads the row's own
+            if (residual) addSelfInput(c, def.target);
+            addPastInput(c, def.target);
+            finishStaticFitted(c, def);
+            register(c);
+        }
     }
 
     /**

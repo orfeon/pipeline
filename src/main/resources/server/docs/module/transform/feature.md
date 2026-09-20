@@ -38,6 +38,8 @@ Supports:
   edges fitted on the input (quantile method), a fitted categorical column to key an encoding on.
   **quantileTransform**: a value's position in the fitted distribution (rank normalisation, optionally as a
   normal score). **svd**: PCA / truncated-SVD scores of a numeric vector (several fields or an array).
+  **smooth**: the curve of a target over a numeric key (penalised B-splines, strength by REML) and the
+  target's residual from it.
 - **Leakage checking** — every column carries a derived availability time and lineage (source, kind,
   evidence). Columns available after `predictAt` are rejected unless they are only consumed as
   intermediates; history windows over late-arriving fields are shifted automatically.
@@ -396,8 +398,8 @@ block from the keys' statistics up to that block, and recorded per block in the 
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
 (UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
-A `type: svd` or `type: quantileTransform` block inherits this `mode` unless it declares its own (see *SVD / PCA*
-and *Quantile transform*); the other population types (factorization / discretize) are always static and are
+A `type: svd`, `type: quantileTransform` or `type: smooth` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
+*Quantile transform* and *Smooth curve*); the other population types (factorization / discretize) are always static and are
 unaffected.
 
 ### Out-of-fold fits (fit.mode fold)
@@ -611,6 +613,65 @@ factors are taken out). `residual` emits one column per input, `<name>_resid_<in
 (an array has no named dimensions: `svd.outputs`); `residualNorm` emits `<name>_residnorm`, the Euclidean length
 of the residual vector, and works for an array input too. With every component kept (`rank` = the vector length)
 the residual is 0. The columns share the block's fit (static or forward) and read null wherever the scores do.
+
+### Smooth curve over a numeric key (population, type: smooth)
+
+```yaml
+  - name: price_curve
+    scope: population
+    type: smooth
+    input: start_price                 # the numeric key x
+    target: sold                       # the numeric / boolean target y (an input field or a column)
+    range: [0, 500]                    # [lo, hi] of the key — required (see "Knots"); keys beyond it are clamped to it
+    segments: 10                       # equal intervals of the range (default 10)
+    degree: 3                          # B-spline degree 0..5 (default 3 = cubic; 0 = smoothed steps)
+    penalty: {order: 2, lambda: reml}  # difference penalty: order 1 | 2 | 3 (default 2), lambda reml (default) | a positive number
+    outputs: [curve]                   # curve (default) -> price_curve | residual -> price_curve_resid
+    fit: {mode: forward, blocks: {size: P90D}}   # static (default), forward, or inherited from a top-level forward fit
+```
+
+An encoding keyed on bins of a numeric field loses what happens inside a bin and at its edges; `smooth` fits the
+conditional mean of the target as a **curve** of the key instead: `f(x) = Σ_j β_j B_j(x)` over `segments + degree`
+uniform B-splines, with a penalty `λ‖Δ^order β‖²` on the differences of neighbouring coefficients (a P-spline). The
+penalty, not the knot count, sets the smoothness — leave `segments` generous. `order` names what the curve
+shrinks towards as `λ` grows: a constant (1), a straight line (2, the default), a parabola (3).
+
+- **The strength `λ`.** `lambda: reml` (default) chooses it by restricted maximum likelihood through the mixed-model
+  reading of the penalty — the smooth counterpart of `weights: varianceComponents` for key lattices: a noisy target
+  is shrunk to the line, a clear non-linear signal keeps its shape. A declared number fixes it (`λ = σ²/τ²`, so the
+  same number smooths a small sample more than a large one). The chosen value, the effective degrees of freedom
+  (`edf`: `order` = fully shrunk, `segments + degree` = unpenalised) and the residual variance are in the artifact
+  and the run log.
+- **Execution.** A row contributes the vector `[B(x), y]` to the same (n, Σz, Σzzᵀ) accumulator an `svd` block uses,
+  which holds `XᵀX`, `Xᵀy` and `yᵀy` — everything the solve *and* the REML criterion need. No row leaves the
+  workers, the block shares the fit stage's one Combine with the svd blocks, and the small penalised system
+  (tens of coefficients) is solved on one worker. The target is centred before the solve, so a large level costs
+  no precision.
+- **Knots.** They are laid over `range` before the single pass over the rows, which is why the range is declared
+  and not read off the data; a key outside it is clamped (the curve is constant beyond its ends), in the fit and in
+  the apply alike. For knots **at the data's quantiles**, feed a uniform `quantileTransform` column: its range is
+  `[0, 1]` and `range` may then be omitted (`smooth.range` info) — the transform gets a fit stage of its own ahead
+  of the curve's.
+- **Missing values.** A row without a key or a target takes no part in the fit; a row without a key reads null. A
+  fit with no more rows than `penalty.order` has no curve and reads null everywhere.
+- **The curve is a feature, the residual is a target.** `price_curve` reads the *other* rows' targets through the
+  fit and only the row's own key, so it is as available as the key (lineage `derivedFrom: outcome` for an outcome
+  target). `outputs: [residual]` adds `<name>_resid` = target − curve, which reads the row's **own** target and is
+  as available as that target: consumed by another block — typically `targets: [{field: price_curve_resid, ...}]`
+  of an encoding, which then estimates an entity's effect *net of* the key's curve — it is kept as an intermediate
+  (`availability.intermediate`); declared as `output.roles.label` it is a label; otherwise it is an
+  `availability.violation`.
+- **Fit modes.** Under `static` every training row's own target shapes the curve it reads (the static-fit caveat
+  of any target-consuming fit: harmless for serving from an artifact, optimistic inside the training set). Under
+  `forward` the moments are kept per time block and the curve is re-solved for every block window a row may read —
+  the complete blocks within `fit.window` whose **targets are known at predictAt** (the target's settlement and
+  ingestion lag delays the readable blocks, as for a forward encoding), the row's own block excluded; `minBlocks` /
+  `minHistory` as for svd, and `λ` is re-chosen per window under `reml`. `fold` / `expanding` are rejected
+  (`smooth.fit.mode`). The artifact `<planHash>/<block>.smooth.json` holds the whole-input curve (range, segments,
+  degree, penalty order, λ, edf, σ², n, coefficients) for a static serving run.
+- Several keys are several blocks; chain them through the residual (`target: <previous>_resid`) for an additive
+  fit by hand. `method: isotonic` / `rff`, several inputs in one block (additive / tensor smooths) and
+  category-varying curves are not implemented (`smooth.method`).
 
 ### Shrinkage and key lattices (population)
 
@@ -1326,11 +1387,12 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
   GroupByKey).
 - Nested encoding targets, the `quantile` / `distribution` stats in
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
-  `factorization` / `discretize` / `quantileTransform` / `svd` (`spectralEmbedding`, `transitionStats`) are parsed
+  `factorization` / `discretize` / `quantileTransform` / `svd` / `smooth` (`spectralEmbedding`, `transitionStats`) are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
   and non-static fits. Discretize: non-static fits (`fit.cadence / window /
-  warmStart` are accepted and ignored); quantileTransform and svd: `fold` (`static` and `forward` are implemented, `fit.cadence /
-  warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). In `shrinkage`,
+  warmStart` are accepted and ignored); quantileTransform, svd and smooth: `fold` (`static` and `forward` are implemented, `fit.cadence /
+  warmStart` ignored). Discretize: `method: tree` / `optimal` (supervised). Smooth: `method: isotonic` / `rff`,
+  several inputs in one block. In `shrinkage`,
   `estimator: joint` needs `fit.mode: static` / `fold` / `forward` (rejected under `expanding`), a conjugate
   `family` needs `scale: identity`, a shrunk `distribution` needs a chain lattice and `backoff`, and
   `weights: heldOut` is rejected;

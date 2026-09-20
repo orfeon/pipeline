@@ -206,7 +206,7 @@ not expand because another block failed).
 
 | code | level | meaning / fix |
 |---|---|---|
-| `population.type` / `population.unsupported` | error | `type` required; `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd` are implemented (`spectralEmbedding` / `transitionStats` are not) |
+| `population.type` / `population.unsupported` | error | `type` required; `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd`, `smooth` are implemented (`spectralEmbedding` / `transitionStats` are not) |
 | `encoding.keySets` / `encoding.targets` / `encoding.keySet.keys` | error | required parts |
 | `encoding.keySet.structure` | error | `flat \| hierarchy \| cross \| sequence` |
 | `encoding.keySet.sequence` | error / warning / info | `structure: sequence` needs at least two keys (a path, most recent first); the info lists the derived suffix chain, the warning says the block declares no `shrinkage` so the chain is never composed (raw full-path statistic) |
@@ -250,12 +250,16 @@ not expand because another block failed).
 | `quantileTransform.fit.mode` / `quantileTransform.fit.mode.static` | error / info | quantileTransform is `static` or `forward` (expanding / fold are rejected); the info says a block declared `static` under a top-level forward fit and therefore sees the whole input |
 | `svd.fit.mode` | error | `static` \| `forward` only (`expanding` / `fold` are rejected) |
 | `svd.fit.mode.static` | info | the block declares `fit.mode: static` while the top-level fit is `forward`, so it alone is fitted on the whole input; drop the block's `fit.mode` to inherit the forward walk |
-| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` | warning | `cadence` / `warmStart` not implemented; `window` applies to a forward `svd` / `quantileTransform` only |
+| `factorization.fit.*` / `discretize.fit.*` / `quantileTransform.fit.*` / `svd.fit.*` / `smooth.fit.*` | warning | `cadence` / `warmStart` not implemented; `window` applies to a forward `svd` / `quantileTransform` / `smooth` only |
 | `discretize.input` / `.bins` / `.minSamplesPerBin` / `.method` / `.target` | error / warning | numeric input; bins ≥ 2; minSamplesPerBin ≥ 1; only `quantile`; `target` is ignored by `quantile` |
 | `quantileTransform.input` / `.bins` / `.distribution` | error | numeric input; bins ≥ 2; `uniform \| normal` |
 | `quantileTransform.clip` | error / warning | error: `clip` must be a probability in `(0, 0.5)` (default `1e-6`); warning: `clip` with `distribution: uniform` has no effect on the output but still changes the plan hash — remove it or switch to `normal` |
 | `clip.invalid` | error | `clip` is not a number |
 | `svd.input` / `.rank` / `.maxFeatures` | error | two or more numeric `inputs`, or one `input` field declared `type: array<float64>` (or another numeric element type) in the sources contract — no feature op produces an array (then `rank` is required); 1 ≤ rank ≤ vector length; rank columns count towards `maxFeatures` |
+| `smooth.input` / `.target` / `.method` | error | numeric `input`; `target` required, numeric or boolean; only `method: spline` (`isotonic` / `rff` are not implemented) |
+| `smooth.range` | error / info | error: `range: [lo, hi]` with lo < hi is required — the knots are placed before the rows are read (keys beyond the range are clamped); info: the range defaulted to `[0, 1]` because the input is a uniform `quantileTransform` column (knots at the input's quantiles) |
+| `smooth.segments` / `.degree` / `.penalty` / `.outputs` | error | segments ≥ 1 and `segments + degree` ≤ 64; degree 0..5; `penalty.order` 1 \| 2 \| 3 with more basis functions than the order, `penalty.lambda` `reml` or a positive number, no other penalty keys; outputs `curve \| residual` |
+| `smooth.fit.mode` / `smooth.fit.mode.static` | error / info | `static` \| `forward` only; the info says the block declared `static` under a top-level forward fit |
 | `svd.rank` | info | array input: the rank cannot be checked against the array length at compile time — a shorter array caps the components at its length (run-time warning), the surplus score columns read null |
 
 ## Engine errors at assembly (after a clean compile)
