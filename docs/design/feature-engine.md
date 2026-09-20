@@ -1053,7 +1053,7 @@ Families (`Summary.Summaries`, plus the two that live with their model class):
 | `COUNTS` | value → count | yes | distribution | encoding `distribution` |
 | `ORDER` | Fenwick multiset (`OrderStatistics`) | yes | quantile(p) | encoding quantile stats |
 | `REGRESSION` | n, Σx, Σy, Σx², Σy², Σxy about an anchor | yes | cov / corr / beta / intercept / r2 | sequence `regression` |
-| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits |
+| `Svd.SUMMARY` | n, Σx, Σxxᵀ about an anchor | **no** (the anchored sums are not subtracted vector by vector) | — (solved, not read) | `type: svd` fits; `type: smooth` fits (the vector is `[B(x), y]`, §9.6.3) |
 | `QuantileTransform.VALUES` | the values themselves | **no** (merge = concatenation) | count | `type: quantileTransform` fits |
 
 Conventions every family follows: population moments (the `std` convention) and null — never NaN — when a
@@ -1144,6 +1144,23 @@ blocks: 40 → 14 top-level transforms; the Dataflow wall-clock on the consumer'
 recorded in §9.2). A block that fits an empty input too (quantileTransform: n = 0 is still an artifact) adds an
 empty marker part so its group exists. fm, discretize and the joint estimator keep their own chains: fm and joint
 have no summary state, discretize gathers the same values as the quantile transform and can join its family.
+
+**A family is reused, not re-declared: `type: smooth`.** The smooth curve of a target over a numeric key (spec §5.6,
+the linear-basis class; `Smooth`) needs `XᵀX`, `Xᵀy` and `yᵀy` of a B-spline design — which are the blocks of the
+second-moment matrix of the vector `z = [B_0(x) … B_{m−1}(x), y]`. `SmoothSpec` therefore contributes `z` to
+`Svd.SUMMARY` and declares the family name `Moments`: it rides the svd blocks' `_FitMoments_Combine`, and `static`,
+`forward`, `fit.window` and `minBlocks` are the `BlockSeries` they already were (the target's availability lag enters
+through `forwardCoordinates`, as for a forward encoding). The solve reads the moments through their *centred* form —
+independent of the accumulator's anchor — rebuilds `XᵀX = C_bb + n·b̄b̄ᵀ`, and centres the target (B-splines sum to
+one and a difference penalty ignores constants, so the mean is added back to every coefficient: exact, and a target
+with a large level costs no digits). The penalty strength is chosen by REML, which needs nothing beyond the same
+moments: `(n − d) log(y'ᵀy' − β'ᵀXᵀy') + log|XᵀX + λP| − (m − d) log λ`, minimised over a fixed grid of log λ around
+`tr(XᵀX)/tr(P)` and a fixed number of golden-section steps (deterministic — a re-fit reproduces λ bit for bit). The
+knots must exist before the one pass over the rows, so the range is declared (quantile knots = a uniform
+`quantileTransform` input, range `[0, 1]`, one fit stage earlier). What the design deliberately leaves out: `isotonic`
+(PAVA is not a sum of contributions — it would gather per-key (x, n, Σy) like the quantile transform's values), `rff`,
+several smooth terms in one block (one λ per term makes REML a multi-dimensional search) and category-varying curves
+(spec §5.6, the tensor with a key lattice — `joint` territory).
 
 #### 9.6.4 Vector operators and their three supplies
 

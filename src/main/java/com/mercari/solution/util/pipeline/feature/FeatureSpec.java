@@ -298,6 +298,17 @@ public class FeatureSpec implements Serializable {
         public boolean standardize;
         /** svd: what to emit — {@code scores} (default) | {@code residual} (per input, in input units) | {@code residualNorm}. */
         public List<String> outputs = new ArrayList<>();
+        // smooth ({@code input}, {@code target}, {@code method}, {@code degree}, {@code outputs} shared with the types above)
+        /** smooth: equal intervals of the range the B-splines span (null = the default). */
+        public Integer segments;
+        /** smooth: {@code [lo, hi]} of the key; empty = not declared. */
+        public List<Double> range = new ArrayList<>();
+        /** smooth: order of the difference penalty (null = the default). */
+        public Integer penaltyOrder;
+        /** smooth: {@code penalty.lambda} as written — {@code reml} or a number (null = reml). */
+        public String penaltyLambda;
+        /** smooth: keys of the {@code penalty} block other than {@code order} / {@code lambda}. */
+        public List<String> penaltyUnknown = new ArrayList<>();
 
         public String location() {
             return "features." + name;
@@ -885,6 +896,14 @@ public class FeatureSpec implements Serializable {
         def.center = o.has("center") && !o.get("center").isJsonNull() ? Json.bool(o, "center", true) : null;
         def.standardize = Json.bool(o, "standardize", false);
         def.outputs = Json.strings(o, "outputs");
+        def.segments = Json.integer(o, "segments");
+        def.range = doubles(o, "range", diagnostics, loc);
+        if (o.has("penalty") && o.get("penalty").isJsonObject()) {
+            final JsonObject penalty = o.getAsJsonObject("penalty");
+            def.penaltyOrder = Json.integer(penalty, "order");
+            def.penaltyLambda = Json.string(penalty, "lambda");
+            for (final String key : penalty.keySet()) if (!List.of("order", "lambda").contains(key)) def.penaltyUnknown.add(key);
+        }
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");
             def.taskTarget = Json.string(task, "target") != null ? Json.string(task, "target") : Json.string(task, "field");

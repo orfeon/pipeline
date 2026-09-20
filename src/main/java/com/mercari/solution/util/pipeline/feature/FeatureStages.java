@@ -331,6 +331,7 @@ public final class FeatureStages {
         blocks.addAll(discretizeSpecs(columns));
         blocks.addAll(quantileTransformSpecs(columns));
         blocks.addAll(svdSpecs(columns));
+        blocks.addAll(smoothSpecs(columns));
         blocks.addAll(jointSpecs(columns));
         return blocks;
     }
@@ -1618,6 +1619,150 @@ public final class FeatureStages {
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
                     forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+        }
+        return specs;
+    }
+
+    // --- smooth ---------------------------------------------------------------------------------------
+
+    /**
+     * The fitted curve of a smooth block: the whole-input fit ({@code total}, what the artifact holds) and, under
+     * {@code fit.mode: forward}, one fit per {@link BlockSeries#changePoints change point} plus the observed blocks
+     * (a row reads the floor entry of its usable block, {@link BlockSeries#lookup}).
+     */
+    record SmoothModel(Smooth total, TreeMap<Long, Smooth> byBlock, TreeSet<Long> observed) implements Serializable {}
+
+    /**
+     * One smooth block of a fit stage (its curve and residual columns), rebuilt from the columns' coordinates. A row
+     * contributes {@code [B(x), y]} to the vector moments — the family of the svd blocks, so the stage's one
+     * {@code _FitMoments_Combine} serves both — and the penalised system is solved from them on one worker.
+     */
+    record SmoothSpec(String block, String field, String target, Smooth.Basis basis, int penaltyOrder, Double lambda,
+                      String artifactUri, boolean refit, List<OutputColumn> columns, boolean[] residual,
+                      Forward forward, long predictOffsetMillis) implements SummaryFitBlock<double[], Svd.Moments, SmoothModel> {
+        @Override
+        public String artifactPath(final String planHash) {
+            return Smooth.artifactPath(artifactUri, planHash, block);
+        }
+
+        /** A forward fit is always re-fitted (the artifact holds the whole-input curve only, for a static serving run). */
+        @Override
+        public boolean artifactExists(final String planHash) {
+            return forward == null && Smooth.exists(artifactUri, planHash, block);
+        }
+
+        @Override
+        public SmoothModel readArtifact(final String planHash) {
+            return new SmoothModel(Smooth.read(artifactUri, planHash, block), null, null);
+        }
+
+        @Override
+        public List<String> fitInputs() {
+            return List.of(field, target);
+        }
+
+        @Override
+        public Summary<Svd.Moments> family() {
+            return Svd.SUMMARY;
+        }
+
+        @Override
+        public String familyName() {
+            return "Moments";
+        }
+
+        @Override
+        public Class<Svd.Moments> stateClass() {
+            return Svd.Moments.class;
+        }
+
+        @Override
+        public Coder<double[]> contributionCoder() {
+            return SerializableCoder.of(double[].class);
+        }
+
+        /** The row's basis values and target: time block 0 for a static fit, the row's time block under forward. */
+        @Override
+        public KV<Long, double[]> contribution(final Map<String, Object> row) {
+            final double[] z = Smooth.contribution(basis, FeatureValues.toDouble(row.get(field)), FeatureValues.toDouble(row.get(target)));
+            if (z == null) return null;
+            long timeBlock = 0L;
+            if (forward != null) {
+                final Long millis = FeatureValues.toEpochMillis(row.get(forward.blockField()), forward.blockFieldType());
+                if (millis == null) return null;
+                timeBlock = forward.blocks().indexOf(millis);
+            }
+            return KV.of(timeBlock, z);
+        }
+
+        /** An input without a single (key, target) pair has no curve: no model (every column reads null) and no artifact. */
+        @Override
+        public boolean fitsEmptyInput() {
+            return false;
+        }
+
+        /** Solves the penalised system from the moments of the time blocks: the whole-input curve, plus one per change point under forward. */
+        @Override
+        public SmoothModel solve(final Map<Long, Svd.Moments> parts, final String planHash) {
+            final BlockSeries<Svd.Moments> series = new BlockSeries<>(Svd.SUMMARY, parts);
+            final Svd.Moments all = series.total();
+            final Smooth total = Smooth.fit(all == null ? new Svd.Moments() : all, basis, penaltyOrder, lambda, true);
+            LOG.info("smooth {}: fitted {} coefficients on {} rows (λ = {}{}, edf = {})", block, total.coefficients.length, total.n,
+                    total.lambda, total.estimated ? " by REML" : "", total.edf);
+            TreeMap<Long, Smooth> byBlock = null;
+            if (forward != null) {
+                byBlock = series.models(forward.windowBlocks(), m -> Smooth.fit(m, basis, penaltyOrder, lambda, false));
+                LOG.info("smooth {}: forward fit over {} block(s), {} change point(s)", block, parts.size(), byBlock.size());
+            }
+            // a forward fit re-fits every run but writes the whole-input curve once (refit: true overwrites)
+            if (artifactUri != null && (refit || !Smooth.exists(artifactUri, planHash, block))) {
+                Smooth.write(artifactUri, planHash, block, total);
+            }
+            return new SmoothModel(total, byBlock, forward == null ? null : series.observed());
+        }
+
+        /** The curve a row reads: the whole-input fit, or under forward the fit over the blocks its usable block may read. */
+        Smooth smoothFor(final SmoothModel model, final Map<String, Object> values) {
+            if (model == null) return null;
+            if (forward == null) return model.total();
+            final Long eventMillis = FeatureValues.toEpochMillis(values.get(forward.blockField()), forward.blockFieldType());
+            if (eventMillis == null) return null;
+            final long usable = forward.blocks().usableBlock(eventMillis, predictOffsetMillis, forward.lagMillis());
+            return BlockSeries.lookup(model.byBlock(), model.observed(), usable, forward.minBlocks());
+        }
+
+        /** {@code columns.get(i)} is the residual when {@code residual[i]}, else the curve (resolved once in {@link #smoothSpecs}). */
+        @Override
+        public void apply(final SmoothModel model, final Map<String, Object> values) {
+            final Smooth smooth = smoothFor(model, values);
+            final Double curve = smooth == null ? null : smooth.curve(FeatureValues.toDouble(values.get(field)));
+            for (int i = 0; i < residual.length; i++) {
+                Double value = curve;
+                if (residual[i] && curve != null) {
+                    final Double y = FeatureValues.toDouble(values.get(target));
+                    value = y == null || y.isNaN() ? null : y - curve;
+                }
+                values.put(columns.get(i).getCanonicalName(), value);
+            }
+        }
+    }
+
+    static List<SmoothSpec> smoothSpecs(final List<OutputColumn> stageColumns) {
+        final Map<String, List<OutputColumn>> columns = new LinkedHashMap<>();
+        for (final OutputColumn c : stageColumns) {
+            if ("smooth".equals(c.getOperator())) columns.computeIfAbsent(c.getBlock(), b -> new ArrayList<>()).add(c);
+        }
+        final List<SmoothSpec> specs = new ArrayList<>();
+        for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
+            final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final boolean[] residual = new boolean[e.getValue().size()];
+            for (int i = 0; i < residual.length; i++) residual[i] = "residual".equals(e.getValue().get(i).getCoordinates().get("output"));
+            final Smooth.Basis basis = new Smooth.Basis(Double.parseDouble(k.get("lo")), Double.parseDouble(k.get("hi")),
+                    Integer.parseInt(k.get("segments")), Integer.parseInt(k.get("degree")));
+            specs.add(new SmoothSpec(e.getKey(), k.get("field"), k.get("target"), basis, Integer.parseInt(k.get("penaltyOrder")),
+                    Smooth.REML.equals(k.get("lambda")) ? null : Double.valueOf(k.get("lambda")),
+                    k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), residual,
+                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }

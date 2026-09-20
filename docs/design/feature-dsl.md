@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, smooth (§5.6, the spline of one numeric key), quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and
@@ -1286,7 +1286,13 @@ ANOVA back-off", keeping consistency with the partition spec. The tensor basis d
 × basis size) is part of the `validate --expand` estimate (§7). A minimum-sample cut-off for categories
 that get their own δ_c (below it, complete shrinkage to f_global) is an operational guard.
 
-This section is the placeholder for v2; v0 / v1 implement the partition class only (§9).
+**Implemented from this matrix**: the partition class, and the linear-basis class for ONE numeric key as the
+population type `smooth` (`method: spline`): uniform B-splines over a declared `range`, a difference penalty of
+`penalty.order`, `penalty.lambda: reml` (default) or a declared number, outputs `curve` (a feature: it reads the
+other rows' targets through the fit only) and `residual` (target − curve: as available as the row's own target, so a
+target for other blocks or a label). `fit.mode: static | forward`; under forward the blocks a row reads are delayed
+by the target's availability, as for an encoding. `isotonic`, `rff`, varying coefficients and several smooth terms
+in one block remain v2 (`smooth.method`).
 
 ---
 

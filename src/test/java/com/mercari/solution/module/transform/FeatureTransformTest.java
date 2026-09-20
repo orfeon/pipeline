@@ -1673,7 +1673,7 @@ public class FeatureTransformTest {
 
     /**
      * A fit stage with many summary-fit blocks (five quantile transforms — static, forward, one over a field without a
-     * single value — and three svds, static and forward) shares ONE {@code Combine.perKey} per summary family and one
+     * single value —, three svds, static and forward, and a smooth curve, whose state is the svds' family) shares ONE {@code Combine.perKey} per summary family and one
      * side input, instead of a chain per block; the values are what each block gives on its own (duplicates agree, the
      * forward blocks read the hand-computed values of their own tests), and the block without values still fits
      * (n = 0: null everywhere) and writes its artifact.
@@ -1690,6 +1690,7 @@ public class FeatureTransformTest {
                     - {name: pc, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2}
                     - {name: pc_again, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2, fit: {artifact: {uri: "%1$s"}}}
                     - {name: pc_forward, scope: population, type: svd, inputs: [start_price, current_bid_t10], rank: 2, fit: {mode: forward, blocks: {size: P7D}}}
+                    - {name: bid_curve, scope: population, type: smooth, input: start_price, target: current_bid_t10, range: [0, 250], segments: 4, penalty: {lambda: 1000000000}}
                 """.formatted(dir);
         // reserve_price: declared, never present in a row
         final String source = SOURCE_CONFIG.replace("        - {name: final_price, type: float64}\n",
@@ -1705,7 +1706,7 @@ public class FeatureTransformTest {
 
         // the graph: one Combine per family for the whole stage, no per-block chains
         final Set<String> names = transformNames();
-        // eight blocks: the stage's top-level transforms stay a handful (a chain per block made it 40)
+        // nine blocks: the stage's top-level transforms stay a handful (a chain per block made it 40)
         final long fitTransforms = names.stream().filter(n -> n.startsWith("features/") && n.contains("_fit_") && n.indexOf('/', "features/".length()) < 0).count();
         Assertions.assertTrue(fitTransforms <= 16, "fit stage transforms: " + fitTransforms);
         Assertions.assertEquals(1, names.stream().filter(n -> n.startsWith("features/") && n.endsWith("_FitValues_Combine")).count(), names::toString);
@@ -1737,6 +1738,11 @@ public class FeatureTransformTest {
             final double[] d = svdScores(VEC_D1, VEC_A1, VEC_A2, VEC_B1, VEC_C1, VEC_C2);
             Assertions.assertEquals(d[0], byKey.get("D/s1").getAsDouble("f_pc_forward_0"), 1e-9);
             Assertions.assertEquals(d[1], byKey.get("D/s1").getAsDouble("f_pc_forward_1"), 1e-9);
+            // the smooth curve rode the svds' Combine: under a heavy penalty, the least-squares line of the bid on the price
+            // (Σx = 610, Σy = 675, Σxx = 76900, Σxy = 83750 over the six rows)
+            final double slope = (83750 - 610 * 675 / 6.0) / (76900 - 610 * 610 / 6.0), intercept = 675 / 6.0 - slope * 610 / 6.0;
+            Assertions.assertEquals(intercept + slope * 120, byKey.get("D/s1").getAsDouble("f_bid_curve"), 1e-3);
+            Assertions.assertEquals(intercept + slope * 50, byKey.get("A/s2").getAsDouble("f_bid_curve"), 1e-3);
             return null;
         });
         pipeline.run();
@@ -2307,6 +2313,135 @@ public class FeatureTransformTest {
             return null;
         });
         min.run();
+    }
+
+    /** start_price and final_price of the six rows, in the order A/s1, A/s2, B/s1, C/s1, C/s2, D/s1. */
+    private static final double[] SMOOTH_X = {100, 50, 200, 80, 60, 120}, SMOOTH_Y = {150, 0, 0, 95, 72, 140};
+    private static final String[] SMOOTH_KEYS = {"A/s1", "A/s2", "B/s1", "C/s1", "C/s2", "D/s1"};
+
+    /**
+     * smooth of final_price over start_price. A heavy second-difference penalty leaves only what the penalty ignores —
+     * a line — so the curve is the least-squares line of the six rows, which the test solves by hand; the residual
+     * (target − curve) is an outcome, kept as the intermediate target of an encoding that averages a seller's past
+     * residuals. The artifact holds the coefficients.
+     */
+    @Test
+    public void testSmooth() throws java.io.IOException {
+        final String dir = "target/feature-artifacts/" + java.util.UUID.randomUUID();
+        final String blocks = """
+                    - name: price_curve
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {lambda: 1000000000}
+                      outputs: [curve, residual]
+                      fit: {artifact: "%s"}
+                    - name: resid_enc
+                      scope: population
+                      type: encoding
+                      keySets:
+                        - keys: [seller_id]
+                      targets:
+                        - {field: price_curve_resid, stats: [mean], as: resid}
+                """.formatted(dir);
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        final Schema schema = output.getSchema();
+        Assertions.assertNotNull(schema.getField("f_price_curve"), schema::toString);
+        Assertions.assertEquals("staticSafe", schema.getField("f_price_curve").getOptions().get("feature.status"));
+        Assertions.assertTrue(schema.getField("f_price_curve").getOptions().get("feature.derivedFrom").contains("outcome"));
+        Assertions.assertNull(schema.getField("f_price_curve_resid"), "the residual is an outcome: an intermediate, not an output");
+        final String encoded = schema.getFields().stream().map(Schema.Field::getName).filter(n -> n.startsWith("f_resid_enc") && n.endsWith("mean")).findFirst().orElseThrow();
+
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        for (int i = 0; i < 6; i++) {
+            sx += SMOOTH_X[i];
+            sy += SMOOTH_Y[i];
+            sxx += SMOOTH_X[i] * SMOOTH_X[i];
+            sxy += SMOOTH_X[i] * SMOOTH_Y[i];
+        }
+        final double slope = (sxy - sx * sy / 6) / (sxx - sx * sx / 6), intercept = sy / 6 - slope * sx / 6;
+        final double[] residual = new double[6];
+        for (int i = 0; i < 6; i++) residual[i] = SMOOTH_Y[i] - intercept - slope * SMOOTH_X[i];
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            for (int i = 0; i < 6; i++) {
+                Assertions.assertEquals(intercept + slope * SMOOTH_X[i], byKey.get(SMOOTH_KEYS[i]).getAsDouble("f_price_curve"), 1e-3, SMOOTH_KEYS[i]);
+            }
+            // s1's past residuals, once their outcomes are known (settlement + ingestion < the gaps between C, D and the rows before)
+            Assertions.assertNull(byKey.get("A/s1").getPrimitiveValue(encoded));
+            Assertions.assertEquals((residual[0] + residual[2]) / 2, byKey.get("C/s1").getAsDouble(encoded), 1e-3);
+            Assertions.assertEquals((residual[0] + residual[2] + residual[3]) / 3, byKey.get("D/s1").getAsDouble(encoded), 1e-3);
+            Assertions.assertEquals(residual[1], byKey.get("C/s2").getAsDouble(encoded), 1e-3);
+            return null;
+        });
+        pipeline.run();
+        final java.io.File[] dirs = new java.io.File(dir).listFiles();
+        Assertions.assertNotNull(dirs);
+        final java.io.File artifact = new java.io.File(dirs[0], "price_curve.smooth.json");
+        Assertions.assertTrue(artifact.exists());
+        final com.google.gson.JsonObject json = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(artifact.toPath())).getAsJsonObject();
+        Assertions.assertEquals(6, json.get("n").getAsLong());
+        Assertions.assertEquals(8, json.getAsJsonArray("coefficients").size());
+        Assertions.assertFalse(json.get("estimated").getAsBoolean());
+        Assertions.assertEquals(2.0, json.get("edf").getAsDouble(), 1e-3);
+    }
+
+    /**
+     * The same curve under {@code fit.mode: forward} with a heavy FIRST-difference penalty — what is left is a
+     * constant, the mean target of the readable rows. final_price is known PT30M + P6D after its event, so B (Jan 3)
+     * cannot read A's block yet, C (Jan 20) reads A and B, and D (Feb 1) reads everything before it; a REML-chosen
+     * strength runs through the same wiring.
+     */
+    @Test
+    public void testSmoothForwardFit() throws java.io.IOException {
+        final String blocks = """
+                    - name: price_curve
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      penalty: {order: 1, lambda: 1000000000}
+                      fit: {mode: forward, blocks: {size: P7D}}
+                    - name: price_reml
+                      scope: population
+                      type: smooth
+                      input: start_price
+                      target: final_price
+                      range: [0, 250]
+                      segments: 5
+                      fit: {mode: forward, blocks: {size: P7D}}
+                """;
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks.replaceAll("(?m)^", "    ") + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        Assertions.assertEquals("forward", outputs.get("features").getSchema().getField("f_price_curve").getOptions().get("feature.coord.fit"));
+        PAssert.that(outputs.get("features").getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            Assertions.assertEquals(6, byKey.size());
+            for (final String key : List.of("A/s1", "A/s2", "B/s1")) {
+                Assertions.assertNull(byKey.get(key).getPrimitiveValue("f_price_curve"), key);
+                Assertions.assertNull(byKey.get(key).getPrimitiveValue("f_price_reml"), key);
+            }
+            Assertions.assertEquals(50.0, byKey.get("C/s1").getAsDouble("f_price_curve"), 1e-3);
+            Assertions.assertEquals(50.0, byKey.get("C/s2").getAsDouble("f_price_curve"), 1e-3);
+            Assertions.assertEquals(63.4, byKey.get("D/s1").getAsDouble("f_price_curve"), 1e-3);
+            // three rows behind C, five behind D: a curve exists and stays within the targets it was fitted on
+            for (final String key : List.of("C/s1", "C/s2", "D/s1")) {
+                final double v = byKey.get(key).getAsDouble("f_price_reml");
+                Assertions.assertTrue(v > -100 && v < 250, key + ": " + v);
+            }
+            return null;
+        });
+        pipeline.run();
     }
 
     /**

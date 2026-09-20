@@ -1912,6 +1912,165 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SVD_BLOCK.replace("rank: 2", "rank: 2\n        maxFeatures: 1"))), "svd.maxFeatures"));
     }
 
+    private static final String SMOOTH_BLOCK = """
+                  - name: price_curve
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: sold
+                    range: [0, 500]
+                    segments: 6
+                    outputs: [curve, residual]
+                    fit: {artifact: "gs://bucket/features"}
+                  - name: enc
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [seller_id]
+                    targets:
+                      - {field: price_curve_resid, stats: [mean]}
+            """;
+
+    /**
+     * smooth: the curve of a target over a numeric key is a feature (the target is read through the fit only), the
+     * residual reads the row's own target — a target for other blocks or a label, never a feature — and the block is
+     * one fit stage ahead of the keyed stage that consumes it.
+     */
+    @Test
+    public void testSmoothExpansion() {
+        final FeaturePlan plan = compile(SOURCES, withEncoding(SMOOTH_BLOCK));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.static"), plan::describe);
+        final OutputColumn curve = column(plan, "price_curve");
+        Assertions.assertEquals("smooth", curve.getOperator());
+        Assertions.assertEquals(FeatureSpec.Scope.population, curve.getScope());
+        Assertions.assertEquals(Schema.FieldType.FLOAT64.getType(), curve.getFieldType().getType());
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, curve.getStatus());
+        Assertions.assertFalse(curve.isIntermediate());
+        final Map<String, String> k = curve.getCoordinates();
+        Assertions.assertEquals("static", k.get("fit"));
+        Assertions.assertEquals("spline", k.get("method"));
+        Assertions.assertEquals("start_price", k.get("field"));
+        Assertions.assertEquals("sold", k.get("target"));
+        Assertions.assertEquals("curve", k.get("output"));
+        Assertions.assertEquals("6", k.get("segments"));
+        Assertions.assertEquals("3", k.get("degree"));
+        Assertions.assertEquals("0.0", k.get("lo"));
+        Assertions.assertEquals("500.0", k.get("hi"));
+        Assertions.assertEquals("2", k.get("penaltyOrder"));
+        Assertions.assertEquals("reml", k.get("lambda"));
+        Assertions.assertTrue(curve.getInputs().containsAll(List.of("start_price", "sold")), curve.getInputs()::toString);
+        // the residual is as available as the row's own outcome: consumed by the encoding, it is an intermediate
+        final OutputColumn residual = column(plan, "price_curve_resid");
+        Assertions.assertEquals("residual", residual.getCoordinates().get("output"));
+        Assertions.assertTrue(residual.isIntermediate(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "availability.intermediate"), plan::describe);
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.kind() == FeaturePlan.StageKind.fit).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.columnNames().containsAll(List.of("price_curve", "price_curve_resid")), plan::describe);
+        final FeaturePlan.Stage keyed = plan.getStages().stream().filter(s -> s.columnNames().stream().anyMatch(n -> n.startsWith("enc__seller_id"))).findFirst().orElseThrow();
+        Assertions.assertTrue(fit.index() < keyed.index(), plan::describe);
+        Assertions.assertTrue(FeatureStages.artifactPaths(plan).get("price_curve").endsWith("price_curve.smooth.json"));
+
+        // a residual nobody consumes is an outcome in the output — unless it is the declared label
+        final String alone = SMOOTH_BLOCK.substring(0, SMOOTH_BLOCK.indexOf("      - name: enc\n"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(alone)), "availability.violation"));
+        final FeaturePlan label = compile(SOURCES, withEncoding(alone).replace("output:\n", "output:\n  roles: {label: price_curve_resid}\n"));
+        Assertions.assertFalse(label.getDiagnostics().hasErrors(), label::describe);
+        Assertions.assertEquals(OutputColumn.Status.label, column(label, "price_curve_resid").getStatus());
+        // the curve alone (the default output), a declared strength, another penalty: all in the hash
+        final FeaturePlan declared = compile(SOURCES, withEncoding(alone.replace("        outputs: [curve, residual]\n", "        penalty: {order: 1, lambda: 25}\n        degree: 2\n")));
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        Assertions.assertNull(declared.getColumn("price_curve_resid"));
+        Assertions.assertEquals("25.0", column(declared, "price_curve").getCoordinates().get("lambda"));
+        Assertions.assertEquals("1", column(declared, "price_curve").getCoordinates().get("penaltyOrder"));
+        Assertions.assertEquals("2", column(declared, "price_curve").getCoordinates().get("degree"));
+        Assertions.assertNotEquals(plan.getHash(), declared.getHash());
+
+        // every parameter error
+        final String curveOnly = alone.replace("        outputs: [curve, residual]\n", "");
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("        range: [0, 500]\n", ""))), "smooth.range"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("range: [0, 500]", "range: [500, 0]"))), "smooth.range"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("        target: sold\n", ""))), "smooth.target"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("target: sold", "target: category"))), "smooth.target"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("input: start_price", "input: condition_grade"))), "smooth.input"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 6\n        method: isotonic"))), "smooth.method"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 0"))), "smooth.segments"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 80"))), "smooth.segments"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 6\n        degree: 9"))), "smooth.degree"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 6\n        penalty: {order: 4}"))), "smooth.penalty"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 6\n        penalty: {lambda: -1}"))), "smooth.penalty"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 6\n        penalty: {lamda: 1}"))), "smooth.penalty"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 1\n        degree: 1"))), "smooth.penalty"), "two basis functions cannot carry a second difference");
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("segments: 6", "segments: 6\n        outputs: [slope]"))), "smooth.outputs"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(curveOnly.replace("fit: {artifact", "fit: {mode: fold, artifact"))), "smooth.fit.mode"));
+    }
+
+    /**
+     * Under {@code fit.mode: forward} the curve is re-solved per time block from the blocks whose TARGETS are known at
+     * predictAt (the lag of the outcome), and a uniform quantileTransform input supplies the range: knots at the
+     * input's quantiles, from a fit stage of its own ahead of the curve's.
+     */
+    @Test
+    public void testSmoothForwardFitAndQuantileKnots() {
+        final String blocks = """
+                  - name: price_q
+                    scope: population
+                    type: quantileTransform
+                    input: start_price
+                  - name: price_curve
+                    scope: population
+                    type: smooth
+                    input: price_q
+                    target: sold
+                    fit: {mode: forward, blocks: {size: P7D}, window: P28D}
+            """;
+        final FeaturePlan plan = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "smooth.range"), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "fit.mode.forward"), plan::describe);
+        final OutputColumn curve = column(plan, "price_curve");
+        Assertions.assertEquals("forward", curve.getCoordinates().get("fit"));
+        Assertions.assertEquals("0.0", curve.getCoordinates().get("lo"));
+        Assertions.assertEquals("1.0", curve.getCoordinates().get("hi"));
+        Assertions.assertEquals("4", curve.getCoordinates().get("windowBlocks"));
+        // sold settles PT30M after the event and is ingested P6D later: the readable blocks are delayed by that lag
+        Assertions.assertTrue(Long.parseLong(curve.getCoordinates().get("forwardLagMillis")) > 6L * 86_400_000L, curve.getCoordinates()::toString);
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, curve.getStatus());
+        final FeaturePlan.Stage knots = plan.getStages().stream().filter(s -> s.columnNames().contains("price_q")).findFirst().orElseThrow();
+        final FeaturePlan.Stage fit = plan.getStages().stream().filter(s -> s.columnNames().contains("price_curve")).findFirst().orElseThrow();
+        Assertions.assertTrue(knots.index() < fit.index(), plan::describe);
+        // an additive fit by hand: the second curve is fitted on what the first leaves, one fit stage later — and its
+        // own residual is what an encoding would take as the target net of both keys
+        final String chained = """
+                  - name: by_price
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: final_price
+                    range: [0, 500]
+                    outputs: [residual]
+                  - name: by_quantity
+                    scope: population
+                    type: smooth
+                    input: quantity
+                    target: by_price_resid
+                    range: [1, 10]
+                    segments: 4
+            """;
+        final FeaturePlan chain = compile(SOURCES, withEncoding(chained));
+        Assertions.assertFalse(chain.getDiagnostics().hasErrors(), chain::describe);
+        Assertions.assertNull(chain.getColumn("by_price"), "outputs: [residual] alone emits no curve column");
+        Assertions.assertTrue(column(chain, "by_price_resid").isIntermediate());
+        Assertions.assertEquals("by_price_resid", column(chain, "by_quantity").getCoordinates().get("target"));
+        Assertions.assertEquals(OutputColumn.Status.staticSafe, column(chain, "by_quantity").getStatus());
+        final FeaturePlan.Stage first = chain.getStages().stream().filter(s -> s.columnNames().contains("by_price_resid")).findFirst().orElseThrow();
+        final FeaturePlan.Stage second = chain.getStages().stream().filter(s -> s.columnNames().contains("by_quantity")).findFirst().orElseThrow();
+        Assertions.assertTrue(first.index() < second.index(), chain::describe);
+        // a normal-score input has no bounded range to default to
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(blocks.replace("input: start_price\n", "input: start_price\n        distribution: normal\n"))), "smooth.range"));
+        Assertions.assertTrue(compile(SOURCES, withEncoding(blocks.replace("input: start_price\n", "input: start_price\n        distribution: normal\n"))).getDiagnostics().hasErrors());
+    }
+
     private static final String QUANTILE_BLOCK = """
                   - name: enc
                     scope: population
