@@ -510,10 +510,11 @@ public class SequenceEvaluator implements Serializable {
     Object evaluateColumn(final OutputColumn c, final Map<String, Object> row, final long nowMillis,
                           final List<Past> history, final KeyState state) {
         final ColumnPlan plan = plans.get(c.canonicalName);
-        if (plan.incremental && state != null && plan.rating != null) {
-            return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func);
-        }
         if (plan.incremental && state != null) {
+            // a rating's running state is a Rating.State the fold pointer advances, not a summary
+            if (plan.rating != null) {
+                return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func);
+            }
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
         }
