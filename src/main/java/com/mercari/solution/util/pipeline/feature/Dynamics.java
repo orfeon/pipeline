@@ -77,7 +77,10 @@ public final class Dynamics implements Summary<Dynamics.State> {
 
     private final Measure measure;
     private final int order;
+    /** The clock is positional (time or a calendar), not the event ordinal. */
     private final boolean byTime;
+    /** A calendar clock ({@code decayBy: <calendar>}): ages in ticks instead of days; null on wall time. */
+    private final Clock calendar;
     /** Decay per clock unit (ln 2 / halflife), 0 without a halflife. */
     private final double theta;
     /** fourier: the base angular frequency 2π / period. */
@@ -94,6 +97,12 @@ public final class Dynamics implements Summary<Dynamics.State> {
     private final double[] unitSin;
 
     public Dynamics(final Measure measure, final int order, final Double halflife, final Double period, final boolean byTime) {
+        this(measure, order, halflife, period, byTime, null);
+    }
+
+    /** @param calendar the calendar clock ages are counted on (ticks), or null for days of wall time / the event ordinal */
+    public Dynamics(final Measure measure, final int order, final Double halflife, final Double period, final boolean byTime, final Clock calendar) {
+        this.calendar = calendar;
         this.measure = measure;
         this.order = order;
         this.byTime = byTime;
@@ -115,16 +124,26 @@ public final class Dynamics implements Summary<Dynamics.State> {
     /**
      * The family and readout of a column from its coordinates: {@code measure} (default exponential — the
      * {@code ewma} sugar carries only halflife / decayBy), {@code order}, {@code halflife}, {@code period},
-     * {@code decayBy} (events | time, default events) and {@code component}.
+     * {@code decayBy} (events | time | a calendar clock attached to the column, default events) and {@code component}.
      */
-    public static Summary.Spec spec(final Map<String, String> coordinates) {
+    public static Summary.Spec spec(final Map<String, String> coordinates, final Map<String, Clock> clocks) {
+        final String decayBy = coordinates.get("decayBy");
+        final Clock calendar = decayBy == null || Clock.BUILT_IN.contains(decayBy) ? null : clocks.get(decayBy);
+        if (decayBy != null && !Clock.BUILT_IN.contains(decayBy) && calendar == null) {
+            throw new IllegalStateException("the calendar clock '" + decayBy + "' of decayBy is not attached to the column");
+        }
         final Measure measure = Measure.valueOf(coordinates.getOrDefault("measure", Measure.exponential.name()));
         final int order = Integer.parseInt(coordinates.getOrDefault("order", "0"));
         final String halflife = coordinates.get("halflife"), period = coordinates.get("period");
         final Dynamics family = new Dynamics(measure, order,
                 halflife == null ? null : Double.valueOf(halflife), period == null ? null : Double.valueOf(period),
-                "time".equals(coordinates.get("decayBy")));
+                "time".equals(decayBy) || calendar != null, calendar);
         return new Summary.Spec(family, Summary.Readout.of("component", Integer.parseInt(coordinates.getOrDefault("component", "0"))));
+    }
+
+    /** Clock units between two instants: days of wall time, or ticks of the calendar. */
+    private double distance(final long later, final long earlier) {
+        return calendar != null ? calendar.distance(later, earlier) : (later - earlier) / DAY_MILLIS;
     }
 
     /** Number of components of a channel: order + 1, or for fourier the constant plus a cosine and a sine per harmonic. */
@@ -171,7 +190,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
         if (measure == Measure.legendre) {
             if (st.rows == 0) st.origin = e.millis();
             if (present) {
-                final double position = byTime ? (e.millis() - st.origin) / DAY_MILLIS : st.rows;
+                final double position = byTime ? distance(e.millis(), st.origin) : st.rows;
                 double power = 1;
                 for (int k = 0; k <= order; k++) {
                     st.s[k] += e.value() * power;
@@ -180,7 +199,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
                 st.n++;
             }
         } else {
-            if (st.rows > 0) propagate(st, byTime ? (e.millis() - st.newest) / DAY_MILLIS : 1);
+            if (st.rows > 0) propagate(st, byTime ? distance(e.millis(), st.newest) : 1);
             if (present) {
                 // K(0): every Laguerre polynomial and every cosine is 1 at age 0, every sine 0
                 if (measure == Measure.exponential) {
@@ -201,7 +220,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
     private void remove(final State st, final Event e) {
         if (measure == Measure.legendre) throw new UnsupportedOperationException("a legendre state is not invertible");
         if (!Double.isNaN(e.value())) {
-            final double age = byTime ? (st.newest - e.millis()) / DAY_MILLIS : st.rows - 1;
+            final double age = byTime ? distance(st.newest, e.millis()) : st.rows - 1;
             final double w = Math.exp(-theta * age);
             if (w > 0) {
                 final double[] k = kernel(age, w);
@@ -286,11 +305,11 @@ public final class Dynamics implements Summary<Dynamics.State> {
             if (byTime) {
                 // re-express both sets of power sums about the earlier origin
                 if (other.origin >= into.origin) {
-                    addShifted(into.s, other.s, (other.origin - into.origin) / DAY_MILLIS);
+                    addShifted(into.s, other.s, distance(other.origin, into.origin));
                 } else {
                     final double[] mine = into.s.clone();
                     java.util.Arrays.fill(into.s, 0);
-                    addShifted(into.s, mine, (into.origin - other.origin) / DAY_MILLIS);
+                    addShifted(into.s, mine, distance(into.origin, other.origin));
                     for (int k = 0; k <= order; k++) into.s[k] += other.s[k];
                     into.origin = other.origin;
                 }
@@ -302,13 +321,13 @@ public final class Dynamics implements Summary<Dynamics.State> {
             for (int j = 0; j < into.s.length; j++) into.s[j] += other.s[j];
             into.den += other.den;
         } else if (other.newest >= into.newest) {
-            propagate(into, (other.newest - into.newest) / DAY_MILLIS);
+            propagate(into, distance(other.newest, into.newest));
             for (int j = 0; j < into.s.length; j++) into.s[j] += other.s[j];
             into.den += other.den;
         } else {
             final State moved = create();
             copy(other, moved);
-            propagate(moved, (into.newest - other.newest) / DAY_MILLIS);
+            propagate(moved, distance(into.newest, other.newest));
             for (int j = 0; j < into.s.length; j++) into.s[j] += moved.s[j];
             into.den += moved.den;
         }
@@ -362,7 +381,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
         final double value;
         switch (measure) {
             case legendre -> {
-                final double span = byTime ? (nowMillis - st.origin) / DAY_MILLIS : st.rows - 1;
+                final double span = byTime ? distance(nowMillis, st.origin) : st.rows - 1;
                 if (!(span > 0)) {
                     // one position only: every event sits at u = 1, where every P_j is 1
                     value = st.s[0] / st.n;
@@ -382,7 +401,7 @@ public final class Dynamics implements Summary<Dynamics.State> {
             }
             default -> {
                 if (!(st.den > 0)) return null;
-                final double delta = byTime ? Math.max(0, (nowMillis - st.newest) / DAY_MILLIS) : 0;
+                final double delta = byTime ? Math.max(0, distance(nowMillis, st.newest)) : 0;
                 if (j == 0 || delta == 0) {
                     value = st.s[j] / st.den;
                 } else {
@@ -407,22 +426,22 @@ public final class Dynamics implements Summary<Dynamics.State> {
         double num = 0, mass = 0;
         if (measure == Measure.legendre) {
             final long origin = window.get(0).millis();
-            final double span = byTime ? (nowMillis - origin) / DAY_MILLIS : size - 1;
+            final double span = byTime ? distance(nowMillis, origin) : size - 1;
             for (int i = 0; i < size; i++) {
                 final Double x = value(window.get(i), field);
                 if (x == null) continue;
-                final double u = span > 0 ? (byTime ? (window.get(i).millis() - origin) / DAY_MILLIS : i) / span : 1;
+                final double u = span > 0 ? (byTime ? distance(window.get(i).millis(), origin) : i) / span : 1;
                 num += x * legendre(2 * u - 1, component);
                 mass++;
             }
         } else {
             final long newest = window.get(size - 1).millis();
             // the exponential readout is taken at the newest event (the class comment), fourier's at now
-            final double delta = byTime && measure == Measure.fourier ? Math.max(0, (nowMillis - newest) / DAY_MILLIS) : 0;
+            final double delta = byTime && measure == Measure.fourier ? Math.max(0, distance(nowMillis, newest)) : 0;
             for (int i = 0; i < size; i++) {
                 final Double x = value(window.get(i), field);
                 if (x == null) continue;
-                final double age = byTime ? (newest - window.get(i).millis()) / DAY_MILLIS : size - 1 - i;
+                final double age = byTime ? distance(newest, window.get(i).millis()) : size - 1 - i;
                 final double w = Math.exp(-theta * age);
                 if (w == 0) continue;
                 mass += w;

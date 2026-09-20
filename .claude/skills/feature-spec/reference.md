@@ -134,7 +134,9 @@ array — the way to get "the composition of the others" as a per-row feature.
 ```
 
 Windows are strictly past (`t' < t`); the near edge is derived from `ingestionLag`, so `window` keys
-other than `maxEvents` / `maxAge` / `filter` are rejected. Window token in names: `n5`, `365d`,
+other than `maxEvents` / `maxAge` / `filter` / `clock` are rejected. `clock: <calendar>` (declared in the sources'
+`clocks:`) counts `maxAge` in ticks (`{maxAge: 20, clock: business}` → token `20business`); `decayBy: <calendar>`
+and `fit.blocks: {size: <ticks>, clock: <calendar>}` count on it too; availability stays on wall time. Window token in names: `n5`, `365d`,
 `365d_n5`, `all`.
 
 | op | keys | output name / type |

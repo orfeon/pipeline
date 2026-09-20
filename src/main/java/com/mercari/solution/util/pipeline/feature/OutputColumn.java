@@ -57,6 +57,12 @@ public class OutputColumn implements Serializable {
     Placement placement = Placement.child;
     /** The {@code output.roles} entry that names this column (data contract, never a feature), null for a feature column. */
     String role;
+    /**
+     * The calendar clocks the column's coordinates name ({@code windowClock}, {@code decayBy}, {@code blockClock}):
+     * the one piece of the engine contract that is data, not a string — a calendar is its list of tick dates. Shared
+     * instances (one per clock in the plan), so a serialized stage carries each calendar once.
+     */
+    final Map<String, Clock> clocks = new LinkedHashMap<>();
 
     public String getCanonicalName() { return canonicalName; }
     public String getOutputName() { return outputName; }
@@ -81,6 +87,7 @@ public class OutputColumn implements Serializable {
     public boolean isFitted() { return fitted; }
     public Placement getPlacement() { return placement; }
     public String getRole() { return role; }
+    public Map<String, Clock> getClocks() { return clocks; }
 
     /** Lineage metadata as stored in {@code Schema.Field.options}. */
     public Map<String, String> toOptions() {

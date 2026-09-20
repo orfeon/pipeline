@@ -433,7 +433,7 @@ public class FeaturePlanCompilerTest {
         rejected.put("{family: lti, measure: fourier, order: 2}", "sequence.dynamics.period");
         rejected.put("{family: lti, measure: fourier, order: 0, period: 7}", "sequence.dynamics.order");
         rejected.put("{family: lti, measure: exponential, halflife: [7], period: 7}", "sequence.dynamics.period");
-        rejected.put("{family: lti, measure: exponential, halflife: [7], decayBy: trading}", "sequence.dynamics.decayBy");
+        rejected.put("{family: lti, measure: exponential, halflife: [7], decayBy: trading}", "clock.unknown");
         rejected.put("{family: lti, measure: exponential, halflife: [7], depth: 2}", "sequence.dynamics.parameter");
         rejected.put("{family: lti, measure: exponential, order: 8, halflife: [7, 30.5]}", "sequence.dynamics.size");
         for (final Map.Entry<String, String> e : rejected.entrySet()) {
@@ -2979,5 +2979,84 @@ public class FeaturePlanCompilerTest {
         final FeaturePlan joint = compile(SOURCES, spec.replace("- {expr: \"sold >= 1\", stats: [mean]}",
                 "- {expr: \"sold >= 1\", stats: [mean]}\n    shrinkage: {estimator: joint}"));
         Assertions.assertEquals(1, joint.getDiagnostics().getMessages().stream().filter(m -> "fit.fold.time.joint".equals(m.code())).count(), joint::describe);
+    }
+
+    /**
+     * Calendar clocks: a window / decay / fit blocks measured in ticks of a clock declared in the sources — the
+     * coordinates, the calendar attached to the columns, the plan hash covering the dates, and the validation.
+     */
+    @Test
+    public void testCalendarClocks() {
+        final String sources = SOURCES + "clocks:\n  - {name: business, type: calendar, dates: [2025-01-06, 2025-01-07, 2025-01-08, 2025-01-09, 2025-01-10]}\n";
+        final String blocks = """
+                  - name: days
+                    scope: sequence
+                    entity: seller
+                    windows: [{maxAge: 3, clock: business}]
+                    ops:
+                      - {type: aggregate, field: start_price, funcs: [mean]}
+                      - {type: ewma, field: start_price, halflife: [2], decayBy: business}
+                  - name: enc_days
+                    scope: population
+                    type: encoding
+                    keySets:
+                      - keys: [category]
+                        windows: [{maxAge: 7, clock: business}]
+                    targets:
+                      - {field: sold, stats: [mean]}
+                    fit: {mode: forward, blocks: {size: 5, clock: business}}
+                """;
+        final String anchor = "  - name: vs_market\n";
+        final String spec = SPEC.replace(anchor, blocks + anchor);
+        final FeaturePlan plan = compile(sources, spec);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+
+        final OutputColumn mean = column(plan, "days_3business_start_price_mean");
+        Assertions.assertEquals("3", mean.getCoordinates().get("maxAgeTicks"));
+        Assertions.assertEquals("business", mean.getCoordinates().get("windowClock"));
+        Assertions.assertNull(mean.getCoordinates().get("maxAge"));
+        Assertions.assertEquals(5, mean.getClocks().get("business").size());
+        final OutputColumn ewma = column(plan, "days_3business_start_price_ewma2");
+        Assertions.assertEquals("business", ewma.getCoordinates().get("decayBy"));
+        Assertions.assertNotNull(ewma.getClocks().get("business"));
+        // forward blocks of 5 ticks; the keySet window of 7 ticks reads 2 blocks
+        final OutputColumn level = plan.getColumns().stream().filter(c -> "enc_days".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && "category".equals(c.getCoordinates().get("keys"))
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
+        Assertions.assertEquals("business", level.getCoordinates().get("blockClock"));
+        Assertions.assertEquals("5", level.getCoordinates().get("blockTicks"));
+        Assertions.assertEquals("2", level.getCoordinates().get("windowBlocks"));
+        Assertions.assertNull(level.getCoordinates().get("blockSizeMillis"));
+        Assertions.assertNotNull(level.getClocks().get("business"));
+
+        // a time fold over the same calendar blocks: the purge rounds up by the clock's shortest tick spacing
+        // (5 ticks of consecutive days = 5 days, so P7D covers 2 blocks)
+        final FeaturePlan folded = compile(sources, spec.replace("fit: {mode: forward, blocks: {size: 5, clock: business}}",
+                "fit: {mode: fold, blocks: {size: 5, clock: business}, fold: {by: time, purge: P7D}}"));
+        Assertions.assertFalse(folded.getDiagnostics().hasErrors(), folded::describe);
+        final OutputColumn foldLevel = folded.getColumns().stream().filter(c -> "enc_days".equals(c.getBlock()) && "encoding".equals(c.getOperator()) && "category".equals(c.getCoordinates().get("keys"))
+                && c.getCoordinates().containsKey("fit")).findFirst().orElseThrow();
+        Assertions.assertEquals("business", foldLevel.getCoordinates().get("blockClock"));
+        Assertions.assertEquals("5", foldLevel.getCoordinates().get("blockTicks"));
+        Assertions.assertEquals("time", foldLevel.getCoordinates().get("foldBy"));
+        Assertions.assertEquals("2", foldLevel.getCoordinates().get("purgeBlocks"));
+
+        // the calendar is part of the plan: another holiday, another hash
+        Assertions.assertNotEquals(plan.getHash(), compile(sources.replace("2025-01-08, ", ""), spec).getHash());
+
+        final Map<String, String> rejected = new java.util.LinkedHashMap<>();
+        rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 3, clock: exchange}]"), "clock.unknown");
+        rejected.put(spec.replace("decayBy: business}", "decayBy: exchange}"), "clock.unknown");
+        rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {size: 5, clock: exchange}"), "clock.unknown");
+        rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {size: P7D}"), "clock.fit");
+        rejected.put(spec.replace("blocks: {size: 5, clock: business}", "blocks: {bucket: month, clock: business}"), "fit.blocks.clock");
+        rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: P3D, clock: business}]"), "window.clock");
+        rejected.put(spec.replace("windows: [{maxAge: 3, clock: business}]", "windows: [{maxAge: 3, clock: events}]"), "window.clock");
+        rejected.put(spec.replace("    entity: seller\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}\n      - {type: ewma, field: start_price, halflife: [2], decayBy: business}",
+                "    entity: seller\n    direction: future\n    windows: [{maxAge: 3, clock: business}]\n    ops:\n      - {type: aggregate, field: start_price, funcs: [mean]}"), "clock.direction");
+        for (final Map.Entry<String, String> e : rejected.entrySet()) {
+            Assertions.assertNotEquals(spec, e.getKey(), e.getValue());
+            final FeaturePlan bad = compile(sources, e.getKey());
+            Assertions.assertTrue(hasCode(bad, e.getValue()), () -> e.getValue() + "\n" + bad.describe());
+        }
     }
 }

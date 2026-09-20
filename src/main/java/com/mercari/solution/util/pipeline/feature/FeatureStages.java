@@ -607,9 +607,10 @@ public final class FeatureStages {
      * FeaturePlanCompiler.forwardCoordinates): a row reads the blocks before its usable one.
      */
     record Forward(ForwardBlocks blocks, int minBlocks, long lagMillis, int windowBlocks, String blockField, String blockFieldType) implements Serializable {
-        static Forward of(final Map<String, String> coordinates) {
+        static Forward of(final OutputColumn column) {
+            final Map<String, String> coordinates = column.getCoordinates();
             if (!"forward".equals(coordinates.get("fit"))) return null;
-            return new Forward(ForwardBlocks.fromCoordinates(coordinates.get("blockBucket"), coordinates.get("blockSizeMillis")),
+            return new Forward(ForwardBlocks.fromCoordinates(coordinates, column.getClocks()),
                     Integer.parseInt(coordinates.getOrDefault("minBlocks", "1")),
                     Long.parseLong(coordinates.getOrDefault("forwardLagMillis", "0")),
                     Integer.parseInt(coordinates.getOrDefault("windowBlocks", "0")),
@@ -624,9 +625,10 @@ public final class FeatureStages {
      * per-(key, block) series with forward levels but none of their row-relative geometry (usable block, lag, window).
      */
     record TimeFold(ForwardBlocks blocks, String blockField, String blockFieldType, int purgeBlocks, int embargoBlocks) implements Serializable {
-        static TimeFold of(final Map<String, String> coordinates) {
+        static TimeFold of(final OutputColumn column) {
+            final Map<String, String> coordinates = column.getCoordinates();
             if (!"fold".equals(coordinates.get("fit")) || !"time".equals(coordinates.get("foldBy"))) return null;
-            return new TimeFold(ForwardBlocks.fromCoordinates(coordinates.get("blockBucket"), coordinates.get("blockSizeMillis")),
+            return new TimeFold(ForwardBlocks.fromCoordinates(coordinates, column.getClocks()),
                     coordinates.get("blockField"), coordinates.getOrDefault("blockFieldType", "timestamp"),
                     Integer.parseInt(coordinates.getOrDefault("purgeBlocks", "0")),
                     Integer.parseInt(coordinates.getOrDefault("embargoBlocks", "0")));
@@ -664,7 +666,7 @@ public final class FeatureStages {
                     c.getCoordinates().get("artifactUri"), "true".equals(c.getCoordinates().get("refit")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
                     foldKeys != null ? Integer.parseInt(c.getCoordinates().get("folds")) : 0,
-                    Forward.of(c.getCoordinates()), TimeFold.of(c.getCoordinates())));
+                    Forward.of(c), TimeFold.of(c)));
         }
         return new ArrayList<>(levels.values());
     }
@@ -1383,12 +1385,13 @@ public final class FeatureStages {
         for (final OutputColumn c : stageColumns) {
             if (!"quantileTransform".equals(c.getOperator())) continue;
             final Map<String, String> k = c.getCoordinates();
+            final Forward forward = Forward.of(c);
             specs.add(new QuantileTransformSpec(c.getBlock(), c.getCanonicalName(), k.get("field"),
                     Integer.parseInt(k.getOrDefault("bins", Integer.toString(QuantileTransform.DEFAULT_BINS))),
                     k.getOrDefault("distribution", QuantileTransform.UNIFORM),
                     Double.parseDouble(k.getOrDefault("clip", Double.toString(QuantileTransform.DEFAULT_CLIP))),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
-                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }
@@ -1608,12 +1611,13 @@ public final class FeatureStages {
         final List<SvdSpec> specs = new ArrayList<>();
         for (final Map.Entry<String, List<OutputColumn>> e : columns.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final Forward forward = Forward.of(e.getValue().get(0));
             final int[] components = new int[e.getValue().size()];
             for (int i = 0; i < components.length; i++) components[i] = SvdSpec.output(e.getValue().get(i).getCoordinates());
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
         }
         return specs;
     }
@@ -1719,13 +1723,14 @@ public final class FeatureStages {
         final List<JointSpec> specs = new ArrayList<>();
         for (final Map.Entry<String, List<OutputColumn>> e : groups.entrySet()) {
             final Map<String, String> k = e.getValue().get(0).getCoordinates();
+            final Forward forward = Forward.of(e.getValue().get(0));
             final String foldKeys = k.get("foldKeys");
             specs.add(new JointSpec(e.getKey(), JointFit.parseLevels(k.get("jointLevels")), k.get("field"),
                     k.containsKey("offset") ? "__baseline_" + k.get("offset") : null,
                     Shrinkage.Scale.valueOf(k.get("scale")), k.get("weights"), Double.parseDouble(k.get("priorWeight")),
                     foldKeys != null ? List.of(foldKeys.split(",")) : null,
                     foldKeys != null ? Integer.parseInt(k.get("folds")) : 0,
-                    Forward.of(k), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue()));
         }
         return specs;

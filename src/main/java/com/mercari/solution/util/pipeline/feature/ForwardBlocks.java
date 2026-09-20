@@ -22,10 +22,25 @@ public final class ForwardBlocks implements Serializable {
 
     private final String bucket;
     private final long sizeMillis;
+    /** Blocks of {@link #ticks} ticks of a calendar clock (null: wall-time blocks). */
+    private final Clock clock;
+    private final int ticks;
 
     private ForwardBlocks(final String bucket, final long sizeMillis) {
+        this(bucket, sizeMillis, null, 0);
+    }
+
+    private ForwardBlocks(final String bucket, final long sizeMillis, final Clock clock, final int ticks) {
         this.bucket = bucket;
         this.sizeMillis = sizeMillis;
+        this.clock = clock;
+        this.ticks = ticks;
+    }
+
+    /** Blocks of {@code ticks} consecutive ticks of a calendar clock (block {@code k} = ticks {@code [k·ticks, (k+1)·ticks)}). */
+    public static ForwardBlocks ofClock(final Clock clock, final int ticks) {
+        if (clock == null || ticks < 1) throw new IllegalArgumentException("calendar blocks need a clock and a size >= 1 tick");
+        return new ForwardBlocks(null, 0L, clock, ticks);
     }
 
     public static ForwardBlocks ofSize(final Duration size) {
@@ -43,11 +58,29 @@ public final class ForwardBlocks implements Serializable {
         return bucket != null ? ofBucket(bucket) : new ForwardBlocks(null, Long.parseLong(sizeMillis));
     }
 
+    /**
+     * Rebuilds the blocks from the column coordinates: {@code blockClock} + {@code blockTicks} (the calendar comes
+     * with the column, {@link OutputColumn#getClocks}), else {@code blockBucket} or {@code blockSizeMillis}.
+     */
+    public static ForwardBlocks fromCoordinates(final java.util.Map<String, String> coordinates, final java.util.Map<String, Clock> clocks) {
+        final String clock = coordinates.get("blockClock");
+        if (clock != null) {
+            final Clock calendar = clocks.get(clock);
+            if (calendar == null) throw new IllegalStateException("the calendar clock '" + clock + "' of the blocks is not attached to the column");
+            return ofClock(calendar, Integer.parseInt(coordinates.get("blockTicks")));
+        }
+        return fromCoordinates(coordinates.get("blockBucket"), coordinates.get("blockSizeMillis"));
+    }
+
     public String bucket() { return bucket; }
     public long sizeMillis() { return sizeMillis; }
+    public Clock clock() { return clock; }
+    public int ticks() { return ticks; }
 
     /** The block containing an instant. */
     public long indexOf(final long millis) {
+        // a date before the calendar's first tick has ordinal −1: block −1
+        if (clock != null) return Math.floorDiv(clock.ordinal(millis), ticks);
         if (bucket == null) return Math.floorDiv(millis, sizeMillis);
         final LocalDate date = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate();
         return switch (bucket) {
@@ -69,6 +102,7 @@ public final class ForwardBlocks implements Serializable {
 
     /** Nominal block length, for rounding a {@code maxAge} window to whole blocks. */
     public Duration nominalLength() {
+        if (clock != null) return Duration.ofMillis(clock.meanSpacingMillis() * ticks);
         if (bucket == null) return Duration.ofMillis(sizeMillis);
         return switch (bucket) {
             case "year" -> Duration.ofDays(365);
@@ -87,6 +121,7 @@ public final class ForwardBlocks implements Serializable {
 
     /** Shortest length a block can have (a calendar bucket varies: a 28-day February, a 90-day quarter). */
     public Duration shortestLength() {
+        if (clock != null) return Duration.ofMillis(clock.minSpacingMillis() * ticks);
         if (bucket == null) return Duration.ofMillis(sizeMillis);
         return switch (bucket) {
             case "year" -> Duration.ofDays(365);
@@ -108,6 +143,7 @@ public final class ForwardBlocks implements Serializable {
     }
 
     public String describe() {
+        if (clock != null) return "size " + ticks + " ticks of " + clock.name();
         return bucket != null ? "bucket " + bucket : "size " + Durations.shortName(Duration.ofMillis(sizeMillis));
     }
 

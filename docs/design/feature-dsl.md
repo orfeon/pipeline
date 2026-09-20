@@ -193,6 +193,21 @@ sources:
       - {name: final_price, type: double, availableAt: after(event), kind: outcome}
 ```
 
+**Clocks.** Besides `sources`, the document may declare calendar clocks — the days on which the domain *happens*
+(business days, trading sessions):
+
+```yaml
+clocks:
+  - {name: business, type: calendar, dates: [2025-01-06, 2025-01-07, ...]}   # or uri: <a list of dates>
+```
+
+A clock measures **windows, decay and fit blocks**, never availability: `window: {maxAge: 20, clock: business}` is
+"the last 20 business days" (a row's position is the ordinal of the last tick on or before its date, so a weekend
+row sits on the Friday), `decayBy: business` counts ages in ticks, `fit.blocks: {size: 20, clock: business}` makes
+blocks of 20 ticks. `availableAt` / `ingestionLag` stay durations on wall time — what is *known* at a time does not
+depend on which days count. The built-in clocks are `time` (wall time, the default) and `events` (the event ordinal:
+`maxEvents`, `decayBy: events`). A calendar's dates are part of the plan hash.
+
 `auction_results` is a table with both a settlement lag (until the world knows) and an ingestion
 lag (until the system knows): the outcome is final thirty minutes after the session, but appears in
 this system's input up to six days later. Sequence features (a seller's recent outcomes) may read it

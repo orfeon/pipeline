@@ -40,7 +40,43 @@ public final class FeaturePlanService {
         }
         resolveInclude(copy, templateArgs);
         resolveTemperatureFrom(copy, templateArgs);
+        resolveClocks(sources, templateArgs);
         return new Documents(sources, copy);
+    }
+
+    /**
+     * {@code clocks[].uri} of the sources document (a calendar's tick dates: one per line / the first CSV column, or a
+     * JSON array) is read here into {@code dates}, with {@code hash} = the hash of those dates: the plan hash covers
+     * the dates (and the uri they came from) — a new holiday is a new plan, while a comment or a reformatting of the
+     * file that leaves the ticks alone is not (as {@code output.includeHash} hashes the parsed list, not the text).
+     */
+    static void resolveClocks(final JsonElement sources, final Map<String, String> templateArgs) {
+        if (sources == null || !sources.isJsonObject() || !sources.getAsJsonObject().has("clocks")
+                || !sources.getAsJsonObject().get("clocks").isJsonArray()) return;
+        for (final JsonElement e : sources.getAsJsonObject().getAsJsonArray("clocks")) {
+            if (!e.isJsonObject()) continue;
+            final JsonObject clock = e.getAsJsonObject();
+            if (!clock.has("uri") || clock.has("dates") || !clock.get("uri").isJsonPrimitive()) continue;
+            final String reference = clock.get("uri").getAsString();
+            final String raw;
+            try {
+                raw = Config.readContent(reference);
+            } catch (final IOException ex) {
+                throw new IllegalArgumentException("failed to read the dates of clock " + clock.get("name") + ": " + reference, ex);
+            }
+            final String text = templateArgs == null ? raw : TemplateUtil.executeStrictTemplate(raw, templateArgs);
+            final List<String> parsed;
+            try {
+                parsed = Clock.parseDates(text);
+            } catch (final RuntimeException ex) {
+                throw new IllegalArgumentException("failed to parse the dates of clock " + clock.get("name") + ": " + reference
+                        + " (" + ex.getMessage() + ")", ex);
+            }
+            final JsonArray dates = new JsonArray();
+            parsed.forEach(dates::add);
+            clock.add("dates", dates);
+            clock.addProperty("hash", FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(dates)));
+        }
     }
 
     /**
