@@ -296,6 +296,21 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   (scan), or the near edge minus a bounded tail (`lag` / `trend` / `fracdiff` = k, `delta` = k + 1, unfiltered
   `maxEvents`); `runLength` / `sinceEvent` / `countMatch`, the other scan-only readouts and filtered windows without
   `maxAge` are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
+- **Ratings** (`rating`, `Rating`): the block's entity is the rated player, `context` the contest (the rows of one
+  group at one event time), `field` its outcome; `elo` and the Weng–Lin closed-form updates (`bradleyTerry`,
+  `plackettLuce`) over (mu, sigma) with a per-contest drift `tau`. An update reads the ratings the earlier contests
+  left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no
+  inverse (no window — the compiler rejects `maxAge` / `maxEvents` / general filters, `sequence.rating.window`). It
+  is a running state all the same: the fold pointer advances one event time at a time and hands the run of rows
+  sharing it — they joined the history together — to `Rating.fold`, which splits it into contests by the context
+  keys; the readout columns of one op share the state (`stateKey`), and the watermark is the fold pointer, so the
+  history holds only the contests the window shift still keeps back. The columns are *pooled*: their stage key is
+  not the entity but the reduced filter field alone (`stageKeys`, empty = the global key — hint
+  `sequence.rating.globalKey` instead of `encoding.globalKey`, whose advice does not apply), and the entity's
+  `minInterval` never absorbs the shift (other players' contests fall inside it). Within a contest every change is
+  computed from the pre-contest ratings over the entries sorted by player, so the row order inside a timestamp —
+  which the sorter does not fix — cannot reach the output. The scan path (`Rating.replay` over the visible window)
+  is the reference `RatingTest` compares the running state with, bit for bit, over trimmed and untrimmed histories.
 - **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
   into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored
   on merge) so a price level does not cancel the covariance away; invertible, so it evicts under `maxAge` like

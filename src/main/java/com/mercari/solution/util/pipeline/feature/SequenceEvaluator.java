@@ -73,6 +73,8 @@ public class SequenceEvaluator implements Serializable {
         Serializable empty;
         /** The aggregate's per-event weight expression ({@code weightBy}), or null. */
         String weightBy;
+        /** rating: the update rule and its keys, or null. Its running state is a {@link Rating.State}, not a summary. */
+        Rating rating;
         /**
          * The key of the running state in {@link KeyState}: the column's canonical name, or the one shared by the
          * components of a dynamics channel (one state, read out once per component column).
@@ -453,6 +455,12 @@ public class SequenceEvaluator implements Serializable {
                 && (plan.filterText == null || plan.equality != null)
                 // a window evicts: only a group (invertible family) can remove a contribution again
                 && (!hasMaxAge(plan) || plan.summary.family().invertible());
+        if ("rating".equals(c.operator)) {
+            // not a summary (an update reads the state the earlier contests left), yet a running state all the same:
+            // the compiler admits the unbounded, filter-less window only, which the fold pointer serves
+            plan.rating = Rating.of(c.coordinates);
+            plan.incremental = !forceScan && plan.maxEvents == null && plan.filterText == null && !hasMaxAge(plan);
+        }
         return plan;
     }
 
@@ -502,6 +510,9 @@ public class SequenceEvaluator implements Serializable {
     Object evaluateColumn(final OutputColumn c, final Map<String, Object> row, final long nowMillis,
                           final List<Past> history, final KeyState state) {
         final ColumnPlan plan = plans.get(c.canonicalName);
+        if (plan.incremental && state != null && plan.rating != null) {
+            return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func);
+        }
         if (plan.incremental && state != null) {
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
@@ -531,6 +542,25 @@ public class SequenceEvaluator implements Serializable {
         }
         final String subkey = plan.equality == null ? "" : FeatureValues.toText(row.get(plan.equality.selfField()));
         return subkey == null ? null : cs.bySubkey.get(subkey);
+    }
+
+    /**
+     * Advances a rating's fold pointer to {@code now}, one event time at a time: the rows sharing a time are the
+     * contests held then (they joined the history together), and a contest updates all its players at once. The
+     * readout columns of one op share the state ({@code stateKey}): the first one read advances it.
+     */
+    private Rating.State advanceRating(final ColumnPlan plan, final KeyState state, final long nowMillis, final List<Past> history) {
+        final ColumnState cs = state.column(plan.stateKey);
+        final Rating.State ratings = (Rating.State) cs.bySubkey.computeIfAbsent("", k -> new Rating.State());
+        final long nearEdge = nowMillis - plan.shiftMillis;
+        while (cs.foldIndex < history.size() && history.get(cs.foldIndex).millis() <= nearEdge) {
+            final long millis = history.get(cs.foldIndex).millis();
+            int end = cs.foldIndex + 1;
+            while (end < history.size() && history.get(end).millis() == millis) end++;
+            plan.rating.fold(ratings, history.subList(cs.foldIndex, end));
+            cs.foldIndex = end;
+        }
+        return ratings;
     }
 
     private void apply(final ColumnPlan plan, final ColumnState cs, final Past p, final int sign) {
@@ -673,6 +703,10 @@ public class SequenceEvaluator implements Serializable {
                     value += w[j] * x;
                 }
                 return Double.isFinite(value) ? value : null;
+            }
+            case "rating" -> {
+                // the reference the running state is equal to: every visible contest folded from scratch
+                return plan.rating.read(plan.rating.replay(window), plan.rating.player(row), plan.func);
             }
             case "barrier" -> {
                 // a future window on the mirrored clock: the nearest event is the window's newest, so the path runs
