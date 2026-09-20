@@ -139,7 +139,7 @@ variable.
 | `row` | none | stateless `ParDo` (`RowStageDoFn`) | row |
 | `context` | context keys | `KeyDoFn` → `GroupByKey` → in-group evaluation (`ContextStageDoFn`) | context |
 | `sequence` / `population` | entity keys / keySet keys | `SortKeyDoFn` → `GroupByKey` → per-key time-ordered replay (`KeyedHistoryDoFn` over `KeyedSpillSorter`) | sequence, expanding encoding |
-| `fit` | (global) | `Combine` → artifact / side input → apply `ParDo` (`FitApplyDoFn`) | population static / fold (encoding levels, factorization, discretize, quantileTransform, svd) |
+| `fit` | (global) | `Combine` → artifact / side input → apply `ParDo` (`FitApplyDoFn`) | population static / fold (encoding levels, factorization, discretize, quantileTransform, svd, smooth) |
 | `groupBy` | context keys | the finalize (`Finalize_Group` + `GroupedFinalizeDoFn`) | `output.groupBy` |
 
 - Stages form a **linear chain** in the baseline design (each stage receives the row with every field
@@ -387,7 +387,7 @@ sufficient statistics, (b) gather on one worker where a matrix computation is ne
   entity's keys or the row identity), and apply subtracts the row's own fold from the totals (n ≤ 0 →
   "no statistics"). λ comes from the totals.
 - **Static-fit blocks** (`StaticFitBlock<M>`: `FmSpec` for factorization, `DiscretizeSpec` for
-  discretize, `QuantileTransformSpec` for quantileTransform, `SvdSpec` for svd, `JointSpec` for
+  discretize, `QuantileTransformSpec` for quantileTransform, `SvdSpec` for svd, `SmoothSpec` for smooth, `JointSpec` for
   `estimator: joint`): rebuilt from the output columns' coordinates; `fit(fitInput)` = extract → `Combine.globally`
   (gather on one worker; the gather has a default accumulator so an empty input still fits) → fit DoFn
   (writes the artifact) → `View.asList`; or `readArtifact` at `@Setup` when the artifact exists.
@@ -527,6 +527,7 @@ entirely (shrinkage block, `structure: hierarchy | cross`, generalised `hierarch
 `weights: varianceComponents`, `output: deviations | effectiveN`, `type: factorization` (fm / fwfm,
 ALS, `pair` / `embedding` / `sum` outputs, r-matrix lineage), `type: discretize` (`method: quantile`),
 `type: quantileTransform` (uniform / normal), `type: svd` (PCA scores of a field vector or an array),
+`type: smooth` (P-spline curve of a target over a numeric key, λ by REML),
 the `quantile` stats, `output.groupBy`, hot-key audit queries, `--dryRun` and the server exposure of
 `validate --expand`, `estimator: joint` (static / fold / forward), the conjugate families (`family`,
 with the Dirichlet-Multinomial shrinkage of `distribution`), the general sequence form with `lti` dynamics. Everything else is parsed and rejected with a

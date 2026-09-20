@@ -898,11 +898,16 @@ public class FeatureSpec implements Serializable {
         def.outputs = Json.strings(o, "outputs");
         def.segments = Json.integer(o, "segments");
         def.range = doubles(o, "range", diagnostics, loc);
-        if (o.has("penalty") && o.get("penalty").isJsonObject()) {
-            final JsonObject penalty = o.getAsJsonObject("penalty");
-            def.penaltyOrder = Json.integer(penalty, "order");
-            def.penaltyLambda = Json.string(penalty, "lambda");
-            for (final String key : penalty.keySet()) if (!List.of("order", "lambda").contains(key)) def.penaltyUnknown.add(key);
+        if (o.has("penalty") && !o.get("penalty").isJsonNull()) {
+            if (o.get("penalty").isJsonObject()) {
+                final JsonObject penalty = o.getAsJsonObject("penalty");
+                def.penaltyOrder = Json.integer(penalty, "order");
+                def.penaltyLambda = Json.string(penalty, "lambda");
+                for (final String key : penalty.keySet()) if (!List.of("order", "lambda").contains(key)) def.penaltyUnknown.add(key);
+            } else {
+                // a bare `penalty: 2` would otherwise be dropped and the defaults used silently
+                diagnostics.error("smooth.penalty", loc, "penalty must be an object {order, lambda}: " + o.get("penalty"));
+            }
         }
         if (o.has("task") && o.get("task").isJsonObject()) {
             final JsonObject task = o.getAsJsonObject("task");
