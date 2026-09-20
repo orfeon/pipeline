@@ -295,7 +295,10 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
 - **Retention**: a column's history watermark is its evict pointer (incremental), the `maxAge` far edge
   (scan), or the near edge minus a bounded tail (`lag` / `trend` / `fracdiff` = k, `delta` = k + 1, unfiltered
   `maxEvents`); `runLength` / `sinceEvent` / `countMatch`, the other scan-only readouts and filtered windows without
-  `maxAge` are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)).
+  `maxAge` are unbounded and reported by the `sequence.window.unbounded` hint (§3.1 (e)). The watermarks are what
+  makes a scan window complete: `select` clamps both bounds to the history's base, so a window never spans a
+  trimmed entry and a readout may walk it from its own start (`Rating.replay` does) rather than only touching a
+  bounded tail — and the base never passes a column's own watermark, so the entries it can still need are held.
 - **Ratings** (`rating`, `Rating`): the block's entity is the rated player, `context` the contest (the rows of one
   group at one event time), `field` its outcome; `elo` and the Weng–Lin closed-form updates (`bradleyTerry`,
   `plackettLuce`) over (mu, sigma) with a per-contest drift `tau`. An update reads the ratings the earlier contests
@@ -311,7 +314,11 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   which the sorter does not fix — cannot reach the output: within a contest every change is computed from the
   pre-contest ratings over the entries sorted by player, and the contests of one event time are applied in
   context-key order (two of them may share a player). The scan path (`Rating.replay` over the visible window)
-  is the reference `RatingTest` compares the running state with, bit for bit, over trimmed and untrimmed histories.
+  is the reference `RatingTest` compares the running state with, bit for bit, over trimmed and untrimmed histories;
+  a rating there reads every contest of its window from the start, so it has no bounded tail and counts as an
+  unbounded column — it pins the key's history whatever its coordinates say. A window that evicts has no
+  implementation on either path, so the evaluator fails on a rating column carrying one instead of replaying it:
+  admitting `maxAge` / `maxEvents` / a general filter at the compile layer means implementing the eviction first.
 - **Two series** (`regression`): the contribution of an event is the pair (x, y) = (`against`, `field`), folded
   into `Summary.Regression` — (n, Σx, Σy, Σx², Σy², Σxy) taken relative to an anchor (the first pair, re-anchored
   on merge) so a price level does not cancel the covariance away; invertible, so it evicts under `maxAge` like

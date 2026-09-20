@@ -155,7 +155,11 @@ public final class Rating implements Serializable {
         for (final List<Entry> entries : contests.values()) update(state, entries);
     }
 
-    /** Folds a time-ordered window from scratch (the scan reference of the running state). */
+    /**
+     * Folds a time-ordered window from scratch (the scan reference of the running state). Every contest of the window
+     * is read, from its first entry: a rating has no bounded tail, which is why it counts as an unbounded column on
+     * the scan path and pins the key's history there ({@code SequenceEvaluator.unbounded}).
+     */
     public State replay(final List<SequenceEvaluator.Past> window) {
         final State state = new State();
         int from = 0;

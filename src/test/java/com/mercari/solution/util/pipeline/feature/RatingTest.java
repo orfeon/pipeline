@@ -364,4 +364,66 @@ public class RatingTest {
         Assertions.assertTrue(trimmed.base() > 0, "history was never trimmed: " + trimmed.retained() + " of " + history.size());
     }
 
+    /**
+     * The scan path over a trimmed history. A rating replays every contest of its window from the window's first
+     * entry — it has no bounded tail — so it counts as an unbounded column and pins the key's history; and the window
+     * the selection hands it holds only entries the history still has, so the replay cannot read a trimmed index.
+     */
+    @Test
+    public void testScanPathReadsTheHeldWindow() {
+        final FeaturePlan plan = compile(SPEC);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        final SequenceEvaluator scan = new SequenceEvaluator(columns, true); // forceScan: the replay, not the running state
+        scan.setup();
+        Assertions.assertEquals(columns.size(), scan.unboundedColumns().size(), () -> scan.unboundedColumns().toString());
+        final SequenceEvaluator.Watermarks watermarks = new SequenceEvaluator.Watermarks(scan.bufferedFields());
+        scan.register(watermarks);
+        watermarks.reset(1_000);
+        Assertions.assertEquals(0, watermarks.all(), "a scan-path rating must pin the history at 0");
+
+        // a trimmed history all the same: the window is what it still holds, read without an index below the base
+        final long start = 1_700_000_000_000L, day = 86_400_000L;
+        final SequenceEvaluator.History trimmed = new SequenceEvaluator.History();
+        final List<SequenceEvaluator.Past> held = new ArrayList<>();
+        for (int s = 0; s < 10; s++) {
+            for (int i = 0; i < 2; i++) {
+                final Map<String, Object> values = new HashMap<>();
+                values.put("session_id", "session" + s);
+                values.put("seller_id", "seller" + ((s + i) % 4));
+                values.put("final_price", (double) i);
+                trimmed.add(new SequenceEvaluator.Past(start + s * day, values));
+                if (s >= 7) held.add(new SequenceEvaluator.Past(start + s * day, new HashMap<>(values)));
+            }
+        }
+        trimmed.trimBefore(14);
+        Assertions.assertEquals(14, trimmed.base());
+        Assertions.assertThrows(IndexOutOfBoundsException.class, () -> trimmed.get(0));
+        final Map<String, Object> row = Map.of("seller_id", "seller1", "session_id", "session99");
+        final long now = start + 100 * day;
+        for (final OutputColumn c : columns) {
+            Assertions.assertEquals(scan.evaluateColumn(c, row, now, held, null),
+                    scan.evaluateColumn(c, row, now, trimmed, null), c.getCanonicalName());
+        }
+        // the held window really rates the row's seller (sessions 8 and 9), so the equality above is not null == null
+        Assertions.assertEquals(2L, scan.evaluateColumn(plan.getColumn("skill_all_final_price_rating_count"), row, now, trimmed, null));
+    }
+
+    /**
+     * Neither path implements a window that evicts a contest: a rating column carrying one is a compile layer that
+     * relaxed {@code sequence.rating.window} without implementing it, and the evaluator says so instead of replaying a
+     * window it cannot honour.
+     */
+    @Test
+    public void testWindowThatEvictsIsRejectedByTheEvaluator() {
+        for (final Map.Entry<String, String> coordinate : Map.of("maxEvents", "5", "maxAge", "P7D", "filter", "category = $self.category").entrySet()) {
+            final FeaturePlan plan = compile(SPEC);
+            final OutputColumn c = plan.getColumn("skill_all_final_price_rating_mu");
+            c.coordinates.put(coordinate.getKey(), coordinate.getValue());
+            final SequenceEvaluator evaluator = new SequenceEvaluator(List.of(c));
+            final IllegalStateException e = Assertions.assertThrows(IllegalStateException.class, evaluator::setup, coordinate.getKey());
+            Assertions.assertTrue(e.getMessage().contains("sequence.rating.window"), e.getMessage());
+        }
+    }
+
 }
