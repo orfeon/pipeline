@@ -2726,4 +2726,54 @@ public class FeatureTransformTest {
         });
         pipeline.run();
     }
+
+    /**
+     * The log-signature of a seller's path through (start_price, quantity) and {@code compress: {svd}} over its
+     * components, against hand values (s1 before D: (100, 2) → (200, 1) → (80, 4)) and an explicit svd block over the
+     * same components.
+     */
+    @Test
+    public void testLogSignatureCompress() throws java.io.IOException {
+        final String blocks = """
+                - name: path
+                  scope: sequence
+                  entity: seller
+                  lift: {fields: [start_price, quantity]}
+                  summarize:
+                    dynamics: {family: bilinear, type: logsignature, depth: 2}
+                  compress:
+                    svd: {rank: 2}
+                    keep: true
+                - name: manual
+                  scope: population
+                  type: svd
+                  inputs: [path_all_logsig_a, path_all_logsig_b, path_all_logsig_ab]
+                  rank: 2
+            """.replaceAll("(?m)^", "    ");
+        final String config = FEATURE_CONFIG.replace("      output:\n", blocks + "      output:\n");
+        final Map<String, MCollection> outputs = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config));
+        final MCollection output = outputs.get("features");
+        Assertions.assertEquals("bilinear", output.getSchema().getField("f_path_all_logsig_ab").getOptions().get("feature.coord.family"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Map<String, MElement> byKey = new HashMap<>();
+            for (final MElement row : rows) byKey.put(row.getAsString("session_id") + "/" + row.getAsString("seller_id"), row);
+            final MElement d = byKey.get("D/s1");
+            // increments (100, −1) then (−120, 3): totals (−20, 2), Lévy area ½(100·3 − (−1)(−120)) = 90
+            Assertions.assertEquals(-20.0, d.getAsDouble("f_path_all_logsig_a"), 1e-9);
+            Assertions.assertEquals(2.0, d.getAsDouble("f_path_all_logsig_b"), 1e-9);
+            Assertions.assertEquals(90.0, d.getAsDouble("f_path_all_logsig_ab"), 1e-9);
+            // fewer than two points: no path
+            Assertions.assertNull(byKey.get("B/s1").getPrimitiveValue("f_path_all_logsig_ab"));
+            // compress is the svd block over the components
+            for (final MElement row : byKey.values()) {
+                for (int k = 0; k < 2; k++) {
+                    final Object compressed = row.getPrimitiveValue("f_path_svd_" + k), manual = row.getPrimitiveValue("f_manual_" + k);
+                    if (manual == null) Assertions.assertNull(compressed, row::toString);
+                    else Assertions.assertEquals(((Number) manual).doubleValue(), ((Number) compressed).doubleValue(), 1e-9, row::toString);
+                }
+            }
+            return null;
+        });
+        pipeline.run();
+    }
 }

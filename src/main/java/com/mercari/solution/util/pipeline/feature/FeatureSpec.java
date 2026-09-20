@@ -141,8 +141,12 @@ public class FeatureSpec implements Serializable {
         public List<Double> halflife = new ArrayList<>();
         /** fourier: the period of the first harmonic, in clock units. */
         public Double period;
-        /** The clock: {@code events} (default) | {@code time} (days). */
+        /** The clock: {@code events} (default) | {@code time} (days) | a calendar (ticks); for bilinear, the clock of the time channel. */
         public String decayBy;
+        /** bilinear: {@code logsignature}. */
+        public String type;
+        /** bilinear: the truncation depth of the signature. */
+        public Integer depth;
         /** Keys other than the known ones (reported, so a misspelled parameter does not silently default). */
         public List<String> unknown = new ArrayList<>();
     }
@@ -229,8 +233,10 @@ public class FeatureSpec implements Serializable {
         public DynamicsSpec dynamics;
         /** sequence general form: {@code summarize} was declared (with or without a usable {@code dynamics}). */
         public boolean summarize;
-        /** sequence general form: {@code compress} was declared (not implemented: a compile error). */
+        /** sequence general form: {@code compress} was declared. */
         public boolean compress;
+        /** sequence general form: the {@code compress} object ({@code {svd: {rank, center, standardize, fit}, keep}}), as JSON. */
+        public String compressJson;
 
         // population
         public List<KeySet> keySets = new ArrayList<>();
@@ -796,11 +802,14 @@ public class FeatureSpec implements Serializable {
             def.dynamics.halflife = doubles(d, "halflife");
             def.dynamics.period = doubleOf(d, "period", diagnostics, loc);
             def.dynamics.decayBy = Json.string(d, "decayBy");
+            def.dynamics.type = Json.string(d, "type");
+            def.dynamics.depth = Json.integer(d, "depth");
             for (final String key : d.keySet()) {
-                if (!List.of("family", "measure", "order", "halflife", "period", "decayBy").contains(key)) def.dynamics.unknown.add(key);
+                if (!List.of("family", "measure", "order", "halflife", "period", "decayBy", "type", "depth").contains(key)) def.dynamics.unknown.add(key);
             }
         }
         def.compress = o.has("compress") && !o.get("compress").isJsonNull();
+        def.compressJson = def.compress && o.get("compress").isJsonObject() ? o.get("compress").toString() : null;
 
         for (final JsonObject ks : objects(o, "keySets")) {
             final KeySet keySet = new KeySet();

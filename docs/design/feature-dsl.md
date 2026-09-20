@@ -1,6 +1,6 @@
 # Feature Transform DSL (Design Document)
 
-Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` family — not yet `bilinear` / `probabilistic` or `compress`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
+Status: **Accepted — v0 and the v0 additions implemented; v1 partially (static / fold / forward fits, factorization, discretize, quantileTransform, svd, quantile stats; of §1.4 the sugar ops and the general lift / summarize form with the `lti` and `bilinear` (log-signature) families and `compress: {svd}` — not yet `probabilistic`). Implementation status and deferred items are tracked in [feature-engine.md](feature-engine.md) §9.**
 
 Design of the declarative feature-engineering DSL behind the `feature` transform module: the
 *sources contract*, the four feature scopes, the unified `encoding` with structured keys and

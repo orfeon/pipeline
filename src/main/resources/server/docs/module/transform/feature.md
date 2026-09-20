@@ -875,13 +875,34 @@ projection of the path onto a basis `b_j` under the measure `w`:
   `sequence.window.unbounded` hint, `ewma` included) — except under a `filter` without `maxAge`, as for any op.
 - Availability, windows (`maxEvents` / `maxAge` / `filter`), the window shift of an outcome channel and the
   naming prefix `{block}_{window}_{channel}` are those of the ops.
+- **Log-signatures (`family: bilinear`).** Instead of one summary per channel, `bilinear` summarises the *joint*
+  path the events trace through all the channels:
+
+  ```yaml
+  summarize:
+    dynamics: {family: bilinear, type: logsignature, depth: 3, decayBy: time}   # depth 1..4 (default 2)
+  ```
+
+  The path is piecewise linear through the events' points (an event contributes when every channel is present;
+  `timeAugment` adds the event's time — days on `time`, its ordinal on `events`, ticks on a calendar — as the last
+  channel). Its truncated log-signature is emitted in the Lyndon basis, one column per word:
+  `{block}_{window}_logsig_{word}`, the channels lettered `a, b, c, …` in lift order (info
+  `sequence.dynamics.logsignature` prints the legend). Words of one letter are the channels' total increments over the
+  window, `ab` the Lévy area between channels a and b (signed: which moved first), longer words the higher-order
+  interactions. Fewer than two points read null. The state is folded once per event on an unbounded window; a
+  `maxAge` / `maxEvents` window re-reads its events (the oldest point cannot be removed from a signature without the
+  one after it). One channel alone is only its increment (`sequence.dynamics.channels`), at most 26 channels.
+- **Compress (`compress: {svd: {...}}`).** The component columns of the block (every window) feed an svd block
+  `{block}_svd` — `rank`, `center`, `standardize`, `outputs` and its own `fit` (static by default, `mode: forward` to
+  walk forward) as for `type: svd`, and no other key — whose scores `{block}_svd_<k>` are emitted instead of the
+  components; `keep: true` emits the components too.
 - **Diagnostics**: a block uses either `ops` or `lift` + `summarize` (`sequence.form`); `summarize` needs
-  `dynamics` (`sequence.summarize`) with `family: lti` (`sequence.dynamics.family`: `bilinear` log-signatures are
-  not implemented yet) and a `measure` (`sequence.dynamics.measure`); `sequence.dynamics.order` /
-  `.halflife` / `.period` / `.decayBy` / `.parameter` check the parameters; channels must be numeric
-  (`sequence.lift.type`); a block emitting more than 64 component columns (windows × halflifes × channels ×
-  components) is `sequence.dynamics.size`; `compress` is not implemented (`sequence.compress` — feed the
-  component columns to a population `svd` block).
+  `dynamics` (`sequence.summarize`) with `family: lti | bilinear` (`sequence.dynamics.family`) — lti a `measure`
+  (`sequence.dynamics.measure`), bilinear `type: logsignature` (`sequence.dynamics.type`) and a `depth`
+  (`sequence.dynamics.depth`); `sequence.dynamics.order` / `.halflife` / `.period` / `.parameter` (a parameter of
+  the other family included) check the parameters; channels must be numeric (`sequence.lift.type`); a block emitting
+  more than 64 component columns is `sequence.dynamics.size`; a malformed `compress` is `sequence.compress`.
+- `trend` (an op) is the same arithmetic as `regression`: the beta of the last `k` present values on their order.
 
 ### Availability check
 

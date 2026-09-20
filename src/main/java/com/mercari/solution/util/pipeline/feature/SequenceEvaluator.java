@@ -485,7 +485,8 @@ public class SequenceEvaluator implements Serializable {
      */
     Summary.Spec summaryOf(final OutputColumn c) {
         return switch (c.operator) {
-            case "ewma", "dynamics" -> Dynamics.spec(c.coordinates, c.clocks);
+            case "ewma", "dynamics" -> "bilinear".equals(c.coordinates.get("family"))
+                    ? Signature.spec(c.coordinates, c.clocks) : Dynamics.spec(c.coordinates, c.clocks);
             case "aggregate" -> OperatorCatalog.summary(func(c));
             case "regression" -> c.coordinates.containsKey("lag") ? null : OperatorCatalog.summary(func(c));
             default -> null;
@@ -548,6 +549,8 @@ public class SequenceEvaluator implements Serializable {
     Object contribution(final ColumnPlan plan, final Past p) {
         // a path event: missing values still advance the events clock (a field-less channel is the constant 1)
         if (plan.summary.family() instanceof Dynamics dynamics) return dynamics.event(p, plan.field);
+        // a point of a multi-channel path (none when a channel is missing)
+        if (plan.summary.family() instanceof Signature signature) return signature.event(p);
         if (plan.field == null) return 0d;
         if (plan.against != null) return pair(p.values().get(plan.against), p.values().get(plan.field));
         return finite(p.values().get(plan.field));
@@ -601,16 +604,21 @@ public class SequenceEvaluator implements Serializable {
                 return a == null || b == null ? null : a - b;
             }
             case "trend" -> {
+                // sugar: the regression of the last k present values on their order (0, 1, …) — the beta readout of the
+                // same family the regression op folds, over a bounded tail
                 final int k = Integer.parseInt(c.coordinates.get("k"));
-                final List<Double> ys = new ArrayList<>();
+                final Summary<Summary.Regression.State> family = Summary.Summaries.REGRESSION;
+                final Summary.Regression.State state = family.create();
+                int x = 0;
                 for (int i = Math.max(0, window.size() - k); i < window.size(); i++) {
-                    final Double y = FeatureValues.toDouble(window.get(i).values().get(field));
-                    if (y != null) ys.add(y);
+                    final Double y = finite(window.get(i).values().get(field));
+                    if (y != null) family.update(state, new double[]{x++, y}, 1);
                 }
-                return slope(ys);
+                return family.read(state, Summary.Readout.of("beta"));
             }
             case "ewma", "dynamics" -> {
                 // the direct projection of the window: the reference the running state is equal to
+                if (plan.summary.family() instanceof Signature signature) return signature.project(window, plan.summary.readout().parameter().intValue());
                 return ((Dynamics) plan.summary.family()).project(window, field, nowMillis, plan.summary.readout().parameter().intValue());
             }
             case "runLength" -> {
