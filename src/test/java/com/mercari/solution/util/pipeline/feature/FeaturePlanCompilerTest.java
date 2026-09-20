@@ -2139,6 +2139,12 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        emit:", "        order: 9\n        emit:"))), "transitionStats.order"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("entity: seller", "entity: buyer"))), "transitionStats.sequenceOf"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("field: condition_grade", "field: start_price"))), "transitionStats.sequenceOf"));
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        emit:", "        maxFeatures: 1\n        emit:"))), "transitionStats.maxFeatures"));
+        // a parameter of the sibling type would be parsed and silently dropped (the shrinkage / the vocabulary cap)
+        for (final String foreign : List.of("cooccur: {window: 2}", "of: previous", "maxValues: 32", "rank: 4")) {
+            Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(TRANSITION_BLOCK.replace("        emit:", "        " + foreign + "\n        emit:"))),
+                    "transitionStats.parameters"), foreign);
+        }
     }
 
     private static final String SPECTRAL_BLOCK = """
@@ -2196,6 +2202,10 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        maxValues: 5000"))), "spectralEmbedding.maxValues"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("rank: 3", "rank: 3\n        of: next"))), "spectralEmbedding.of"));
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("fit: {artifact", "fit: {mode: fold, artifact"))), "spectralEmbedding.fit.mode"));
+        for (final String foreign : List.of("order: 2", "emit: [distribution]", "blend: {priorWeight: 5}")) {
+            Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(SPECTRAL_BLOCK.replace("        rank: 3\n", "        rank: 3\n        " + foreign + "\n"))),
+                    "spectralEmbedding.parameters"), foreign);
+        }
     }
 
     private static final String QUANTILE_BLOCK = """

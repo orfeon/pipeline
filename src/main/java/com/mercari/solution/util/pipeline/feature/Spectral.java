@@ -116,7 +116,13 @@ public final class Spectral implements Serializable {
     public final long pairs;
     /** Distinct values left out by the {@code maxValues} cap (they read null). */
     public final int dropped;
-    private transient Map<String, Integer> index;
+    /**
+     * Lazily built lookup of {@link #vocabulary}. One model instance is shared by every worker thread (the
+     * artifact {@code MODEL_CACHE} and the fit side input both hand out the same object), so the field is
+     * {@code volatile}: without it a thread could see a non-null reference to a map another thread has not
+     * finished publishing. Racing builds are harmless — they produce the same map.
+     */
+    private transient volatile Map<String, Integer> index;
 
     Spectral(final String[] vocabulary, final double[][] embedding, final double[] eigenvalues, final long pairs, final int dropped) {
         this.vocabulary = vocabulary;
@@ -134,15 +140,19 @@ public final class Spectral implements Serializable {
         return eigenvalues.length == 0;
     }
 
-    /** The coordinates of a value, or null (missing, unseen in the fit, beyond the vocabulary cap, nothing fitted). */
+    /**
+     * The coordinates of a value, or null (missing, unseen in the fit, beyond the vocabulary cap, nothing fitted).
+     * The returned array is the model's own row — read it, never modify it: one model serves every thread of a worker.
+     */
     public double[] embed(final String value) {
         if (value == null || isEmpty()) return null;
-        if (index == null) {
-            final Map<String, Integer> built = new HashMap<>();
-            for (int i = 0; i < vocabulary.length; i++) built.put(vocabulary[i], i);
-            index = built;
+        Map<String, Integer> at = index;
+        if (at == null) {
+            at = new HashMap<>();
+            for (int i = 0; i < vocabulary.length; i++) at.put(vocabulary[i], i);
+            index = at;
         }
-        final Integer i = index.get(value);
+        final Integer i = at.get(value);
         return i == null ? null : embedding[i];
     }
 
@@ -259,20 +269,29 @@ public final class Spectral implements Serializable {
     public static Spectral fromJson(final JsonObject json) {
         final JsonElement pairs = json.get("pairs");
         if (pairs == null || !pairs.isJsonPrimitive()) throw new IllegalStateException("spectralEmbedding artifact lacks 'pairs': " + json);
-        final JsonArray values = json.getAsJsonArray("eigenvalues");
+        final JsonElement dropped = json.get("dropped");
+        if (dropped == null || !dropped.isJsonPrimitive()) throw new IllegalStateException("spectralEmbedding artifact lacks 'dropped': " + json);
+        final JsonArray values = array(json, "eigenvalues");
         final double[] eigenvalues = new double[values.size()];
         for (int i = 0; i < eigenvalues.length; i++) eigenvalues[i] = values.get(i).getAsDouble();
-        final JsonArray rows = json.getAsJsonArray("values");
+        final JsonArray rows = array(json, "values");
         final String[] vocabulary = new String[rows.size()];
         final double[][] embedding = new double[rows.size()][];
         for (int i = 0; i < vocabulary.length; i++) {
             final JsonObject row = rows.get(i).getAsJsonObject();
             vocabulary[i] = row.get("value").getAsString();
-            final JsonArray coordinates = row.getAsJsonArray("embedding");
+            final JsonArray coordinates = array(row, "embedding");
             embedding[i] = new double[coordinates.size()];
             for (int r = 0; r < embedding[i].length; r++) embedding[i][r] = coordinates.get(r).getAsDouble();
         }
-        return new Spectral(vocabulary, embedding, eigenvalues, pairs.getAsLong(), json.get("dropped").getAsInt());
+        return new Spectral(vocabulary, embedding, eigenvalues, pairs.getAsLong(), dropped.getAsInt());
+    }
+
+    /** A required array member: a truncated artifact must say which member is missing, not throw a NullPointerException. */
+    private static JsonArray array(final JsonObject json, final String name) {
+        final JsonElement element = json.get(name);
+        if (element == null || !element.isJsonArray()) throw new IllegalStateException("spectralEmbedding artifact lacks the array '" + name + "': " + json);
+        return element.getAsJsonArray();
     }
 
     public static void write(final String artifactUri, final String planHash, final String block, final Spectral spectral) {

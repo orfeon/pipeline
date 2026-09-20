@@ -2337,14 +2337,43 @@ public final class FeaturePlanCompiler {
         lag.as = "prev";
         path.ops.add(lag);
         expandSequence(path, computeAt);
+        // the names expandSequence gave the lag columns: <block>_<window token>_<op.as>_lag<i>, on the default window
+        final String base = def.name + "_" + new Window().token() + "_" + lag.as + "_lag";
         final List<String> columns = new ArrayList<>();
         for (int i = 1; i <= steps; i++) {
-            final OutputColumn c = columnsByCanonical.get(def.name + "_" + new Window().token() + "_prev_lag" + i);
+            final OutputColumn c = columnsByCanonical.get(base + i);
             if (c == null) return null; // the lag failed to expand and said why
             c.intermediate = true;
             columns.add(c.canonicalName);
         }
         return columns;
+    }
+
+    /**
+     * The two sequence-of-values types share {@code sequenceOf} and nothing else, and {@link FeatureSpec} parses
+     * every key of either onto the same {@link FeatureDef}: a parameter of the sibling type would otherwise be
+     * accepted and silently dropped (a {@code blend} that never shrinks, a {@code maxValues} that never caps).
+     * Reported like the foreign parameters of a {@code rating} method.
+     *
+     * @return whether the block declares only its own parameters
+     */
+    private boolean rejectForeignSequenceParameters(final FeatureDef def, final boolean spectral) {
+        final List<String> foreign = new ArrayList<>();
+        if (spectral) {
+            if (def.order != null) foreign.add("order");
+            if (!def.emitValues.isEmpty() || def.emitDistribution) foreign.add("emit");
+            if (def.blendPerEntity != null || def.blendPriorWeight != null) foreign.add("blend");
+        } else {
+            if (def.cooccurWindow != null || def.cooccurWeighting != null) foreign.add("cooccur");
+            if (def.embedOf != null) foreign.add("of");
+            if (def.maxValues != null) foreign.add("maxValues");
+            if (def.rank != null) foreign.add("rank");
+        }
+        if (foreign.isEmpty()) return true;
+        diagnostics.error(def.type + ".parameters", def.location(), foreign + (spectral
+                ? " are transitionStats parameters: spectralEmbedding takes sequenceOf, cooccur, rank, of, maxValues, maxFeatures, fit"
+                : " are spectralEmbedding parameters: transitionStats takes sequenceOf, order, emit, blend, maxFeatures"));
+        return false;
     }
 
     /**
@@ -2357,6 +2386,7 @@ public final class FeaturePlanCompiler {
      */
     private void expandTransitionStats(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
+        if (!rejectForeignSequenceParameters(def, false)) return;
         final int order = def.order == null ? 1 : def.order;
         if (order < 1 || order > 4) {
             diagnostics.error("transitionStats.order", loc, "order must be within 1..4 (the number of previous values that make the state): " + order);
@@ -2364,6 +2394,12 @@ public final class FeaturePlanCompiler {
         }
         if (def.emitValues.isEmpty() && !def.emitDistribution && def.sequenceUnknown.isEmpty()) {
             diagnostics.error("transitionStats.emit", loc, "transitionStats requires emit: [distribution | {toValueProb: <value>}, ...]");
+            return;
+        }
+        // the emitted columns: one per toValueProb, plus the distribution map (svd / spectralEmbedding cap theirs too)
+        final int produced = def.emitValues.size() + (def.emitDistribution ? 1 : 0);
+        if (def.maxFeatures != null && produced > def.maxFeatures) {
+            diagnostics.error("transitionStats.maxFeatures", loc, "emit produces " + produced + " columns, exceeding maxFeatures " + def.maxFeatures);
             return;
         }
         final boolean perEntity = def.blendPerEntity != null && def.blendPerEntity;
@@ -2426,6 +2462,7 @@ public final class FeaturePlanCompiler {
      */
     private void expandSpectralEmbedding(final FeatureDef def, final AvailableAt computeAt) {
         final String loc = def.location();
+        if (!rejectForeignSequenceParameters(def, true)) return;
         final int window = def.cooccurWindow == null ? Spectral.DEFAULT_WINDOW : def.cooccurWindow;
         final int rank = def.rank == null ? Spectral.DEFAULT_RANK : def.rank;
         final int maxValues = def.maxValues == null ? Spectral.DEFAULT_MAX_VALUES : def.maxValues;
@@ -2470,8 +2507,14 @@ public final class FeaturePlanCompiler {
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input embedding is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
+            // the pairs are counted from every row's OWN value of the field, whichever value `of` looks up: an
+            // outcome-like field therefore shapes the coordinates a training row reads (as svd reports for its inputs)
+            final Ref fieldRef = resolve(def.sequenceField);
+            final boolean outcome = fieldRef != null && isOutcomeLike(fieldRef);
             diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
-                    + "; no target is read, but the neighbourhoods include the test period (fit.mode forward walks them)");
+                    + "; no target is read, but the neighbourhoods include the test period (fit.mode forward walks them)"
+                    + (outcome ? "; '" + def.sequenceField + "' is outcome-like, so each training row's own outcome is one of the pairs behind"
+                            + " the coordinates it reads — 'of: previous' changes which value is looked up, not what the fit counts (fit.mode forward does)" : ""));
         }
         final List<String> references = new ArrayList<>(path);
         references.add(def.sequenceField);

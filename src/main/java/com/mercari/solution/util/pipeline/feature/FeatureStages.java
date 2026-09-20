@@ -322,8 +322,8 @@ public final class FeatureStages {
 
     /**
      * Every static-fit block among the columns, rebuilt from their coordinates — the single registry of the
-     * static-fit population types (factorization, discretize, quantileTransform, svd) and the joint estimator
-     * models of an encoding block: a new type is added here and nowhere else.
+     * static-fit population types (factorization, discretize, quantileTransform, svd, smooth, spectralEmbedding)
+     * and the joint estimator models of an encoding block: a new type is added here and nowhere else.
      */
     static List<StaticFitBlock<?>> staticFitBlocks(final List<OutputColumn> columns) {
         final List<StaticFitBlock<?>> blocks = new ArrayList<>();
