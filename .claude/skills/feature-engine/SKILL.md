@@ -414,8 +414,10 @@ Listed in engine doc §9.2 "Deferred" and enforced as compile errors so nothing 
   row-local replay has no cell table), a moment-estimated λ for a shrunk `distribution` — extend `Shrinkage` +
   `expandEncoding`. (An `offset` on a logit / log scale is implemented: hidden `__sumoff` per level,
   `Shrinkage.Level.offColumn`, `KeyStats.sumOff`, info `encoding.offset.additive`.)
-- `structure: sequence` key sets, nested encoding targets (`targets[].field.ref`) —
-  `encoding.keySet.structure` / `encoding.nested`; ordering of fits is the open question.
+- nested encoding targets (`targets[].field.ref`) —
+  `encoding.nested`; ordering of fits is the open question. (`structure: sequence` is implemented: the keys are a
+  path declared most recent first and `expandEncoding` derives the suffix chain `(k1..kn) → (k1..kn−1) → … → (k1)` as
+  lattice levels — the same thing an explicit chain `hierarchy` declares, so the engine has no code of its own for it.)
 - `quantile` / `distribution` in static / fold (`encoding.stat.static`): a static fit keeps only
   (n, Σy, Σy²) per key; would need a per-key sketch artifact.
 - discretize `tree` / `optimal` (`discretize.method`): supervised, consumes a target — the spec ties

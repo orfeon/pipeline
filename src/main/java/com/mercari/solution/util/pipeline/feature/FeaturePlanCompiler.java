@@ -2625,7 +2625,20 @@ public final class FeaturePlanCompiler {
                         levels.add(List.of(Shrinkage.ADDITIVE));
                     }
                 }
-                default -> diagnostics.error("encoding.keySet.structure", loc, "structure must be flat | hierarchy | cross (sequence is v1): " + structure);
+                case "sequence" -> {
+                    // the keys are a path declared most recent first: the lattice backs off by forgetting the oldest
+                    // step, a chain of nested key lists like an explicit hierarchy (leave-node-out holds: the rows
+                    // of a path are rows of each of its suffixes)
+                    if (ks.keys.size() < 2) {
+                        diagnostics.error("encoding.keySet.sequence", loc, "structure: sequence requires at least two keys (a path, most recent first): " + ks.keys);
+                    } else if (hierarchy == null) {
+                        for (int n = ks.keys.size() - 1; n >= 1; n--) levels.add(List.copyOf(ks.keys.subList(0, n)));
+                        diagnostics.info("encoding.keySet.sequence", loc, "structure: sequence on " + ks.keys + " (most recent first) shrinks along "
+                                + levels.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(" -> ")) + " -> global:"
+                                + " a row whose older keys are null or unseen reads its longest known suffix");
+                    }
+                }
+                default -> diagnostics.error("encoding.keySet.structure", loc, "structure must be flat | hierarchy | cross | sequence: " + structure);
             }
             if (additiveAt >= 0) {
                 for (final String key : ks.keys) {

@@ -209,7 +209,7 @@ that fraction of the current row's value, 0 when neither, null without a future 
   keySets:
     - keys: [k1, k2]
       windows: [{maxAge: P365D}]                 # optional; ignored in static / fold, rounded to blocks in forward
-      structure: flat | hierarchy | cross        # hierarchy needs parentRef (+ maxDepth); sequence not implemented
+      structure: flat | hierarchy | cross | sequence   # hierarchy needs parentRef (+ maxDepth); sequence: keys = a path, most recent first (lag columns), shrunk along its suffixes (k1,k2,k3) -> (k1,k2) -> (k1) -> global; null / unseen older steps read the longest known suffix
       parentRef: <field>
       hierarchy: [[coarser keys], additive, []]  # explicit lattice, fine → coarse
       shrinkage: {...}                           # per-keySet override

@@ -570,6 +570,8 @@ the residual is 0. The columns share the block's fit (static or forward) and rea
       - keys: [category, condition_grade]
         structure: cross                          # cell → additive(main effects) → global (sequential estimator)
         shrinkage: {priorWeight: 50}              # keySet-level override
+      - keys: [grade_all_condition_grade_lag1, grade_all_condition_grade_lag2]
+        structure: sequence                       # a path, most recent first: (lag1, lag2) → (lag1) → global
     targets:
       - {field: sold, stats: [mean]}
     shrinkage:
@@ -587,6 +589,17 @@ shrinkage toward the global mean. Every lattice level is evaluated as its own ke
 window and target, and the composition is a per-row formula: `est(level) = est(parent) + w · (t(mean) −
 est(parent))` from the global level down to the key, on the declared scale. `share` is
 `n_key / n_global` over strictly-past rows.
+
+**Paths (`structure: sequence`).** The keys are the steps of a path **declared most recent first** —
+typically the `lag` columns of a categorical field (`- {type: lag, field: condition_grade, k: 2}` →
+`..._lag1`, `..._lag2`), optionally led by a field of the current row — and the lattice is the chain of the
+path's suffixes: `(k1, k2, k3) → (k1, k2) → (k1) → global`, i.e. the explicit `hierarchy: [[k1, k2], [k1],
+[]]`. The statistic of a long path is shrunk toward what the shorter, better-observed path says, and a row
+whose older steps are null (an entity with a short history) or whose path was never seen reads its **longest
+known suffix** — so young entities are not dropped the way a cross of lag columns drops them. At least two
+keys (`encoding.keySet.sequence`); the info of the same code lists the derived levels. Every level is a
+keyed stage of its own, so a path of `k` steps costs `k` shuffles; keys that derive from an outcome (the
+lags of `sold`) need `fit.groupBy` under `fit.mode: fold`, like any such key.
 
 **Estimators.** `backoff` is the top-down pass above, one level at a time; `sequential` (the default of a
 lattice with `additive` / `cross`) shrinks a cell toward the sum of the shrunk main effects, so it absorbs
@@ -1196,7 +1209,7 @@ stage) are flagged in the query's `note` — evaluate those on the relation as i
 - Batch only for sequence / population features (per-key time-ordered replay). Row / context features also
   run in streaming within the configured window, as a linear chain (the parallel-wave merge is a batch
   GroupByKey).
-- Key set `structure: sequence`, nested encoding targets, the `quantile` / `distribution` stats in
+- Nested encoding targets, the `quantile` / `distribution` stats in
   `fit.mode: static` / `fold` (expanding only), and population types other than `encoding` /
   `factorization` / `discretize` / `quantileTransform` / `svd` (`spectralEmbedding`, `transitionStats`) are parsed
   but rejected. Factorization: `variant: bayesian`, `fit.cadence / window / warmStart`,
