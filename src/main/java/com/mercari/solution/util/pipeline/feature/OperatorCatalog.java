@@ -71,14 +71,14 @@ public final class OperatorCatalog {
         register(Scope.sequence, "lag", InputKind.any, null, false, "value k events back");
         register(Scope.sequence, "delta", InputKind.numeric, F64, false, "difference between lag k and lag k+1");
         register(Scope.sequence, "trend", InputKind.numeric, F64, false, "regression slope over the last k events");
-        register(Scope.sequence, "ewma", InputKind.numeric, F64, false, "exponentially weighted moving average (halflife, decayBy events|time)");
+        register(Scope.sequence, "ewma", InputKind.numeric, F64, false, "exponentially weighted moving average (halflife, decayBy events|time|a declared calendar clock)");
         register(Scope.sequence, "runLength", InputKind.any, I64, false, "length of the trailing run equal to value");
         register(Scope.sequence, "sinceEvent", InputKind.predicate, null, false, "events / days since the predicate last held");
         register(Scope.sequence, "countMatch", InputKind.predicate, I64, false, "number of past rows where the predicate holds");
         register(Scope.sequence, "aggregate", InputKind.numeric, null, false, "count / mean / min / max / sum / std over the window");
         register(Scope.sequence, "regression", InputKind.numeric, F64, false, "two-series statistics of field regressed against another field over the window: cov / corr / beta / intercept / r2; lag pairs the field with the other series k events earlier (lead-lag)");
         register(Scope.sequence, "fracdiff", InputKind.numeric, F64, false, "fractional difference of order d over the last k events (fixed-width truncation)");
-        register(Scope.sequence, "dynamics", InputKind.numeric, F64, false, "general form lift -> summarize.dynamics (lti: exponential | legendre | fourier measure, order, halflife / period, decayBy): one column per state component");
+        register(Scope.sequence, "dynamics", InputKind.numeric, F64, false, "general form lift -> summarize.dynamics (lti: exponential | legendre | fourier measure, order, halflife / period, decayBy events|time|a declared calendar clock): one column per state component");
 
         // population (fit)
         register(Scope.population, "encoding", InputKind.any, F64, true, "shrinkage-smoothed conditional statistics over structured key space");

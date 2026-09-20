@@ -1203,7 +1203,7 @@ public final class FeaturePlanCompiler {
                                 continue;
                             }
                             if (op.halflife.stream().anyMatch(h -> !(h > 0) || h.isInfinite())) {
-                                diagnostics.error("sequence.ewma.halflife", loc, "halflife must be a positive number (events, or days under decayBy: time): " + op.halflife);
+                                diagnostics.error("sequence.ewma.halflife", loc, "halflife must be a positive number (events, days under decayBy: time, or ticks under a calendar clock): " + op.halflife);
                                 continue;
                             }
                             final String decayBy = op.decayBy == null ? "events" : op.decayBy;
@@ -3067,7 +3067,12 @@ public final class FeaturePlanCompiler {
                 diagnostics.error("clock.fit", loc, "a keySet window on the clock '" + window.clock + "' under fit.mode forward needs fit.blocks on the same clock ({size: <ticks>, clock: "
                         + window.clock + "}); the blocks are " + blocks.describe());
             } else {
-                c.coordinates.put("windowBlocks", Long.toString(Math.max(1, (window.maxAgeTicks + blocks.ticks() - 1) / blocks.ticks())));
+                final long k = Math.max(1, (window.maxAgeTicks + blocks.ticks() - 1) / blocks.ticks());
+                c.coordinates.put("windowBlocks", Long.toString(k));
+                if (hintedBlocks.add(def.name + "#forwardWindow")) {
+                    diagnostics.info("fit.mode.forward.window", loc, "maxAge " + window.maxAgeTicks + " tick(s) of " + window.clock
+                            + " is rounded up to " + k + " block(s) of " + blocks.describe() + " in fit.mode forward");
+                }
             }
             return;
         }
@@ -3090,7 +3095,8 @@ public final class FeaturePlanCompiler {
         final Clock clock = clocks.get(name);
         if (clock == null) {
             diagnostics.error("clock.unknown", loc, what + " '" + name + "' is neither a built-in clock " + Clock.BUILT_IN
-                    + " nor declared in the sources' clocks" + (clocks.isEmpty() ? "" : " (declared: " + String.join(", ", clocks.keySet()) + ")"));
+                    + " nor declared in the sources' clocks" + (clocks.isEmpty() ? ""
+                    : " (declared: " + String.join(", ", clocks.values().stream().map(Clock::describe).toList()) + ")"));
         }
         return clock;
     }

@@ -364,7 +364,7 @@ public class FeatureSpec implements Serializable {
             if (fit == null) return;
             if (fit.has("blocks") && !fit.get("blocks").isJsonNull()) {
                 if (!fit.get("blocks").isJsonObject()) {
-                    diagnostics.error("fit.blocks", loc, "fit.blocks must be an object: {bucket: year | quarter | month | week | day} or {size: <ISO-8601 duration>}");
+                    diagnostics.error("fit.blocks", loc, "fit.blocks must be an object: {bucket: year | quarter | month | week | day}, {size: <ISO-8601 duration>} or {size: <ticks>, clock: <calendar>}");
                 } else {
                     final JsonObject blocks = fit.getAsJsonObject("blocks");
                     final String field = Json.string(blocks, "field");
@@ -373,7 +373,9 @@ public class FeatureSpec implements Serializable {
                     }
                     final String bucket = Json.string(blocks, "bucket");
                     final String clock = Json.string(blocks, "clock");
-                    if (clock != null && !"time".equals(clock)) {
+                    final boolean onCalendar = clock != null && !"time".equals(clock);
+                    final Duration size = onCalendar ? null : Json.duration(blocks, "size", null, diagnostics, loc);
+                    if (onCalendar) {
                         // blocks of n ticks of a calendar clock
                         final JsonElement ticks = blocks.get("size");
                         if (bucket != null || ticks == null || !ticks.isJsonPrimitive() || !ticks.getAsJsonPrimitive().isNumber()
@@ -385,10 +387,6 @@ public class FeatureSpec implements Serializable {
                             spec.blockBucket = null;
                             spec.blockSize = null;
                         }
-                    }
-                    final Duration size = clock != null && !"time".equals(clock) ? null : Json.duration(blocks, "size", null, diagnostics, loc);
-                    if (clock != null && !"time".equals(clock)) {
-                        // handled above
                     } else if (bucket != null && size != null) {
                         diagnostics.error("fit.blocks", loc, "fit.blocks takes either bucket or size, not both");
                     } else if (bucket != null) {

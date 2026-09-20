@@ -126,9 +126,13 @@ clocks:
   `fit.window` / `minHistory` / `purge` durations round with the calendar's mean tick spacing.
 - **Availability stays on wall time**: `availableAt`, `ingestionLag` and the window shift they cause are durations —
   a clock measures windows, not knowledge.
-- A `uri` is read at assembly (like `output.include`); the dates are part of the plan hash, so a new holiday is a new
-  plan. `clock.unknown` names an undeclared clock (`time` and `events` are built in); `window.clock`,
-  `fit.blocks.clock` and `sources.clocks.*` report malformed declarations.
+- A `uri` is read at assembly (like `output.include`); the **dates** are part of the plan hash, so a new holiday is a
+  new plan while a comment, a header or a reformatting of the file that leaves the ticks alone is not.
+- A clock's `name` rides into generated column names (the window token `20business`), so it is an identifier
+  (letters / digits / `_`, not starting with a digit) other than `time` and `events`; a duplicate name is rejected
+  (`sources.clocks.name`) rather than silently overriding the earlier declaration. `clock.unknown` names an
+  undeclared clock and lists each declared one with its tick count and coverage; `window.clock`, `fit.blocks.clock`
+  and `sources.clocks.*` report malformed declarations.
 
 ### Feature scopes
 

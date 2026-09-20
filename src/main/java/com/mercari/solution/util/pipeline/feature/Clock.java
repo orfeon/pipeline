@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * A calendar clock declared in the sources document ({@code clocks:}): the tick dates (business days, trading
@@ -24,6 +25,8 @@ import java.util.TreeSet;
 public final class Clock implements Serializable {
 
     public static final List<String> BUILT_IN = List.of("time", "events");
+    /** A clock's name rides into generated column names (the window token {@code 20business}), so it is an identifier. */
+    private static final Pattern NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     static final long DAY_MILLIS = 86_400_000L;
 
     private final String name;
@@ -70,7 +73,7 @@ public final class Clock implements Serializable {
      */
     public long farEdgeMillis(final long nowMillis, final long ticks) {
         final long k = ordinal(nowMillis) - ticks;
-        return k <= 0 ? (k == 0 ? days[0] * DAY_MILLIS : Long.MIN_VALUE) : days[(int) k] * DAY_MILLIS;
+        return k < 0 ? Long.MIN_VALUE : days[(int) k] * DAY_MILLIS;
     }
 
     /** The mean spacing of the ticks: the nominal length of a tick when a wall-time span is rounded to ticks. */
@@ -124,8 +127,13 @@ public final class Clock implements Serializable {
             final JsonObject o = e.getAsJsonObject();
             final String name = SourceContract.Json.string(o, "name");
             final String loc = "clocks." + name;
-            if (name == null || BUILT_IN.contains(name)) {
-                diagnostics.error("sources.clocks.name", loc, "a clock needs a name other than the built-in " + BUILT_IN + ": " + name);
+            if (name == null || BUILT_IN.contains(name) || !NAME.matcher(name).matches()) {
+                diagnostics.error("sources.clocks.name", loc, "a clock needs an identifier name (letters / digits / _, not starting with a digit)"
+                        + " other than the built-in " + BUILT_IN + ": " + name);
+                continue;
+            }
+            if (clocks.containsKey(name)) {
+                diagnostics.error("sources.clocks.name", loc, "duplicate clock name: " + name);
                 continue;
             }
             final String type = SourceContract.Json.string(o, "type");
@@ -150,7 +158,6 @@ public final class Clock implements Serializable {
                 diagnostics.error("sources.clocks.dates", loc, "a calendar clock needs at least one tick date");
                 continue;
             }
-            if (clocks.containsKey(name)) diagnostics.error("sources.clocks.name", loc, "duplicate clock name");
             clocks.put(name, of(name, dates));
         }
         return clocks;

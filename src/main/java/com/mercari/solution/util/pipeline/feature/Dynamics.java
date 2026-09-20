@@ -126,10 +126,6 @@ public final class Dynamics implements Summary<Dynamics.State> {
      * {@code ewma} sugar carries only halflife / decayBy), {@code order}, {@code halflife}, {@code period},
      * {@code decayBy} (events | time | a calendar clock attached to the column, default events) and {@code component}.
      */
-    public static Summary.Spec spec(final Map<String, String> coordinates) {
-        return spec(coordinates, Map.of());
-    }
-
     public static Summary.Spec spec(final Map<String, String> coordinates, final Map<String, Clock> clocks) {
         final String decayBy = coordinates.get("decayBy");
         final Clock calendar = decayBy == null || Clock.BUILT_IN.contains(decayBy) ? null : clocks.get(decayBy);

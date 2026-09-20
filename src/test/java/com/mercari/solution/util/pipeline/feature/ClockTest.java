@@ -87,7 +87,20 @@ public class ClockTest {
         final FeaturePlanService.Documents documents = FeaturePlanService.resolve(parameters, Map.of());
         final JsonObject clock = documents.sources().getAsJsonObject().getAsJsonArray("clocks").get(0).getAsJsonObject();
         Assertions.assertEquals(2, clock.getAsJsonArray("dates").size());
-        Assertions.assertEquals(FeaturePlanCompiler.sha256("date\n2025-01-06\n2025-01-07\n"), clock.get("hash").getAsString());
+        // the hash covers the ticks, not the file's formatting: a comment / header change leaves the plan hash put
+        Assertions.assertEquals(FeaturePlanCompiler.sha256(FeaturePlanCompiler.canonical(clock.getAsJsonArray("dates"))),
+                clock.get("hash").getAsString());
+        final java.nio.file.Path reformatted = dir.resolve(UUID.randomUUID() + ".csv");
+        java.nio.file.Files.writeString(reformatted, "# trading days\nsession_date,open\n2025-01-06,1\n2025-01-07,1\n");
+        final JsonObject other = FeaturePlanService.resolve(Config.convertConfigJson("""
+                sources:
+                  sources: []
+                  clocks:
+                    - {name: business, uri: "FILE"}
+                features: []
+                """.replace("FILE", reformatted.toString().replace('\\', '/')), Config.Format.yaml), Map.of())
+                .sources().getAsJsonObject().getAsJsonArray("clocks").get(0).getAsJsonObject();
+        Assertions.assertEquals(clock.get("hash").getAsString(), other.get("hash").getAsString());
         final Diagnostics diagnostics = new Diagnostics();
         Assertions.assertEquals(2, Clock.parseAll(documents.sources(), diagnostics).get("business").size());
         Assertions.assertFalse(diagnostics.hasErrors());
