@@ -134,7 +134,13 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
    block — 0 under static —, value) or null, `solve(parts, planHash)` (merge the per-time-block states
    through a `BlockSeries`, fit, write the artifact) and `fitsEmptyInput()`. The stage then fits every
    such block together — one extraction pass and one `Combine.perKey` per family, one side input for
-   all models (`fitSummaryBlocks`) — so a dozen blocks do not become a dozen chains. Register it once in `staticFitBlocks`
+   all models (`fitSummaryBlocks`) — so a dozen blocks do not become a dozen chains. **When the state is
+   only bounded once something of the input is known** (spectralEmbedding: the pair counts are quadratic in
+   the values counted, so the `maxValues` vocabulary cannot wait for the solve), override `prepare(fitInput,
+   prefix)` to build the side input and return a copy of the spec carrying it, `extractionViews()` to declare
+   it, and `contribution(row, views)` to filter with it (`SpectralSpec` + `vocabularyView` is the template:
+   rank the values the way the solve would, so the bounded state fits the same model). The plain blocks reach
+   the solve, so a view travels only to the ParDo that declares it. Register it once in `staticFitBlocks`
    (`blocks.addAll(<type>Specs(columns))`), which feeds both `applyFit` and the manifest's
    `artifactPaths` — `FitApplyDoFn` needs no change. Copy before
    sorting (DirectRunner immutability). The whole training set lands on one worker: state the

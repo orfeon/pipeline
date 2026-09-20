@@ -1110,7 +1110,11 @@ Only the monoid law is used (a range is *merged*, not differenced), which is wha
 state (an eigendecomposition, quantile knots) is fitted once per **change point** — every observed block and,
 under a window, the index at which a block leaves (`changePoints`) — and a row reads the floor entry of its
 usable block (`lookup`), the rule `JointFit` already used for its per-block solutions. The artifact keeps the
-whole-input model (what a static serving run loads); a forward fit is re-fitted every run.
+whole-input model (what a static serving run loads); a forward fit is re-fitted every run. Without a window the
+readable state is a prefix that grows by one block per change point, so `models` merges only the entering block into
+one running state: B merges instead of B²/2 — the same prefix scan `VarianceComponents.forwardSeries` does per key,
+and what makes a year of weekly blocks affordable for a family whose part is large (pair counts, gathered values)
+rather than a fixed-size matrix. A fit therefore reads the state it is given and keeps nothing.
 
 `type: svd` and `type: quantileTransform` are on it. The encoding levels still carry their own
 `ForwardBlocks.Series` (prefix arrays of `KeyStats` + the per-block λ); moving them onto
@@ -1143,6 +1147,18 @@ blocks: 40 → 14 top-level transforms; the Dataflow wall-clock on the consumer'
 recorded in §9.2). A block that fits an empty input too (quantileTransform: n = 0 is still an artifact) adds an
 empty marker part so its group exists. fm, discretize and the joint estimator keep their own chains: fm and joint
 have no summary state, discretize gathers the same values as the quantile transform and can join its family.
+
+**A state that must be bounded before it accumulates.** Every other summary state is bounded by its declaration (a
+d×d matrix, 8 bytes per row); the co-occurrence counts of `spectralEmbedding` are quadratic in the *values* they
+hold, so a high-cardinality field dies in the accumulator long before `maxValues` is consulted in the solve. A block
+may therefore declare a side input for its extraction: `prepare(fitInput, prefix)` builds it and returns a copy of
+the spec carrying it, `extractionViews()` declares it to the extraction ParDo, and `contribution(row, views)` reads
+it. `SpectralSpec` uses it for the vocabulary (`vocabularyView`: one extra pass ranks the values by the same
+co-occurrence mass the solve ranks by, `Sum.longsPerKey` → `Top.of(maxValues)` → a map view), so the pairs it counts
+are exactly the cells the unfiltered solve would have kept — the same model, a state bounded by the cap
+(`SpectralTest.testVocabularyPrePassEqualsTheFitsOwnCap`). `PairCounts` keeps a hard ceiling that names the cause
+should a caller accumulate unfiltered. Under `forward` the vocabulary is global while the counts stay per block,
+which the `fit.mode.forward` diagnostic states.
 
 **A family is reused, not re-declared: `type: smooth`.** The smooth curve of a target over a numeric key (spec §5.6,
 the linear-basis class; `Smooth`) needs `XᵀX`, `Xᵀy` and `yᵀy` of a B-spline design — which are the blocks of the

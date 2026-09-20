@@ -320,8 +320,10 @@ has no mass, null = nothing known yet; a first event reads the marginal. Interme
 `<name>_0 .. <name>_{rank−1}`: the value's coordinates from the PPMI matrix of the co-occurrence counts
 (eigenvectors of largest |eigenvalue| × sqrt(|eigenvalue|), largest loading positive). No target is read. Null for
 a missing / unseen / capped value — including one the cap keeps but whose every partner it dropped (no co-occurrence
-row, so no position rather than the origin) — and for surplus columns when there are fewer values than `rank`. Artifact
-`<block>.spectral.json`.
+row, so no position rather than the origin) — and for surplus columns when there are fewer values than `rank`. The
+cap is applied before the counts are accumulated (an extra pass ranks the values by co-occurrence mass; under
+`fit.mode: forward` over the whole input, the counts per block), so a high-cardinality field costs a pass, not the
+worker's memory. Artifact `<block>.spectral.json`.
 
 ## Availability expressions
 

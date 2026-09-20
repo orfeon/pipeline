@@ -1,11 +1,17 @@
 package com.mercari.solution.util.pipeline.feature;
 
+import org.apache.beam.sdk.values.KV;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
+import java.util.TreeMap;
 
 public class SpectralTest {
 
@@ -140,6 +146,60 @@ public class SpectralTest {
         }
         final Spectral again = Spectral.fit(reversed, 2, 256, true);
         for (final String value : spectral.vocabulary) Assertions.assertArrayEquals(spectral.embed(value), again.embed(value), 0);
+    }
+
+    /**
+     * The engine caps the vocabulary before the pairs are accumulated (FeatureStages.vocabularyView), so the state a
+     * Combine carries is bounded by {@code maxValues} instead of by the field's cardinality. The design claim this
+     * pins: the pre-pass keeps exactly the values the fit's own cap would have kept (co-occurrence mass, ties in
+     * string order) and drops exactly the cells the fit would have skipped, so the model is unchanged.
+     */
+    @Test
+    public void testVocabularyPrePassEqualsTheFitsOwnCap() {
+        final List<String[]> rows = List.of(
+                new String[]{"a", "b"}, new String[]{"a", "b"}, new String[]{"a", "b"},
+                new String[]{"b", "c"}, new String[]{"b", "c"},
+                new String[]{"c", "d"}, new String[]{"d", "e"});
+        // mass: b 5, a 3, c 3, d 2, e 1 — room for three keeps b, then a before c on the tie
+        final Spectral.PairCounts whole = Spectral.SUMMARY.create();
+        final Map<String, Long> mass = new TreeMap<>();
+        for (final String[] values : rows) {
+            Spectral.SUMMARY.update(whole, values, 1);
+            mass.merge(values[0], (long) values.length - 1, Long::sum);
+            for (int i = 1; i < values.length; i++) mass.merge(values[i], 1L, Long::sum);
+        }
+        final List<KV<String, Long>> ranked = new ArrayList<>();
+        for (final Map.Entry<String, Long> e : mass.entrySet()) ranked.add(KV.of(e.getKey(), e.getValue()));
+        ranked.sort(new FeatureStages.ByMass().reversed());   // Top.of keeps the greatest: the same order, capped
+        final Map<String, Long> vocabulary = new HashMap<>();
+        for (final KV<String, Long> e : ranked.subList(0, 3)) vocabulary.put(e.getKey(), e.getValue());
+        Assertions.assertEquals(Set.of("b", "a", "c"), vocabulary.keySet());
+        // the block restricts each row's pairs to the vocabulary, exactly as the extraction does
+        final FeatureStages.SpectralSpec spec = new FeatureStages.SpectralSpec("block", "v", List.of("p"), "v", 2, 3,
+                null, false, List.of(), new int[]{0}, null, 0L, null);
+        final Spectral.PairCounts filtered = Spectral.SUMMARY.create();
+        for (final String[] values : rows) {
+            final KV<Long, String[]> pairs = spec.contribution(Map.of("v", values[0], "p", values[1]), List.of(vocabulary));
+            if (pairs != null) Spectral.SUMMARY.update(filtered, pairs.getValue(), 1);
+        }
+        final Spectral direct = Spectral.fit(whole, 2, 3, false);
+        final Spectral bounded = Spectral.fit(filtered, 2, 3, false);
+        Assertions.assertArrayEquals(direct.vocabulary, bounded.vocabulary);
+        Assertions.assertArrayEquals(direct.eigenvalues, bounded.eigenvalues, 1e-12);
+        for (final String value : direct.vocabulary) Assertions.assertArrayEquals(direct.embed(value), bounded.embed(value), 1e-12, value);
+        // only the pair count differs: the bounded state never saw the cells the fit would have skipped
+        Assertions.assertEquals(7, direct.pairs);
+        Assertions.assertEquals(5, bounded.pairs);
+    }
+
+    /** The accumulator refuses to grow past its ceiling: an unbounded state is a configuration mistake, not an OOM. */
+    @Test
+    public void testPairCountsCeiling() {
+        final Spectral.PairCounts state = new Spectral.PairCounts();
+        final IllegalStateException thrown = Assertions.assertThrows(IllegalStateException.class, () -> {
+            for (int i = 0; i <= Spectral.MAX_STATE_VALUES; i++) state.add("v" + String.format("%06d", i), "z", 1);
+        });
+        Assertions.assertTrue(thrown.getMessage().contains("capped before the pairs are counted"), thrown::getMessage);
     }
 
     @Test

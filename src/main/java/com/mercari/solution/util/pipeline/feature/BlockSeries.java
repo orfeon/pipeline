@@ -74,12 +74,27 @@ public final class BlockSeries<S extends Serializable> implements Serializable {
     /**
      * One model per change point, fitted from the window state at that point ({@code fit} receives the family's
      * empty state when the window is empty there, so it can produce its own "nothing fitted" model).
+     *
+     * <p>Without a window the readable state is a prefix that grows by exactly one block per change point, so the
+     * series merges only the entering block into one running state instead of re-merging the whole prefix: B merges
+     * rather than B²/2, which is what makes a long forward fit affordable for a family whose part is large (the
+     * co-occurrence counts of {@link Spectral}, the gathered values of {@link QuantileTransform}) — the same
+     * prefix-scan {@link VarianceComponents#forwardSeries} does per key. {@code fit} therefore reads the state it is
+     * given and keeps nothing: every family's fit copies what it needs into its model.
      */
     public <M> TreeMap<Long, M> models(final int windowBlocks, final Function<S, M> fit) {
         final TreeMap<Long, M> models = new TreeMap<>();
-        for (final long at : changePoints(windowBlocks)) {
-            final S state = window(at, windowBlocks);
-            models.put(at, fit.apply(state == null ? family.create() : state));
+        if (windowBlocks > 0) {
+            for (final long at : changePoints(windowBlocks)) {
+                final S state = window(at, windowBlocks);
+                models.put(at, fit.apply(state == null ? family.create() : state));
+            }
+            return models;
+        }
+        final S prefix = family.create();
+        for (final Map.Entry<Long, S> part : parts.entrySet()) {
+            family.merge(prefix, part.getValue());
+            models.put(part.getKey(), fit.apply(prefix));
         }
         return models;
     }

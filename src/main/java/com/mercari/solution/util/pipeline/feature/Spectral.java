@@ -26,9 +26,14 @@ import java.util.TreeMap;
  *
  * <p>The fit state is the pair counts ({@link PairCounts}): a sum of per-row contributions, hence a
  * {@link Summary} monoid — one {@code Combine} per time block, merged over the blocks a row may read
- * ({@link BlockSeries}) — and the small symmetric eigenproblem (one row per distinct value, capped at
- * {@code maxValues} by co-occurrence mass) is solved on one worker with the Jacobi rotation of {@link Svd}.
- * Components are oriented so their largest loading is positive: a re-fit on the same data reproduces the columns.
+ * ({@link BlockSeries}) — and the small symmetric eigenproblem (one row per value) is solved on one worker with the
+ * Jacobi rotation of {@link Svd}. Components are oriented so their largest loading is positive: a re-fit on the same
+ * data reproduces the columns.
+ *
+ * <p>The {@code maxValues} vocabulary cap is applied by the engine before the pairs are counted (the
+ * co-occurrence-mass pre-pass of FeatureStages.vocabularyView), because the state is quadratic in the values it
+ * holds; {@link #fit} applies the same cap to whatever state it is given, which is what a direct caller (a test, a
+ * re-fit from a state) relies on.
  */
 public final class Spectral implements Serializable {
 
@@ -40,6 +45,13 @@ public final class Spectral implements Serializable {
     public static final int DEFAULT_MAX_VALUES = 256;
     /** The eigenproblem is dense and cubic in the vocabulary. */
     public static final int MAX_VALUES = 1024;
+    /**
+     * A ceiling on the values one {@link PairCounts} may hold. The engine caps the vocabulary <em>before</em> the
+     * pairs are counted (FeatureStages.vocabularyView), so a state that reaches this was accumulated unfiltered —
+     * a hard failure naming the cause beats an accumulator that grows to one cell per co-occurring pair of distinct
+     * values and takes the worker (or the coder) down with no explanation.
+     */
+    public static final int MAX_STATE_VALUES = 4 * MAX_VALUES;
 
     /**
      * Unordered co-occurrence counts: {@code counts[a][b]} with {@code a ≤ b} (string order) is the number of times
@@ -53,6 +65,7 @@ public final class Spectral implements Serializable {
             final boolean ordered = a.compareTo(b) <= 0;
             counts.computeIfAbsent(ordered ? a : b, k -> new TreeMap<>()).merge(ordered ? b : a, n, Long::sum);
             pairs += n;
+            bound();
         }
 
         public void merge(final PairCounts other) {
@@ -61,6 +74,16 @@ public final class Spectral implements Serializable {
                 for (final Map.Entry<String, Long> e : row.getValue().entrySet()) into.merge(e.getKey(), e.getValue(), Long::sum);
             }
             pairs += other.pairs;
+            bound();
+        }
+
+        /** {@link Spectral#MAX_STATE_VALUES}, checked on the one number that is O(1) to read. */
+        private void bound() {
+            if (counts.size() > MAX_STATE_VALUES) {
+                throw new IllegalStateException("spectralEmbedding: the co-occurrence counts hold more than " + MAX_STATE_VALUES
+                        + " distinct values. The vocabulary must be capped before the pairs are counted: bucket or discretize the field"
+                        + " upstream (a spectralEmbedding state is quadratic in the values it counts, and maxValues is at most " + MAX_VALUES + ")");
+            }
         }
     }
 
@@ -112,7 +135,7 @@ public final class Spectral implements Serializable {
     public final double[][] embedding;
     /** The eigenvalue of each component (by decreasing magnitude; a PPMI matrix is not definite, so some are negative). */
     public final double[] eigenvalues;
-    /** Pairs counted. */
+    /** Pairs counted (of the vocabulary, when the extraction capped it before accumulating). */
     public final long pairs;
     /**
      * Distinct values the fit left out — they read null: beyond the {@code maxValues} cap, or kept by the cap but

@@ -2514,6 +2514,9 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + "), re-solved for every row over the complete blocks"
                     + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose values are known at predictAt (the row's own block excluded)"
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    // the vocabulary cap must be decided before the counts are accumulated (the state is quadratic in
+                    // the values), which is one thing a forward fit reads from the whole input rather than per block
+                    + "; the " + maxValues + " values counted (maxValues, by co-occurrence mass) are chosen over the whole input, the counts themselves per block"
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input embedding is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
             // the pairs are counted from every row's OWN value of the field, whichever value `of` looks up: an

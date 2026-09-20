@@ -730,7 +730,10 @@ is missing, unseen in the fit or beyond `maxValues` reads null, as do the surplu
 values than `rank`. A value the cap keeps but whose every co-occurrence partner it dropped reads null too: with no
 co-occurrence row it has no position, rather than the origin of the fitted space. The fit state is the pair counts — a sum of row contributions, so one Combine (per time block
 under `fit.mode: forward`, where a row reads the complete blocks before it and the usual `window` / `minBlocks` apply)
-— and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. Artifact
+— and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. The cap is
+applied before the pairs are counted (one extra pass over the fit input ranks the values by co-occurrence mass), so
+the Combine state is bounded by `maxValues` rather than by the field's cardinality; under `fit.mode: forward` those
+values are chosen over the whole input while the counts stay per block. Artifact
 `<planHash>/<block>.spectral.json` (values with their coordinates, eigenvalues, pair count).
 
 ### Shrinkage and key lattices (population)
