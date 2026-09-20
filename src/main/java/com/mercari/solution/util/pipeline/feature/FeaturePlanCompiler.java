@@ -35,6 +35,8 @@ public final class FeaturePlanCompiler {
     private static final Set<String> KEYWORDS = Set.of(
             "and", "or", "not", "null", "true", "false", "in", "is", "like", "between", "case", "when", "then", "else", "end");
     private static final Set<String> PARENT_CONTEXT_OPS = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
+    /** Context ops whose column can be null although the field is present (a null offset, a group the solver declines). */
+    private static final Set<String> NULLABLE_CONTEXT_OPS = Set.of("softmax", "residualize", "harville");
 
     private final Diagnostics diagnostics = new Diagnostics();
     private final Map<String, SourceContract> sources;
@@ -344,30 +346,26 @@ public final class FeaturePlanCompiler {
     // expansion loop
     // ------------------------------------------------------------------------------------------
 
-    /** A block awaiting expansion with its syntactic references. */
-    private record Pending(String name, Set<String> references, Runnable expand) {}
+    /** A block awaiting expansion with its syntactic references; {@code ownPrefix} is what its own columns start with. */
+    private record Pending(String name, Set<String> references, String ownPrefix, Runnable expand) {
+        boolean isOwn(final String reference) {
+            return ownPrefix != null && reference.startsWith(ownPrefix);
+        }
+    }
 
     private void expandAll() {
         final List<Pending> pending = new ArrayList<>();
         for (final BaselineDef baseline : spec.baselines) {
-            pending.add(new Pending("baselines." + baseline.name(), baselineReferences(baseline), () -> expandBaseline(baseline)));
+            pending.add(new Pending("baselines." + baseline.name(), baselineReferences(baseline), null, () -> expandBaseline(baseline)));
         }
         for (final FeatureDef def : spec.features) {
-            pending.add(new Pending(def.location(), blockReferences(def), () -> expandBlock(def)));
+            pending.add(new Pending(def.location(), blockReferences(def), def.name + "_", () -> expandBlock(def)));
         }
-        boolean progress = true;
-        while (!pending.isEmpty() && progress) {
-            progress = false;
-            final Iterator<Pending> it = pending.iterator();
-            while (it.hasNext()) {
-                final Pending p = it.next();
-                if (p.references.stream().allMatch(this::resolves)) {
-                    p.expand.run();
-                    it.remove();
-                    progress = true;
-                }
-            }
-        }
+        expandReady(pending, false);
+        // whatever is left may be waiting for itself: a residualize regressor naming an earlier op of the same block
+        // is a reference the block satisfies while it expands (the ops run in declaration order), not a cycle. Only
+        // a stalled set is retried this way, so a reference another block happens to provide is still waited for.
+        expandReady(pending, true);
         // a reference into another failed block is also a secondary failure, not a fresh error
         final Set<String> failedBlocks = new LinkedHashSet<>();
         for (final Pending p : pending) {
@@ -398,6 +396,23 @@ public final class FeaturePlanCompiler {
             diagnostics.error("reference.unresolved", p.name,
                     "unresolved references (unknown name or dependency cycle): " + unresolved
                             + (causedByLineage.isEmpty() ? "" : "; caused by: " + causedByLineage));
+        }
+    }
+
+    /** Expands every block whose references resolve, until none does; {@code ignoreOwn} = a block may wait for itself. */
+    private void expandReady(final List<Pending> pending, final boolean ignoreOwn) {
+        boolean progress = true;
+        while (!pending.isEmpty() && progress) {
+            progress = false;
+            final Iterator<Pending> it = pending.iterator();
+            while (it.hasNext()) {
+                final Pending p = it.next();
+                if (p.references.stream().allMatch(r -> resolves(r) || (ignoreOwn && p.isOwn(r)))) {
+                    p.expand.run();
+                    it.remove();
+                    progress = true;
+                }
+            }
         }
     }
 
@@ -460,6 +475,8 @@ public final class FeaturePlanCompiler {
                 refs.addAll(w.others);
                 refs.addAll(w.self);
             }
+            // the explanatory fields of a context residualize (a sequence regression's single series is op.against)
+            refs.addAll(op.regressors);
         }
         // the general form's channels: a typo or a forward reference must wait / be reported like an op's field
         if (def.lift != null) {
@@ -600,6 +617,14 @@ public final class FeaturePlanCompiler {
 
     private void expandBaseline(final BaselineDef baseline) {
         final String loc = "baselines." + baseline.name();
+        final OperatorCatalog.Call call = OperatorCatalog.parseContextCall(baseline.expr());
+        if (call != null && baseline.context() == null) {
+            diagnostics.error("baselines.expr.op", loc, "'" + call.operator().name() + "(...)' is a context op: the baseline must name the"
+                    + " 'context' whose group it is computed over");
+        } else if (call != null && !call.operator().baselineCallable()) {
+            diagnostics.error("baselines.expr.op", loc, "context op '" + call.operator().name() + "' cannot be called from a baseline expression"
+                    + " (it takes parameters of its own): declare it as an op of a context feature block instead");
+        }
         final OutputColumn c = newColumn("baselines", baseline.context() != null ? Scope.context : Scope.row, "baseline",
                 "__baseline_" + baseline.name(), Schema.FieldType.FLOAT64, spec.predictAt);
         c.intermediate = true;
@@ -936,6 +961,9 @@ public final class FeaturePlanCompiler {
                 diagnostics.error("context.fields", loc, "op " + op.type + " requires 'fields' (or block-level 'inputs')");
                 continue;
             }
+            // the op's own parameters are validated once here — an op over three fields reports a bad one once
+            final ContextOpParams params = validateContextOp(op, def, context, loc);
+            if (params == null) continue;
             for (final String field : fields) {
                 final Ref ref = resolve(field);
                 if (ref == null) continue;
@@ -943,69 +971,133 @@ public final class FeaturePlanCompiler {
                     diagnostics.error("context.op.type", loc, "op " + op.type + " expects " + operator.input() + " input; '" + field + "' is " + (ref.type() == null ? "unknown" : ref.type().getType()));
                     continue;
                 }
-                if (!op.values.isEmpty() && List.of("countByValue", "ratioByValue").contains(op.type)) {
-                    // one column per listed value (like indicator) instead of a map column
-                    for (final String value : op.values) {
-                        final Schema.FieldType type = "countByValue".equals(op.type) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64;
-                        final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type + "_" + value, type, computeAt);
-                        c.coordinates.put("field", canonicalOf(field));
-                        c.coordinates.put("value", value);
-                        addSelfInput(c, field);
-                        finishContext(c, def, context, op);
-                    }
+                if (params.against().contains(canonicalOf(field))) {
+                    diagnostics.error("context.residualize.against", loc, "residualize 'against' names the field '" + field + "' itself");
                     continue;
                 }
-                final OutputColumn c = newColumn(def.name, Scope.context, op.type, def.name + "_" + (op.as != null ? op.as : field) + "_" + op.type, operator.outputFor(ref.type()), computeAt);
-                c.coordinates.put("field", canonicalOf(field));
-                addSelfInput(c, field);
-                if (!configureContextOp(c, op, def, context, loc)) continue;
-                finishContext(c, def, context, op);
+                for (final Variant variant : contextVariants(op, params, operator, ref)) {
+                    final OutputColumn c = newColumn(def.name, Scope.context, op.type,
+                            def.name + "_" + (op.as != null ? op.as : field) + variant.suffix(), variant.type(), computeAt);
+                    c.coordinates.put("field", canonicalOf(field));
+                    c.coordinates.putAll(params.coordinates());
+                    c.coordinates.putAll(variant.coordinates());
+                    addSelfInput(c, field);
+                    for (final String input : params.inputs()) addSelfInput(c, input);
+                    // the probability is as perishable as its offset (a market price with validFor)
+                    if (def.validFor == null && params.validFor() != null) c.validFor = params.validFor();
+                    finishContext(c, def, context, op);
+                }
             }
         }
     }
 
+    /** Groups with more valid rows than this read null under {@code harville} unless the op declares its own bound. */
+    static final int DEFAULT_MAX_GROUP_SIZE = 64;
+
     /**
-     * Parameters of the context ops that take more than one field: {@code softmax} (offset / temperature /
-     * scales) and {@code shuffle} (seed / ordering). Returns false when the column must not be created.
+     * What every column of a context op needs, validated once per op rather than once per field: the coordinates the
+     * op contributes to each column, the extra inputs those columns read (the regressors of a residualize, a softmax
+     * offset, the row identity of a shuffle), the validFor an offset passes on, the resolved regressors and the
+     * places of a harville (one column each).
      */
-    private boolean configureContextOp(final OutputColumn c, final Op op, final FeatureDef def, final ContextDef context, final String loc) {
+    private record ContextOpParams(Map<String, String> coordinates, List<String> inputs, Duration validFor,
+                                   List<String> against, List<Integer> top) {}
+
+    /**
+     * Validates the parameters of one context op and resolves what its columns are built from: {@code softmax}
+     * (offset / temperature / scales), {@code residualize} (the explanatory fields), {@code harville} (places /
+     * discount / maxGroupSize) and {@code shuffle} (seed / ordering). Returns null when no column must be created.
+     */
+    private ContextOpParams validateContextOp(final Op op, final FeatureDef def, final ContextDef context, final String loc) {
+        final Map<String, String> coordinates = new LinkedHashMap<>();
+        final List<String> inputs = new ArrayList<>();
+        final List<String> against = new ArrayList<>();
+        List<Integer> top = List.of();
+        Duration validFor = null;
         switch (op.type) {
+            case "residualize" -> {
+                if (op.regressors.isEmpty()) {
+                    diagnostics.error("context.residualize.against", loc, "residualize requires 'against': the field(s) of the op are regressed on it within the group");
+                    return null;
+                }
+                for (final String regressor : op.regressors) {
+                    final Ref ref = resolve(regressor);
+                    if (ref == null || !OperatorCatalog.isNumeric(ref.type())) {
+                        diagnostics.error("context.residualize.against", loc, "residualize 'against' field '" + regressor + "' must be a numeric field or column"
+                                + (ref == null ? "" : " (is " + (ref.type() == null ? "unknown" : ref.type().getType()) + ")"));
+                        return null;
+                    }
+                    if (against.contains(ref.canonical())) {
+                        diagnostics.error("context.residualize.against", loc, "residualize 'against' lists '" + regressor + "' twice");
+                        return null;
+                    }
+                    against.add(ref.canonical());
+                    inputs.add(ref.canonical());
+                }
+                coordinates.put("against", String.join(",", against));
+                if (op.maxGroupSize != null) {
+                    diagnostics.warning("context.op.maxGroupSize", loc,
+                            "maxGroupSize is read by harville only: residualize reads every row of the group");
+                }
+            }
+            case "harville" -> {
+                top = op.top.isEmpty() ? List.of(2, 3) : op.top;
+                if (top.stream().anyMatch(k -> k < 1 || k > GroupOps.MAX_TOP) || new HashSet<>(top).size() != top.size()) {
+                    diagnostics.error("context.harville.top", loc, "harville top must list distinct places in [1, " + GroupOps.MAX_TOP + "]: " + top);
+                    return null;
+                }
+                if (op.discount.size() > GroupOps.MAX_TOP - 1 || op.discount.stream().anyMatch(d -> !(d > 0) || d.isInfinite())) {
+                    diagnostics.error("context.harville.discount", loc, "harville discount lists the positive exponents of the 2nd and the 3rd place (at most "
+                            + (GroupOps.MAX_TOP - 1) + " values, 1 = plain Harville): " + op.discount);
+                    return null;
+                }
+                final int maxGroupSize = op.maxGroupSize == null ? DEFAULT_MAX_GROUP_SIZE : op.maxGroupSize;
+                if (maxGroupSize < 2) {
+                    diagnostics.error("context.op.maxGroupSize", loc, "maxGroupSize must be >= 2: " + maxGroupSize);
+                    return null;
+                }
+                if (def.excludeSelf) diagnostics.warning("context.harville.excludeSelf", loc, "excludeSelf has no effect on harville (the row is part of its own field)");
+                if (hintedBlocks.add("context.op.groupSolver:" + def.name)) {
+                    diagnostics.info("context.op.groupSolver", loc, "harville solves every group on one worker — quadratic in the group size for the 2nd place, cubic for the 3rd:"
+                            + " a group with more than " + maxGroupSize + " valid rows reads null (maxGroupSize)");
+                }
+                if (!op.discount.isEmpty()) coordinates.put("discount", op.discount.stream().map(Object::toString).collect(java.util.stream.Collectors.joining(",")));
+                coordinates.put("maxGroupSize", Integer.toString(maxGroupSize));
+            }
             case "softmax" -> {
                 if (op.offset != null) {
                     final String offsetColumn = baselineColumns.containsKey(op.offset) ? baselineColumns.get(op.offset) : op.offset;
                     final Ref ref = resolve(offsetColumn);
                     if (ref == null) {
                         diagnostics.error("context.softmax.offset", loc, "softmax offset must reference baselines[].name or a numeric column: " + op.offset);
-                        return false;
+                        return null;
                     }
                     if (!OperatorCatalog.isNumeric(ref.type())) {
                         diagnostics.error("context.softmax.offset", loc, "softmax offset '" + op.offset + "' is not numeric");
-                        return false;
+                        return null;
                     }
-                    c.coordinates.put("offset", ref.canonical());
-                    addSelfInput(c, ref.canonical());
-                    // the probability is as perishable as its offset (a market price with validFor)
-                    final Duration validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
-                    if (def.validFor == null && validFor != null) c.validFor = validFor;
+                    coordinates.put("offset", ref.canonical());
+                    inputs.add(ref.canonical());
+                    validFor = ref.field != null ? ref.field.getValidFor() : ref.column.validFor;
                 }
                 if (op.temperature != null && !(op.temperature > 0)) {
                     diagnostics.error("context.softmax.temperature", loc, "temperature must be > 0: " + op.temperature);
-                    return false;
+                    return null;
                 }
                 final String offsetScale = op.offsetScale == null ? "probability" : op.offsetScale;
                 if (!List.of("probability", "log").contains(offsetScale)) {
                     diagnostics.error("context.softmax.offsetScale", loc, "offsetScale must be probability | log: " + offsetScale);
-                    return false;
+                    return null;
                 }
                 final String scoreNull = op.scoreNull == null ? "zero" : op.scoreNull;
                 if (!List.of("zero", "null").contains(scoreNull)) {
                     diagnostics.error("context.softmax.scoreNull", loc, "scoreNull must be zero | null: " + scoreNull);
-                    return false;
+                    return null;
                 }
-                c.coordinates.put("temperature", Double.toString(op.temperature == null ? 1d : op.temperature));
-                if (op.temperatureSource != null) c.coordinates.put("temperatureSource", op.temperatureSource);
-                c.coordinates.put("offsetScale", offsetScale);
-                c.coordinates.put("scoreNull", scoreNull);
+                coordinates.put("temperature", Double.toString(op.temperature == null ? 1d : op.temperature));
+                if (op.temperatureSource != null) coordinates.put("temperatureSource", op.temperatureSource);
+                coordinates.put("offsetScale", offsetScale);
+                coordinates.put("scoreNull", scoreNull);
                 if (def.excludeSelf) {
                     diagnostics.warning("context.softmax.excludeSelf", loc, "excludeSelf has no effect on softmax (the row is part of its own normalisation)");
                 }
@@ -1013,26 +1105,45 @@ public final class FeaturePlanCompiler {
             case "shuffle" -> {
                 if (op.seed == null) {
                     diagnostics.error("context.shuffle.seed", loc, "shuffle requires 'seed' (the permutation must be reproducible)");
-                    return false;
+                    return null;
                 }
                 if (spec.orderTieBreak.isEmpty()) {
                     diagnostics.warning("context.shuffle.identity", loc, "shuffle without time.orderTieBreak orders rows sharing a timestamp by their input values only; declare time.orderTieBreak for a row identity");
                 }
-                c.coordinates.put("seed", Long.toString(op.seed));
-                c.coordinates.put("order", String.join(",", rowIdentity()));
-                c.coordinates.put("contextKeys", String.join(",", context.keys()));
+                coordinates.put("seed", Long.toString(op.seed));
+                coordinates.put("order", String.join(",", rowIdentity()));
+                coordinates.put("contextKeys", String.join(",", context.keys()));
                 // rows sharing the identity are told apart by their input values, so the permutation is a pure
                 // function of the group whatever order the GroupByKey delivers (and identical in every engine mode)
                 final List<String> tieBreak = new ArrayList<>(new TreeSet<>(inputFields.keySet()));
                 tieBreak.removeAll(rowIdentity());
-                c.coordinates.put("tieBreak", String.join(",", tieBreak));
-                for (final String f : rowIdentity()) addSelfInput(c, f);
-                // the permuted values carry the availability of the source column (addSelfInput above);
-                // nothing else is read
+                coordinates.put("tieBreak", String.join(",", tieBreak));
+                // the permuted values carry the availability of the source column (the op's own field); the row
+                // identity is read to order the group
+                inputs.addAll(rowIdentity());
             }
             default -> { }
         }
-        return true;
+        return new ContextOpParams(coordinates, inputs, validFor, against, top);
+    }
+
+    /** One column of a context op: the ops that fan out produce several per field (a listed value, a place). */
+    private record Variant(String suffix, Schema.FieldType type, Map<String, String> coordinates) {}
+
+    /**
+     * The columns one field of a context op produces: one per listed value for {@code countByValue} /
+     * {@code ratioByValue} (like {@code indicator}, instead of a map column), one per place for {@code harville},
+     * one otherwise.
+     */
+    private List<Variant> contextVariants(final Op op, final ContextOpParams params, final Operator operator, final Ref ref) {
+        if (!op.values.isEmpty() && List.of("countByValue", "ratioByValue").contains(op.type)) {
+            final Schema.FieldType type = "countByValue".equals(op.type) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64;
+            return op.values.stream().map(value -> new Variant("_" + op.type + "_" + value, type, Map.of("value", value))).toList();
+        }
+        if (!params.top().isEmpty()) {
+            return params.top().stream().map(k -> new Variant("_harville_top" + k, Schema.FieldType.FLOAT64, Map.of("top", Integer.toString(k)))).toList();
+        }
+        return List.of(new Variant("_" + op.type, operator.outputFor(ref.type()), Map.of()));
     }
 
     private void finishContext(final OutputColumn c, final FeatureDef def, final ContextDef context, final Op op) {
@@ -3572,7 +3683,7 @@ public final class FeaturePlanCompiler {
             // nor does a label: its null-ness is post-event too, and the flag would be a feature
             final boolean indicator = !c.intermediate && spec.output.nullPolicy == NullPolicy.indicator && !keptByRole.contains(c.canonicalName)
                     && c.status != Status.label;
-            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || "softmax".equals(c.operator))) {
+            if (indicator && (c.validFor != null || c.scope == Scope.sequence || c.scope == Scope.population || NULLABLE_CONTEXT_OPS.contains(c.operator))) {
                 final OutputColumn flag = newColumn(c.block, c.scope, "isnull", c.canonicalName + "_isnull", Schema.FieldType.BOOLEAN, c.computeAt);
                 flag.outputName = c.outputName + "_isnull";
                 flag.inputs.add(c.canonicalName);

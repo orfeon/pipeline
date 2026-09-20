@@ -1408,6 +1408,83 @@ public class FeatureTransformTest {
         assertParallelMatchesLinear(PROB_CONFIG, 6, List.of(), List.of());
     }
 
+    private static final String GROUP_OP_BLOCKS = """
+                - name: neutral
+                  scope: context
+                  context: byCategory
+                  ops:
+                    - {type: residualize, field: current_bid_t10, against: [start_price]}
+                - name: strength
+                  scope: context
+                  context: byCategory
+                  ops:
+                    - {type: harville, field: start_price, top: [1, 2]}
+            """.replaceAll("(?m)^", "    ");
+
+    /**
+     * The group solvers over the rows of a category (electronics: s1's four listings, toys: s2's two).
+     * {@code residualize}: the bid regressed on the start price within the group — toys has fewer than p + 2 = 3 rows and
+     * reads null. {@code harville}: the start price read as a strength, normalised over the group.
+     */
+    @Test
+    public void testContextGroupSolvers() throws java.io.IOException {
+        final String config = FEATURE_CONFIG
+                .replace("        - {name: session, keys: [session_id]}\n", "        - {name: session, keys: [session_id]}\n        - {name: byCategory, keys: [category]}\n")
+                .replace("      output:\n", GROUP_OP_BLOCKS + "      output:\n");
+        Assertions.assertTrue(config.contains("byCategory, keys") && config.contains("type: harville"));
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + config)).get("features");
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            // electronics: x = start_price, y = current_bid_t10
+            final double[] x = {100, 200, 80, 120}, y = {120, 210, 90, 130};
+            final String[] ids = {"A/s1", "B/s1", "C/s1", "D/s1"};
+            double xMean = 0, yMean = 0, sxy = 0, sxx = 0, total = 0;
+            for (int i = 0; i < 4; i++) {
+                xMean += x[i] / 4;
+                yMean += y[i] / 4;
+                total += x[i];
+            }
+            for (int i = 0; i < 4; i++) {
+                sxy += (x[i] - xMean) * (y[i] - yMean);
+                sxx += (x[i] - xMean) * (x[i] - xMean);
+            }
+            final Map<String, double[]> expected = new HashMap<>();
+            for (int i = 0; i < 4; i++) {
+                final double p = x[i] / total;
+                double second = 0;
+                for (int j = 0; j < 4; j++) if (j != i) second += (x[j] / total) * p / (1 - x[j] / total);
+                expected.put(ids[i], new double[]{(y[i] - yMean) - sxy / sxx * (x[i] - xMean), p, p + second});
+            }
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final double[] e = expected.get(id);
+                if (e == null) {
+                    // toys: two rows — no residual; both are within the first two
+                    Assertions.assertNull(row.getPrimitiveValue("f_neutral_current_bid_t10_residualize"), id);
+                    Assertions.assertEquals(1.0, ((Number) row.getPrimitiveValue("f_strength_start_price_harville_top2")).doubleValue(), 1e-12, id);
+                    Assertions.assertEquals("A/s2".equals(id) ? 50.0 / 110 : 60.0 / 110, ((Number) row.getPrimitiveValue("f_strength_start_price_harville_top1")).doubleValue(), 1e-12, id);
+                    continue;
+                }
+                Assertions.assertEquals(e[0], ((Number) row.getPrimitiveValue("f_neutral_current_bid_t10_residualize")).doubleValue(), 1e-9, id);
+                Assertions.assertEquals(e[1], ((Number) row.getPrimitiveValue("f_strength_start_price_harville_top1")).doubleValue(), 1e-12, id);
+                Assertions.assertEquals(e[2], ((Number) row.getPrimitiveValue("f_strength_start_price_harville_top2")).doubleValue(), 1e-12, id);
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testContextGroupSolversParallelMatchesLinear() throws java.io.IOException {
+        // one more context branch of wave 1: the solvers sum in the order of the values, not of the rows' arrival
+        assertParallelMatchesLinear(PARALLEL_CONFIG
+                        .replace("        - {name: session, keys: [session_id]}\n", "        - {name: session, keys: [session_id]}\n        - {name: byCategory, keys: [category]}\n")
+                        .replace("      output:\n", GROUP_OP_BLOCKS + "      output:\n"), 6,
+                List.of("Wave1_FanIn"), List.of());
+    }
+
     // ------------------------------------------------------------------------------------------
     // quantileTransform / svd
     // ------------------------------------------------------------------------------------------

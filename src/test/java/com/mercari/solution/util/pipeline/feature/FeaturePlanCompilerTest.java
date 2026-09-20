@@ -2674,6 +2674,25 @@ public class FeaturePlanCompilerTest {
         for (int i = 0; i < 6; i++) Assertions.assertEquals(permuted.get(i), again.get(i).get("placeboShuffle_condition_grade_shuffle"));
     }
 
+    /** A baseline expression may call the context ops that read one value per row - and only those. */
+    @Test
+    public void testBaselineOpCall() {
+        final String baseline = "- {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}";
+        Assertions.assertTrue(SPEC.contains(baseline));
+        // an op that takes parameters of its own has no place to read them from in a baseline
+        for (final String call : List.of("residualize(current_bid_t10)", "harville(current_bid_t10)",
+                "softmax(current_bid_t10)", "shuffle(current_bid_t10)")) {
+            final FeaturePlan plan = compile(SOURCES, SPEC.replace("share(1 / current_bid_t10)", call));
+            Assertions.assertTrue(hasCode(plan, "baselines.expr.op"), () -> call + "\n" + plan.describe());
+        }
+        // a group op without the group it is computed over
+        final FeaturePlan rowScope = compile(SOURCES, SPEC.replace(baseline, "- {name: market, expr: \"share(1 / current_bid_t10)\"}"));
+        Assertions.assertTrue(hasCode(rowScope, "baselines.expr.op"), rowScope::describe);
+        // an ordinary expression, and a function that is not an op, stay expressions
+        final FeaturePlan expression = compile(SOURCES, SPEC.replace("share(1 / current_bid_t10)", "ln(current_bid_t10)"));
+        Assertions.assertFalse(hasCode(expression, "baselines.expr.op"), expression::describe);
+    }
+
     @Test
     public void testBaselineEmitAndRole() {
         final String spec = SPEC.replace("- {name: market, context: session, expr: \"share(1 / current_bid_t10)\"}",

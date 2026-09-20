@@ -103,6 +103,14 @@ public class FeatureSpec implements Serializable {
         public String scoreNull;
         /** shuffle: the seed of the deterministic permutation. */
         public Long seed;
+        /** residualize (context): the fields the op's field is regressed against within the group ({@code against: [a, b]}). */
+        public List<String> regressors = new ArrayList<>();
+        /** harville (context): the places {@code k} whose "finishes within the first k" probability is emitted (1..3). */
+        public List<Integer> top = new ArrayList<>();
+        /** harville: the exponents applied to the probabilities when the 2nd / 3rd place is drawn (1 = plain Harville). */
+        public List<Double> discount = new ArrayList<>();
+        /** harville: groups with more valid rows than this read null (the op is cubic in the group size). */
+        public Integer maxGroupSize;
         /**
          * sequence aggregate: a numeric expression giving every past event its weight; it reads the event's fields by
          * name and the current row's through {@code $self.<field>} (a similarity kernel). Null / NaN / non-positive
@@ -758,7 +766,7 @@ public class FeatureSpec implements Serializable {
         def.inputs = Json.strings(o, "inputs");
         def.derive = Json.strings(o, "derive");
         def.cyclical = Json.bool(o, "cyclical", false);
-        def.edges = doubles(o, "edges");
+        def.edges = doubles(o, "edges", diagnostics, loc);
         def.values = Json.strings(o, "values");
         def.baseline = Json.string(o, "baseline");
         def.on = Json.string(o, "on");
@@ -814,7 +822,7 @@ public class FeatureSpec implements Serializable {
             def.dynamics.family = Json.string(d, "family");
             def.dynamics.measure = Json.string(d, "measure");
             def.dynamics.order = Json.integer(d, "order");
-            def.dynamics.halflife = doubles(d, "halflife");
+            def.dynamics.halflife = doubles(d, "halflife", diagnostics, loc);
             def.dynamics.period = doubleOf(d, "period", diagnostics, loc);
             def.dynamics.decayBy = Json.string(d, "decayBy");
             def.dynamics.type = Json.string(d, "type");
@@ -1009,7 +1017,7 @@ public class FeatureSpec implements Serializable {
         op.d = doubleOf(o, "d", diagnostics, loc);
         op.up = doubleOf(o, "up", diagnostics, loc);
         op.down = doubleOf(o, "down", diagnostics, loc);
-        op.halflife = doubles(o, "halflife");
+        op.halflife = doubles(o, "halflife", diagnostics, loc);
         op.funcs = Json.strings(o, "funcs");
         op.value = Json.string(o, "value");
         op.unit = Json.strings(o, "unit");
@@ -1030,6 +1038,19 @@ public class FeatureSpec implements Serializable {
         op.offsetScale = Json.string(o, "offsetScale");
         op.scoreNull = Json.string(o, "scoreNull");
         op.seed = longOf(o, "seed", diagnostics, loc);
+        if (o.has("against") && o.get("against").isJsonArray()) {
+            // a list of explanatory fields (context residualize); the single series of a sequence regression stays a string
+            op.regressors = Json.strings(o, "against");
+            op.against = null;
+        } else if (op.against != null) {
+            op.regressors.add(op.against);
+        }
+        for (final JsonElement k : arrayOf(o.get("top"))) {
+            if (k.isJsonPrimitive() && k.getAsJsonPrimitive().isNumber() && k.getAsDouble() == Math.rint(k.getAsDouble())) op.top.add(k.getAsInt());
+            else diagnostics.error("context.harville.top", loc, "top must list integer places: " + k);
+        }
+        op.discount = doubles(o, "discount", diagnostics, loc);
+        op.maxGroupSize = Json.integer(o, "maxGroupSize");
         if (o.has("temperature") && !o.get("temperature").isJsonNull()) {
             final JsonElement t = o.get("temperature");
             if (t.isJsonPrimitive() && t.getAsJsonPrimitive().isNumber()) {
@@ -1085,11 +1106,24 @@ public class FeatureSpec implements Serializable {
         return null;
     }
 
-    private static List<Double> doubles(final JsonObject o, final String key) {
+    /** A list of numeric parameters; a value that is not a number is reported as {@code <key>.invalid}, like {@link #doubleOf}. */
+    private static List<Double> doubles(final JsonObject o, final String key, final Diagnostics diagnostics, final String loc) {
         final List<Double> list = new ArrayList<>();
         if (!o.has(key)) return list;
         for (final JsonElement e : arrayOf(o.get(key))) {
-            if (e.isJsonPrimitive()) list.add(e.getAsDouble());
+            if (e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber()) {
+                list.add(e.getAsDouble());
+                continue;
+            }
+            if (e.isJsonPrimitive()) {
+                try {
+                    list.add(Double.parseDouble(e.getAsString().trim()));
+                    continue;
+                } catch (final NumberFormatException ignored) {
+                    // reported below
+                }
+            }
+            diagnostics.error(key + ".invalid", loc, key + " must list numbers: " + e);
         }
         return list;
     }

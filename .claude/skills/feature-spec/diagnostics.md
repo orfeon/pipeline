@@ -46,6 +46,7 @@ not expand because another block failed).
 | `contexts.invalid` / `contexts.duplicate` | error | same for contexts |
 | `baselines.invalid` | error | each baseline needs `name` and `expr` |
 | `baselines.context` | error | the baseline's `context` is unknown |
+| `baselines.expr.op` | error | the baseline expression calls a context op that cannot be called that way (`softmax`, `residualize`, `harville`, `shuffle` take parameters of their own — declare them as ops of a context block), or calls one without naming the `context` it is computed over |
 | `baselines.declaredMarket` | error | a baseline reads a `market` field with `evidence: declared`; baselines must be time-consistent (`measured`, or `allowDeclared`) |
 | `fit.mode` | error | `expanding`, `static`, `fold` or `forward` |
 | `fit.blocks` / `fit.blocks.bucket` / `fit.blocks.size` / `fit.blocks.field` / `fit.minBlocks` | error | forward blocks: `{bucket: year \| quarter \| month \| week \| day}` or `{size: <positive duration>}` (not both); `field` must be `time.field`; `minBlocks` ≥ 1 |
@@ -142,6 +143,11 @@ not expand because another block failed).
 | `context.softmax.temperature` / `.offsetScale` / `.scoreNull` | error | temperature must be a number > 0; offsetScale probability / log; scoreNull zero / null |
 | `context.softmax.temperatureFrom.unresolved` | error | `temperatureFrom` must be a URI (resolved before compile); a document that is neither a number nor JSON with `temperature` / `T` fails at resolve |
 | `context.softmax.excludeSelf` | warning | `excludeSelf` has no effect on softmax |
+| `context.residualize.against` | error | `residualize` needs `against` — one numeric field / column or a list of distinct ones, none of them the field itself (the key is `against`; a bare `on` is a YAML boolean). A regressor produced by the same block must be declared **before** the `residualize` op; one declared later is not yet a column |
+| `context.harville.top` / `.discount` / `context.op.maxGroupSize` | error | `top` lists distinct integer places in 1..3; `discount` at most two positive exponents (2nd, 3rd place); `maxGroupSize` ≥ 2 |
+| `context.op.maxGroupSize` | warning | `maxGroupSize` on `residualize`: the key is read by `harville` only and is ignored |
+| `context.op.groupSolver` | info | a group solver runs on one worker: `harville` is quadratic (2nd place) / cubic (3rd) in the group size and a group with more than `maxGroupSize` valid rows reads null. `residualize` is linear in the group size with or without `excludeSelf` and raises no cost info |
+| `context.harville.excludeSelf` | warning | `excludeSelf` has no effect on harville |
 | `context.shuffle.seed` | error | `shuffle` needs an integer `seed` |
 | `context.shuffle.identity` | warning | no `time.orderTieBreak`: rows sharing a timestamp are ordered by their input values only |
 
