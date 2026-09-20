@@ -1315,9 +1315,23 @@ public class FeaturePlanCompilerTest {
         for (final List<String> keys : List.of(List.of("condition_grade", "category", "seller_id"), List.of("condition_grade", "category"), List.of("condition_grade"), List.<String>of())) {
             Assertions.assertTrue(indexOfStage(derived.getStages(), keys) >= 0, () -> keys + " in\n" + derived.describe());
         }
-        // a path has at least two steps; an unknown structure names the accepted ones
-        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(path.replace("[condition_grade, category, seller_id]", "[condition_grade]"))), "encoding.keySet.sequence"));
+        // a path has at least two steps (an error, not the info of the same code); an unknown structure names the accepted ones
+        final FeaturePlan oneStep = compile(SOURCES, withEncoding(path.replace("[condition_grade, category, seller_id]", "[condition_grade]")));
+        Assertions.assertTrue(hasCode(oneStep, "encoding.keySet.sequence"), oneStep::describe);
+        Assertions.assertTrue(oneStep.getDiagnostics().hasErrors(), oneStep::describe);
         Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: tree"))), "encoding.keySet.structure"));
+        // the derivation is not silenced by a hierarchy key that declares nothing (a bare `hierarchy:` is JSON null)
+        for (final String empty : List.of("hierarchy:", "hierarchy: []")) {
+            final FeaturePlan plan = compile(SOURCES, withEncoding(path.replace("structure: sequence", "structure: sequence\n" + " ".repeat(12) + empty)));
+            Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+            Assertions.assertEquals(a.getCoordinates().get("levels"),
+                    column(plan, "enc__condition_grade_category_seller_id__e1__mean").getCoordinates().get("levels"), plan::describe);
+        }
+        // without shrinkage the chain is never composed: the same code warns instead of informing
+        final FeaturePlan unshrunk = compile(SOURCES, withEncoding(path.replace("\n" + " ".repeat(8) + "shrinkage: {priorWeight: 2}", "")));
+        Assertions.assertFalse(unshrunk.getDiagnostics().hasErrors(), unshrunk::describe);
+        Assertions.assertTrue(unshrunk.getDiagnostics().getMessages().stream()
+                .anyMatch(m -> m.code().equals("encoding.keySet.sequence") && m.level() == Diagnostics.Level.warning), unshrunk::describe);
     }
 
     @Test

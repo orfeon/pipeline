@@ -148,8 +148,8 @@ over the whole input (or loaded from an artifact), applied per row by lookup.
 
 ## Recipe F — population type with expanding statistics
 
-Anything evaluated per key in time order (a new `estimator`, `structure: sequence`, nested
-targets) goes through `expandEncoding` → `populationColumn` (hidden level columns named
+Anything evaluated per key in time order (a new `estimator`, a new key-set `structure` — `sequence`
+derives its suffix chain there — nested targets) goes through `expandEncoding` → `populationColumn` (hidden level columns named
 `{block}__{keys|global}__{window}__{target}__n/__sum`) and the row-local composition in
 `Shrinkage` (`composeCoordinates`, `levels` coordinate, `compose` / `deviation` / `effectiveN` row
 ops). Read engine doc §4.4 and spec §5 first; the invariants that bite are strictly-past

@@ -597,9 +597,12 @@ path's suffixes: `(k1, k2, k3) → (k1, k2) → (k1) → global`, i.e. the expli
 []]`. The statistic of a long path is shrunk toward what the shorter, better-observed path says, and a row
 whose older steps are null (an entity with a short history) or whose path was never seen reads its **longest
 known suffix** — so young entities are not dropped the way a cross of lag columns drops them. At least two
-keys (`encoding.keySet.sequence`); the info of the same code lists the derived levels. Every level is a
-keyed stage of its own, so a path of `k` steps costs `k` shuffles; keys that derive from an outcome (the
-lags of `sold`) need `fit.groupBy` under `fit.mode: fold`, like any such key.
+keys (`encoding.keySet.sequence`); the info of the same code lists the derived levels, and the same code
+warns when the block declares no `shrinkage` at all — the chain is only composed for a shrunk statistic, so
+without it the column is the raw full-path value and an unseen path reads null. A chain composes top-down
+(`backoff`) whatever `estimator` the block declares (`sequential` is the estimator of an `additive` / `cross`
+lattice). Every level is a keyed stage of its own, so a path of `k` steps costs `k` shuffles; keys that
+derive from an outcome (the lags of `sold`) need `fit.groupBy` under `fit.mode: fold`, like any such key.
 
 **Estimators.** `backoff` is the top-down pass above, one level at a time; `sequential` (the default of a
 lattice with `additive` / `cross`) shrinks a cell toward the sum of the shrunk main effects, so it absorbs

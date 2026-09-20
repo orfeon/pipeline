@@ -199,7 +199,7 @@ not expand because another block failed).
 | `population.type` / `population.unsupported` | error | `type` required; `encoding`, `factorization`, `discretize`, `quantileTransform`, `svd` are implemented (`spectralEmbedding` / `transitionStats` are not) |
 | `encoding.keySets` / `encoding.targets` / `encoding.keySet.keys` | error | required parts |
 | `encoding.keySet.structure` | error | `flat \| hierarchy \| cross \| sequence` |
-| `encoding.keySet.sequence` | error / info | `structure: sequence` needs at least two keys (a path, most recent first); the info lists the derived suffix chain |
+| `encoding.keySet.sequence` | error / warning / info | `structure: sequence` needs at least two keys (a path, most recent first); the info lists the derived suffix chain, the warning says the block declares no `shrinkage` so the chain is never composed (raw full-path statistic) |
 | `encoding.keySet.parentRef` / `encoding.keySet.cross` | error | `hierarchy` needs `parentRef`; `cross` needs ≥ 2 keys |
 | `encoding.hierarchy.entry` / `encoding.hierarchy.key` | error | entries are key lists, `additive` or `[]`; keys must exist |
 | `encoding.hierarchy.additive` | error | `additive` once, last before `[]`, and the single-key keySets (same windows) must exist in the block |
