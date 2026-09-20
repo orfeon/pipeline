@@ -197,10 +197,12 @@ reads what the compile layer wrote into each column's `coordinates`.
   `blockBucket` | `blockSizeMillis`, `minBlocks`, `forwardLagMillis` (target availability delay), `windowBlocks`,
   `blockField` / `blockFieldType` written by `FeaturePlanCompiler.forwardCoordinates`; the engine side is
   `FitLevel.forward` + `FitApplyDoFn.forwardStats`, which also swaps the row's per-block λ into the evaluator).
-  A time fold (`fit.mode: fold` + `fold.by: time`) rides the same series: `Forward.of` also accepts the coordinates
-  `foldBy` / `purgeBlocks` / `embargoBlocks` (`FeaturePlanCompiler.timeFoldCoordinates`, purge defaulting to the
-  target label's horizon via `labelHorizon`) and `FitApplyDoFn.timeFoldStats` reads totals minus the blocks
-  `[b − purge, b + purge + embargo]` (two-sided purge) with the whole-input λ; `auditTimeFold` counts rows leaving
+  A time fold (`fit.mode: fold` + `fold.by: time`) rides the same series but has its own record: `TimeFold.of` reads
+  the coordinates `foldBy` / `purgeBlocks` / `embargoBlocks` (`FeaturePlanCompiler.timeFoldCoordinates`, purge
+  defaulting to the target label's horizon via `labelHorizon`) into `FitLevel.timeFold` (`isTimeFold()`; `Forward` /
+  `isForward()` are forward-only), and `FitApplyDoFn.timeFoldStats` reads totals minus the blocks
+  `[b − purge, b + purge + embargo]` (two-sided purge) with the whole-input λ (`_TimeFoldTotals` → `_TimeFoldVc`, not
+  the per-block `_ForwardVc`; `_ForwardOnly` splits the series when both kinds share a stage); `auditTimeFold` counts rows leaving
   out more than half of the input's blocks (`feature/timeFold_<level>_excludedOverHalf`, run-time only).
 
 ### Beam engine (`FeatureStages`)

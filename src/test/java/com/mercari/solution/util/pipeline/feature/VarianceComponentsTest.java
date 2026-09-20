@@ -119,4 +119,35 @@ public class VarianceComponentsTest {
         assertLambdas(reference.get("l"), lambdas(acc), "step");
     }
 
+    /**
+     * A time fold reads the whole input's λ, estimated from its levels' totals ({@code lambdasFromKeyStats}, whose
+     * in-memory twin is {@code lambdasInMemory}): the same value as the last step of the per-block λ a forward level
+     * reads, without building the step function.
+     */
+    @Test
+    public void testWholeInputLambdaIsLastStep() {
+        final Random random = new Random(11);
+        for (int trial = 0; trial < 20; trial++) {
+            final int keys = 2 + random.nextInt(12);
+            final Map<String, ForwardBlocks.Series> byEntry = new HashMap<>();
+            final Map<String, VarianceComponents.KeyStats> totals = new HashMap<>();
+            for (int k = 0; k < keys; k++) {
+                final ForwardBlocks.Series s = series(random, 1 + random.nextInt(6));
+                final String entry = FitArtifact.entryKey("lvl__n", "k" + k);
+                byEntry.put(entry, s);
+                totals.put(entry, s.totals());
+            }
+            final Map.Entry<Long, Double> last = VarianceComponents.lambdasByBlock(byEntry).get("lvl__n").lastEntry();
+            final Double whole = VarianceComponents.lambdasInMemory(totals).get("lvl__n");
+            if (last == null) {
+                Assertions.assertNull(whole, "trial " + trial);
+            } else {
+                Assertions.assertNotNull(whole, "trial " + trial);
+                // λ = ∞ (full shrinkage) must match exactly: a relative delta of ∞ would accept any value
+                final double delta = Double.isInfinite(last.getValue()) ? 0d : Math.abs(last.getValue()) * 1e-9;
+                Assertions.assertEquals(last.getValue(), whole, delta, "trial " + trial);
+            }
+        }
+    }
+
 }

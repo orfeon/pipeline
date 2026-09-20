@@ -356,7 +356,8 @@ is a fold:
   `feature/timeFold_<level>_excludedOverHalf` (the input's block span is only known at run time) — use smaller blocks
   or a shorter purge / embargo.
 - `folds` and `groupBy` do not apply (every block is a fold); `purge` / `embargo` without `by: time` are ignored with
-  a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`). `estimator: joint` solves hash folds only
+  a warning (`fit.fold.ignored`), `by` is `row | time` (`fit.fold.by`), a negative `purge` / `embargo` is an error
+  (`fit.fold.negative`). `estimator: joint` solves hash folds only
   (`fit.fold.time.joint`). A keySet key derived from a past target stays an error (`fit.groupBy.required`) — the
   entity's rows in the other blocks carry this row's outcome in their key, and `groupBy` does not help here: use
   `by: row` with `groupBy`.
