@@ -64,6 +64,15 @@ public class GroupOpsTest {
             constant[i] = 7;
         }
         Assertions.assertArrayEquals(e, GroupOps.residualize(y, new double[][]{x[0], x[1], combined, constant}, false), 1e-7);
+        // a regressor in far smaller units is NOT a redundant one: the sweep weighs every pivot against its own scale
+        final double[] scaled = new double[n];
+        final double[][] units = new double[2][n];
+        for (int i = 0; i < n; i++) {
+            units[0][i] = 1e5 * (i + 1);        // a price
+            units[1][i] = 1e-4 * (i % 3);       // a rate, nine orders of magnitude smaller
+            scaled[i] = 3 + 2e-5 * units[0][i] + 1e4 * units[1][i];
+        }
+        for (final double v : GroupOps.residualize(scaled, units, false)) Assertions.assertEquals(0, v, 1e-6);
         // against a constant alone the residual is the deviation from the group mean
         final double[] centred = GroupOps.residualize(y, new double[][]{constant}, false);
         double mean = 0;
@@ -96,6 +105,12 @@ public class GroupOpsTest {
         }
         final double[] ePermuted = GroupOps.residualize(yPermuted, xPermuted, false);
         for (int i = 0; i < n; i++) Assertions.assertEquals(e[order[i]], ePermuted[i], "bit for bit, row " + i);
+
+        // the leave-one-out identity is read off the one fit against the regressors the whole group keeps:
+        // a redundant regressor changes neither the residual nor the leverage it is divided by
+        final double[] redundant = new double[n];
+        for (int i = 0; i < n; i++) redundant[i] = 2 * x[0][i] - x[1][i] + 1;
+        Assertions.assertArrayEquals(loo, GroupOps.residualize(y, new double[][]{x[0], x[1], redundant}, true), 1e-7);
     }
 
     /** The plane through the fitted values (y − e) of three rows: intercept and the two slopes. */
@@ -125,10 +140,34 @@ public class GroupOpsTest {
                 GroupOps.harville(new double[]{0.6, NaN, 0.36, 0.24, -1, 0}, 2, new double[0], 64), 1e-12);
         // two runners: both are within the first two (and three)
         Assertions.assertArrayEquals(new double[]{1, 1}, GroupOps.harville(new double[]{0.9, 0.1}, 3, new double[0], 64), 1e-12);
+        // no strength left in the pool once the certain winner is drawn: the rest share the places equally
+        Assertions.assertArrayEquals(new double[]{1, 1}, GroupOps.harville(new double[]{1, 0}, 2, new double[0], 64), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 0.5, 0.5}, GroupOps.harville(new double[]{1, 0, 0}, 2, new double[0], 64), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1, 1}, GroupOps.harville(new double[]{1, 0, 0}, 3, new double[0], 64), 1e-12);
+        // and a zero row that the others can still beat only loses
+        Assertions.assertArrayEquals(new double[]{1, 1, 0}, GroupOps.harville(new double[]{0.5, 0.5, 0}, 2, new double[0], 64), 1e-12);
+        Assertions.assertArrayEquals(new double[]{1, 1, 1}, GroupOps.harville(new double[]{0.5, 0.5, 0}, 3, new double[0], 64), 1e-12);
         // nothing positive, or more rows than the bound: null
         for (final double v : GroupOps.harville(new double[]{0, 0}, 2, new double[0], 64)) Assertions.assertTrue(Double.isNaN(v));
         for (final double v : GroupOps.harville(p, 2, new double[0], 2)) Assertions.assertTrue(Double.isNaN(v));
         Assertions.assertThrows(IllegalArgumentException.class, () -> GroupOps.harville(p, 4, new double[0], 64));
+    }
+
+    @Test
+    public void testHarvillePlaces() {
+        // one pass gives every place: each row of it is the same as asking for that place alone
+        final double[] p = {0.4, 0.25, 0.2, 0.1, 0.05};
+        for (final double[] discount : List.of(new double[0], new double[]{0.81, 0.65})) {
+            final double[][] places = GroupOps.harvillePlaces(p, 3, discount, 64);
+            Assertions.assertEquals(3, places.length);
+            for (int top = 1; top <= 3; top++) {
+                Assertions.assertArrayEquals(GroupOps.harville(p, top, discount, 64), places[top - 1], 0d, "top " + top);
+            }
+            // a place contains the one before it
+            for (int i = 0; i < p.length; i++) Assertions.assertTrue(places[0][i] <= places[1][i] && places[1][i] <= places[2][i]);
+        }
+        // fewer places asked for, nothing else computed
+        Assertions.assertEquals(1, GroupOps.harvillePlaces(p, 1, new double[0], 64).length);
     }
 
     @Test
@@ -161,6 +200,38 @@ public class GroupOpsTest {
         final double[] p = {0.6, 0.2, 0.1, 0.1};
         final double[] plain = GroupOps.harville(p, 3, new double[0], 64), discounted = GroupOps.harville(p, 3, new double[]{0.81, 0.65}, 64);
         Assertions.assertTrue(discounted[0] < plain[0] && discounted[3] > plain[3]);
+    }
+
+    /** The evaluator hands every place of a group the same pass: the columns read what the solver returns. */
+    @Test
+    public void testEvaluateGroup() {
+        final FeaturePlan plan = compile(SPEC);
+        final List<OutputColumn> columns = List.of(plan.getColumn("placed_p_harville_top2"), plan.getColumn("placed_p_harville_top3"));
+        final ContextEvaluator evaluator = new ContextEvaluator(columns);
+        evaluator.setup();
+        final double[] p = {0.5, 0.3, 0.15, 0.05};
+        final List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (final double v : p) {
+            final Map<String, Object> row = new java.util.HashMap<>();
+            row.put("prob_pWin_softmax", v);
+            rows.add(row);
+        }
+        evaluator.evaluate(rows);
+        final double[] discount = {0.81, 0.65};
+        final double[] top2 = GroupOps.harville(p, 2, discount, 64), top3 = GroupOps.harville(p, 3, discount, 64);
+        for (int i = 0; i < p.length; i++) {
+            Assertions.assertEquals(top2[i], (Double) rows.get(i).get("placed_p_harville_top2"), 1e-12);
+            Assertions.assertEquals(top3[i], (Double) rows.get(i).get("placed_p_harville_top3"), 1e-12);
+        }
+        // a second group is a second pass: the cache of the first one does not reach it
+        final List<Map<String, Object>> other = new java.util.ArrayList<>();
+        for (final double v : new double[]{0.9, 0.1}) {
+            final Map<String, Object> row = new java.util.HashMap<>();
+            row.put("prob_pWin_softmax", v);
+            other.add(row);
+        }
+        evaluator.evaluate(other);
+        for (final Map<String, Object> row : other) Assertions.assertEquals(1d, (Double) row.get("placed_p_harville_top2"), 1e-12);
     }
 
     private static final String SOURCES = """
@@ -238,6 +309,41 @@ public class GroupOpsTest {
         Assertions.assertEquals("true", loo.getColumn("neutral_model_score_residualize").getCoordinates().get("excludeSelf"), loo::describe);
     }
 
+    /** A residualize regressor may be a column an earlier op of the same block produced (the ops run in order). */
+    @Test
+    public void testCompileSameBlockRegressor() {
+        final String chained = SPEC + """
+              - name: chain
+                scope: context
+                context: session
+                ops:
+                  - {type: softmax, field: model_score, as: q}
+                  - {type: residualize, field: start_price, against: [chain_q_softmax], as: adj}
+            """;
+        final FeaturePlan plan = compile(chained);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertEquals("chain_q_softmax", plan.getColumn("chain_adj_residualize").getCoordinates().get("against"));
+        // the other way round the regressor does not exist yet: the op that reads it says so, not a dependency cycle
+        final FeaturePlan forward = compile(SPEC + """
+              - name: chain
+                scope: context
+                context: session
+                ops:
+                  - {type: residualize, field: start_price, against: [chain_q_softmax], as: adj}
+                  - {type: softmax, field: model_score, as: q}
+            """);
+        Assertions.assertTrue(hasCode(forward, "context.residualize.against"), forward::describe);
+        Assertions.assertFalse(hasCode(forward, "reference.cycle"), forward::describe);
+        // a block whose name is a prefix of ANOTHER block's column still waits for it (it is not its own)
+        final FeaturePlan prefix = compile(SPEC + """
+              - name: log
+                scope: row
+                expr: "log_price * 2"
+            """);
+        Assertions.assertFalse(prefix.getDiagnostics().hasErrors(), prefix::describe);
+        Assertions.assertTrue(prefix.getColumn("log").getInputs().contains("log_price"), prefix::describe);
+    }
+
     @Test
     public void testCompileErrors() {
         final String residualize = "      - {type: residualize, field: model_score, against: [log_price, quantity]}";
@@ -264,6 +370,11 @@ public class GroupOpsTest {
             final FeaturePlan plan = compile(SPEC.replace(harville, e.getKey()));
             Assertions.assertTrue(hasCode(plan, e.getValue()), () -> e.getKey() + "\n" + plan.describe());
         }
+        // an op over several fields reports its own parameters once, not once per field
+        final FeaturePlan repeated = compile(SPEC.replace(harville,
+                "      - {type: harville, fields: [prob_pWin_softmax, model_score], top: [4]}"));
+        Assertions.assertEquals(1, repeated.getDiagnostics().getMessages().stream()
+                .filter(m -> m.code().equals("context.harville.top")).count(), repeated::describe);
         // a misspelled regressor is an unresolved reference of the block, like any other field
         final FeaturePlan typo = compile(SPEC.replace("[log_price, quantity]", "[log_prise, quantity]"));
         Assertions.assertTrue(typo.getDiagnostics().hasErrors(), typo::describe);

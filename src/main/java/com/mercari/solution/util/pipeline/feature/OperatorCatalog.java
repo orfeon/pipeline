@@ -22,7 +22,15 @@ public final class OperatorCatalog {
         /** boolean predicate over fields */ predicate
     }
 
-    public record Operator(Scope scope, String name, InputKind input, Schema.FieldType output, boolean fit, String description) {
+    /**
+     * @param baselineCallable the op may be called as a function from a {@code baselines[].expr}
+     *                         ({@code share(1 / bid)}): it reads one value per row of the group and returns one
+     *                         number per row. An op that needs coordinates of its own (softmax, shuffle and the
+     *                         group solvers) is not callable that way — {@link ContextEvaluator} has no place to
+     *                         take them from, so the compiler rejects the call instead (baselines.expr.op).
+     */
+    public record Operator(Scope scope, String name, InputKind input, Schema.FieldType output, boolean fit,
+                           boolean baselineCallable, String description) {
         /** Output type: null in the catalog means "same as input". */
         public Schema.FieldType outputFor(final Schema.FieldType inputType) {
             return output != null ? output : inputType;
@@ -33,7 +41,19 @@ public final class OperatorCatalog {
 
     private static void register(final Scope scope, final String name, final InputKind input,
                                  final Schema.FieldType output, final boolean fit, final String description) {
-        OPERATORS.put(scope + "." + name, new Operator(scope, name, input, output, fit, description));
+        register(scope, name, input, output, fit, false, description);
+    }
+
+    /** A context op that a baseline expression may call as a function (see {@link Operator#baselineCallable()}). */
+    private static void registerCallable(final Scope scope, final String name, final InputKind input,
+                                         final Schema.FieldType output, final String description) {
+        register(scope, name, input, output, false, true, description);
+    }
+
+    private static void register(final Scope scope, final String name, final InputKind input,
+                                 final Schema.FieldType output, final boolean fit, final boolean baselineCallable,
+                                 final String description) {
+        OPERATORS.put(scope + "." + name, new Operator(scope, name, input, output, fit, baselineCallable, description));
     }
 
     private static final Schema.FieldType F64 = Schema.FieldType.FLOAT64;
@@ -52,17 +72,17 @@ public final class OperatorCatalog {
         register(Scope.row, "vector", InputKind.numeric, F64, false, "scalar readouts (funcs) of a numeric array field after optional slice / diff / normalize steps");
 
         // context
-        register(Scope.context, "rank", InputKind.numeric, I64, false, "rank within the group (1 = largest)");
-        register(Scope.context, "zscore", InputKind.numeric, F64, false, "(x - mean) / std within the group");
-        register(Scope.context, "gapToBest", InputKind.numeric, F64, false, "x - max within the group");
-        register(Scope.context, "shareOfTotal", InputKind.numeric, F64, false, "x / sum within the group");
-        register(Scope.context, "percentile", InputKind.numeric, F64, false, "empirical percentile within the group");
-        register(Scope.context, "median_diff", InputKind.numeric, F64, false, "x - median within the group");
-        register(Scope.context, "share", InputKind.numeric, F64, false, "alias of shareOfTotal (baselines)");
-        register(Scope.context, "groupSize", InputKind.none, I64, false, "number of rows in the group");
+        registerCallable(Scope.context, "rank", InputKind.numeric, I64, "rank within the group (1 = largest)");
+        registerCallable(Scope.context, "zscore", InputKind.numeric, F64, "(x - mean) / std within the group");
+        registerCallable(Scope.context, "gapToBest", InputKind.numeric, F64, "x - max within the group");
+        registerCallable(Scope.context, "shareOfTotal", InputKind.numeric, F64, "x / sum within the group");
+        registerCallable(Scope.context, "percentile", InputKind.numeric, F64, "empirical percentile within the group");
+        registerCallable(Scope.context, "median_diff", InputKind.numeric, F64, "x - median within the group");
+        registerCallable(Scope.context, "share", InputKind.numeric, F64, "alias of shareOfTotal (baselines)");
+        registerCallable(Scope.context, "groupSize", InputKind.none, I64, "number of rows in the group");
         register(Scope.context, "countByValue", InputKind.categorical, Schema.FieldType.map(I64), false, "count per value within the group");
         register(Scope.context, "ratioByValue", InputKind.categorical, Schema.FieldType.map(F64), false, "ratio per value within the group");
-        register(Scope.context, "entropy", InputKind.categorical, F64, false, "entropy of the value distribution within the group");
+        registerCallable(Scope.context, "entropy", InputKind.categorical, F64, "entropy of the value distribution within the group");
         register(Scope.context, "softmax", InputKind.numeric, F64, false, "probability within the group: offset * exp(score / temperature), normalised over the group");
         register(Scope.context, "residualize", InputKind.numeric, F64, false, "residual of the field regressed (with an intercept) on the 'against' fields over the rows of the group; excludeSelf fits on the other rows");
         register(Scope.context, "harville", InputKind.numeric, F64, false, "probability of finishing within the first k places (top: [2, 3]) from win probabilities, by the Harville forward computation (discount: exponents for the 2nd / 3rd place)");
@@ -96,6 +116,25 @@ public final class OperatorCatalog {
 
     public static Operator get(final Scope scope, final String name) {
         return OPERATORS.get(scope + "." + name);
+    }
+
+    /** A context op called as a function from a baseline expression, with the expression it is applied to. */
+    public record Call(Operator operator, String arguments) {}
+
+    private static final java.util.regex.Pattern CALL = java.util.regex.Pattern.compile("^\\s*([A-Za-z_]+)\\s*\\((.*)\\)\\s*$");
+
+    /**
+     * The context op a {@code baselines[].expr} calls ({@code share(1 / bid)} -> share applied to {@code 1 / bid}),
+     * or null when the expression is not a single call of a catalogued context op (an ordinary expression, or a call
+     * of an {@link com.mercari.solution.util.ExpressionUtil} function). The compiler and {@link ContextEvaluator}
+     * read the same parse, so a call the evaluator cannot route is rejected at compile time.
+     */
+    public static Call parseContextCall(final String expression) {
+        if (expression == null) return null;
+        final java.util.regex.Matcher m = CALL.matcher(expression);
+        if (!m.matches()) return null;
+        final Operator operator = get(Scope.context, m.group(1));
+        return operator == null ? null : new Call(operator, m.group(2));
     }
 
     public static List<Operator> all() {

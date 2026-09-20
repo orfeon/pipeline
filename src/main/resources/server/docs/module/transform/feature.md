@@ -67,7 +67,7 @@ time; warnings and hints from the compiler are part of that report.
 | predictAt  | required | String                         | When the features are used: `event_time - PT10M`, `event_time` (the literal event time), ... Every emitted column must be available at or before this time. |
 | entities   | optional | Array<Object\>                 | Subjects of sequence features: `{name, keys: [...], minInterval: <ISO8601>}`. |
 | contexts   | optional | Array<Object\>                 | Co-occurrence groups for context features: `{name, keys: [...]}`. |
-| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op, e.g. `share(1 / price)`. Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
+| baselines  | optional | Array<Object\>                 | Named baselines: `{name, expr, context, emit}`. `expr` may wrap a numeric expression in a context op that reads one value per row of the group — `share` / `shareOfTotal`, `rank`, `zscore`, `gapToBest`, `percentile`, `median_diff`, `entropy`, `groupSize` — e.g. `share(1 / price)`, and the baseline then needs the `context` it is computed over. The ops that take parameters of their own (`softmax`, `residualize`, `harville`, `shuffle`) are declared as ops of a context block instead (`baselines.expr.op`). Referenced by `type: residual` (`baseline:`), encoding / factorization `offset:` and the `softmax` op. Baselines are intermediate columns; `emit: <name>` also writes the value as an output column (the same number the softmax offset reads), which a `baseline` role can name. |
 | features   | required | Array<Object\> or String       | Feature blocks (see scopes below). A string is a URI / path to a document whose `features` list is used. |
 | fit        | optional | Object                         | Defaults for population features (overridable per block with `fit:`): `orderBy` (= time.field), `mode` (`expanding` \| `static` \| `fold` \| `forward`), `groupBy` (entity name: the fold unit), `folds` (number of folds for `fold`, default 5), `blocks` (`{bucket: year \| quarter \| month \| week \| day}` or `{size: <ISO-8601>}`, default `P90D`) `minBlocks` (default 1), `minHistory` (the same as a duration, rounded up to whole blocks; `minBlocks` wins) and `window` (the range of blocks a row reads) for `forward`, `artifact` (`{uri, refit, id}` or the URI string — see *Static fits and artifacts*, *Out-of-fold fits* and *Forward block fits*). |
 | engine     | optional | Object                         | Runtime knobs that do not change the plan. `parallelWaves` (default `true`): evaluate the independent stages of each wave in parallel and merge them by row id (see *Performance and sizing*); `false` runs the stages as one linear chain. `rowId`: input fields identifying a row (a natural key) for that merge; without it every row gets a random id pinned by one extra Reshuffle before the first fan-out. `spill`: the per-key sort of the keyed stages — `memoryMB` (in-memory buffer per key before sorted chunks are spilled to worker-local disk; default derived from the worker heap: a quarter of the heap shared by the cores, clamped to 16-256 MB; the `--featureSpillMemoryMB` pipeline option sets it for every feature step), `directory` (spill directory on the worker, default `java.io.tmpdir`), `compress` (deflate the chunk files, default false). See *Performance and sizing*. |
@@ -746,25 +746,33 @@ Two context ops fit a small model over the rows of the group and hand each row i
   row reads null — with fewer the fit passes through the points. A regressor that is constant in the group, or a
   combination of the others, is left out (the residual is the same). Against a single constant the residual is
   the deviation from the group mean. With the block's `excludeSelf: true` every row is fitted on the **other**
-  rows (leave-one-out: a prediction error rather than an in-sample residual; one more row is needed).
-  The key is `against`, not `on` (a YAML 1.1 boolean).
+  rows (leave-one-out: a prediction error rather than an in-sample residual; one more row is needed) — read
+  off the one fit of the group, so it costs no more than the in-sample residual. A row the fit runs exactly
+  through (it alone decides its own fitted value) reads null.
+  The key is `against`, not `on` (a YAML 1.1 boolean). `against` may name a column an **earlier op of the same
+  block** produces (the ops of a block run in the order they are declared) or a column of another block; a name
+  declared later in the same block is not yet a column and is reported as an unknown regressor.
 - **`harville`** reads `field` as win probabilities (any non-negative strengths: they are normalised over the
   group, so implied probabilities that sum past 1 are fine) and returns, for each `k` in `top` (1..3, default
   `[2, 3]`), the probability of finishing **within the first k places** by the Harville forward computation —
   the winner is drawn by `p`, the next place among the rest in proportion to their strengths, and so on.
   `discount: [λ2, λ3]` raises the probabilities to `λ` when the 2nd / 3rd place is drawn (default 1 = plain
   Harville; values below 1 flatten the later places, which plain Harville gives too readily to the
-  favourites). A null or negative value takes no part (null out), a 0 can only lose; in a group with fewer
-  rows than `k` everyone is within the first k. Columns: `{block}_{field}_harville_top{k}` (`as` replaces the
-  field segment). `excludeSelf` has no effect.
-- **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size
-  (quadratic with `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — a group with
-  more than `maxGroupSize` valid rows (default 64) reads null (info `context.op.groupSolver`). The result does
-  not depend on the order the rows of a group arrive in.
+  favourites). A null or negative value takes no part (null out), a 0 can only lose while a row with strength
+  is still running; once the remaining rows are all 0 they share the place in equal parts, so every place is
+  taken by exactly one row and in a group with at most `k` rows everyone is within the first k. Columns:
+  `{block}_{field}_harville_top{k}` (`as` replaces the field segment). `excludeSelf` has no effect.
+- **Cost.** The group is solved in memory on one worker: `residualize` is linear in the group size (with or
+  without `excludeSelf`), `harville` quadratic for the 2nd place and cubic for the 3rd — the places asked for
+  in one `top` are one pass, not one per place. `maxGroupSize` (default 64) is read by `harville` only: a group
+  with more valid rows reads null (info `context.op.groupSolver`; on `residualize` the key is ignored with a
+  warning, since it reads every row of the group whatever its size). The result does not depend on the order
+  the rows of a group arrive in.
 - Both are row / context only (streaming-capable) and inherit the availability of every field they read.
+  Under `nullPolicy: indicator` both get an `_isnull` companion column (a group can read null as a whole).
 - Diagnostics: `context.residualize.against` (missing, non-numeric, repeated, or the field itself),
   `context.harville.top` (distinct integers in 1..3), `context.harville.discount` (at most two positive
-  exponents), `context.op.maxGroupSize` (≥ 2).
+  exponents), `context.op.maxGroupSize` (≥ 2; a warning on `residualize`).
 
 ### Array readouts (row, `type: vector`)
 

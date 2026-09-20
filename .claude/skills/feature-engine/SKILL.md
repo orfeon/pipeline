@@ -143,18 +143,29 @@ reads what the compile layer wrote into each column's `coordinates`.
   by one `mapValue` row column per listed category — `expandDistributionValues`), `deviation`, `effectiveN` (λ from `setLambdas`, the
   variance-components side input). `joint` columns are population-scope lookup columns filled by
   `JointSpec.apply` in the fit stage, not row columns.
-- `ContextEvaluator.evaluateColumn` — one group at a time; `apply(op, values, self, excludeSelf)`;
-  group-constant ops are evaluated once per group; `values:` lists become per-value columns
-  (`valueKey` normalises integral numbers). `softmax` and `shuffle` bypass `apply`: they read two
-  per-row inputs / need the group order (`softmax(c, rows)` in probability space with a max-shift;
-  `shuffle(c, rows)` = Fisher–Yates from (seed, group key) over rows sorted by `order` + `tieBreak`
-  coordinates — the tie-break over all input fields is what makes it engine-mode independent). Op
-  parameters that are not a single field go through `FeaturePlanCompiler.configureContextOp`. The group
-  solvers `residualize` / `harville` go through `solve(c, rows)` → `GroupOps` (pure `double[][] channels →
-  double[]`, NaN = missing): several fields of the group at once, one value back per row. A new solver is a
-  `GroupOps` function + a branch in `solve`; it must take its sums in an order the *values* decide (`GroupOps.sort`)
-  — the rows of a group arrive in runner order, and the parallel / linear equality is compared bit for bit — and
-  declare its cost (`context.op.groupSolver`, `maxGroupSize`) when it is more than linear in the group size.
+- `ContextEvaluator.evaluateColumn` — one group at a time, driven by a per-column `Plan` built once in
+  `setup()` (`plan(c)`: every coordinate parsed there, never per group — `against` / `discount` / `order`
+  splits, `seed`, `top`, `maxGroupSize`); `apply(op, values, self, excludeSelf)`; group-constant ops are
+  evaluated once per group; `values:` lists become per-value columns (`valueKey` normalises integral numbers).
+  `softmax` and `shuffle` bypass `apply`: they read two per-row inputs / need the group order (`softmax` in
+  probability space with a max-shift; `shuffle` = Fisher–Yates from (seed, group key) over rows sorted by
+  `order` + `tieBreak` — the tie-break over all input fields is what makes it engine-mode independent). The
+  group solvers `residualize` / `harville` go through `solve(name, plan, rows)` → `GroupOps` (pure
+  `double[][] channels → double[]`, NaN = missing): several fields of the group at once, one value back per row.
+  Work shared by several columns of one group is cached on the group's list identity (`harvillePlaces`: every
+  place of a `top` is one pass — a new group is a new list, so the cache cannot outlive it).
+  A new solver is a `GroupOps` function + a branch in `solve` + a record in `Plan`; it must take its sums in an
+  order the *values* decide (`GroupOps.sort`, a primitive merge sort — no boxed index per row) — the rows of a
+  group arrive in runner order, and the parallel / linear equality is compared bit for bit — and declare its
+  cost (`context.op.groupSolver`, `maxGroupSize`) when it is more than linear in the group size. Prefer a
+  closed form over a per-row refit: the leave-one-out residuals come from the one fit and its leverages
+  (`e_i / (1 - h_i)`), not from m fits.
+- `FeaturePlanCompiler.expandContext` — the op's own parameters are validated **once per op** in
+  `validateContextOp` (which returns the `ContextOpParams` every column of the op shares: coordinates, extra
+  inputs, an inherited `validFor`, the resolved regressors, the places), and the columns one field produces come
+  from `contextVariants` (one per listed `value`, one per `top`, one otherwise). Put a new op's validation and
+  fan-out there rather than in a branch of its own, or an op over three fields reports the same error three
+  times and the rules of the shared path stop applying to it.
 - `Summary<S>` — the typed, mergeable accumulator behind every statistic the engine serves without
   re-reading rows: `create` / `update(state, contribution, ±1)` / `merge` / `read(state, Readout)`,
   with `invertible()` saying whether a contribution can be removed again (a group: windows can evict)

@@ -4,20 +4,23 @@ import com.mercari.solution.util.ExpressionUtil;
 
 import java.io.Serializable;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Evaluates context-scope columns over the rows that share a context key (one co-occurrence group).
  * Groups are expected to be small (the rows of one event), so per-row "others" statistics are O(n²).
+ *
+ * <p>Every column's coordinates are resolved into a {@link Plan} once per worker ({@link #setup()}): the group loop
+ * reads parsed numbers and arrays, never strings. The group solvers of one field share their work through
+ * {@link #harvilleCache} — the places of a harville are one pass, whatever {@code top} the columns ask for.
  */
 public class ContextEvaluator implements Serializable {
 
-    private static final Pattern OP_CALL = Pattern.compile("^\\s*([A-Za-z_]+)\\s*\\((.*)\\)\\s*$");
-
     private final List<OutputColumn> columns;
-    private transient Map<String, ExpressionUtil.Expression> expressions;
-    private transient Map<String, String> baselineOps;
+    private transient Map<String, Plan> plans;
+    /** The largest place any column of a group solver asks for, by solver key: one pass serves them all. */
+    private transient Map<String, Integer> places;
+    private transient List<Map<String, Object>> cachedGroup;
+    private transient Map<String, double[][]> harvilleCache;
 
     public ContextEvaluator(final List<OutputColumn> columns) {
         this.columns = columns;
@@ -28,17 +31,12 @@ public class ContextEvaluator implements Serializable {
     }
 
     public void setup() {
-        expressions = new HashMap<>();
-        baselineOps = new HashMap<>();
+        plans = new HashMap<>();
+        places = new HashMap<>();
         for (final OutputColumn c : columns) {
-            if (!"baseline".equals(c.operator)) continue;
-            final String expr = c.coordinates.get("expr");
-            final Matcher m = OP_CALL.matcher(expr);
-            if (m.matches() && OperatorCatalog.get(FeatureSpec.Scope.context, m.group(1)) != null) {
-                baselineOps.put(c.canonicalName, m.group(1));
-                expressions.put(c.canonicalName, ExpressionUtil.createDefaultExpression(m.group(2)));
-            } else {
-                expressions.put(c.canonicalName, ExpressionUtil.createDefaultExpression(expr));
+            final Plan plan = plans.computeIfAbsent(c.canonicalName, name -> plan(c));
+            if (plan.harville() != null) {
+                places.merge(plan.harville().key(), plan.harville().top(), Math::max);
             }
         }
     }
@@ -51,42 +49,41 @@ public class ContextEvaluator implements Serializable {
 
     /** Evaluates one context column for every row of the group (rows are mutated in place). */
     public void evaluateColumn(final OutputColumn c, final List<Map<String, Object>> rows) {
-        if ("softmax".equals(c.operator)) {
-            softmax(c, rows);
+        final Plan plan = plan(c.canonicalName, c);
+        if (plan.softmax() != null) {
+            softmax(c.canonicalName, plan.field(), plan.softmax(), rows);
             return;
         }
-        if ("shuffle".equals(c.operator)) {
-            shuffle(c, rows);
+        if (plan.shuffle() != null) {
+            shuffle(c.canonicalName, plan.field(), plan.shuffle(), rows);
             return;
         }
-        if ("residualize".equals(c.operator) || "harville".equals(c.operator)) {
-            solve(c, rows);
+        if (plan.residualize() != null || plan.harville() != null) {
+            solve(c.canonicalName, plan, rows);
             return;
         }
-        final String op = "baseline".equals(c.operator) ? baselineOps.get(c.canonicalName) : c.operator;
-        final boolean excludeSelf = "true".equals(c.coordinates.get("excludeSelf"));
+        final String op = plan.op();
         if (op == null) {
             // row-level baseline expression evaluated per row
-            final ExpressionUtil.Expression e = expressions.get(c.canonicalName);
-            for (final Map<String, Object> row : rows) row.put(c.canonicalName, FeatureValues.evaluate(e, row));
+            for (final Map<String, Object> row : rows) row.put(c.canonicalName, FeatureValues.evaluate(plan.expression(), row));
             return;
         }
         final List<Object> values = new ArrayList<>(rows.size());
         for (final Map<String, Object> row : rows) {
-            if ("baseline".equals(c.operator)) {
-                values.add(FeatureValues.evaluate(expressions.get(c.canonicalName), row));
-            } else if (c.coordinates.containsKey("field")) {
-                values.add(row.get(c.coordinates.get("field")));
+            if (plan.expression() != null) {
+                values.add(FeatureValues.evaluate(plan.expression(), row));
+            } else if (plan.field() != null) {
+                values.add(row.get(plan.field()));
             } else {
                 values.add(null);
             }
         }
-        final String value = c.coordinates.get("value");
+        final String value = plan.value();
         // group-constant ops (no excludeSelf) are evaluated once for the group, not once per row
-        final boolean groupConstant = !excludeSelf && (value != null || List.of("countByValue", "ratioByValue", "entropy", "groupSize").contains(op));
-        Object shared = groupConstant ? apply(op, values, 0, false) : null;
+        final boolean groupConstant = plan.groupConstant();
+        final Object shared = groupConstant ? apply(op, values, 0, false) : null;
         for (int i = 0; i < rows.size(); i++) {
-            Object result = groupConstant ? shared : apply(op, values, i, excludeSelf);
+            Object result = groupConstant ? shared : apply(op, values, i, plan.excludeSelf());
             if (value != null && result instanceof Map<?, ?> map) {
                 // per-value column of countByValue / ratioByValue: absent value = 0 count / null ratio
                 final Object picked = map.get(valueKey(value));
@@ -94,6 +91,95 @@ public class ContextEvaluator implements Serializable {
             }
             rows.get(i).put(c.canonicalName, result);
         }
+    }
+
+    // --- plans ------------------------------------------------------------------------------------
+
+    /**
+     * One column's coordinates, parsed. {@code op} is the operator to apply over the group's values (null for a
+     * plain row expression); the parameterised ops carry their own record and are dispatched on it.
+     */
+    private record Plan(String op, String field, boolean excludeSelf, String value, ExpressionUtil.Expression expression,
+                        Softmax softmax, Residualize residualize, Harville harville, Shuffle shuffle) {
+
+        /** The ops whose reading is the same for every row of the group, so the group is read once. */
+        private static final Set<String> GROUP_CONSTANT = Set.of("countByValue", "ratioByValue", "entropy", "groupSize");
+
+        static Plan of(final String op, final String field, final boolean excludeSelf, final String value,
+                       final ExpressionUtil.Expression expression) {
+            return new Plan(op, field, excludeSelf, value, expression, null, null, null, null);
+        }
+
+        Plan with(final Softmax s) { return new Plan(op, field, excludeSelf, value, expression, s, null, null, null); }
+
+        Plan with(final Residualize r) { return new Plan(op, field, excludeSelf, value, expression, null, r, null, null); }
+
+        Plan with(final Harville h) { return new Plan(op, field, excludeSelf, value, expression, null, null, h, null); }
+
+        Plan with(final Shuffle p) { return new Plan(op, field, excludeSelf, value, expression, null, null, null, p); }
+
+        boolean groupConstant() {
+            return !excludeSelf && (value != null || GROUP_CONSTANT.contains(op));
+        }
+    }
+
+    private record Softmax(String offset, double temperature, boolean logScale, boolean scoreNullIsNull) {}
+
+    private record Residualize(String[] against) {}
+
+    /** {@code key} names the pass this column reads: the same field, discount and bound are computed once per group. */
+    private record Harville(int top, double[] discount, int maxGroupSize, String key) {}
+
+    /** {@code order} is the row identity followed by the tie break, {@code contextKeys} the group key. */
+    private record Shuffle(long seed, List<String> order, List<String> contextKeys) {}
+
+    /** The column's plan, built on first use when {@link #setup()} has not run (a direct call from a test). */
+    private Plan plan(final String name, final OutputColumn c) {
+        if (plans == null) plans = new HashMap<>();
+        return plans.computeIfAbsent(name, key -> plan(c));
+    }
+
+    private static Plan plan(final OutputColumn c) {
+        final Map<String, String> at = c.coordinates;
+        final boolean excludeSelf = "true".equals(at.get("excludeSelf"));
+        final String field = at.get("field");
+        if ("baseline".equals(c.operator)) {
+            // an expression, or a context op applied to one (share(1 / bid)); the compiler has rejected the ops
+            // that cannot be called this way (baselines.expr.op), so an op found here is one apply() computes
+            final OperatorCatalog.Call call = OperatorCatalog.parseContextCall(at.get("expr"));
+            final boolean isOp = call != null && call.operator().baselineCallable();
+            return Plan.of(isOp ? call.operator().name() : null, field, excludeSelf, at.get("value"),
+                    ExpressionUtil.createDefaultExpression(isOp ? call.arguments() : at.get("expr")));
+        }
+        final Plan plan = Plan.of(c.operator, field, excludeSelf, at.get("value"), null);
+        return switch (c.operator) {
+            case "softmax" -> plan.with(new Softmax(at.get("offset"), Double.parseDouble(at.getOrDefault("temperature", "1")),
+                    "log".equals(at.get("offsetScale")), "null".equals(at.get("scoreNull"))));
+            case "residualize" -> plan.with(new Residualize(split(at.get("against"))));
+            case "harville" -> {
+                final String discount = at.get("discount");
+                final int maxGroupSize = Integer.parseInt(at.get("maxGroupSize"));
+                yield plan.with(new Harville(Integer.parseInt(at.get("top")), doubles(discount), maxGroupSize,
+                        field + "\u0000" + discount + "\u0000" + maxGroupSize));
+            }
+            case "shuffle" -> {
+                final List<String> order = new ArrayList<>(List.of(split(at.get("order"))));
+                order.addAll(List.of(split(at.get("tieBreak"))));
+                yield plan.with(new Shuffle(Long.parseLong(at.get("seed")), List.copyOf(order), List.of(split(at.get("contextKeys")))));
+            }
+            default -> plan;
+        };
+    }
+
+    private static String[] split(final String joined) {
+        return joined == null || joined.isEmpty() ? new String[0] : joined.split(",");
+    }
+
+    private static double[] doubles(final String joined) {
+        final String[] parts = split(joined);
+        final double[] values = new double[parts.length];
+        for (int i = 0; i < parts.length; i++) values[i] = Double.parseDouble(parts[i]);
+        return values;
     }
 
     static Object apply(final String op, final List<Object> values, final int self, final boolean excludeSelf) {
@@ -122,18 +208,20 @@ public class ContextEvaluator implements Serializable {
         };
     }
 
+    /** Group softmax over one column (the plan of {@code c}); see {@link #softmax(String, String, Softmax, List)}. */
+    static void softmax(final OutputColumn c, final List<Map<String, Object>> rows) {
+        final Plan plan = plan(c);
+        softmax(c.canonicalName, plan.field(), plan.softmax(), rows);
+    }
+
     /**
      * Group softmax in probability space: p_i = w_i · exp(f_i / T) / Σ_j w_j · exp(f_j / T), w = the offset value
      * (1 without an offset; {@code offsetScale: log} takes exp first). A null offset makes the row null and drops it
      * from the denominator; an offset of 0 gives p = 0; a null score falls back to 0 ({@code scoreNull: zero}) or
      * makes the row null ({@code scoreNull: null}). Scores are shifted by the group maximum for stability.
      */
-    static void softmax(final OutputColumn c, final List<Map<String, Object>> rows) {
-        final String field = c.coordinates.get("field");
-        final String offset = c.coordinates.get("offset");
-        final double temperature = Double.parseDouble(c.coordinates.getOrDefault("temperature", "1"));
-        final boolean logScale = "log".equals(c.coordinates.get("offsetScale"));
-        final boolean scoreNullIsNull = "null".equals(c.coordinates.get("scoreNull"));
+    static void softmax(final String name, final String field, final Softmax plan, final List<Map<String, Object>> rows) {
+        final String offset = plan.offset();
         final int n = rows.size();
         final double[] weights = new double[n];
         final double[] scores = new double[n];
@@ -142,15 +230,15 @@ public class ContextEvaluator implements Serializable {
         for (int i = 0; i < n; i++) {
             final Map<String, Object> row = rows.get(i);
             Double w = offset == null ? Double.valueOf(1d) : FeatureValues.toDouble(row.get(offset));
-            if (w != null && logScale && offset != null) w = Math.exp(w); // no offset: w = 1 whatever the scale
+            if (w != null && offset != null && plan.logScale()) w = Math.exp(w); // no offset: w = 1 whatever the scale
             if (w == null || Double.isNaN(w) || Double.isInfinite(w) || w < 0) continue;
             Double f = FeatureValues.toDouble(row.get(field));
             if (f == null || Double.isNaN(f)) {
-                if (scoreNullIsNull) continue;
+                if (plan.scoreNullIsNull()) continue;
                 f = 0d;
             }
             weights[i] = w;
-            scores[i] = f / temperature;
+            scores[i] = f / plan.temperature();
             active[i] = true;
             if (w > 0) max = Math.max(max, scores[i]);
         }
@@ -159,40 +247,49 @@ public class ContextEvaluator implements Serializable {
         for (int i = 0; i < n; i++) {
             final Map<String, Object> row = rows.get(i);
             if (!active[i] || denominator <= 0 || Double.isNaN(denominator)) {
-                row.put(c.canonicalName, null);
+                row.put(name, null);
             } else {
-                row.put(c.canonicalName, weights[i] == 0 ? 0d : weights[i] * Math.exp(scores[i] - max) / denominator);
+                row.put(name, weights[i] == 0 ? 0d : weights[i] * Math.exp(scores[i] - max) / denominator);
             }
         }
     }
 
     /**
      * The group solvers ({@link GroupOps}): the op's fields become one vector per channel over the rows of the group
-     * (a missing or non-finite value is NaN), the solver returns every row's value (NaN = null).
+     * (a missing or non-finite value is NaN), the solver returns every row's value (NaN = null). The places of a
+     * harville are one pass per (field, discount, bound) — the {@code top} columns of a group read the same one.
      */
-    static void solve(final OutputColumn c, final List<Map<String, Object>> rows) {
-        final double[] field = channel(rows, c.coordinates.get("field"));
+    private void solve(final String name, final Plan plan, final List<Map<String, Object>> rows) {
         final double[] result;
-        if ("residualize".equals(c.operator)) {
-            final String[] against = c.coordinates.get("against").split(",");
+        if (plan.residualize() != null) {
+            final String[] against = plan.residualize().against();
             final double[][] x = new double[against.length][];
             for (int k = 0; k < against.length; k++) x[k] = channel(rows, against[k]);
-            result = GroupOps.residualize(field, x, "true".equals(c.coordinates.get("excludeSelf")));
+            result = GroupOps.residualize(channel(rows, plan.field()), x, plan.excludeSelf());
         } else {
-            final String discount = c.coordinates.get("discount");
-            final double[] exponents = discount == null ? new double[0] : Arrays.stream(discount.split(",")).mapToDouble(Double::parseDouble).toArray();
-            result = GroupOps.harville(field, Integer.parseInt(c.coordinates.get("top")), exponents, Integer.parseInt(c.coordinates.get("maxGroupSize")));
+            result = harvillePlaces(plan, rows)[plan.harville().top() - 1];
         }
-        for (int i = 0; i < rows.size(); i++) rows.get(i).put(c.canonicalName, Double.isNaN(result[i]) ? null : (Object) result[i]);
+        for (int i = 0; i < rows.size(); i++) rows.get(i).put(name, Double.isNaN(result[i]) ? null : (Object) result[i]);
     }
 
-    private static double[] channel(final List<Map<String, Object>> rows, final String field) {
-        final double[] values = new double[rows.size()];
-        for (int i = 0; i < values.length; i++) {
-            final Double d = FeatureValues.toDouble(rows.get(i).get(field));
-            values[i] = d == null || !Double.isFinite(d) ? Double.NaN : d;
+    /**
+     * The harville pass this column reads, computed once per group: a new group arrives as a new list, so the cache
+     * is dropped the moment the identity changes. A column asking for a place beyond what the cached pass holds
+     * (only possible when {@link #setup()} has not seen every column) recomputes it.
+     */
+    private double[][] harvillePlaces(final Plan plan, final List<Map<String, Object>> rows) {
+        if (cachedGroup != rows) {
+            cachedGroup = rows;
+            harvilleCache = new HashMap<>();
         }
-        return values;
+        final Harville harville = plan.harville();
+        double[][] cached = harvilleCache.get(harville.key());
+        if (cached == null || cached.length < harville.top()) {
+            final int maxTop = Math.max(harville.top(), places == null ? 0 : places.getOrDefault(harville.key(), 0));
+            cached = GroupOps.harvillePlaces(channel(rows, plan.field()), maxTop, harville.discount(), harville.maxGroupSize());
+            harvilleCache.put(harville.key(), cached);
+        }
+        return cached;
     }
 
     /**
@@ -201,18 +298,18 @@ public class ContextEvaluator implements Serializable {
      * per group is preserved and the result is a pure function of the group.
      */
     static void shuffle(final OutputColumn c, final List<Map<String, Object>> rows) {
-        final String field = c.coordinates.get("field");
-        final long seed = Long.parseLong(c.coordinates.get("seed"));
-        final List<String> order = new ArrayList<>(List.of(c.coordinates.get("order").split(",")));
-        final String tieBreak = c.coordinates.getOrDefault("tieBreak", "");
-        if (!tieBreak.isEmpty()) order.addAll(List.of(tieBreak.split(",")));
-        final List<String> contextKeys = c.coordinates.get("contextKeys").isEmpty() ? List.of() : List.of(c.coordinates.get("contextKeys").split(","));
+        final Plan plan = plan(c);
+        shuffle(c.canonicalName, plan.field(), plan.shuffle(), rows);
+    }
+
+    static void shuffle(final String name, final String field, final Shuffle plan, final List<Map<String, Object>> rows) {
+        final List<String> order = plan.order();
         final int n = rows.size();
         final Integer[] sorted = new Integer[n];
         for (int i = 0; i < n; i++) sorted[i] = i;
         Arrays.sort(sorted, (a, b) -> compareIdentity(rows.get(a), rows.get(b), order));
-        final String groupKey = n == 0 ? "" : FeatureValues.keyWithNullTokens(rows.get(0), contextKeys);
-        final java.util.SplittableRandom random = FeatureValues.seededRandom(seed, groupKey);
+        final String groupKey = n == 0 ? "" : FeatureValues.keyWithNullTokens(rows.get(0), plan.contextKeys());
+        final java.util.SplittableRandom random = FeatureValues.seededRandom(plan.seed(), groupKey);
         final int[] permutation = new int[n];
         for (int i = 0; i < n; i++) permutation[i] = i;
         for (int i = n - 1; i > 0; i--) {
@@ -223,7 +320,16 @@ public class ContextEvaluator implements Serializable {
         }
         final List<Object> values = new ArrayList<>(n);
         for (int i = 0; i < n; i++) values.add(rows.get(sorted[i]).get(field));
-        for (int i = 0; i < n; i++) rows.get(sorted[i]).put(c.canonicalName, values.get(permutation[i]));
+        for (int i = 0; i < n; i++) rows.get(sorted[i]).put(name, values.get(permutation[i]));
+    }
+
+    private static double[] channel(final List<Map<String, Object>> rows, final String field) {
+        final double[] values = new double[rows.size()];
+        for (int i = 0; i < values.length; i++) {
+            final Double d = FeatureValues.toDouble(rows.get(i).get(field));
+            values[i] = d == null || !Double.isFinite(d) ? Double.NaN : d;
+        }
+        return values;
     }
 
     private static int compareIdentity(final Map<String, Object> a, final Map<String, Object> b, final List<String> order) {
