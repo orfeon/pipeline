@@ -309,7 +309,21 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `adjacent` | `mean`); `adjacent` is defined on the outcomes (the opponents at the player's own, the nearest better
   and the nearest worse outcome), never on the position of an entry, so ties cannot make it order-dependent. The
   paper's alternative `γ = 1/k` for `plackettLuce` was examined and left out: under the default parameters
-  `σ/c ≈ 0.89/√k` exceeds `1/k` for every field, so it shrinks `sigma` less, not more. An update reads the ratings the earlier contests
+  `σ/c ≈ 0.89/√k` exceeds `1/k` for every field, so it shrinks `sigma` less, not more. **Teams** (`Rating.withTeam`, the pure layer — the DSL does not reach it
+  yet): a row may be rated as the sum of several members, the rated player and other entities of the same row
+  (`Rating.Member`: key fields, prior, drift, and a *pool* — the namespace of its keys in the one `State`, so a seller
+  and an agent of one id stay apart; a rating without a team keeps its bare keys). `mu = Σ mu_j`, `sigma² = Σ v_j`,
+  `beta` once per team; the update rules run on the teams **unchanged** (they only ever read an entry's `(m, v)`) and
+  return `Ω` and the raw `Δ` per entry, which `update` shares among the members by `v_j / v` — `mu_j += share · Ω`,
+  `sigma_j² = v_j · max(1 − share · Δ, κ)`, the clamp after the share — walking the sorted entries so that a member of
+  several teams (like a player of several rows) sums its shares in an order the contest decides. A team of one has
+  the share `v / v = 1` and sums that start from the member rather than from 0: the arithmetic of a player to the
+  last bit, which `RatingTest.testPlayerArithmeticIsUnchangedByTeams` pins against a frozen copy of the update as it
+  stood before teams (`PlayersOnly`), run side by side in one JVM — not against recorded numbers: `Math.exp` / `Math.pow`
+  are specified to an ulp, not to a bit, so a constant would pin a platform's libm rather than the property. The rated
+  player's prior, drift and key fields live in `members.get(0)` and nowhere else. `elo` has no variance to share by and takes no team. The members' levels
+  are identified up to a shift between the pools (every seller up, every agent down changes no expectation); their
+  sum — `readTeam` — is what the contests identify. An update reads the ratings the earlier contests
   left, so the state is **not a `Summary`**: no merge (nothing to combine per block, no prefix-scan form) and no
   inverse (no window — the compiler rejects `maxAge` / `maxEvents` / general filters, `sequence.rating.window`). It
   is a running state all the same: the fold pointer advances one event time at a time and hands the run of rows

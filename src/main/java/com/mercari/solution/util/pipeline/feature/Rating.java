@@ -5,8 +5,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -27,6 +30,16 @@ import java.util.TreeMap;
  * the update is order-independent: every change is computed from the pre-contest ratings over the entries sorted by
  * player, then applied. A player with several rows in one contest takes part once per row (its own rows are not
  * compared with each other in the pairwise methods) and receives the sum of their changes.
+ *
+ * <p><b>Teams</b> ({@link #withTeam}). A row may be rated as a team: the rated player together with other entities of
+ * the same row (its {@link Member}s), each with a rating of its own. The team's strength is the sum of its members'
+ * — {@code mu = Σ mu_j}, {@code sigma² = Σ sigma_j²}, the performance noise {@code beta} once per team — the update
+ * rules run on the teams exactly as they run on players, and a team's change is shared among its members by their
+ * part of its variance: {@code mu_j += (v_j / v) · Ω}, {@code sigma_j² = v_j · max(1 − (v_j / v) · Δ, κ)} (Weng &amp;
+ * Lin's team form). The well-known member hardly moves and the uncertain one takes the update, which is what lets a
+ * member's contribution be told apart from that of the company it keeps. A team of one member has the share 1:
+ * the arithmetic of a player, to the last bit. A member of several teams of one contest receives the sum of its
+ * shares, as a player of several rows does.
  *
  * <p>The row order the replay hands over is not fixed inside one event time (the sorter orders by event time alone),
  * so the contests held at one event time are folded in the order of their context key, not the order their rows
@@ -81,33 +94,65 @@ public final class Rating implements Serializable {
         public final Map<String, Player> players = new HashMap<>();
     }
 
-    /** One row of a contest: the player and its outcome. */
-    public record Entry(String player, double outcome) {}
+    /**
+     * One row of a contest: the team it is rated as — the state keys of its members ({@link #teamOf}), the rated
+     * player first — and its outcome. A row of one member is a player: every rating without a team.
+     */
+    public record Entry(List<String> members, double outcome) {
+        public Entry(final String player, final double outcome) {
+            this(List.of(player), outcome);
+        }
+
+        /** The rated player: the first member. */
+        public String player() {
+            return members.get(0);
+        }
+    }
+
+    /**
+     * A member of the team a row is rated as: the fields of the row that name it, its prior and its drift. {@code pool}
+     * is the namespace of its keys in the state — members of different entities live in one {@link State}, and a seller
+     * and an agent may well share an id — or null: the keys themselves, for the single player of a rating without a team,
+     * whose state is keyed as it always was.
+     */
+    public record Member(String pool, List<String> keys, double mu, double sigma, double tau) implements Serializable {}
+
+    /** The team readouts: the sum of the members' ratings and the uncertainty of that sum. */
+    public static final List<String> TEAM_FUNCS = List.of("mu", "sigma");
+
+    /**
+     * Between a pool and a key in a state key ({@link #memberKey}), and between the members in a team's identity
+     * ({@link #id}). A key from {@link FeatureValues#key} carries {@code U+0001} itself (it terminates every
+     * component) but is length-prefixed, so a concatenation of keys stays unambiguous whatever the data holds. What
+     * could make two pools meet on one state key is a separator inside a <b>pool</b>, which {@link #withTeam} rejects.
+     */
+    private static final char POOL_SEPARATOR = '\u0001', MEMBER_SEPARATOR = '\u0002';
 
     private final Method method;
     /** Whether a smaller outcome is the better one (a rank / finishing position) rather than a larger one (a score). */
     private final boolean ascending;
-    private final double mu, sigma, beta, tau, kFactor, scale;
+    private final double beta, kFactor, scale;
     /** The time {@code tau} is the drift of, or 0: {@code tau} is the drift of one contest. */
     private final long tauPerMillis;
     private final Pairs pairs;
-    private final List<String> playerKeys, contestKeys;
+    private final List<String> contestKeys;
     private final String field;
+    /**
+     * The team a row is rated as, the rated player first; one member = a player. The rated player's prior, drift and
+     * key fields live here and nowhere else (the rating's {@code mu} / {@code sigma} / {@code tau} are its first member's).
+     */
+    private final List<Member> members;
 
-    private Rating(final Method method, final boolean ascending, final double mu, final double sigma, final double beta,
-                   final double tau, final double kFactor, final double scale, final long tauPerMillis, final Pairs pairs,
-                   final List<String> playerKeys, final List<String> contestKeys, final String field) {
+    private Rating(final Method method, final boolean ascending, final double beta, final double kFactor, final double scale,
+                   final long tauPerMillis, final Pairs pairs, final List<String> contestKeys, final String field, final List<Member> members) {
+        this.members = members;
         this.tauPerMillis = tauPerMillis;
         this.pairs = pairs;
         this.method = method;
         this.ascending = ascending;
-        this.mu = mu;
-        this.sigma = sigma;
         this.beta = beta;
-        this.tau = tau;
         this.kFactor = kFactor;
         this.scale = scale;
-        this.playerKeys = playerKeys;
         this.contestKeys = contestKeys;
         this.field = field;
     }
@@ -149,9 +194,11 @@ public final class Rating implements Serializable {
                             final List<String> playerKeys, final List<String> contestKeys, final String field) {
         final double m = mu != null ? mu : defaultMu(method);
         final double s = sigma != null ? sigma : defaultSigma(m);
-        return new Rating(method, ascending, m, s, beta != null ? beta : defaultBeta(s), tau != null ? tau : defaultTau(s),
+        // a rating without a team: one member under no pool, its state keyed by the bare keys as it always was
+        return new Rating(method, ascending, beta != null ? beta : defaultBeta(s),
                 kFactor != null ? kFactor : DEFAULT_K_FACTOR, scale != null ? scale : DEFAULT_SCALE,
-                tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, playerKeys, contestKeys, field);
+                tauPerMillis == null ? 0L : tauPerMillis, pairs == null ? Pairs.all : pairs, contestKeys, field,
+                List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))));
     }
 
     /** The rating a column's coordinates describe (written by {@code FeaturePlanCompiler}, defaults resolved there). */
@@ -170,15 +217,83 @@ public final class Rating implements Serializable {
         return text == null ? null : Double.valueOf(text);
     }
 
+    /**
+     * This rating over teams: the rated player — its keys now in the namespace {@code pool} — together with the members
+     * {@code with}, each of a pool of its own. The rating's {@code mu} / {@code sigma} / {@code tau} stay the player's;
+     * {@code beta}, the pairing and the clock of a drift in time are the team's. {@code elo} keeps no uncertainty to
+     * share a team's change by, so a team is rated by the two Bayesian methods only.
+     */
+    public Rating withTeam(final String pool, final List<Member> with) {
+        if (method == Method.elo) {
+            throw new IllegalArgumentException("elo keeps no uncertainty to share a team's update by: a team is rated by bradleyTerry / plackettLuce");
+        }
+        // the whole team is declared at once: a second call would otherwise drop the members the first one added
+        if (members.size() > 1) {
+            throw new IllegalArgumentException("this rating already has a team of " + members.size() + " members: withTeam declares the whole team at once");
+        }
+        if (with == null || with.isEmpty()) {
+            throw new IllegalArgumentException("a team needs at least one member besides the rated player");
+        }
+        final Member player = members.get(0);
+        final List<Member> team = new ArrayList<>();
+        team.add(new Member(pool, player.keys(), player.mu(), player.sigma(), player.tau()));
+        team.addAll(with);
+        final Set<String> pools = new HashSet<>();
+        for (final Member member : team) {
+            if (member == null) throw new IllegalArgumentException("a team holds no null member");
+            if (member.pool() == null || member.pool().isEmpty()) throw new IllegalArgumentException("every member of a team needs a pool (the namespace of its keys)");
+            if (member.pool().indexOf(POOL_SEPARATOR) >= 0 || member.pool().indexOf(MEMBER_SEPARATOR) >= 0) {
+                throw new IllegalArgumentException("a pool cannot hold the key separators U+0001 / U+0002 (two pools would meet on one state key): '" + member.pool() + "'");
+            }
+            if (!pools.add(member.pool())) throw new IllegalArgumentException("two members of one team share the pool '" + member.pool() + "'");
+            // an empty key list would name every row the same member; a null one fails per row, deep in the fold
+            if (member.keys() == null || member.keys().isEmpty()) {
+                throw new IllegalArgumentException("a member needs the key fields that name it: " + member);
+            }
+            if (!(member.sigma() > 0) || !(member.tau() >= 0) || !Double.isFinite(member.mu())) {
+                throw new IllegalArgumentException("a member needs a finite mu, sigma > 0 and tau >= 0: " + member);
+            }
+        }
+        return new Rating(method, ascending, beta, kFactor, scale, tauPerMillis, pairs, contestKeys, field, List.copyOf(team));
+    }
+
+    /** The members of the team a row is rated as (one: a player). */
+    public List<Member> members() {
+        return members;
+    }
+
     /** The player a row is rated as (null when a key field is missing: the row reads null and joins no contest). */
     public String player(final Map<String, Object> row) {
-        return FeatureValues.key(row, playerKeys);
+        return memberKey(row, 0);
+    }
+
+    /** The state key of a row's {@code member}-th team member, or null when one of its key fields is missing. */
+    public String memberKey(final Map<String, Object> row, final int member) {
+        final Member m = members.get(member);
+        final String key = FeatureValues.key(row, m.keys());
+        return key == null || m.pool() == null ? key : m.pool() + POOL_SEPARATOR + key;
+    }
+
+    /** The team a row is rated as — the state keys of its members — or null when a member is missing: the row joins no contest. */
+    public List<String> teamOf(final Map<String, Object> row) {
+        final String[] team = new String[members.size()];
+        for (int j = 0; j < team.length; j++) {
+            final String key = memberKey(row, j);
+            if (key == null) return null;
+            team[j] = key;
+        }
+        return List.of(team);
+    }
+
+    /** What makes two rows the same team: all their members (a player's own rows, in a rating without a team). */
+    private static String id(final Entry entry) {
+        return entry.members().size() == 1 ? entry.members().get(0) : String.join(String.valueOf(MEMBER_SEPARATOR), entry.members());
     }
 
     /**
      * Folds the rows of ONE event time into the state: they are split into contests by the context keys (a row
-     * without them, without a player or without a finite outcome takes no part), and every contest with at least two
-     * distinct players updates its players. The contests are applied in context-key order so the arbitrary row order
+     * without them, without a player — or a member of its team — or without a finite outcome takes no part), and every
+     * contest with at least two distinct players (teams) updates them. The contests are applied in context-key order so the arbitrary row order
      * inside a timestamp cannot reach the state (two contests of one event time may share a player).
      */
     public void fold(final State state, final List<SequenceEvaluator.Past> run) {
@@ -192,10 +307,10 @@ public final class Rating implements Serializable {
                         + " (the caller must slice the history by event time — SequenceEvaluator.advanceRating / Rating.replay)");
             }
             final String contest = FeatureValues.key(p.values(), contestKeys);
-            final String player = player(p.values());
+            final List<String> team = teamOf(p.values());
             final Double outcome = SequenceEvaluator.finite(p.values().get(field));
-            if (contest == null || player == null || outcome == null) continue;
-            contests.computeIfAbsent(contest, k -> new ArrayList<>()).add(new Entry(player, outcome));
+            if (contest == null || team == null || outcome == null) continue;
+            contests.computeIfAbsent(contest, k -> new ArrayList<>()).add(new Entry(team, outcome));
         }
         for (final List<Entry> entries : contests.values()) update(state, entries, millis);
     }
@@ -232,8 +347,8 @@ public final class Rating implements Serializable {
      * alike — the read of a returning player shows the absence it comes back from — and nothing for a player never
      * rated, whose prior is the whole uncertainty already.
      */
-    private double drifted(final Player p, final long millis, final boolean contest) {
-        final double s = p == null ? sigma : p.sigma;
+    private double drifted(final Member member, final Player p, final long millis, final boolean contest) {
+        final double s = p == null ? member.sigma() : p.sigma, tau = member.tau();
         if (tauPerMillis <= 0) return s * s + (contest ? tau * tau : 0d);
         if (p == null) return s * s;
         // the absence, compared before it is subtracted: `millis - lastMillis` would wrap to a huge positive
@@ -242,51 +357,86 @@ public final class Rating implements Serializable {
         return s * s + tau * tau * absence / (double) tauPerMillis;
     }
 
-    /** Applies one contest held at {@code millis}. The entries' order does not matter (they are sorted by player, then outcome). */
+    /** What a contest does to one member: the sum of its shares, from the rating it entered the contest with. */
+    private static final class Change {
+        final Member member;
+        final double mu, variance;
+        double change, factor = 1;
+
+        Change(final Member member, final double mu, final double variance) {
+            this.member = member;
+            this.mu = mu;
+            this.variance = variance;
+        }
+    }
+
+    /** Applies one contest held at {@code millis}. The entries' order does not matter (they are sorted by team, then outcome). */
     public void update(final State state, final List<Entry> contest, final long millis) {
         final List<Entry> entries = new ArrayList<>(contest);
-        entries.sort(Comparator.comparing(Entry::player).thenComparingDouble(Entry::outcome));
-        final int n = entries.size();
-        // a contest needs two distinct players; the entries are sorted by player, so the ends decide it
-        if (n < 2 || entries.get(0).player().equals(entries.get(n - 1).player())) return;
+        entries.sort(Comparator.comparing(Rating::id).thenComparingDouble(Entry::outcome));
+        final int n = entries.size(), k = members.size();
+        final String[] ids = new String[n];
+        for (int i = 0; i < n; i++) {
+            if (entries.get(i).members().size() != k) {
+                throw new IllegalArgumentException("an entry of " + entries.get(i).members().size() + " member(s) in a rating of teams of " + k);
+            }
+            ids[i] = id(entries.get(i));
+        }
+        // a contest needs two distinct players (teams); the entries are sorted by them, so the ends decide it
+        if (n < 2 || ids[0].equals(ids[n - 1])) return;
 
-        // pre-contest ratings per entry (the variance already carries the drift)
+        // pre-contest ratings per entry (the variance already carries the drift): a team is the sum of its members.
+        // The per-member values are held flat (index i * k + j): one array rather than one per entry
+        final double[] mus = new double[n * k], variances = new double[n * k];
         final double[] m = new double[n], v = new double[n];
         for (int i = 0; i < n; i++) {
-            final Player p = state.players.get(entries.get(i).player());
-            m[i] = p == null ? mu : p.mu;
-            v[i] = drifted(p, millis, true);
+            for (int j = 0; j < k; j++) {
+                final Player p = state.players.get(entries.get(i).members().get(j));
+                mus[i * k + j] = p == null ? members.get(j).mu() : p.mu;
+                variances[i * k + j] = drifted(members.get(j), p, millis, true);
+                // the first member starts the sums (not 0 +): a team of one is its member to the last bit
+                m[i] = j == 0 ? mus[i * k + j] : m[i] + mus[i * k + j];
+                v[i] = j == 0 ? variances[i * k + j] : v[i] + variances[i * k + j];
+            }
         }
-        final double[] dMu = new double[n], shrink = new double[n];
-        Arrays.fill(shrink, 1d);
+        // Ω and Δ per entry: the change of its mu, and the part of its variance the contest takes away
+        final double[] dMu = new double[n], deltas = new double[n];
         switch (method) {
-            case elo -> elo(entries, m, dMu);
-            case bradleyTerry -> bradleyTerry(entries, m, v, dMu, shrink);
-            case plackettLuce -> plackettLuce(entries, m, v, dMu, shrink);
+            case elo -> elo(entries, ids, m, dMu);
+            case bradleyTerry -> bradleyTerry(entries, ids, m, v, dMu, deltas);
+            case plackettLuce -> plackettLuce(entries, m, v, dMu, deltas);
         }
 
-        // a player's entries are adjacent (sorted): one change per player
-        int i = 0;
-        while (i < n) {
-            final String name = entries.get(i).player();
-            double change = 0, factor = 1;
-            int j = i;
-            for (; j < n && entries.get(j).player().equals(name); j++) {
-                change += dMu[j];
-                factor *= shrink[j];
+        // a team's change is shared among its members by their part of its variance (1 for a player). The entries are
+        // walked in their sorted order, so the sums of a member of several entries — a player of several rows, a member
+        // of several teams — are taken in an order the contest decides, not the order its rows arrived in
+        final Map<String, Change> changes = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < k; j++) {
+                final String key = entries.get(i).members().get(j);
+                Change c = changes.get(key);
+                if (c == null) {
+                    c = new Change(members.get(j), mus[i * k + j], variances[i * k + j]);
+                    changes.put(key, c);
+                }
+                final double share = variances[i * k + j] / v[i];
+                c.change += share * dMu[i];
+                c.factor *= Math.max(1 - share * deltas[i], KAPPA);
             }
-            final Player p = state.players.computeIfAbsent(name, k -> {
+        }
+        for (final Map.Entry<String, Change> e : changes.entrySet()) {
+            final Change c = e.getValue();
+            final Player p = state.players.computeIfAbsent(e.getKey(), key -> {
                 final Player created = new Player();
-                created.mu = mu;
-                created.sigma = sigma;
+                created.mu = c.member.mu();
+                created.sigma = c.member.sigma();
                 return created;
             });
-            p.mu = m[i] + change;
-            if (method != Method.elo) p.sigma = Math.sqrt(v[i] * factor);
-            p.delta = change;
+            p.mu = c.mu + c.change;
+            if (method != Method.elo) p.sigma = Math.sqrt(c.variance * c.factor);
+            p.delta = c.change;
             p.count++;
             p.lastMillis = millis;
-            i = j;
         }
     }
 
@@ -302,7 +452,7 @@ public final class Rating implements Serializable {
         return (Double.compare(a, b) < 0) == ascending ? 1d : 0d;
     }
 
-    private void elo(final List<Entry> entries, final double[] m, final double[] dMu) {
+    private void elo(final List<Entry> entries, final String[] ids, final double[] m, final double[] dMu) {
         final int n = entries.size();
         for (int i = 0; i < n; i++) {
             final Entry self = entries.get(i);
@@ -310,7 +460,7 @@ public final class Rating implements Serializable {
             int opponents = 0;
             for (int j = 0; j < n; j++) {
                 final Entry other = entries.get(j);
-                if (other.player().equals(self.player())) continue;
+                if (ids[j].equals(ids[i])) continue;
                 final double expected = 1d / (1d + Math.pow(10d, (m[j] - m[i]) / scale));
                 sum += score(self, other) - expected;
                 opponents++;
@@ -320,7 +470,7 @@ public final class Rating implements Serializable {
         }
     }
 
-    private void bradleyTerry(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] shrink) {
+    private void bradleyTerry(final List<Entry> entries, final String[] ids, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
         for (int i = 0; i < n; i++) {
             final Entry self = entries.get(i);
@@ -331,7 +481,7 @@ public final class Rating implements Serializable {
             if (pairs == Pairs.adjacent) {
                 for (int q = 0; q < n; q++) {
                     final Entry other = entries.get(q);
-                    if (other.player().equals(self.player())) continue;
+                    if (ids[q].equals(ids[i])) continue;
                     final double sc = score(other, self);
                     if (sc == 1d && (Double.isNaN(better) || score(other.outcome(), better) == 0d)) better = other.outcome();
                     if (sc == 0d && (Double.isNaN(worse) || score(other.outcome(), worse) == 1d)) worse = other.outcome();
@@ -341,7 +491,7 @@ public final class Rating implements Serializable {
             int opponents = 0;
             for (int q = 0; q < n; q++) {
                 final Entry other = entries.get(q);
-                if (other.player().equals(self.player())) continue;
+                if (ids[q].equals(ids[i])) continue;
                 if (pairs == Pairs.adjacent && other.outcome() != self.outcome() && other.outcome() != better && other.outcome() != worse) continue;
                 final double c = Math.sqrt(v[i] + v[q] + 2 * beta * beta);
                 final double p = 1d / (1d + Math.exp((m[q] - m[i]) / c));
@@ -354,11 +504,11 @@ public final class Rating implements Serializable {
                 delta /= opponents;
             }
             dMu[i] = omega;
-            shrink[i] = Math.max(1 - delta, KAPPA);
+            deltas[i] = delta;
         }
     }
 
-    private void plackettLuce(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] shrink) {
+    private void plackettLuce(final List<Entry> entries, final double[] m, final double[] v, final double[] dMu, final double[] deltas) {
         final int n = entries.size();
         double c2 = 0, top = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
@@ -391,7 +541,7 @@ public final class Rating implements Serializable {
                 delta += quotient * (1 - quotient) / ties[q];
             }
             dMu[i] = v[i] / c * omega;
-            shrink[i] = Math.max(1 - Math.sqrt(v[i]) / c * (v[i] / c2) * delta, KAPPA);
+            deltas[i] = Math.sqrt(v[i]) / c * (v[i] / c2) * delta;
         }
     }
 
@@ -413,11 +563,20 @@ public final class Rating implements Serializable {
      * contest ({@link #drifted}) — what is known of the player now, not what was known when it last competed.
      */
     public Object read(final State state, final String player, final String func, final long nowMillis) {
-        if (player == null) return null;
-        final Player p = state == null ? null : state.players.get(player);
+        return read(state, 0, player, func, nowMillis);
+    }
+
+    /**
+     * A readout of the {@code member}-th member of a row's team ({@code key}: its state key, {@link #memberKey}); a
+     * member never rated reads its own prior.
+     */
+    public Object read(final State state, final int member, final String key, final String func, final long nowMillis) {
+        if (key == null) return null;
+        final Member m = members.get(member);
+        final Player p = state == null ? null : state.players.get(key);
         return switch (func) {
-            case "mu" -> p == null ? mu : p.mu;
-            case "sigma" -> p == null ? sigma : sigmaAt(p, nowMillis);
+            case "mu" -> p == null ? m.mu() : p.mu;
+            case "sigma" -> p == null ? m.sigma() : sigmaAt(m, p, nowMillis);
             case "count" -> p == null ? 0L : p.count;
             case "delta" -> p == null ? null : (Object) p.delta;
             default -> throw new IllegalArgumentException("unknown rating readout: " + func);
@@ -425,12 +584,42 @@ public final class Rating implements Serializable {
     }
 
     /**
+     * A readout of the team a row is rated as ({@code team}: {@link #teamOf}, null = a member is missing → null): the
+     * strength the contest will see — {@code mu} the sum of the members' ratings, {@code sigma} the uncertainty of that
+     * sum, under a drift in time as of {@code nowMillis}. A member never rated counts with its prior, so a known player
+     * in new company still reads a team. The sum is what the contests identify: the members' levels may shift against
+     * each other over a long replay (every player up, every agent down changes no expectation), their sum does not.
+     */
+    public Double readTeam(final State state, final List<String> team, final String func, final long nowMillis) {
+        if (team == null) return null;
+        // func null first: TEAM_FUNCS is an immutable list, whose contains(null) throws
+        if (func == null || !TEAM_FUNCS.contains(func)) {
+            throw new IllegalArgumentException("unknown team readout: " + func + " (available: " + TEAM_FUNCS + ")");
+        }
+        if (team.size() != members.size()) {
+            throw new IllegalArgumentException("a team of " + team.size() + " read from a rating of teams of " + members.size());
+        }
+        double sum = 0;
+        for (int j = 0; j < members.size(); j++) {
+            final Member m = members.get(j);
+            final Player p = state == null ? null : state.players.get(team.get(j));
+            if ("mu".equals(func)) {
+                sum += p == null ? m.mu() : p.mu;
+            } else {
+                final double s = p == null ? m.sigma() : sigmaAt(m, p, nowMillis);
+                sum += s * s;
+            }
+        }
+        return "mu".equals(func) ? sum : Math.sqrt(sum);
+    }
+
+    /**
      * The uncertainty a row at {@code nowMillis} reads: the state's, carrying the drift of the absence since the
      * player's last contest. {@code Long.MIN_VALUE} (a read without a time) is the state's own value, bit for bit.
      */
-    private double sigmaAt(final Player p, final long nowMillis) {
+    private double sigmaAt(final Member member, final Player p, final long nowMillis) {
         if (tauPerMillis <= 0 || nowMillis == Long.MIN_VALUE) return p.sigma;
-        return Math.sqrt(drifted(p, nowMillis, false));
+        return Math.sqrt(drifted(member, p, nowMillis, false));
     }
 
 }
