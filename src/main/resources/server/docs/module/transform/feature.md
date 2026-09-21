@@ -485,6 +485,7 @@ filesystems (`gs://`, `s3://`, relative local paths).
     blocks: {size: P90D}                          # or {bucket: year | quarter | month | week | day}; default P90D
     minBlocks: 1                                  # rows with fewer preceding blocks (with data for the key) read nothing
     minHistory: P180D                             # alternative to minBlocks: the minimum history, rounded up to blocks
+    minRows: 200                                  # smooth / svd / quantileTransform / spectralEmbedding: a fit over fewer rows is not solved
     window: P2Y                                   # optional: a row reads the blocks within this range only (rounded up to blocks)
     artifact: {uri: "gs://bucket/features"}       # optional: the whole-input totals, for a static serving run
 ```
@@ -508,6 +509,18 @@ block from the keys' statistics up to that block, and recorded per block in the 
 (`lambdasByBlock`). Block size trades staleness against stability: yearly blocks leave the first year
 empty and miss within-year drift, `P90D` is a good default; `blocks.bucket` gives calendar alignment
 (UTC). The `blocks` / `minBlocks` / `minHistory` / `window` settings are part of the plan hash. Batch only.
+
+`minBlocks` / `minHistory` count blocks, not rows — and blocks are cut from the epoch, so the input's first block is
+usually a fraction of one, and on a sparse key (a field that is mostly null) even a full block may hold a handful of
+rows. **`minRows`** is the floor in rows for the lookup fits (`smooth`, `svd`, `quantileTransform`,
+`spectralEmbedding`; a block's own `fit.minRows` wins over the top-level one): a fit — one window's under `forward`,
+the whole input's under `static` — that fewer rows contributed to is not solved, and the rows that would read it
+read null. It counts the rows that entered the fit (a key and a target for a curve, a complete vector for svd, a
+non-null value for a quantile transform, a value with at least one previous value for an embedding). Default: a
+`smooth` needs as many rows as it has coefficients (`segments + degree` — with fewer, the penalty alone decides the
+curve); the other types have no floor. `minRows: 0` switches it off. The run log counts the change points it
+emptied (`forward fit over … change point(s), n of them with fewer than fit.minRows …`). Encodings ignore it: a thin
+level is shrunk towards its parent instead (`fit.minRows` info). Part of the plan hash when declared.
 A `type: svd`, `type: quantileTransform`, `type: smooth` or `type: spectralEmbedding` block inherits this `mode` unless it declares its own (see *SVD / PCA*,
 *Quantile transform* and *Smooth curve*); the other population types (factorization / discretize) are always static and are
 unaffected.
@@ -751,7 +764,13 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
   is shrunk to the line, a clear non-linear signal keeps its shape. A declared number fixes it (`λ = σ²/τ²`, so the
   same number smooths a small sample more than a large one). The chosen value, the effective degrees of freedom
   (`edf`: `order` = fully shrunk, `segments + degree` = unpenalised) and the residual variance are in the artifact
-  and the run log.
+  and the run log. When the data shows no curvature (or the key takes a few values only) the criterion flattens
+  into a plateau towards `λ → ∞` and has no minimum to locate: a best strength REML cannot tell from an end of its
+  search (16 decades around `tr(XᵀX) / tr(P)`) is reported **as that end**, marked `limit: polynomial` (or
+  `unpenalised` at the other end) in the artifact and the log — the curve is the penalty's polynomial either way,
+  and the strength is a fixed number rather than wherever on the plateau rounding puts a minimiser. When you
+  reproduce a curve elsewhere, compare curves, not strengths: away from the limits REML locates `log10 λ` to about
+  1e-4, which moves the curve by about 1e-6.
 - **Execution.** A row contributes the vector `[B(x), y]` to the same (n, Σz, Σzzᵀ) accumulator an `svd` block uses,
   which holds `XᵀX`, `Xᵀy` and `yᵀy` — everything the solve *and* the REML criterion need. No row leaves the
   workers, the block shares the fit stage's one Combine with the svd blocks, and the small penalised system
@@ -776,18 +795,36 @@ shrinks towards as `λ` grows: a constant (1), a straight line (2, the default),
   `forward` the moments are kept per time block and the curve is re-solved for every block window a row may read —
   the complete blocks within `fit.window` whose **targets are known at predictAt** (the target's settlement and
   ingestion lag delays the readable blocks, as for a forward encoding), the row's own block excluded; `minBlocks` /
-  `minHistory` as for svd, and `λ` is re-chosen per window under `reml`. `fold` / `expanding` are rejected
+  `minHistory` / `minRows` as for svd (a curve's default `minRows` is its number of coefficients — see *Forward
+  block fits*), and `λ` is re-chosen per window under `reml`. **Without `fit.window` the curve is fitted on the
+  whole history**: once years of blocks have accumulated one more block hardly moves it, so it is close to a fixed
+  non-linear transform of the key. To follow a relation that drifts, declare a rolling `fit.window` (`P730D`,
+  say). `fold` / `expanding` are rejected
   (`smooth.fit.mode`). The artifact `<planHash>/<block>.smooth.json` holds the whole-input curve (range, segments,
   degree, penalty order, λ, edf, σ², n, coefficients) for a static serving run.
 - Several keys are several blocks; chain them through the residual (`target: <previous>_resid`) for an additive
   fit by hand. `method: isotonic` / `rff`, several inputs in one block (additive / tensor smooths) and
   category-varying curves are not implemented (`smooth.method`).
+- **A curve per category, by hand.** A row without a key takes no part in the fit and reads null, so a key masked
+  to one category fits that category's curve, and a row `expr` picks the row's own (both curves share a fit stage):
+
+  ```yaml
+  - {name: price_bulk,   scope: row, expr: "quantity > 1 ? start_price : null"}
+  - {name: price_single, scope: row, expr: "quantity > 1 ? null : start_price"}
+  - {name: curve_bulk,   scope: population, type: smooth, input: price_bulk,   target: sold, range: [0, 500]}
+  - {name: curve_single, scope: population, type: smooth, input: price_single, target: sold, range: [0, 500]}
+  - {name: price_curve_by_kind, scope: row, expr: "quantity > 1 ? curve_bulk : curve_single"}
+  ```
+- **The residual alone.** `outputs: [residual]` emits no curve column. It is the form to use when the *key* is
+  known only after the event (a closing price): its curve would be an `availability.violation` as an output, while
+  the residual — the target net of that key's curve — is consumed as an encoding target like any other.
 
 ### Sequences of values (population, types: transitionStats, spectralEmbedding)
 
 Two population types read the **values an entity takes one after another** — a seller's grades, a machine's states,
 a customer's plan changes: `sequenceOf: {entity, field}` names the entity (`entities[].name`) and a categorical field
-(discretize a numeric one first). Both are built on the entity's previous values, an ordinary `lag` that the block
+— a string, a boolean or an integer code, which includes the INT64 column of a `type: bin` row block or of a
+`discretize` block (a continuous numeric field must be binned first). Both are built on the entity's previous values, an ordinary `lag` that the block
 expands under its own name as intermediate columns (`<name>_all_prev_lag<i>`, most recent first), so they need no
 keyed pass of their own and schedule like the blocks they stand for.
 
@@ -809,7 +846,8 @@ case of *Shrinkage*, `p(level) = (counts + λ · p(parent)) / (n + λ)` with `λ
 is strictly past, leak-checked and windowless like any expanding encoding, and a row reads exactly what the explicit
 `lag` + `encoding` blocks would read. Without `blend` (or with `perEntity: false`) the transitions are pooled over
 entities: `(state) → … → marginal`. `{toValueProb: v}` emits the probability of one next value (0 when it has no
-mass, null when nothing is known yet); `distribution` emits the whole map. An entity's first event has no previous
+mass, null when nothing is known yet) — `v` is written as the field holds it, a number for an integer code
+(`{toValueProb: 0}` → `<name>_to_0`); `distribution` emits the whole map. An entity's first event has no previous
 value, so its state levels are empty and it reads the marginal; a state never seen before reads its parent. It is
 always expanding, whatever the top-level `fit.mode` (a value distribution has no static form). When the field is an
 outcome the usual window shift applies to the lag and to the counted transitions alike.
@@ -841,8 +879,13 @@ under `fit.mode: forward`, where a row reads the complete blocks before it and t
 — and the dense eigenproblem is solved on one worker: cubic in the distinct values, hence the cap. The cap is
 applied before the pairs are counted (one extra pass over the fit input ranks the values by co-occurrence mass), so
 the Combine state is bounded by `maxValues` rather than by the field's cardinality; under `fit.mode: forward` those
-values are chosen over the whole input while the counts stay per block. Artifact
-`<planHash>/<block>.spectral.json` (values with their coordinates, eigenvalues, pair count).
+values are chosen over the whole input while the counts stay per block — when the field has more values than
+`maxValues`, *which* values are embedded therefore depends on the whole input, the one thing in a forward embedding
+that is not walk-forward (the `fit.mode.forward` info states it). Artifact
+`<planHash>/<block>.spectral.json` (values with their coordinates, eigenvalues, pair count). A PPMI matrix is not
+definite: some of the components of largest |eigenvalue| may have a **negative** eigenvalue, and the artifact's
+`eigenvalues` (one per coordinate, in column order) carry the sign. Distances between coordinates are meaningful
+for every component; a dot product reproduces the PPMI only over the components of positive eigenvalue.
 
 ### Shrinkage and key lattices (population)
 

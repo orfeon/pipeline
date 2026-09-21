@@ -58,6 +58,8 @@ public final class Spectral implements Serializable, FitArtifact.Model {
     public static final class PairCounts implements Serializable {
         public final TreeMap<String, TreeMap<String, Long>> counts = new TreeMap<>();
         public long pairs;
+        /** The rows that contributed (one row adds a pair per previous value in its window): what {@code fit.minRows} counts. */
+        public long rows;
         /**
          * Every distinct value the state holds. {@link #counts} keys only the smaller value of each pair, so its
          * size is not the vocabulary: one value that sorts before every other absorbs the whole state into a
@@ -81,6 +83,7 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             }
             values.addAll(other.values);
             pairs += other.pairs;
+            rows += other.rows;
             bound();
         }
 
@@ -112,6 +115,7 @@ public final class Spectral implements Serializable, FitArtifact.Model {
             if (sign < 0) throw new UnsupportedOperationException("pair counts are not evicted");
             final String[] values = (String[]) contribution;
             for (int i = 1; i < values.length; i++) state.add(values[0], values[i], 1);
+            if (values.length > 1) state.rows++;
         }
 
         @Override

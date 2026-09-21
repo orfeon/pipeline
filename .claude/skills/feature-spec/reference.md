@@ -300,14 +300,23 @@ of the target at the row's key (a feature: only the key is read from the row its
 curve (reads the row's own target: an intermediate when another block consumes it, a label under
 `output.roles.label`, otherwise `availability.violation`). A penalised B-spline regression solved from sufficient
 statistics (it shares the svd blocks' Combine; no row leaves the workers); `segments + degree` ≤ 64. Under
-`forward` the readable blocks are delayed by the target's settlement + ingestion lag and λ is re-chosen per window.
-Missing key → null; a fit with ≤ `penalty.order` rows → null everywhere. Artifact `<block>.smooth.json` (λ, edf,
-σ², coefficients).
+`forward` the readable blocks are delayed by the target's settlement + ingestion lag and λ is re-chosen per window;
+without `fit.window` the curve is fitted on the whole history and soon stops moving — declare a rolling window
+(`P730D`) to follow a relation that drifts. Missing key → null; a fit over fewer rows than `fit.minRows` (default:
+the number of coefficients, `segments + degree`; `0` = off) → null for the rows that read it. Artifact
+`<block>.smooth.json` (λ, edf, σ², coefficients, and `limit: polynomial | unpenalised` when REML could not tell its
+best strength from an end of its search — λ is then that end, a fixed number; compare curves, not strengths, when you
+reproduce a fit). `outputs: [residual]` alone (no curve column) is the form for a key known only after the event: its
+curve cannot be an output, its residual is an encoding target like any other. A curve per category: mask the key
+with a row `expr` (`cond ? key : null` — a row without a key takes no part in the fit), fit one block per mask, pick
+the row's own with another `expr`.
 
 ### `type: transitionStats` (always expanding)
 
-`sequenceOf: {entity, field}` (an `entities[].name` and a categorical field), `order` (previous values that make
-the state, 1..4, default 1), `emit: [{toValueProb: <value>}, distribution]` (required), `blend: {perEntity: true,
+`sequenceOf: {entity, field}` (an `entities[].name` and a categorical field: string, boolean or an integer code —
+the INT64 column of a `type: bin` / `discretize` block qualifies), `order` (previous values that make
+the state, 1..4, default 1), `emit: [{toValueProb: <value>}, distribution]` (required; the value as the field holds
+it, `{toValueProb: 0}` for an integer code), `blend: {perEntity: true,
 priorWeight: 20}` (optional; absent or `perEntity: false` = transitions pooled over entities). Output float64
 `<name>_to_<value>` = P(next value = value | the entity's previous value(s)), and the map `<name>_to` for
 `distribution`. Sugar for a `lag` of the entity plus an expanding `encoding` with `stats: [distribution]` keyed on
@@ -326,8 +335,11 @@ has no mass, null = nothing known yet; a first event reads the marginal. Interme
 a missing / unseen / capped value — including one the cap keeps but whose every partner it dropped (no co-occurrence
 row, so no position rather than the origin) — and for surplus columns when there are fewer values than `rank`. The
 cap is applied before the counts are accumulated (an extra pass ranks the values by co-occurrence mass; under
-`fit.mode: forward` over the whole input, the counts per block), so a high-cardinality field costs a pass, not the
-worker's memory. Artifact `<block>.spectral.json`.
+`fit.mode: forward` over the whole input, the counts per block — with more values than `maxValues`, which ones are
+embedded is the one part of a forward embedding that is not walk-forward), so a high-cardinality field costs a pass,
+not the worker's memory. Artifact `<block>.spectral.json`; its `eigenvalues` (one per coordinate) carry the sign — a
+PPMI matrix is not definite, so some components may have a negative eigenvalue: distances are meaningful for every
+component, a dot product reproduces the PPMI only over the positive ones.
 
 ## Availability expressions
 

@@ -979,6 +979,28 @@ public final class FeatureStages {
          */
         M fit(S state, boolean loud);
 
+        /** {@code fit.minRows}: a state fewer rows contributed to is not fitted — its rows read null (0 = no floor). */
+        long minRows();
+
+        /** The rows that contributed to a state (what {@link #minRows} counts). */
+        long rowsOf(S state);
+
+        /**
+         * {@link #fit} behind the {@code fit.minRows} floor: a state below it gets the family's "nothing fitted" model
+         * (the fit of an empty state), whose rows read null. The first blocks of a forward fit are where it bites — the
+         * input starts mid-block, so the first window may hold a handful of rows.
+         */
+        default M fitAbove(final S state, final boolean loud) {
+            if (minRows() > 0 && rowsOf(state) < minRows()) {
+                if (loud) {
+                    LOG.warn("{} {}: {} row(s) are fewer than fit.minRows {}; nothing is fitted, every row reads null",
+                            artifact().name(), block(), rowsOf(state), minRows());
+                }
+                return fit(family().create(), false);
+            }
+            return fit(state, loud);
+        }
+
         /** The loaded model as this block will apply it (quantileTransform takes the config's clip, not the artifact's). */
         default M adopt(final M model) {
             return model;
@@ -1009,11 +1031,16 @@ public final class FeatureStages {
         default ForwardModel<M> solve(final Map<Long, S> parts, final String planHash) {
             final BlockSeries<S> series = new BlockSeries<>(family(), parts);
             final S all = parts.size() == 1 ? parts.values().iterator().next() : series.total();
-            final M total = fit(all == null ? family().create() : all, true);
+            final M total = fitAbove(all == null ? family().create() : all, true);
             TreeMap<Long, M> byBlock = null;
             if (forward() != null) {
-                byBlock = series.models(forward().windowBlocks(), state -> fit(state, false));
-                LOG.info("{} {}: forward fit over {} block(s), {} change point(s)", artifact().name(), block(), parts.size(), byBlock.size());
+                final int[] belowFloor = {0};
+                byBlock = series.models(forward().windowBlocks(), state -> {
+                    if (minRows() > 0 && rowsOf(state) > 0 && rowsOf(state) < minRows()) belowFloor[0]++;
+                    return fitAbove(state, false);
+                });
+                LOG.info("{} {}: forward fit over {} block(s), {} change point(s){}", artifact().name(), block(), parts.size(), byBlock.size(),
+                        belowFloor[0] == 0 ? "" : ", " + belowFloor[0] + " of them with fewer than fit.minRows " + minRows() + " row(s): not fitted, their rows read null");
             }
             if (artifactUri() != null && (refit() || !artifact().exists(artifactUri(), planHash, block()))) {
                 artifact().write(artifactUri(), planHash, block(), total);
@@ -1402,7 +1429,7 @@ public final class FeatureStages {
      * themselves ({@link QuantileTransform#VALUES}, exact), gathered per time block — one block for a static fit.
      */
     record QuantileTransformSpec(String block, String column, String field, int bins, String distribution, double clip,
-                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis) implements ForwardFitBlock<Double, QuantileTransform.Values, QuantileTransform> {
+                                 String artifactUri, boolean refit, Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<Double, QuantileTransform.Values, QuantileTransform> {
         @Override
         public FitArtifact.Json<QuantileTransform> artifact() {
             return QuantileTransform.ARTIFACT;
@@ -1457,6 +1484,11 @@ public final class FeatureStages {
             return true;
         }
 
+        @Override
+        public long rowsOf(final QuantileTransform.Values values) {
+            return values.size();
+        }
+
         /** The values of every time block meet here (8 bytes per row, as the static fit always did). */
         @Override
         public QuantileTransform fit(final QuantileTransform.Values values, final boolean loud) {
@@ -1482,7 +1514,7 @@ public final class FeatureStages {
                     k.getOrDefault("distribution", QuantileTransform.UNIFORM),
                     Double.parseDouble(k.getOrDefault("clip", Double.toString(QuantileTransform.DEFAULT_CLIP))),
                     k.get("artifactUri"), "true".equals(k.get("refit")),
-                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
         }
         return specs;
     }
@@ -1495,10 +1527,15 @@ public final class FeatureStages {
      */
     record SvdSpec(String block, List<String> fields, String arrayField, int rank, boolean center, boolean standardize,
                    String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                   Forward forward, long predictOffsetMillis) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
+                   Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<double[], Svd.Moments, Svd> {
         @Override
         public FitArtifact.Json<Svd> artifact() {
             return Svd.ARTIFACT;
+        }
+
+        @Override
+        public long rowsOf(final Svd.Moments m) {
+            return m.n;
         }
 
         /**
@@ -1656,7 +1693,7 @@ public final class FeatureStages {
             specs.add(new SvdSpec(e.getKey(), k.containsKey("fields") ? List.of(k.get("fields").split(",")) : List.of(), k.get("arrayField"),
                     Integer.parseInt(k.get("rank")), Boolean.parseBoolean(k.getOrDefault("center", "true")),
                     Boolean.parseBoolean(k.getOrDefault("standardize", "false")), k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    forward, Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
         }
         return specs;
     }
@@ -1670,7 +1707,7 @@ public final class FeatureStages {
      */
     record SmoothSpec(String block, String field, String target, Smooth.Basis basis, int penaltyOrder, Double lambda,
                       String artifactUri, boolean refit, List<OutputColumn> columns, boolean[] residual,
-                      Forward forward, long predictOffsetMillis) implements ForwardFitBlock<double[], Svd.Moments, Smooth> {
+                      Forward forward, long predictOffsetMillis, long minRows) implements ForwardFitBlock<double[], Svd.Moments, Smooth> {
         @Override
         public FitArtifact.Json<Smooth> artifact() {
             return Smooth.ARTIFACT;
@@ -1716,13 +1753,18 @@ public final class FeatureStages {
             return false;
         }
 
+        @Override
+        public long rowsOf(final Svd.Moments m) {
+            return m.n;
+        }
+
         /** Solves the penalised system from the moments of a time block's rows. */
         @Override
         public Smooth fit(final Svd.Moments m, final boolean loud) {
             final Smooth fitted = Smooth.fit(m, basis, penaltyOrder, lambda, loud);
             if (loud) {
                 LOG.info("smooth {}: fitted {} coefficients on {} rows (λ = {}{}, edf = {})", block, fitted.coefficients.length, fitted.n,
-                        fitted.lambda, fitted.estimated ? " by REML" : "", fitted.edf);
+                        fitted.lambda, !fitted.estimated ? "" : fitted.limit == null ? " by REML" : " = the end of the REML search, the " + fitted.limit + " limit", fitted.edf);
             }
             return fitted;
         }
@@ -1758,7 +1800,7 @@ public final class FeatureStages {
             specs.add(new SmoothSpec(e.getKey(), k.get("field"), k.get("target"), basis, Integer.parseInt(k.get("penaltyOrder")),
                     Smooth.REML.equals(k.get("lambda")) ? null : Double.valueOf(k.get("lambda")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), residual,
-                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0"))));
+                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0"))));
         }
         return specs;
     }
@@ -1776,7 +1818,7 @@ public final class FeatureStages {
      */
     record SpectralSpec(String block, String field, List<String> path, String applied, int rank, int maxValues,
                         String artifactUri, boolean refit, List<OutputColumn> columns, int[] components,
-                        Forward forward, long predictOffsetMillis,
+                        Forward forward, long predictOffsetMillis, long minRows,
                         PCollectionView<Map<String, Long>> vocabulary) implements ForwardFitBlock<String[], Spectral.PairCounts, Spectral> {
         @Override
         public FitArtifact.Json<Spectral> artifact() {
@@ -1835,7 +1877,7 @@ public final class FeatureStages {
         @Override
         public SpectralSpec prepare(final PCollection<MElement> fitInput, final String prefix) {
             return new SpectralSpec(block, field, path, applied, rank, maxValues, artifactUri, refit, columns, components,
-                    forward, predictOffsetMillis, vocabularyView(fitInput, this, prefix));
+                    forward, predictOffsetMillis, minRows, vocabularyView(fitInput, this, prefix));
         }
 
         @Override
@@ -1865,6 +1907,12 @@ public final class FeatureStages {
         @Override
         public boolean fitsEmptyInput() {
             return false;
+        }
+
+        /** The rows that contributed at least one pair (a row adds one pair per previous value in its window). */
+        @Override
+        public long rowsOf(final Spectral.PairCounts counts) {
+            return counts.rows;
         }
 
         /** Factorises the pair counts of a time block's rows on one worker. */
@@ -1906,7 +1954,7 @@ public final class FeatureStages {
             specs.add(new SpectralSpec(e.getKey(), k.get("field"), List.of(k.get("path").split(",")), k.get("applied"),
                     Integer.parseInt(k.get("rank")), Integer.parseInt(k.get("maxValues")),
                     k.get("artifactUri"), "true".equals(k.get("refit")), e.getValue(), components,
-                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), null));
+                    Forward.of(e.getValue().get(0)), Long.parseLong(k.getOrDefault("predictOffsetMillis", "0")), Long.parseLong(k.getOrDefault("minRows", "0")), null));
         }
         return specs;
     }

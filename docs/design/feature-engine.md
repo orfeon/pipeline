@@ -1144,6 +1144,7 @@ merged state of those blocks solves to. `BlockSeries<S>` holds one `Summary` sta
 | `forward` | `(−∞, usable]` — the complete blocks whose inputs are known at predictAt, the row's own block excluded | merge of the prefix |
 | `forward` + `window` | `(usable − windowBlocks, usable]` | merge of the range |
 | `minBlocks` / `minHistory` | — | fewer observed blocks at or before `usable` → the row reads null |
+| `minRows` (lookup fits) | — | a state fewer rows contributed to is given the family's "nothing fitted" model — the fit of an empty state — by `ForwardFitBlock.fitAbove`, the one place both the whole-input fit and every change point go through; `rowsOf(state)` is the family's own count (`Moments.n`, `Values.size`, `PairCounts.rows`) |
 | `fold` by time | every block but `[b − purgeBlocks, b + purgeBlocks + embargoBlocks]` around the row's block `b` | the total minus the range |
 
 Only the monoid law is used (a range is *merged*, not differenced), which is what lets a non-invertible family

@@ -312,7 +312,7 @@ reads what the compile layer wrote into each column's `coordinates`.
      `SvdSpec`, `JointSpec` — one per keySet × window × target with `estimator: joint`, cells
      aggregated per key then solved on one worker by `JointFit`: `fit(fitInput)` → one side-input
      model, or `readArtifact` at `@Setup`; fold / forward joint models always re-fit; the blocks whose fit
-     state is a `Summary` family — `SvdSpec`, `QuantileTransformSpec`, `SmoothSpec` (the svd family again), `SpectralSpec` (pair counts) — are `SummaryFitBlock`s (all four `ForwardFitBlock`s: one shared fit geometry and one shared `FitArtifact.Json`) fitted
+     state is a `Summary` family — `SvdSpec`, `QuantileTransformSpec`, `SmoothSpec` (the svd family again), `SpectralSpec` (pair counts) — are `SummaryFitBlock`s (all four `ForwardFitBlock`s: one shared fit geometry, one shared `FitArtifact.Json`, and one floor — `fitAbove` gives a state fewer rows than the `minRows` coordinate contributed to the family's empty-state model, for the whole-input fit and every change point alike; `rowsOf(state)` is the family's own count) fitted
      together by `fitSummaryBlocks`: one `_Fit<Family>_Extract` pass + one `_Fit<Family>_Combine` per family
      keyed by (block, time block), `_Group` by block, `_Solve`, and ONE `_FitModelsView` list side input for
      all of them, so the stage's step count does not grow with the block count) → `FitApplyDoFn`

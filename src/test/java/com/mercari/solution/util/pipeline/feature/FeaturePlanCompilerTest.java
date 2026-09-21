@@ -2192,6 +2192,65 @@ public class FeaturePlanCompilerTest {
         Assertions.assertTrue(compile(SOURCES, withEncoding(blocks.replace("input: start_price\n", "input: start_price\n        distribution: normal\n"))).getDiagnostics().hasErrors());
     }
 
+    /**
+     * {@code fit.minRows}: the fewest rows a lookup fit is solved from. A curve defaults to its number of coefficients
+     * (fewer rows leave it to the penalty alone), the other types to no floor; a block's own value wins over the
+     * top-level one, 0 switches the floor off, and the types without a summary fit say that they ignore it.
+     */
+    @Test
+    public void testFitMinRows() {
+        final String blocks = """
+                  - name: price_curve
+                    scope: population
+                    type: smooth
+                    input: start_price
+                    target: final_price
+                    range: [0, 500]
+                    segments: 6
+                  - name: price_q
+                    scope: population
+                    type: quantileTransform
+                    input: start_price
+            """;
+        final FeaturePlan defaults = compile(SOURCES, withEncoding(blocks));
+        Assertions.assertFalse(defaults.getDiagnostics().hasErrors(), defaults::describe);
+        Assertions.assertEquals("9", column(defaults, "price_curve").getCoordinates().get("minRows"), "segments 6 + degree 3");
+        Assertions.assertNull(column(defaults, "price_q").getCoordinates().get("minRows"));
+        Assertions.assertTrue(defaults.describe().contains("fewer than 9 row(s)"), defaults::describe);
+
+        final FeaturePlan declared = compile(SOURCES, withEncoding(blocks
+                .replace("        segments: 6\n", "        segments: 6\n        fit: {minRows: 0}\n")
+                .replace("        type: quantileTransform\n", "        type: quantileTransform\n        fit: {minRows: 200}\n")));
+        Assertions.assertFalse(declared.getDiagnostics().hasErrors(), declared::describe);
+        Assertions.assertNull(column(declared, "price_curve").getCoordinates().get("minRows"));
+        Assertions.assertEquals("200", column(declared, "price_q").getCoordinates().get("minRows"));
+        // the floor is part of what is fitted: a different plan, a different artifact directory
+        Assertions.assertNotEquals(defaults.getHash(), declared.getHash());
+
+        // a top-level floor reaches every lookup fit that declares none of its own
+        final String topLevel = withEncoding(blocks.replace("        type: quantileTransform\n", "        type: quantileTransform\n        fit: {minRows: 200}\n"))
+                .replace("features:\n", "fit: {minRows: 30}\nfeatures:\n");
+        final FeaturePlan inherited = compile(SOURCES, topLevel);
+        Assertions.assertFalse(inherited.getDiagnostics().hasErrors(), inherited::describe);
+        Assertions.assertEquals("30", column(inherited, "price_curve").getCoordinates().get("minRows"));
+        Assertions.assertEquals("200", column(inherited, "price_q").getCoordinates().get("minRows"));
+        Assertions.assertTrue(hasCode(inherited, "fit.minRows"), inherited::describe);
+
+        final FeaturePlan negative = compile(SOURCES, withEncoding(blocks.replace("        segments: 6\n", "        segments: 6\n        fit: {minRows: -1}\n")));
+        Assertions.assertTrue(hasCode(negative, "fit.minRows"), negative::describe);
+        Assertions.assertTrue(negative.getDiagnostics().hasErrors());
+
+        final String binned = """
+                  - name: price_bin
+                    scope: population
+                    type: discretize
+                    input: start_price
+                    bins: 3
+                    fit: {minRows: 50}
+            """;
+        Assertions.assertTrue(hasCode(compile(SOURCES, withEncoding(binned)), "discretize.fit.minRows"));
+    }
+
     private static final String TRANSITION_BLOCK = """
                   - name: grade_next
                     scope: population

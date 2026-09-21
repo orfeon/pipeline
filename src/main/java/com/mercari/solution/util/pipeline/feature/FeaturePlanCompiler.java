@@ -312,6 +312,10 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.minHistory", "fit", "fit.minHistory is the minimum history of a fit.mode forward block, rounded up to whole blocks"
                     + " (an explicit minBlocks wins); expanding / static / fold fits have no blocks and ignore it");
         }
+        if (spec.fit.minRows != null) {
+            diagnostics.info("fit.minRows", "fit", "fit.minRows is the fewest rows a smooth / svd / quantileTransform / spectralEmbedding fit is solved from"
+                    + " (a block's own fit.minRows wins); encodings shrink a thin level instead and ignore it");
+        }
         if (spec.fit.groupBy != null && !entities.containsKey(spec.fit.groupBy)) {
             diagnostics.error("fit.groupBy", "fit", "fit.groupBy must reference an entity: " + spec.fit.groupBy);
         }
@@ -2701,6 +2705,8 @@ public final class FeaturePlanCompiler {
         if (path == null) return;
         if (!rejectEncodingParameters(def, true)) return;
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "spectralEmbedding", "the embedding is fitted", "eigendecomposition of the whole input's co-occurrence counts", true);
+        final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
+        final String minRowsPhrase = minRowsPhrase(minRows, null);
         final boolean forward = fitSpec.mode == FitMode.forward;
         final String applied = "previous".equals(of) ? path.get(0) : def.sequenceField;
         final String what = "spectralEmbedding counts the pairs of " + def.sequenceField + " within " + window + " step(s) of entity " + def.sequenceEntity
@@ -2710,16 +2716,18 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + "), re-solved for every row over the complete blocks"
                     + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose values are known at predictAt (the row's own block excluded)"
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + minRowsPhrase
                     // the vocabulary cap must be decided before the counts are accumulated (the state is quadratic in
                     // the values), which is one thing a forward fit reads from the whole input rather than per block
                     + "; the " + maxValues + " values counted (maxValues, by co-occurrence mass) are chosen over the whole input, the counts themselves per block"
+                    + " — when the field has more values than that, which of them are embedded depends on the whole input (the one part of the fit that is not walk-forward)"
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input embedding is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
             // the pairs are counted from every row's OWN value of the field, whichever value `of` looks up: an
             // outcome-like field therefore shapes the coordinates a training row reads (as svd reports for its inputs)
             final Ref fieldRef = resolve(def.sequenceField);
             final boolean outcome = fieldRef != null && isOutcomeLike(fieldRef);
-            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
                     + "; no target is read, but the neighbourhoods include the test period (fit.mode forward walks them)"
                     + (outcome ? "; '" + def.sequenceField + "' is outcome-like, so each training row's own outcome is one of the pairs behind"
                             + " the coordinates it reads — 'of: previous' changes which value is looked up, not what the fit counts (fit.mode forward does)" : ""));
@@ -2742,6 +2750,7 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("maxValues", Integer.toString(maxValues));
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
+            if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
             // only the embedded value is read from the row itself; the pairs are read through the fit
             addSelfInput(c, applied);
             for (final String reference : references) addPastInput(c, reference);
@@ -2847,6 +2856,9 @@ public final class FeaturePlanCompiler {
         }
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "smooth", "the curve is fitted", "penalised regression solved from the moments of the whole input", true);
         if (!valid) return;
+        // fewer rows than coefficients leave the curve to the penalty alone: the default floor of a curve
+        final int minRows = fitSpec.minRows == null ? segments + degree : fitSpec.minRows;
+        final String minRowsPhrase = minRowsPhrase(minRows, fitSpec.minRows == null ? "the number of coefficients" : null);
         final boolean forward = fitSpec.mode == FitMode.forward;
         final String what = "smooth fits " + (segments + degree) + " B-spline coefficients of degree " + degree + " over [" + lo + ", " + hi + "] (difference penalty of order " + order
                 + ", strength " + (Smooth.REML.equals(lambda) ? "chosen by REML" : lambda) + ") from the moments of (basis, target)";
@@ -2855,9 +2867,10 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves them over the complete blocks"
                     + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose targets are known at predictAt (the row's own block excluded)"
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + minRowsPhrase
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input curve is persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
-            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
                     + "; every training row's own target shapes the curve it reads (static-fit caveat): fit.mode forward reads the earlier time blocks only");
         }
 
@@ -2882,6 +2895,7 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("lambda", lambda);
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
+            if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
             addSelfInput(c, input);
             addPastInput(c, input);
             // the curve reads the targets of other rows (through the fit); the residual also reads the row's own
@@ -2925,6 +2939,8 @@ public final class FeaturePlanCompiler {
             }
         }
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "quantileTransform", "the quantiles are fitted", "quantile knots fitted on the whole input", true);
+        final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
+        final String minRowsPhrase = minRowsPhrase(minRows, null);
         final boolean forward = fitSpec.mode == FitMode.forward;
         if (forward) {
             final ForwardBlocks blocks = fitSpec.forwardBlocks();
@@ -2932,9 +2948,10 @@ public final class FeaturePlanCompiler {
                     + " quantile intervals over the complete blocks" + (fitSpec.window == null ? "" : " within " + fitSpec.window)
                     + " whose input is known at predictAt (the row's own block excluded)"
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + minRowsPhrase
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input knots are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
-            diagnostics.info("fit.mode.static", loc, "quantileTransform fits " + bins + " quantile intervals on the whole input" + artifactPhrase(fitSpec)
+            diagnostics.info("fit.mode.static", loc, "quantileTransform fits " + bins + " quantile intervals on the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
                     + (isOutcomeLike(ref) ? "; the input is outcome-like, so training rows' own outcomes shape the knots (static-fit caveat)" : ""));
         }
 
@@ -2951,6 +2968,7 @@ public final class FeaturePlanCompiler {
         if (clipCoordinate != null) c.coordinates.put("clip", clipCoordinate);
         if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
         if (fitSpec.refit) c.coordinates.put("refit", "true");
+        if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
         addSelfInput(c, input);
         addPastInput(c, input);
         finishStaticFitted(c, def);
@@ -3011,6 +3029,8 @@ public final class FeaturePlanCompiler {
         }
         final boolean center = def.center == null || def.center;
         final FeatureSpec.FitSpec fitSpec = parseLookupFit(def, "svd", "the components are fitted", "covariance eigendecomposition on the whole input", true);
+        final int minRows = fitSpec.minRows == null ? 0 : fitSpec.minRows;
+        final String minRowsPhrase = minRowsPhrase(minRows, null);
         final boolean forward = fitSpec.mode == FitMode.forward;
         final List<String> inputs = arrayField != null ? List.of(arrayField) : fields;
         boolean outcome = false;
@@ -3025,9 +3045,10 @@ public final class FeaturePlanCompiler {
             diagnostics.info("fit.mode.forward", loc, what + " per time block (" + blocks.describe() + ") and, for every row, re-solves them over the complete blocks"
                     + (fitSpec.window == null ? "" : " within " + fitSpec.window) + " whose inputs are known at predictAt (the row's own block excluded)"
                     + (fitSpec.minBlocksOf(blocks) <= 1 ? "" : "; rows with fewer than " + fitSpec.minBlocksOf(blocks) + " preceding blocks read null")
+                    + minRowsPhrase
                     + (fitSpec.artifactUri == null ? "" : "; the whole-input components are persisted under " + fitSpec.artifactUri + "/<planHash>/ for a static serving run"));
         } else {
-            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec)
+            diagnostics.info("fit.mode.static", loc, what + " over the whole input" + artifactPhrase(fitSpec) + minRowsPhrase
                     + (outcome ? "; an input is outcome-like, so training rows' own outcomes shape the components (static-fit caveat)" : ""));
         }
 
@@ -3066,6 +3087,7 @@ public final class FeaturePlanCompiler {
             c.coordinates.put("standardize", Boolean.toString(def.standardize));
             if (fitSpec.artifactUri != null) c.coordinates.put("artifactUri", fitSpec.artifactUri);
             if (fitSpec.refit) c.coordinates.put("refit", "true");
+            if (minRows > 0) c.coordinates.put("minRows", Integer.toString(minRows));
             for (final String f : inputs) {
                 addSelfInput(c, f);
                 addPastInput(c, f);
@@ -3135,6 +3157,17 @@ public final class FeaturePlanCompiler {
     }
 
     /**
+     * The {@code fit.minRows} clause of a lookup fit's report: empty without a floor.
+     *
+     * @param defaultReason what the floor is when the block declared none (null = declared)
+     */
+    private static String minRowsPhrase(final int minRows, final String defaultReason) {
+        if (minRows <= 0) return "";
+        return "; a fit over fewer than " + minRows + " row(s) is not solved and its rows read null (fit.minRows"
+                + (defaultReason == null ? "" : ", default: " + defaultReason + " — 0 = no floor") + ")";
+    }
+
+    /**
      * The fit block of a lookup-fitted population type (svd / quantileTransform / discretize / factorization): static
      * by default, {@code forward} when the type supports per-block fits ({@code forwardAllowed}: the block's
      * {@code fit.blocks} / {@code minBlocks} / {@code window} / {@code minHistory} inherit the top-level fit and are
@@ -3169,6 +3202,7 @@ public final class FeaturePlanCompiler {
             fitSpec.blockClock = spec.fit.blockClock;
             fitSpec.blockTicks = spec.fit.blockTicks;
             fitSpec.minBlocks = spec.fit.minBlocks;
+            fitSpec.minRows = spec.fit.minRows;
             fitSpec.window = spec.fit.window;
             fitSpec.minHistory = spec.fit.minHistory;
             FeatureSpec.FitSpec.parseForward(defFit, fitSpec, diagnostics, loc, spec.timeField);
@@ -3182,8 +3216,9 @@ public final class FeaturePlanCompiler {
                 diagnostics.info(codePrefix + ".fit.mode.static", loc, def.type + " declares fit.mode static while the top-level fit is forward, so "
                         + fitted + " on the whole input; drop the block's fit.mode to walk it forward with the rest of the spec");
             }
-        } else if (defFit != null && defFit.has("window")) {
-            diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");
+        } else if (defFit != null) {
+            if (defFit.has("window")) diagnostics.warning(codePrefix + ".fit.window", loc, "fit.window is not implemented for " + def.type + " and ignored (" + fitted + " on the whole input)");
+            if (defFit.has("minRows")) diagnostics.warning(codePrefix + ".fit.minRows", loc, "fit.minRows is not implemented for " + def.type + " and ignored (smooth / svd / quantileTransform / spectralEmbedding take it)");
         }
         if (mode != FitMode.statik && !(forwardAllowed && mode == FitMode.forward)) {
             diagnostics.error(codePrefix + ".fit.mode", loc, def.type + " requires fit.mode static" + (forwardAllowed ? " | forward" : "") + " (" + why + "); "

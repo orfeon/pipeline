@@ -147,6 +147,42 @@ public class SmoothTest {
         for (double x = 0.5; x < 10; x += 0.5) Assertions.assertEquals(2 + 0.5 * x, noiseless.curve(x), 1e-6);
     }
 
+    /**
+     * A criterion still falling at the heavy end of the search has no minimum to locate — the curve is the penalty's
+     * polynomial whatever strength is reported, and a minimiser would return whichever point of the plateau rounding
+     * favours. The fit reports the end of the search itself and says so; an interior minimum carries no mark.
+     */
+    @Test
+    public void testRemlAtTheEndOfTheSearchIsMarked() {
+        // a key that takes three values cannot tell a curve from the line through them
+        final int n = 600;
+        final double[] x = new double[n], y = new double[n];
+        final java.util.Random random = new java.util.Random(11);
+        for (int i = 0; i < n; i++) {
+            x[i] = 2 + 3 * (i % 3);
+            y[i] = 1 + 0.5 * x[i] + 0.3 * random.nextGaussian();
+        }
+        final Smooth line = Smooth.fit(moments(CUBIC, x, y), CUBIC, 2, null, true);
+        Assertions.assertTrue(line.estimated);
+        Assertions.assertEquals(Smooth.POLYNOMIAL, line.limit, "λ = " + line.lambda + ", edf = " + line.edf);
+        Assertions.assertEquals(2, line.edf, 1e-3);
+        for (final double at : new double[]{2, 5, 8}) Assertions.assertEquals(1 + 0.5 * at, line.curve(at), 0.05);
+        // the same rows in another order: the same strength to the last bit, which a refinement on the plateau does not give
+        final double[] xr = new double[n], yr = new double[n];
+        for (int i = 0; i < n; i++) {
+            xr[i] = x[n - 1 - i];
+            yr[i] = y[n - 1 - i];
+        }
+        Assertions.assertEquals(line.lambda, Smooth.fit(moments(CUBIC, xr, yr), CUBIC, 2, null, true).lambda, line.lambda * 1e-9);
+        Assertions.assertEquals(Smooth.POLYNOMIAL, Smooth.fromJson(line.toJson()).limit);
+
+        final double[][] xy = sample(3000, 3, Math::sin, 0.3);
+        final Smooth interior = Smooth.fit(moments(CUBIC, xy[0], xy[1]), CUBIC, 2, null, true);
+        Assertions.assertNull(interior.limit);
+        Assertions.assertFalse(interior.toJson().has("limit"));
+        Assertions.assertNull(Smooth.fit(moments(CUBIC, x, y), CUBIC, 2, 5d, true).limit, "a declared strength is not searched");
+    }
+
     /** log|M| by Gaussian elimination with partial pivoting (M positive definite here). */
     private static double logDeterminant(final double[][] input) {
         final int m = input.length;

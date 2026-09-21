@@ -259,6 +259,11 @@ The three forward knobs, all in the plan hash:
 - `minBlocks: n` or `minHistory: P180D` (rounded up to blocks; `minBlocks` wins) — rows with fewer preceding
   blocks that carry data read null instead of a model fitted on a handful of rows. Decide what the consumer does with
   those nulls (`nullPolicy`, or drop the warm-up period from training).
+- `minRows: n` — the same floor counted in **rows**, for `smooth` / `svd` / `quantileTransform` / `spectralEmbedding`:
+  blocks are cut from the epoch, so the first block of an input is a fraction of one, and a sparse key leaves few rows
+  even in a full block. A fit fewer rows contributed to is not solved and its rows read null. A `smooth` defaults to
+  its number of coefficients (`segments + degree`), the others to no floor; `0` switches it off. The run log counts
+  the change points it emptied. Set it when a backtest starts close to the beginning of the data.
 
 Reading the plan: `fit.mode.forward` (info) states per block what it reads, `windowBlocks` / `minBlocks` /
 `forwardLagMillis` are in the column coordinates — an **outcome** input delays the readable blocks by its settlement
