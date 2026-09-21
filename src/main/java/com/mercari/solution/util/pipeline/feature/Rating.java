@@ -201,8 +201,35 @@ public final class Rating implements Serializable {
                 List.of(new Member(null, playerKeys, m, s, tau != null ? tau : defaultTau(s))));
     }
 
-    /** The rating a column's coordinates describe (written by {@code FeaturePlanCompiler}, defaults resolved there). */
+    /**
+     * The rating a column's coordinates describe (written by {@code FeaturePlanCompiler}, defaults resolved there). A
+     * team is the two coordinates {@code teamPool} (the rated player's pool) and {@code teamMembers}
+     * ({@link #encodeMembers}); without them the rating is one of players, as it always was.
+     */
     public static Rating of(final Map<String, String> coordinates) {
+        final Rating players = playersOf(coordinates);
+        final String members = coordinates.get("teamMembers");
+        return members == null ? players : players.withTeam(coordinates.get("teamPool"), decodeMembers(members));
+    }
+
+    /** {@code pool|key,key|mu|sigma|tau} per member, joined by {@code ;} (names are checked for the separators at compile time). */
+    public static String encodeMembers(final List<Member> members) {
+        final List<String> parts = new ArrayList<>();
+        for (final Member m : members) parts.add(m.pool() + "|" + String.join(",", m.keys()) + "|" + m.mu() + "|" + m.sigma() + "|" + m.tau());
+        return String.join(";", parts);
+    }
+
+    static List<Member> decodeMembers(final String text) {
+        final List<Member> members = new ArrayList<>();
+        for (final String part : text.split(";")) {
+            final String[] f = part.split("\\|");
+            if (f.length != 5) throw new IllegalArgumentException("not a team member (pool|keys|mu|sigma|tau): " + part);
+            members.add(new Member(f[0], List.of(f[1].split(",")), Double.parseDouble(f[2]), Double.parseDouble(f[3]), Double.parseDouble(f[4])));
+        }
+        return members;
+    }
+
+    private static Rating playersOf(final Map<String, String> coordinates) {
         return of(Method.valueOf(coordinates.get("method")), !"descending".equals(coordinates.get("order")),
                 number(coordinates, "mu"), number(coordinates, "sigma"), number(coordinates, "beta"), number(coordinates, "tau"),
                 number(coordinates, "kFactor"), number(coordinates, "scale"),

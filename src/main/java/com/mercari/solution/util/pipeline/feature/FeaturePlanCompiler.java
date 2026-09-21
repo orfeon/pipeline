@@ -1552,6 +1552,7 @@ public final class FeaturePlanCompiler {
                 valid = false;
             }
         }
+        if (!validateRatingTeam(def, entity, op, elo, singleField)) valid = false;
         if (!valid) return;
 
         final double mu = op.mu != null ? op.mu : Rating.defaultMu(method);
@@ -1583,6 +1584,23 @@ public final class FeaturePlanCompiler {
         for (final String key : contest.keys()) contestKeys.add(canonicalOf(key));
         shared.put("playerKeys", String.join(",", playerKeys));
         shared.put("contestKeys", String.join(",", contestKeys));
+        // a team: the block's entity and the `with` entities of the same row, each with a prior and a drift of its own
+        // (the op's unless declared). Without `with` neither coordinate is written — the rating, its state keys and its
+        // columns are those of a rating of players
+        final List<EntityDef> teamEntities = new ArrayList<>();
+        if (!op.with.isEmpty()) {
+            final double tau = op.tau != null ? op.tau : Rating.defaultTau(sigma);
+            final List<Rating.Member> members = new ArrayList<>();
+            for (final FeatureSpec.TeamMember m : op.with) {
+                final EntityDef member = entities.get(m.entity);
+                final List<String> keys = new ArrayList<>();
+                for (final String key : member.keys()) keys.add(canonicalOf(key));
+                members.add(new Rating.Member(member.name(), keys, m.mu != null ? m.mu : mu, m.sigma != null ? m.sigma : sigma, m.tau != null ? m.tau : tau));
+                teamEntities.add(member);
+            }
+            shared.put("teamPool", entity.name());
+            shared.put("teamMembers", Rating.encodeMembers(members));
+        }
 
         // `as` names the field segment; without it the op is part of the name (the outcome field may feed other ops)
         final String segment = op.as != null && singleField ? op.as : displayName(field) + "_rating";
@@ -1595,17 +1613,138 @@ public final class FeaturePlanCompiler {
                     + segment + "' with different parameters (" + previous + " vs " + shared + "): they would share one running state — name them apart with as:");
             return;
         }
-        for (final String func : funcs) {
-            final OutputColumn c = newColumn(def.name, Scope.sequence, "rating", stateKey + "_" + func,
-                    "count".equals(func) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
-            c.coordinates.put("func", func);
+        // the readouts: the rated player's (index 0, the names a rating of players has), then each member's under its
+        // entity name, then the team's. Every column folds the same contests, so every one carries all the members' keys
+        // — as past inputs, and of the current row too: the columns of one op share ONE fold pointer (stateKey), so
+        // they must share one availability contract. A column whose self side were later than the others' would be
+        // classified apart (no window shift, or a runtime filter) and advance the shared state past their near edge
+        record Readout(String segment, String func, int member) {}
+        final List<Readout> readouts = new ArrayList<>();
+        for (final String func : funcs) readouts.add(new Readout("", func, 0));
+        for (int j = 0; j < teamEntities.size(); j++) {
+            for (final String func : funcs) readouts.add(new Readout(teamEntities.get(j).name() + "_", func, j + 1));
+        }
+        for (final String func : op.team) readouts.add(new Readout("team_", func, -1));
+        for (final Readout r : readouts) {
+            final OutputColumn c = newColumn(def.name, Scope.sequence, "rating", stateKey + "_" + r.segment() + r.func(),
+                    "count".equals(r.func()) ? Schema.FieldType.INT64 : Schema.FieldType.FLOAT64, computeAt);
+            c.coordinates.put("func", r.func());
             c.coordinates.putAll(shared);
             c.coordinates.put("stateKey", stateKey);
+            if (r.member() < 0) {
+                c.coordinates.put("readout", "team");
+            } else if (r.member() > 0) {
+                c.coordinates.put("readout", "member");
+                c.coordinates.put("member", teamEntities.get(r.member() - 1).name());
+                c.coordinates.put("memberIndex", Integer.toString(r.member()));
+            }
             addPastInput(c, field);
             for (final String key : entity.keys()) addPastInput(c, key);
             for (final String key : contest.keys()) addPastInput(c, key);
+            for (final EntityDef member : teamEntities) {
+                for (final String key : member.keys()) {
+                    addPastInput(c, key);
+                    addSelfInput(c, key);
+                }
+            }
             finishSequence(c, def, entity, window, null, reducedKey, op, List.of(), true);
         }
+        if (!teamEntities.isEmpty() && hintedBlocks.add("sequence.rating.with:" + stateKey)) {
+            final List<String> names = new ArrayList<>(List.of(entity.name()));
+            for (final EntityDef member : teamEntities) names.add(member.name());
+            diagnostics.info("sequence.rating.with", loc, "rating '" + segment + "' rates a row as the team " + String.join(" + ", names)
+                    + ": its strength is the sum of the members' ratings and a contest's change is shared among them by their part of the team's variance"
+                    + " (a well-known member hardly moves, an uncertain one takes the update). The members' levels are identified up to a shift between the"
+                    + " entities — read a member relative to its contest (a context block over the column), or the team's sum (team: [mu, sigma])");
+        }
+    }
+
+    /**
+     * The separators no entity or key name of a team may hold: those of the {@code teamMembers} coordinate
+     * ({@link Rating#encodeMembers}) and those of a state key ({@code U+0001} between a pool and its key,
+     * {@code U+0002} between the members of a team), which {@code Rating.withTeam} rejects by throwing.
+     */
+    private static final Pattern TEAM_SEPARATORS = Pattern.compile("[|;,\\u0001\\u0002]");
+
+    /**
+     * {@code with} / {@code team} of a rating op (code {@code sequence.rating.with}): the members are entities of the
+     * spec other than the block's, each once; a team needs the variance the Bayesian methods keep (not elo), and a
+     * name of its own — its columns are the op's segment plus the member, which the default segment
+     * {@code <field>_rating} makes both long and ambiguous.
+     */
+    private boolean validateRatingTeam(final FeatureDef def, final EntityDef entity, final Op op, final boolean elo, final boolean singleField) {
+        final String loc = def.location();
+        boolean valid = true;
+        if (op.withInvalid != null) {
+            diagnostics.error("sequence.rating.with", loc, op.withInvalid);
+            valid = false;
+        }
+        if (op.with.isEmpty()) {
+            if (!op.team.isEmpty()) {
+                diagnostics.error("sequence.rating.with", loc, "team: " + op.team + " reads the rating of a team: declare its members with with: [<entity>, ...]");
+                valid = false;
+            }
+            return valid;
+        }
+        if (elo) {
+            diagnostics.error("sequence.rating.with", loc, "a team's change is shared among its members by their variance, which elo does not keep: rate a team with plackettLuce or bradleyTerry");
+            valid = false;
+        }
+        if (op.as == null || !singleField) {
+            diagnostics.error("sequence.rating.with", loc, "a rating with a team needs as: (and one field): its columns are <block>_<window>_<as>_<func> for the "
+                    + entity.name() + ", <block>_<window>_<as>_<member>_<func> for a member and <block>_<window>_<as>_team_<func> for the team");
+            valid = false;
+        }
+        final Set<String> seen = new HashSet<>();
+        // the rated player's pool is the block's entity name: checked once, not once per member
+        if (!validTeamName(entity.name(), loc)) valid = false;
+        for (final FeatureSpec.TeamMember m : op.with) {
+            final EntityDef member = m.entity == null ? null : entities.get(m.entity);
+            if (member == null) {
+                diagnostics.error("sequence.rating.with", loc, "with names entities[].name — the other entities of the row rated with " + entity.name() + ": " + m.entity
+                        + " (available: " + entities.keySet() + ")");
+                valid = false;
+                continue;
+            }
+            if (member.name().equals(entity.name())) {
+                diagnostics.error("sequence.rating.with", loc, "with lists the OTHER members of the team: " + entity.name() + " is the block's entity, the rated player itself");
+                valid = false;
+            } else if (!seen.add(member.name())) {
+                diagnostics.error("sequence.rating.with", loc, "with names " + member.name() + " twice");
+                valid = false;
+            }
+            if ("team".equals(member.name())) {
+                diagnostics.error("sequence.rating.with", loc, "an entity named 'team' cannot be a member: <as>_team_<func> are the columns of the whole team");
+                valid = false;
+            }
+            if (!validTeamName(member.name(), loc)) valid = false;
+            for (final String key : member.keys()) if (!validTeamName(key, loc)) valid = false;
+            if (!m.unknown.isEmpty()) {
+                diagnostics.error("sequence.rating.with", loc, "unknown key(s) " + m.unknown + " of member " + member.name()
+                        + " (accepted: " + String.join(", ", FeatureSpec.TEAM_MEMBER_KEYS) + ")");
+                valid = false;
+            }
+            if (m.mu != null && !Double.isFinite(m.mu) || m.sigma != null && !(m.sigma > 0 && Double.isFinite(m.sigma)) || m.tau != null && !(m.tau >= 0 && Double.isFinite(m.tau))) {
+                diagnostics.error("sequence.rating.with", loc, "member " + member.name() + " needs a finite mu, sigma > 0 and tau >= 0: mu=" + m.mu + " sigma=" + m.sigma + " tau=" + m.tau);
+                valid = false;
+            }
+        }
+        for (final String func : op.team) {
+            if (!Rating.TEAM_FUNCS.contains(func)) {
+                diagnostics.error("sequence.rating.with", loc, "unknown team readout: " + func + " (available: " + String.join(" | ", Rating.TEAM_FUNCS)
+                        + " — mu is the sum of the members' ratings, sigma the uncertainty of that sum)");
+                valid = false;
+            }
+        }
+        return valid;
+    }
+
+    /** Whether a name of a team (an entity's, or one of its key fields') is free of the separators the state keys use. */
+    private boolean validTeamName(final String name, final String loc) {
+        if (!TEAM_SEPARATORS.matcher(name).find()) return true;
+        diagnostics.error("sequence.rating.with", loc, "a team's entity and key names cannot hold '|', ';', ','"
+                + " or the state key separators U+0001 / U+0002 (two members would meet on one state key): " + name);
+        return false;
     }
 
     /** The rating ops already expanded, by their {@code stateKey}: the coordinates behind one running state. */

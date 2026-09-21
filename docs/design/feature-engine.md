@@ -309,8 +309,14 @@ naturally. A stateful variant is the streaming follow-up (§6, §9.4.6).
   `adjacent` | `mean`); `adjacent` is defined on the outcomes (the opponents at the player's own, the nearest better
   and the nearest worse outcome), never on the position of an entry, so ties cannot make it order-dependent. The
   paper's alternative `γ = 1/k` for `plackettLuce` was examined and left out: under the default parameters
-  `σ/c ≈ 0.89/√k` exceeds `1/k` for every field, so it shrinks `sigma` less, not more. **Teams** (`Rating.withTeam`, the pure layer — the DSL does not reach it
-  yet): a row may be rated as the sum of several members, the rated player and other entities of the same row
+  `σ/c ≈ 0.89/√k` exceeds `1/k` for every field, so it shrinks `sigma` less, not more. **Teams** (`Rating.withTeam`; DSL `with:` / `team:` on the op → the coordinates
+  `teamPool` + `teamMembers` = `pool|keys|mu|sigma|tau;…`, written only when declared, and per column `readout` =
+  `member` (+ `member`, `memberIndex`) | `team` — absent for the rated player, whose columns keep the names and the
+  coordinates of a rating of players; `SequenceEvaluator.readRating` is the one place a column picks what it reads,
+  on the fold pointer and on the scan path alike; every column of the op carries all members' keys as past inputs —
+  since each folds the same contests — and as self inputs, whichever member it reads: the columns of one op share ONE
+  fold pointer, so their availability must be classified alike (a column left without the others' window shift would
+  advance the shared state past their near edge)): a row may be rated as the sum of several members, the rated player and other entities of the same row
   (`Rating.Member`: key fields, prior, drift, and a *pool* — the namespace of its keys in the one `State`, so a seller
   and an agent of one id stay apart; a rating without a team keeps its bare keys). `mu = Σ mu_j`, `sigma² = Σ v_j`,
   `beta` once per team; the update rules run on the teams **unchanged** (they only ever read an entry's `(m, v)`) and

@@ -779,6 +779,164 @@ public class RatingTest {
     /** Measured over the seeds 1..10: in the team 0.918 to 0.990, alone 0.683 to 0.919 (always lower, by 0.060 at least) - the bounds leave room. */
     private static final double TEAM_CORRELATION = 0.9, TEAM_MARGIN = 0.04;
 
+    // ------------------------------------------------------------------------------------------
+    // teams through the DSL: with / team on the rating op
+    // ------------------------------------------------------------------------------------------
+
+    /** The spec with an agent: a second entity of the same row, and one rating op in place of the three of {@link #SPEC}. */
+    private static String teamSpec(final String op) {
+        final int from = SPEC.indexOf("      - {type: rating"), to = SPEC.indexOf("  - name: past");
+        return (SPEC.substring(0, from) + op + "\n" + SPEC.substring(to))
+                .replace("fields: [session_id, seller_id, category,", "fields: [session_id, seller_id, agent_id, category,")
+                .replace("  - {name: seller, keys: [seller_id], minInterval: P30D}\n", "  - {name: seller, keys: [seller_id], minInterval: P30D}\n  - {name: agent, keys: [agent_id]}\n");
+    }
+
+    private static FeaturePlan compileTeam(final String op) {
+        return compileTeamSpec(teamSpec(op));
+    }
+
+    private static FeaturePlan compileTeamSpec(final String spec) {
+        return compileTeamSpec(spec, "{name: agent_id, type: string}");
+    }
+
+    /** @param agentField the sources declaration of the agent's key field */
+    private static FeaturePlan compileTeamSpec(final String spec, final String agentField) {
+        final JsonObject sources = Config.convertConfigJson(SOURCES.replace("      - {name: seller_id, type: string}\n",
+                "      - {name: seller_id, type: string}\n      - " + agentField + "\n"), Config.Format.yaml);
+        return FeaturePlanCompiler.compile(sources, Config.convertConfigJson(spec, Config.Format.yaml), null);
+    }
+
+    /**
+     * The columns of one rating op share ONE fold pointer, so they share one availability contract: every readout
+     * takes every member's keys from its own row, whichever member it reads. Here the agent is only known after the
+     * event. Were that the agent's columns' business alone, they would be classified apart — a violation carries no
+     * window shift — and, kept as intermediates by a consumer, advance the shared state to the row's own time: the
+     * seller's columns, correctly shifted, would then read contests whose outcome they must not know yet. With one
+     * contract the op stands or falls as a whole, and the evaluator refuses a state whose columns disagree on the shift.
+     */
+    @Test
+    public void testTeamColumnsShareOneAvailabilityContract() {
+        final FeaturePlan late = compileTeamSpec(teamSpec(DUO), "{name: agent_id, type: string, availableAt: after(event)}");
+        final List<OutputColumn> columns = late.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        Assertions.assertEquals(8, columns.size(), late::describe);
+        for (final OutputColumn c : columns) {
+            Assertions.assertEquals(OutputColumn.Status.violation, c.getStatus(), c.getCanonicalName() + "\n" + late.describe());
+            Assertions.assertNull(c.getWindowShift(), c.getCanonicalName());
+        }
+        // known before the event, the same columns all carry the one shift
+        final List<OutputColumn> shifted = compileTeam(DUO).getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        Assertions.assertEquals(1, shifted.stream().map(OutputColumn::getWindowShift).distinct().count());
+        Assertions.assertEquals(Duration.parse("P2DT40M"), shifted.get(0).getWindowShift());
+        new SequenceEvaluator(shifted).setup();
+
+        // the invariant where the state is shared: one column of the op without its shift is refused, not replayed
+        shifted.get(3).windowShift = null;
+        final IllegalStateException refused = Assertions.assertThrows(IllegalStateException.class, () -> new SequenceEvaluator(shifted).setup());
+        Assertions.assertTrue(refused.getMessage().contains("skill_all_duo") && refused.getMessage().contains("window shift"), refused.getMessage());
+        // ... and so is a column that reads a member the team does not have
+        final List<OutputColumn> columnsOfTwo = compileTeam(DUO).getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
+        columnsOfTwo.get(4).coordinates.put("memberIndex", "2");
+        Assertions.assertThrows(IllegalStateException.class, () -> new SequenceEvaluator(columnsOfTwo).setup());
+    }
+
+    private static final String DUO = "      - {type: rating, field: final_price, context: session, order: descending, as: duo, tau: 0.5,"
+            + " with: [{entity: agent, mu: 0, sigma: 4}], funcs: [mu, sigma, count], team: [mu, sigma]}";
+
+    @Test
+    public void testCompileTeam() {
+        final FeaturePlan plan = compileTeam(DUO);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        Assertions.assertTrue(hasCode(plan, "sequence.rating.with"), plan::describe);
+        // the rated player keeps the names and the readout of a rating of players; a member reads under its entity
+        // name, the team under `team`
+        final OutputColumn seller = plan.getColumn("skill_all_duo_mu"), agent = plan.getColumn("skill_all_duo_agent_sigma"), team = plan.getColumn("skill_all_duo_team_mu");
+        for (final String name : List.of("skill_all_duo_mu", "skill_all_duo_sigma", "skill_all_duo_count", "skill_all_duo_agent_mu", "skill_all_duo_agent_sigma",
+                "skill_all_duo_agent_count", "skill_all_duo_team_mu", "skill_all_duo_team_sigma")) {
+            Assertions.assertNotNull(plan.getColumn(name), () -> name + "\n" + plan.describe());
+        }
+        Assertions.assertEquals(8, plan.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).count());
+        Assertions.assertEquals(com.mercari.solution.module.Schema.Type.int64, plan.getColumn("skill_all_duo_agent_count").getFieldType().getType());
+        Assertions.assertNull(seller.getCoordinates().get("readout"));
+        Assertions.assertEquals("member", agent.getCoordinates().get("readout"));
+        Assertions.assertEquals("agent", agent.getCoordinates().get("member"));
+        Assertions.assertEquals("1", agent.getCoordinates().get("memberIndex"));
+        Assertions.assertEquals("team", team.getCoordinates().get("readout"));
+        // one state behind all of them: the same team, the same stage (the global key), the same shift
+        for (final OutputColumn c : List.of(seller, agent, team)) {
+            Assertions.assertEquals("seller", c.getCoordinates().get("teamPool"));
+            Assertions.assertEquals("agent|agent_id|0.0|4.0|0.5", c.getCoordinates().get("teamMembers"));
+            Assertions.assertEquals("skill_all_duo", c.getCoordinates().get("stateKey"));
+            Assertions.assertEquals("", c.getCoordinates().get("stageKeys"));
+            Assertions.assertTrue(c.getPastInputs().containsAll(List.of("final_price", "seller_id", "agent_id", "session_id")), c.getPastInputs().toString());
+            Assertions.assertEquals(OutputColumn.Status.windowShift, c.getStatus());
+            Assertions.assertEquals(2, Rating.of(c.getCoordinates()).members().size());
+        }
+        // the lineage of every column names both entities' keys (the contests it folds are made of them)
+        for (final OutputColumn c : List.of(seller, agent, team)) Assertions.assertTrue(c.getInputs().containsAll(List.of("seller_id", "agent_id")), c.getInputs().toString());
+        final Rating.Member member = Rating.of(team.getCoordinates()).members().get(1);
+        Assertions.assertEquals(new Rating.Member("agent", List.of("agent_id"), 0d, 4d, 0.5), member);
+
+        // a bare entity name: the op's prior and drift
+        final FeaturePlan bare = compileTeam(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [agent]"));
+        Assertions.assertFalse(bare.getDiagnostics().hasErrors(), bare::describe);
+        Assertions.assertEquals("agent|agent_id|25.0|" + 25d / 3 + "|0.5", bare.getColumn("skill_all_duo_mu").getCoordinates().get("teamMembers"));
+
+        // a rating without `with` is untouched by all this: not a coordinate differs
+        final OutputColumn before = compile(SPEC).getColumn("skill_all_final_price_rating_mu");
+        Assertions.assertNull(before.getCoordinates().get("teamMembers"));
+        Assertions.assertNull(before.getCoordinates().get("teamPool"));
+        Assertions.assertNull(before.getCoordinates().get("readout"));
+        Assertions.assertEquals(1, Rating.of(before.getCoordinates()).members().size());
+        // ... and the pools of a named window split a team's contests as they split a player's
+        final FeaturePlan pooled = compileTeamSpec(teamSpec(DUO).replace("    entity: seller\n    ops:\n      - {type: rating",
+                "    entity: seller\n    windows: [{filter: \"category = $self.category\"}]\n    ops:\n      - {type: rating"));
+        Assertions.assertFalse(pooled.getDiagnostics().hasErrors(), pooled::describe);
+        Assertions.assertEquals("category", pooled.getColumn("skill_all_duo_team_mu").getCoordinates().get("stageKeys"));
+    }
+
+    @Test
+    public void testCompileTeamErrors() {
+        final Map<String, String> cases = new java.util.LinkedHashMap<>();
+        cases.put(DUO.replace("entity: agent", "entity: nobody"), "an unknown entity");
+        cases.put(DUO.replace("entity: agent", "entity: seller"), "the block's own entity");
+        cases.put(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [agent, agent]"), "a member twice");
+        cases.put(DUO.replace("as: duo, tau: 0.5,", "as: duo, method: elo,"), "elo keeps no variance to share by");
+        cases.put(DUO.replace("as: duo, ", ""), "a team needs a name");
+        cases.put(DUO.replace(" with: [{entity: agent, mu: 0, sigma: 4}],", ""), "team readouts without a team");
+        cases.put(DUO.replace("team: [mu, sigma]", "team: [mu, count]"), "count is no team readout");
+        cases.put(DUO.replace("sigma: 4", "sigma: 0"), "a member's sigma");
+        cases.put(DUO.replace("sigma: 4", "sigma: 4, beta: 2"), "beta is the team's, not a member's");
+        cases.put(DUO.replace("with: [{entity: agent, mu: 0, sigma: 4}]", "with: [3]"), "neither a name nor a member");
+        cases.put(DUO.replace("team: [mu, sigma]", "team: [{mu: true}]"), "a team readout is a name: reported, not dropped");
+        for (final Map.Entry<String, String> e : cases.entrySet()) {
+            final FeaturePlan plan = compileTeam(e.getKey());
+            Assertions.assertTrue(plan.getDiagnostics().hasErrors() && hasCode(plan, "sequence.rating.with"), () -> e.getValue() + "\n" + plan.describe());
+            Assertions.assertTrue(plan.getColumns().stream().noneMatch(c -> "rating".equals(c.getOperator())), e.getValue());
+        }
+        // an entity name holding a separator of the state keys is a diagnostic, not a worker failing in Rating.withTeam
+        final FeaturePlan separator = compileTeamSpec(teamSpec(DUO).replace("{name: agent,", "{name: \"ag\\u0001ent\",").replace("entity: agent", "entity: \"ag\\u0001ent\""));
+        Assertions.assertTrue(separator.getDiagnostics().hasErrors() && hasCode(separator, "sequence.rating.with"), separator::describe);
+        Assertions.assertEquals(1, separator.getDiagnostics().getMessages().stream().filter(m -> m.code().equals("sequence.rating.with")).count(), "reported once");
+        // two ops of one name with different teams would share one state
+        Assertions.assertTrue(hasCode(compileTeam(DUO + "\n" + DUO.replace("sigma: 4", "sigma: 2").replace(", team: [mu, sigma]", "").replace("funcs: [mu, sigma, count]", "funcs: [delta]")),
+                "sequence.rating.as"));
+    }
+
+    /**
+     * The engine contract over teams: the running state (the fold pointer) equals a from-scratch replay, over the whole
+     * history and over the trimmed one, to the last bit — member and team readouts, a drift in time per member, rows
+     * without an agent (no contest for them, no member / team readout, the seller still read).
+     */
+    @Test
+    public void testIncrementalMatchesScanAndTrimmedWithTeams() {
+        final String ops = "      - {type: rating, field: final_price, context: session, order: descending, as: duo, tau: 1.5, tauPer: P1D,"
+                + " with: [{entity: agent, mu: 0, sigma: 4, tau: 0.5}], funcs: [mu, sigma, count, delta], team: [mu, sigma]}\n"
+                + "      - {type: rating, field: final_price, context: session, order: descending, method: bradleyTerry, pairs: adjacent, as: adj, with: [agent]}";
+        final FeaturePlan plan = compileTeam(ops);
+        Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
+        assertIncrementalMatchesScanAndTrimmed(plan, 4 + 4 + 2 + 2 + 2);
+    }
+
     @Test
     public void testContestProperties() {
         for (final Rating.Method method : Rating.Method.values()) {
@@ -1007,7 +1165,10 @@ public class RatingTest {
     }
 
     private static void assertIncrementalMatchesScanAndTrimmed(final String spec, final int expectedColumns) {
-        final FeaturePlan plan = compile(spec);
+        assertIncrementalMatchesScanAndTrimmed(compile(spec), expectedColumns);
+    }
+
+    private static void assertIncrementalMatchesScanAndTrimmed(final FeaturePlan plan, final int expectedColumns) {
         Assertions.assertFalse(plan.getDiagnostics().hasErrors(), plan::describe);
         final List<OutputColumn> columns = plan.getColumns().stream().filter(c -> "rating".equals(c.getOperator())).toList();
         Assertions.assertEquals(expectedColumns, columns.size(), plan::describe);
@@ -1039,6 +1200,7 @@ public class RatingTest {
                     row.put("session_id", random.nextInt(40) == 0 ? null : sessionId);
                     row.put("seller_id", random.nextInt(40) == 0 ? null : "seller" + random.nextInt(8));
                     row.put("final_price", random.nextInt(15) == 0 ? null : (double) random.nextInt(6));
+                    row.put("agent_id", random.nextInt(25) == 0 ? null : "agent" + random.nextInt(5));
                     final Map<String, Object> trimmedRow = new HashMap<>(row);
                     for (final OutputColumn c : columns) {
                         final Object incremental = evaluator.evaluateColumn(c, row, millis, history, state);
@@ -1046,7 +1208,12 @@ public class RatingTest {
                         // the same contests folded in the same order: equal to the last bit
                         Assertions.assertEquals(scan, incremental, c.getCanonicalName() + "@" + step);
                         Assertions.assertEquals(scan, trimmedEvaluator.evaluateColumn(c, trimmedRow, millis, trimmed, trimmedState), c.getCanonicalName() + "@" + step + " (trimmed)");
-                        if (row.get("seller_id") == null) Assertions.assertNull(scan, c.getCanonicalName());
+                        // a column reads null when the row lacks what it reads: the seller (the player's columns), the agent
+                        // (a member's), either (the team's)
+                        final String readout = c.getCoordinates().get("readout");
+                        final boolean missing = "team".equals(readout) ? row.get("seller_id") == null || row.get("agent_id") == null
+                                : "member".equals(readout) ? row.get("agent_id") == null : row.get("seller_id") == null;
+                        if (missing) Assertions.assertNull(scan, c.getCanonicalName());
                         if (c.getCanonicalName().endsWith("_count") && scan != null && (Long) scan > 0) rated++;
                         compared++;
                     }

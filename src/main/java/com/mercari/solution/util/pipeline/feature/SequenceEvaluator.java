@@ -75,6 +75,9 @@ public class SequenceEvaluator implements Serializable {
         String weightBy;
         /** rating: the update rule and its keys, or null. Its running state is a {@link Rating.State}, not a summary. */
         Rating rating;
+        /** rating: the team member the column reads (0 = the rated player), or the whole team. */
+        int ratingMember;
+        boolean ratingTeam;
         /**
          * The key of the running state in {@link KeyState}: the column's canonical name, or the one shared by the
          * components of a dynamics channel (one state, read out once per component column).
@@ -415,6 +418,28 @@ public class SequenceEvaluator implements Serializable {
             checkWindowContract(c, plan);
             plans.put(c.canonicalName, plan);
         }
+        checkSharedStates();
+    }
+
+    /**
+     * Columns that share one running state (the readouts of a rating op, the components of a dynamics channel) share
+     * its fold pointer: the first one read advances it to ITS near edge. They must therefore agree on the window shift
+     * — a column with a shorter one (a self side classified apart: a violation kept as an intermediate has none) would
+     * fold contests / events the others must not see yet, and hand them over without a word. The compiler gives the
+     * columns of one state one availability contract; this is that invariant, checked where the state is shared.
+     */
+    private void checkSharedStates() {
+        final Map<String, OutputColumn> first = new HashMap<>();
+        for (final OutputColumn c : columns) {
+            final ColumnPlan plan = plans.get(c.canonicalName);
+            if (plan.stateKey == null) continue;
+            final OutputColumn other = first.putIfAbsent(plan.stateKey, c);
+            if (other != null && plans.get(other.canonicalName).shiftMillis != plan.shiftMillis) {
+                throw new IllegalStateException("columns " + other.canonicalName + " and " + c.canonicalName + " share the running state '" + plan.stateKey
+                        + "' but not its window shift (" + plans.get(other.canonicalName).shiftMillis + " ms vs " + plan.shiftMillis + " ms): the shorter one"
+                        + " would advance the state past the other's near edge — the columns of one state need one availability contract (the same self and past inputs)");
+            }
+        }
     }
 
     /**
@@ -429,6 +454,9 @@ public class SequenceEvaluator implements Serializable {
      */
     private static void checkWindowContract(final OutputColumn c, final ColumnPlan plan) {
         if (plan.rating == null) return;
+        if (plan.ratingMember < 0 || plan.ratingMember >= plan.rating.members().size()) {
+            throw new IllegalStateException("rating column " + c.canonicalName + " reads member " + plan.ratingMember + " of a team of " + plan.rating.members().size());
+        }
         if (plan.maxEvents != null || plan.filterText != null || hasMaxAge(plan)) {
             throw new IllegalStateException("rating column " + c.canonicalName + " carries a window this evaluator cannot honour"
                     + " (maxEvents / filter / maxAge): the compiler rejects it with sequence.rating.window — admitting one means"
@@ -488,6 +516,8 @@ public class SequenceEvaluator implements Serializable {
             // pointer serves. Nothing here re-derives that contract — a column that breaks it is rejected by
             // checkWindowContract rather than quietly routed to a scan path that cannot honour it either.
             plan.rating = Rating.of(c.coordinates);
+            plan.ratingTeam = "team".equals(c.coordinates.get("readout"));
+            plan.ratingMember = c.coordinates.get("memberIndex") == null ? 0 : Integer.parseInt(c.coordinates.get("memberIndex"));
             plan.incremental = !forceScan;
         }
         return plan;
@@ -542,7 +572,7 @@ public class SequenceEvaluator implements Serializable {
         if (plan.incremental && state != null) {
             // a rating's running state is a Rating.State the fold pointer advances, not a summary
             if (plan.rating != null) {
-                return plan.rating.read(advanceRating(plan, state, nowMillis, history), plan.rating.player(row), plan.func, nowMillis);
+                return readRating(plan, advanceRating(plan, state, nowMillis, history), row, nowMillis);
             }
             final Serializable summary = advance(c, plan, state, nowMillis, history, row);
             return readStatistic(c, plan, summary == null ? plan.empty : summary, nowMillis);
@@ -572,6 +602,12 @@ public class SequenceEvaluator implements Serializable {
         }
         final String subkey = plan.equality == null ? "" : FeatureValues.toText(row.get(plan.equality.selfField()));
         return subkey == null ? null : cs.bySubkey.get(subkey);
+    }
+
+    /** A rating column's value for a row: the rating of the member it reads — the rated player unless told otherwise — or of the row's whole team. */
+    private static Object readRating(final ColumnPlan plan, final Rating.State ratings, final Map<String, Object> row, final long nowMillis) {
+        if (plan.ratingTeam) return plan.rating.readTeam(ratings, plan.rating.teamOf(row), plan.func, nowMillis);
+        return plan.rating.read(ratings, plan.ratingMember, plan.rating.memberKey(row, plan.ratingMember), plan.func, nowMillis);
     }
 
     /**
@@ -736,7 +772,7 @@ public class SequenceEvaluator implements Serializable {
             }
             case "rating" -> {
                 // the reference the running state is equal to: every visible contest folded from scratch
-                return plan.rating.read(plan.rating.replay(window), plan.rating.player(row), plan.func, nowMillis);
+                return readRating(plan, plan.rating.replay(window), row, nowMillis);
             }
             case "barrier" -> {
                 // a future window on the mirrored clock: the nearest event is the window's newest, so the path runs

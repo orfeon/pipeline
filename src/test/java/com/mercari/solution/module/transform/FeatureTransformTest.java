@@ -3319,6 +3319,97 @@ public class FeatureTransformTest {
         pipeline.run();
     }
 
+    private static final String TEAM_BLOCKS = """
+                - name: skill
+                  scope: sequence
+                  entity: seller
+                  ops:
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: duo, with: [{entity: cat, mu: 0, sigma: 4}], funcs: [mu, sigma, count], team: [mu, sigma]}
+                    - {type: rating, field: final_price, context: session, order: descending, tau: 0, as: solo, funcs: [mu]}
+                - name: field
+                  scope: context
+                  context: session
+                  inputs: [skill_all_duo_team_mu]
+                  ops: [gapToBest]
+            """.replaceAll("(?m)^", "    ");
+
+    /** The feature config with a second entity — the listing's category — and the team rating blocks. */
+    private static String teamConfig(final String config) {
+        final String entities = "- {name: seller, keys: [seller_id]}\n";
+        final String withCategory = config.replace(entities, entities + " ".repeat(config.indexOf(entities) - config.lastIndexOf('\n', config.indexOf(entities)) - 1) + "- {name: cat, keys: [category]}\n");
+        Assertions.assertNotEquals(config, withCategory);
+        return withCategory.replace("      output:\n", TEAM_BLOCKS + "      output:\n");
+    }
+
+    /**
+     * A rating of teams ({@code with}): a listing is rated as its seller plus its category, the strength of a row the sum
+     * of both. Session A (s1 / electronics 150 beats s2 / toys 0) is known at C, session C (95 beats 72) at D. The seller
+     * (prior sigma 8.33) holds most of a team's variance next to the category (sigma 4) and takes that part of every
+     * change; the seller's columns keep the names of a rating of players, the category reads under its entity name and
+     * the row's whole strength under {@code team} — a column like any other, here ranked within the session.
+     */
+    @Test
+    public void testSequenceRatingTeam() throws java.io.IOException {
+        final MCollection output = MPipeline.apply(pipeline, Config.load(SOURCE_CONFIG + teamConfig(FEATURE_CONFIG))).get("features");
+        Assertions.assertEquals(Schema.Type.int64, output.getSchema().getField("f_skill_all_duo_cat_count").getFieldType().getType());
+        Assertions.assertEquals("member", output.getSchema().getField("f_skill_all_duo_cat_mu").getOptions().get("feature.coord.readout"));
+        PAssert.that(output.getCollection()).satisfies(rows -> {
+            final Rating rating = Rating.of(Rating.Method.plackettLuce, false, null, null, null, 0d, null, null, List.of("seller_id"), List.of(), "y")
+                    .withTeam("seller", List.of(new Rating.Member("cat", List.of("category"), 0d, 4d, 0d)));
+            final Map<String, Object> s1 = Map.of("seller_id", "s1", "category", "electronics"), s2 = Map.of("seller_id", "s2", "category", "toys");
+            final Rating.State afterA = new Rating.State(), afterC = new Rating.State();
+            for (final Rating.State state : List.of(afterA, afterC)) {
+                rating.update(state, List.of(new Rating.Entry(rating.teamOf(s1), 150), new Rating.Entry(rating.teamOf(s2), 0)));
+            }
+            rating.update(afterC, List.of(new Rating.Entry(rating.teamOf(s1), 95), new Rating.Entry(rating.teamOf(s2), 72)));
+            // the share is the part of the variance: the seller's move is (sigma / 4)² times the category's
+            final double sellerMove = (Double) rating.read(afterA, 0, rating.memberKey(s1, 0), "delta", Long.MIN_VALUE);
+            final double categoryMove = (Double) rating.read(afterA, 1, rating.memberKey(s1, 1), "delta", Long.MIN_VALUE);
+            Assertions.assertEquals(Math.pow(25d / 3 / 4, 2), sellerMove / categoryMove, 1e-9);
+            int count = 0;
+            for (final MElement row : rows) {
+                count++;
+                final String id = row.getAsString("session_id") + "/" + row.getAsString("seller_id");
+                final Rating.State known = switch (id) {
+                    case "A/s1", "A/s2", "B/s1" -> null;
+                    case "C/s1", "C/s2" -> afterA;
+                    case "D/s1" -> afterC;
+                    default -> throw new AssertionError("unexpected row " + id);
+                };
+                final Map<String, Object> keys = id.endsWith("s1") ? s1 : s2;
+                for (final String func : List.of("mu", "sigma", "count")) {
+                    final Object seller = rating.read(known, 0, rating.memberKey(keys, 0), func, Long.MIN_VALUE), category = rating.read(known, 1, rating.memberKey(keys, 1), func, Long.MIN_VALUE);
+                    Assertions.assertEquals(((Number) seller).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_" + func)).doubleValue(), 1e-9, id + " seller " + func);
+                    Assertions.assertEquals(((Number) category).doubleValue(), ((Number) row.getPrimitiveValue("f_skill_all_duo_cat_" + func)).doubleValue(), 1e-9, id + " category " + func);
+                }
+                for (final String func : List.of("mu", "sigma")) {
+                    Assertions.assertEquals(rating.readTeam(known, rating.teamOf(keys), func, Long.MIN_VALUE), row.getAsDouble("f_skill_all_duo_team_" + func), 1e-9, id + " team " + func);
+                }
+                // nothing known: the priors — 25 and 0, and the sum's sigma
+                if (known == null) {
+                    Assertions.assertEquals(25d, row.getAsDouble("f_skill_all_duo_team_mu"), 0d, id);
+                    Assertions.assertEquals(Math.sqrt(Math.pow(25d / 3, 2) + 16), row.getAsDouble("f_skill_all_duo_team_sigma"), 1e-12, id);
+                    Assertions.assertEquals(0d, row.getAsDouble("f_skill_all_duo_cat_mu"), 0d, id);
+                }
+                // the team takes from the seller what a rating of players gives it alone: the winner's solo mu is the higher
+                if (id.equals("C/s1")) Assertions.assertTrue(row.getAsDouble("f_skill_all_solo_mu") > row.getAsDouble("f_skill_all_duo_mu"), row::toString);
+                // a context block reads the team's strength like any column
+                final double gap = row.getAsDouble("f_field_skill_all_duo_team_mu_gapToBest");
+                if (id.equals("C/s2")) Assertions.assertTrue(gap < 0, row::toString);
+                else Assertions.assertEquals(0d, gap, 1e-12, id);
+            }
+            Assertions.assertEquals(6, count);
+            return null;
+        });
+        pipeline.run();
+    }
+
+    @Test
+    public void testSequenceRatingTeamParallelMatchesLinear() throws java.io.IOException {
+        // the member and the team readouts ride the one replay of the rating; the context block reading the team follows
+        assertParallelMatchesLinear(teamConfig(PARALLEL_CONFIG), 6, List.of("Wave1_FanIn"), List.of());
+    }
+
     @Test
     public void testSequenceRatingParallelMatchesLinear() throws java.io.IOException {
         // the rating replay (global key) is one more keyed branch of wave 1; the context block reading it follows

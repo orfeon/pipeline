@@ -350,6 +350,11 @@ not alter values).
   `plackettLuce`'s `sigma` hardly shrinks in a large field (about a percent per contest for the last players
   of a field of 16, next to nothing for the leaders, whatever `beta`): it is a function of the contest count,
   so use `count` for "how well known".
+- **`rating` of an entity that never appears alone** (an agent for sellers, a driver in a car): rated by itself
+  it is rated for the company it keeps, and screens as redundant with what you already have. Rate the row as a
+  team — `entity: seller`, `with: [{entity: agent, mu: 0, sigma: 4}]`, `as:` — and read `<as>_agent_mu`
+  relative to its contest (a context `zscore` / `gapToBest`), or the row's whole strength `team: [mu]`. The
+  member's `sigma` is a modelling choice: it decides how much of every change that member takes.
 - **`rating` with irregular contests**: the default `tau` drifts per contest, so a long absence leaves the
   uncertainty where it was. `tau: <n>, tauPer: P30D` makes the variance grow with the time since the player's
   previous contest, and the `sigma` a row reads includes the time up to that row — "back after ten months" is
